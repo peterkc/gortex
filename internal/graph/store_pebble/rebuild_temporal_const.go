@@ -33,15 +33,12 @@ type TemporalConstCandidate struct {
 
 // TemporalConstStats counts names visited and rounds that discovered a name or
 // installed a value. Each round count can reach eight. ScratchBytes counts
-// logical key/value bytes submitted. SpillBytes counts physical bytes of
-// closed threshold SST runs consumed by this pass. It is zero because this
-// pass uses only the pending overlay.
+// logical key/value bytes submitted.
 type TemporalConstStats struct {
 	Names           int
 	DiscoveryPasses int
 	CollapsePasses  int
 	ScratchBytes    uint64
-	SpillBytes      uint64
 }
 
 // TemporalConstDeref is borrowed for the duration of the result callback.
@@ -72,7 +69,7 @@ func (r *TemporalConstDeref) Value(ctx context.Context, name string) (string, er
 // including cleanup after consume requires the worker to abort. Errors from
 // consume retain their own cause; Value marks its constant lookup failures.
 func (v RebuildView) WithTemporalConstDeref(
-	ctx context.Context, spillAt int,
+	ctx context.Context,
 	seed func(yield func(string) error) error,
 	project func(*graph.Node) TemporalConstCandidate,
 	consume func(*TemporalConstDeref) error,
@@ -89,7 +86,7 @@ func (v RebuildView) WithTemporalConstDeref(
 			stats = TemporalConstStats{}
 		}
 	}()
-	if v.build == nil || spillAt <= 0 || seed == nil || project == nil || consume == nil {
+	if v.build == nil || seed == nil || project == nil || consume == nil {
 		return stats, errors.New("invalid Temporal constant inputs")
 	}
 	if err := ctx.Err(); err != nil {

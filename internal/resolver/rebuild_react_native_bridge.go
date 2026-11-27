@@ -14,12 +14,12 @@ import (
 // It consumes live rn.native markers, including extractor targets retained
 // after main's checked full-name miss.
 func RunRebuildReactNativeBridge(ctx context.Context, b *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error],
-	selection FrameworkSynthesizerSelection, spillAt int,
+	selection FrameworkSynthesizerSelection,
 ) (store_pebble.RebuildReactNativeBridgeStats, error) {
 	if !selection.allows(SynthReactNative) {
 		return store_pebble.RebuildReactNativeBridgeStats{}, nil
 	}
-	return b.RebuildReactNativeBridge(ctx, receipts, spillAt, func(language string) bool {
+	return b.RebuildReactNativeBridge(ctx, receipts, func(language string) bool {
 		return slices.Contains(frameworkSynthLanguageFamilies[SynthReactNative], frameworkLanguageFamily(language))
 	}, func(e *graph.Edge) bool {
 		return e.Kind == graph.EdgeCalls && e.From != "" && e.Meta["via"] == rnNativeVia

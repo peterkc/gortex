@@ -19,12 +19,12 @@ func TestRebuildTemporalConstCollapseOrder(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		reverse   bool
-		threshold int
+		wideNames bool
 		passes    int
 		rows      int
 	}{
-		{"dependent-first-1B", false, 1, 8, 9},
-		{"referent-first-1MiB", true, 1 << 20, 1, 10},
+		{name: "dependent-first", passes: 8, rows: 9},
+		{name: "referent-first", reverse: true, wideNames: true, passes: 1, rows: 10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts, aliases := temporalConstChain(tc.reverse)
@@ -52,7 +52,9 @@ func TestRebuildTemporalConstCollapseOrder(t *testing.T) {
 			t.Logf("raw sorted sweep: %v; raw reverse sweep: %v", forwardRows, backwardRows)
 
 			names := append(slices.Clone(backward), "Terminal", "A01", "")
-			if tc.threshold > 1 {
+			minScratchBytes := uint64(1)
+			if tc.wideNames {
+				minScratchBytes = 1 << 20
 				// More than 1 MiB of real name-set rows, without adding any
 				// candidate or resolving any alias outside the raw witness.
 				wide := strings.Repeat("n", 20<<10)
@@ -60,15 +62,13 @@ func TestRebuildTemporalConstCollapseOrder(t *testing.T) {
 					names = append(names, fmt.Sprintf("absent-%02d-%s", i, wide))
 				}
 			}
-			got, stats := readRebuildTemporalConst(t, view, tc.threshold, names, names)
+			got, stats := readRebuildTemporalConst(t, view, names, names)
 			require.Equal(t, forwardRows, got)
 			require.Equal(t, len(names)-2, stats.Names)
 			require.Zero(t, stats.DiscoveryPasses)
 			require.Equal(t, tc.passes, stats.CollapsePasses)
-			require.Greater(t, stats.ScratchBytes, uint64(tc.threshold))
-			require.Zero(t, stats.SpillBytes)
-			t.Logf("saved order-locked results (%d): %v; scratch bytes=%d, L0 table bytes flushed=%d",
-				len(got), got, stats.ScratchBytes, stats.SpillBytes)
+			require.Greater(t, stats.ScratchBytes, minScratchBytes)
+			t.Logf("saved order-locked results (%d): %v; scratch bytes=%d", len(got), got, stats.ScratchBytes)
 		})
 	}
 }
@@ -87,12 +87,11 @@ func TestRebuildTemporalConstDiscoveryCap(t *testing.T) {
 		t.Run(tc.root, func(t *testing.T) {
 			seeds := []string{tc.root}
 			want := orderedTemporalConstRows(buildConstDerefMap(native, seeds))
-			got, stats := readRebuildTemporalConst(t, view, 1, seeds, queries)
+			got, stats := readRebuildTemporalConst(t, view, seeds, queries)
 			require.Len(t, got, tc.rows)
 			require.Equal(t, want, got)
 			require.Equal(t, 9, stats.Names)
 			require.Equal(t, 8, stats.DiscoveryPasses)
-			require.Zero(t, stats.SpillBytes)
 		})
 	}
 }
@@ -136,10 +135,9 @@ func TestRebuildTemporalConstCandidateOrderAndLiterals(t *testing.T) {
 				"ChooseAlias": "right", "ChooseJava": "right-java", "Left": "left", "Right": "right",
 				"AliasAfterConflict": "left", "OwnLiteral": "own", "Agree": "same",
 			}, locked)
-			got, stats := readRebuildTemporalConst(t, view, 1, seeds, queries)
+			got, stats := readRebuildTemporalConst(t, view, seeds, queries)
 			require.Equal(t, orderedTemporalConstRows(locked), got)
 			require.Equal(t, 13, stats.Names)
-			require.Zero(t, stats.SpillBytes)
 			t.Logf("raw reverse candidates: %v; saved order-locked results (%d): %v", orderedTemporalConstRows(rawReverse), len(got), got)
 		})
 	}
@@ -249,11 +247,11 @@ func orderedTemporalConstRows(values map[string]string) []temporalConstRow {
 	return rows
 }
 
-func readRebuildTemporalConst(t *testing.T, view store_pebble.RebuildView, threshold int, seeds, query []string) ([]temporalConstRow, store_pebble.TemporalConstStats) {
+func readRebuildTemporalConst(t *testing.T, view store_pebble.RebuildView, seeds, query []string) ([]temporalConstRow, store_pebble.TemporalConstStats) {
 	t.Helper()
 	ctx := t.Context()
 	var rows []temporalConstRow
-	stats, err := withRebuildTemporalConstants(ctx, view, threshold, func(yield func(string) error) error {
+	stats, err := withRebuildTemporalConstants(ctx, view, func(yield func(string) error) error {
 		for _, name := range seeds {
 			if err := yield(name); err != nil {
 				return err

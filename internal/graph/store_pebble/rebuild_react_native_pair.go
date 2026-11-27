@@ -17,16 +17,14 @@ var ErrRebuildReactNativeNativePairing = errors.New("pebble rebuild React Native
 var rebuildRNPairPrefix = []byte{'g', 'Q'}
 
 // RebuildReactNativeNativePairingStats reports installed edges.
-// SpillBytes counts physical bytes of closed threshold SST runs consumed by
-// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildReactNativeNativePairingStats struct {
-	Edges, SpillBytes uint64
+	Edges uint64
 }
 
 // RebuildReactNativeNativePairing streams opposite-platform method pairs.
 // For SQLite parity, preserve existing durable keys. Prove both declarations
 // before installing any new edge.
-func (b *BuildStore) RebuildReactNativeNativePairing(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildReactNativeNativePairing(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	platform func(string) string, makeEdge func(*graph.Node, *graph.Node, string, string) *graph.Edge,
 ) (stats RebuildReactNativeNativePairingStats, err error) {
 	defer func() {
@@ -35,7 +33,7 @@ func (b *BuildStore) RebuildReactNativeNativePairing(ctx context.Context, receip
 			err = fmt.Errorf("%w: %w", ErrRebuildReactNativeNativePairing, err)
 		}
 	}()
-	if spillAt < 1 || spillAt > goldBufferBytes || receipts == nil || platform == nil || makeEdge == nil {
+	if receipts == nil || platform == nil || makeEdge == nil {
 		return stats, fmt.Errorf("%w: invalid React Native native pairing stage inputs", ErrRebuildLinkInputSize)
 	}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildRNPairPrefix)

@@ -58,7 +58,7 @@ func TestRebuildObserverSQLiteOracle(t *testing.T) {
 	disabled, err := NewFrameworkSynthesizerSelection(nil)
 	require.NoError(t, err)
 	before := rebuildEventSavedRows(t, b)
-	stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), disabled, 1)
+	stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), disabled)
 	require.NoError(t, err)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildEventSavedRows(t, b))
@@ -74,9 +74,8 @@ func TestRebuildObserverSQLiteOracle(t *testing.T) {
 		require.ElementsMatch(t, []*graph.Edge{incumbent, call},
 			rebuildObserverNativeDispatchCalls(native, channel.dispatch.ID))
 
-		stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1)
+		_, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection)
 		require.NoError(t, err)
-		require.Zero(t, stats.SpillBytes)
 		require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 	}
 }
@@ -108,7 +107,7 @@ func TestRebuildObserverReplaysOwnCall(t *testing.T) {
 		// so the first hop can become a registrar input only on the next run.
 		frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 		require.NoError(t, err)
-		stats, err := RunRebuildObserver(ctx, b, rebuildGRPCReceipts(receipts...), frozen, 1)
+		stats, err := RunRebuildObserver(ctx, b, rebuildGRPCReceipts(receipts...), frozen)
 		require.NoError(t, err)
 		require.EqualValues(t, 1, stats.Edges)
 		require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
@@ -157,7 +156,7 @@ func TestRebuildObserverInlineScriptProof(t *testing.T) {
 			}
 			before := rebuildEventSavedRows(t, b)
 			selection := rebuildObserverSelection(t)
-			stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1)
+			stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection)
 			if tc.legacy || tc.liveLanguage != "" {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildObserver)
 				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
@@ -221,7 +220,7 @@ func TestRebuildObserverProofScopeWithAndWithoutCallbacks(t *testing.T) {
 						proof[0].Nodes[i].StartLine++
 					}
 				}
-				stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
+				stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
 				require.Zero(t, stats)
 				if tc.wantCalls == 0 {
 					require.NoError(t, err)
@@ -291,10 +290,9 @@ func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
 				// so none of its access, inbound or callback proof is needed.
 				receipts[0].Edges = nil
 			}
-			stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1<<20)
+			stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection)
 			require.NoError(t, err)
 			require.Equal(t, uint64(tc.want), stats.Edges)
-			require.Zero(t, stats.SpillBytes)
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 		})
 	}
@@ -323,7 +321,7 @@ func TestRebuildObserverRefusesMissingWinnerReceipt(t *testing.T) {
 	// Keep the later channel's wrong-line receipt and live winning row. A
 	// missing proof cannot justify either dropping this pair or writing the first.
 	receipts[1].Edges = receipts[1].Edges[:len(receipts[1].Edges)-1]
-	stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1)
+	stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection)
 	var refusal *store_pebble.RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refusal)
 	require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(want[0])}, refusal)

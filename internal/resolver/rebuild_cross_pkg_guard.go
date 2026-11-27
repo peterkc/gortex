@@ -104,7 +104,7 @@ func (g *rebuildCrossPackageGuard) Apply(
 			err = errors.Join(err, stage.usings.Close())
 		}
 	}()
-	_, err = withRebuildImportClosure(ctx, stage.view, nil, g.spillAt, func(closure *store_pebble.RebuildImportClosure) error {
+	_, err = withRebuildImportClosure(ctx, stage.view, nil, func(closure *store_pebble.RebuildImportClosure) error {
 		hasCallers, err := closure.AnyCaller(ctx)
 		if err != nil || !hasCallers {
 			return err

@@ -15,16 +15,16 @@ func TestRebuildReactNativeNativePairingSQLiteOracle(t *testing.T) {
 	require.NoError(t, err)
 	for _, tc := range []struct {
 		name    string
-		spillAt int
+		padding int
 	}{
 		{"one byte", 1},
 		{"one MiB", 1 << 20},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			module := "Calendar"
-			if tc.spillAt > 1 {
+			if tc.padding > 1 {
 				// Exercise a join key larger than 1 MiB.
-				module += strings.Repeat("x", tc.spillAt)
+				module += strings.Repeat("x", tc.padding)
 			}
 			ios := []*graph.Node{
 				rebuildRNPairMethod("Calendar.m", "objc", "ObjCOpen", module, "open", 3),
@@ -98,9 +98,8 @@ func TestRebuildReactNativeNativePairingSQLiteOracle(t *testing.T) {
 					private := openRebuildGRPCBuild(t, ordered...)
 					require.Equal(t, before, rebuildEventSavedRows(t, private))
 					for _, wantNew := range []uint64{7, 0} {
-						stats, err := RunRebuildReactNativeNativePairing(t.Context(), private, rebuildGRPCReceipts(ordered...), selection, tc.spillAt)
+						stats, err := RunRebuildReactNativeNativePairing(t.Context(), private, rebuildGRPCReceipts(ordered...), selection)
 						require.NoError(t, err)
-						require.Zero(t, stats.SpillBytes)
 						require.Equal(t, wantNew, stats.Edges)
 						require.Equal(t, want, rebuildEventSavedRows(t, private))
 					}
@@ -140,7 +139,7 @@ func TestRebuildReactNativeNativePairingRejectsUnprovedDeclaration(t *testing.T)
 		require.Equal(t, before, rebuildEventSQLiteRows(native))
 
 		private := openRebuildGRPCBuild(t, facts...)
-		stats, err := RunRebuildReactNativeNativePairing(t.Context(), private, rebuildGRPCReceipts(facts...), excluded, 1)
+		stats, err := RunRebuildReactNativeNativePairing(t.Context(), private, rebuildGRPCReceipts(facts...), excluded)
 		require.NoError(t, err)
 		require.Zero(t, stats)
 		require.Equal(t, before, rebuildEventSavedRows(t, private))
@@ -226,7 +225,7 @@ func TestRebuildReactNativeNativePairingRejectsUnprovedDeclaration(t *testing.T)
 			case "changed target method":
 				wrong.Meta["rn_method"] = "close"
 			}
-			stats, err := RunRebuildReactNativeNativePairing(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
+			stats, err := RunRebuildReactNativeNativePairing(t.Context(), private, rebuildGRPCReceipts(proof...), selection)
 			if mode == "complete" {
 				require.NoError(t, err)
 				require.Equal(t, uint64(4), stats.Edges)

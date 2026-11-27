@@ -59,16 +59,15 @@ func TestRebuildEventChannelSQLiteOracle(t *testing.T) {
 	require.Equal(t, rebuildEventSQLiteRows(native), before)
 	disabled, err := NewFrameworkSynthesizerSelection(nil)
 	require.NoError(t, err)
-	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts...), disabled, 1)
+	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts...), disabled)
 	require.NoError(t, err)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildEventSavedRows(t, b))
 
 	for range 2 {
 		ResolveEventChannelCalls(native)
-		stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts...), selection, 1)
+		_, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts...), selection)
 		require.NoError(t, err)
-		require.Zero(t, stats.SpillBytes)
 		require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 		calls := slices.Collect(native.EdgesByKind(graph.EdgeCalls))
 		require.Len(t, calls, 3)
@@ -108,7 +107,7 @@ func TestRebuildEventChannelTopicCollision(t *testing.T) {
 	call := synthEventEdge(native, emitter.ID, listener.ID)
 	require.NotNil(t, call)
 	require.Equal(t, "bus::b", call.Meta["event_topic"])
-	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), selection, 1)
+	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), selection)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stats.Pairs)
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
@@ -135,10 +134,9 @@ func TestRebuildEventChannelFirstNonemptyTransport(t *testing.T) {
 	require.Equal(t, 2, call.Line)
 	require.Equal(t, "socketio", call.Meta["event_transport"])
 
-	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), AllFrameworkSynthesizers(), 1<<20)
+	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), AllFrameworkSynthesizers())
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stats.Pairs)
-	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 }
 
@@ -173,7 +171,7 @@ func TestRebuildEventChannelRawSiteCaps(t *testing.T) {
 			}, sites...)
 			b, native := openRebuildEventStores(t, facts)
 			require.Equal(t, tc.pairs, ResolveEventChannelCalls(native))
-			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), AllFrameworkSynthesizers(), 1<<20)
+			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), AllFrameworkSynthesizers())
 			require.NoError(t, err)
 			require.Equal(t, uint64(tc.pairs), stats.Pairs)
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
@@ -211,7 +209,7 @@ func TestRebuildEventChannelNodeGates(t *testing.T) {
 			require.NoError(t, report.Err)
 			require.Zero(t, report.Total)
 			require.Equal(t, before, rebuildEventSQLiteRows(native))
-			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), selection, 1<<20)
+			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), selection)
 			require.NoError(t, err)
 			require.Zero(t, stats.Pairs)
 			require.Equal(t, before, rebuildEventSavedRows(t, b))
@@ -258,14 +256,14 @@ func TestRebuildEventChannelTransportFallback(t *testing.T) {
 			require.Equal(t, listener.ID, call.To)
 			require.Equal(t, tc.wantTransport, call.Meta["event_transport"])
 
-			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(tc.facts...), AllFrameworkSynthesizers(), 1<<20)
+			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(tc.facts...), AllFrameworkSynthesizers())
 			require.NoError(t, err)
 			require.Equal(t, uint64(1), stats.Pairs)
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 			if len(tc.facts) == 2 {
 				unproved, _ := openRebuildEventStores(t, tc.facts...)
 				before := rebuildEventSavedRows(t, unproved)
-				stats, err := RunRebuildEventChannel(t.Context(), unproved, rebuildGRPCReceipts(web), AllFrameworkSynthesizers(), 1<<20)
+				stats, err := RunRebuildEventChannel(t.Context(), unproved, rebuildGRPCReceipts(web), AllFrameworkSynthesizers())
 				var refusal *store_pebble.RebuildUnknownProvenanceError
 				require.ErrorAs(t, err, &refusal)
 				require.Equal(t, uint64(1), refusal.Count)
@@ -296,7 +294,7 @@ func TestRebuildEventChannelLowerLineInLaterPath(t *testing.T) {
 	require.Equal(t, laterFile, call.FilePath)
 	require.Equal(t, 4, call.Line)
 
-	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(early, later), AllFrameworkSynthesizers(), 1<<20)
+	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(early, later), AllFrameworkSynthesizers())
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stats.Pairs)
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
@@ -356,7 +354,7 @@ func TestRebuildEventChannelRejectsUnprovedWinner(t *testing.T) {
 				proof.Nodes = []*graph.Node{emitter, &wrong, facts.Nodes[2]}
 			}
 			proof.File.NodeCount = len(proof.Nodes)
-			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(valid, proof), AllFrameworkSynthesizers(), 1)
+			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(valid, proof), AllFrameworkSynthesizers())
 			if mode == "complete" {
 				require.NoError(t, err)
 				require.Equal(t, uint64(2), stats.Pairs)

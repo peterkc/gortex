@@ -17,10 +17,10 @@ func TestRebuildEventChannelRejectsInvalidScratch(t *testing.T) {
 	const prefix = "event::emitter::"
 	const topic = prefix + "bus::tick"
 	b.AddNode(&graph.Node{ID: topic, Kind: graph.KindEvent, Name: "tick", FilePath: "bus.ts"})
-	run := func(limit int, prefixes []string) (RebuildEventChannelStats, error) {
+	run := func(prefixes []string) (RebuildEventChannelStats, error) {
 		return b.RebuildEventChannel(ctx, func(func(ParseFacts, error) bool) {
 			t.Fatal("scratch refusal must precede receipt reads")
-		}, limit, prefixes, func(string, string) (string, int) {
+		}, prefixes, func(string, string) (string, int) {
 			t.Fatal("scratch refusal must precede election")
 			return "", 0
 		}, func(string, string, *graph.Edge, *graph.Edge) *graph.Edge {
@@ -30,16 +30,13 @@ func TestRebuildEventChannelRejectsInvalidScratch(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name     string
-		limit    int
 		prefixes []string
 	}{
-		{"zero limit", 0, []string{prefix}},
-		{"oversize limit", goldBufferBytes + 1, []string{prefix}},
-		{"nil prefixes", 1, nil},
-		{"empty prefixes", 1, []string{}},
+		{"nil prefixes", nil},
+		{"empty prefixes", []string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stats, err := run(tc.limit, tc.prefixes)
+			stats, err := run(tc.prefixes)
 			require.ErrorIs(t, err, ErrRebuildEventChannel)
 			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 			require.Zero(t, stats)
@@ -48,7 +45,7 @@ func TestRebuildEventChannelRejectsInvalidScratch(t *testing.T) {
 
 	key := eventScratch('t', "occupied")
 	require.NoError(t, b.pending.Set(key, []byte("owner"), pebble.NoSync))
-	stats, err := run(1, []string{prefix})
+	stats, err := run([]string{prefix})
 	require.ErrorIs(t, err, ErrRebuildEventChannel)
 	require.ErrorContains(t, err, "event channel scratch range occupied")
 	require.Zero(t, stats)
@@ -75,7 +72,7 @@ func TestRebuildEventChannelRejectsInvalidScratch(t *testing.T) {
 	site.From = "z"
 	oversized := pendingEdgeKey(site)
 	require.NoError(t, b.pending.Set(oversized, large, pebble.NoSync))
-	stats, err = run(1<<20, []string{prefix})
+	stats, err = run([]string{prefix})
 	require.ErrorIs(t, err, ErrRebuildEventChannel)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 	require.ErrorContains(t, err, "event channel input row")

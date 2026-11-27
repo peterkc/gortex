@@ -30,7 +30,7 @@ func TestRebuildKMPExpectActualMuxAndCustody(t *testing.T) {
 			Edges: []*graph.Edge{stationary}},
 		ParseFacts{EffectiveLanguage: "java", File: graph.FileMetaRow{FilePath: actual.FilePath}, Nodes: []*graph.Node{actual}})
 	ctx := t.Context()
-	stats, err := b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	stats, err := b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
 	require.NoError(t, err)
 	require.Zero(t, stats)
 
@@ -38,7 +38,7 @@ func TestRebuildKMPExpectActualMuxAndCustody(t *testing.T) {
 	// authorize new rows: the pass refuses and writes nothing.
 	marker := &graph.Node{ID: "marker.kt", Kind: graph.KindFile, FilePath: "marker.kt", Language: " Kotlin "}
 	b.AddNode(marker)
-	stats, err = b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	stats, err = b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
 	var refused *RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refused)
 	first := graph.EdgeIdentityFor(makeEdge(actual, expect.ID, graph.EdgeImplements))
@@ -56,7 +56,7 @@ func TestRebuildKMPExpectActualMuxAndCustody(t *testing.T) {
 			Edges: []*graph.Edge{stationary}},
 		ParseFacts{EffectiveLanguage: "java", File: graph.FileMetaRow{FilePath: actual.FilePath}, Nodes: []*graph.Node{actual}},
 		ParseFacts{EffectiveLanguage: "kotlin", File: graph.FileMetaRow{FilePath: marker.FilePath}, Nodes: []*graph.Node{marker}})
-	stats, err = b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	stats, err = b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, stats.Edges)
 	live, err := b.pendingEdge(pendingEdgeKey(stationary))
@@ -82,16 +82,13 @@ func TestRebuildKMPExpectActualRejectsInputsAndOccupiedScratch(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		receipts iter.Seq2[ParseFacts, error]
-		spillAt  int
 		makeEdge func(*graph.Node, string, graph.EdgeKind) *graph.Edge
 	}{
-		{"nil receipts", nil, 1, makeEdge},
-		{"zero spill threshold", receipts, 0, makeEdge},
-		{"oversize spill threshold", receipts, goldBufferBytes + 1, makeEdge},
-		{"nil edge builder", receipts, 1, nil},
+		{"nil receipts", nil, makeEdge},
+		{"nil edge builder", receipts, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stats, err := b.RebuildKMPExpectActual(t.Context(), tc.receipts, tc.spillAt, tc.makeEdge)
+			stats, err := b.RebuildKMPExpectActual(t.Context(), tc.receipts, tc.makeEdge)
 			require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
 			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 			require.Zero(t, stats)
@@ -99,7 +96,7 @@ func TestRebuildKMPExpectActualRejectsInputsAndOccupiedScratch(t *testing.T) {
 	}
 	key, value := rebuildKMPKey('w'), []byte("occupied")
 	require.NoError(t, b.pending.Set(key, value, pebble.NoSync))
-	stats, err := b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	stats, err := b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
 	require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
 	require.ErrorIs(t, err, errInvalidRecord)
 	require.ErrorContains(t, err, "scratch range occupied")
@@ -126,7 +123,7 @@ func TestRebuildKMPExpectActualLightScanAndCandidateRowLimit(t *testing.T) {
 	found, err := rebuildKMPHasKotlin(ctx, b.RebuildView())
 	require.NoError(t, err) // The probe must stop before the bad row.
 	require.True(t, found)
-	stats, err := b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	stats, err := b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
 	require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
 	require.ErrorIs(t, err, errInvalidRecord)
 	require.ErrorContains(t, err, "KMP expect/actual node identity")
@@ -137,7 +134,7 @@ func TestRebuildKMPExpectActualLightScanAndCandidateRowLimit(t *testing.T) {
 	raw, err = encodeNode(n)
 	require.NoError(t, err)
 	require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
-	stats, err = b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	stats, err = b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
 	require.NoError(t, err) // The cap does not cover excluded kinds.
 	require.Zero(t, stats)
 
@@ -145,7 +142,7 @@ func TestRebuildKMPExpectActualLightScanAndCandidateRowLimit(t *testing.T) {
 	raw, err = encodeNode(n)
 	require.NoError(t, err)
 	require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
-	stats, err = b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	stats, err = b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
 	require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 	require.Zero(t, stats)

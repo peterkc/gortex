@@ -28,12 +28,9 @@ const (
 )
 
 // RebuildReexportStats describes successful closure construction. ScratchBytes
-// counts logical key/value bytes submitted, not memory use. SpillBytes counts
-// physical bytes of closed threshold SST runs consumed by this pass. It is
-// zero because this pass uses only the pending overlay.
+// counts logical key/value bytes submitted, not memory use.
 type RebuildReexportStats struct {
 	ScratchBytes uint64
-	SpillBytes   uint64
 	Rounds       int
 	Directories  int
 }
@@ -79,10 +76,10 @@ func (c *RebuildImportClosure) Visit(ctx context.Context, yield func(callerFile,
 //
 // A nil repos set uses all callers. A non-nil set restricts caller seeds and
 // import sources (not re-exports). skipTarget and directory are the native
-// resolver's placeholder and path rules. spillAt must be positive. Pebble's
-// usual memtable/cache limits apply; there is no app-side batch of graph rows.
+// resolver's placeholder and path rules. Pebble's usual memtable/cache limits
+// apply; there is no app-side batch of graph rows.
 func (v RebuildView) WithImportClosure(
-	ctx context.Context, repos map[string]struct{}, spillAt int,
+	ctx context.Context, repos map[string]struct{},
 	skipTarget func(string) bool, directory func(string) string,
 	consume func(*RebuildImportClosure) error,
 ) (stats RebuildReexportStats, err error) {
@@ -92,7 +89,7 @@ func (v RebuildView) WithImportClosure(
 			err = fmt.Errorf("%w: %w", ErrRebuildReexports, err)
 		}
 	}()
-	if v.build == nil || spillAt <= 0 || skipTarget == nil || directory == nil || consume == nil {
+	if v.build == nil || skipTarget == nil || directory == nil || consume == nil {
 		return stats, errors.New("invalid import closure input")
 	}
 	if err := ctx.Err(); err != nil {

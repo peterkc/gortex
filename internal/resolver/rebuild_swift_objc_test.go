@@ -104,10 +104,10 @@ func rebuildSwiftObjCPrivateEdges(t *testing.T, b *store_pebble.BuildStore) map[
 func TestRebuildSwiftObjCNativeRowsWithoutSpill(t *testing.T) {
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthSwiftObjC})
 	require.NoError(t, err)
-	for _, spillAt := range []int{1, 1 << 20} {
-		t.Run(fmt.Sprint(spillAt), func(t *testing.T) {
+	for _, fixtureSize := range []int{1, 1 << 20} {
+		t.Run(fmt.Sprint(fixtureSize), func(t *testing.T) {
 			var extra int
-			if spillAt > 1 {
+			if fixtureSize > 1 {
 				extra = 144
 			}
 			facts, stationary := rebuildSwiftObjCFixture(extra)
@@ -134,9 +134,8 @@ func TestRebuildSwiftObjCNativeRowsWithoutSpill(t *testing.T) {
 					}
 				}
 				require.Len(t, want, 9+2*extra)
-				stats, err := RunRebuildSwiftObjC(t.Context(), b, receipts, selection, spillAt)
+				_, err := RunRebuildSwiftObjC(t.Context(), b, receipts, selection)
 				require.NoError(t, err)
-				require.Zero(t, stats.SpillBytes)
 				got := rebuildSwiftObjCPrivateEdges(t, b)
 				require.Equal(t, want, got)
 				require.Equal(t, stationary, got[graph.EdgeIdentityFor(stationary)])
@@ -186,7 +185,7 @@ func TestRebuildSwiftObjCSelectionAndMarkers(t *testing.T) {
 		before := rebuildSwiftObjCPrivateEdges(t, b)
 		stats, err := RunRebuildSwiftObjC(t.Context(), b, func(func(store_pebble.ParseFacts, error) bool) {
 			t.Fatal("unselected bridge read receipts")
-		}, unselected, 1)
+		}, unselected)
 		require.NoError(t, err)
 		require.Zero(t, stats)
 		require.Equal(t, before, rebuildSwiftObjCPrivateEdges(t, b))
@@ -198,7 +197,7 @@ func TestRebuildSwiftObjCSelectionAndMarkers(t *testing.T) {
 		report := RunFrameworkSynthesizersWithSelection(native, selected)
 		require.NoError(t, report.Err)
 		require.Zero(t, report.Total)
-		stats, err := RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(facts[0]), selected, 1)
+		stats, err := RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(facts[0]), selected)
 		require.NoError(t, err)
 		require.Zero(t, stats.Edges)
 		require.Empty(t, rebuildSwiftObjCPrivateEdges(t, b))
@@ -261,7 +260,7 @@ func TestRebuildSwiftObjCUnnamedDeclarations(t *testing.T) {
 				require.Empty(t, native.AllEdges())
 				stats, err := RunRebuildSwiftObjC(t.Context(), b, func(func(store_pebble.ParseFacts, error) bool) {
 					t.Fatal("bridge with no usable populations read receipts")
-				}, selection, 1)
+				}, selection)
 				require.NoError(t, err)
 				require.Zero(t, stats)
 				require.Empty(t, rebuildSwiftObjCPrivateEdges(t, b))
@@ -273,7 +272,7 @@ func TestRebuildSwiftObjCUnnamedDeclarations(t *testing.T) {
 			implements := slices.Collect(native.EdgesByKind(graph.EdgeImplements))
 			require.Len(t, implements, 1)
 			require.Equal(t, winner, implements[0].To)
-			stats, err := RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(swiftFacts, objcFacts), selection, 1)
+			stats, err := RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(swiftFacts, objcFacts), selection)
 			require.NoError(t, err)
 			require.Equal(t, uint64(3), stats.Edges)
 			require.ElementsMatch(t, want, slices.Collect(maps.Values(rebuildSwiftObjCPrivateEdges(t, b))))
@@ -313,7 +312,7 @@ func TestRebuildSwiftObjCNativeDropsStructuralProtocolTargets(t *testing.T) {
 			// take its place.
 			stats, err := RunRebuildSwiftObjC(t.Context(), b, func(func(store_pebble.ParseFacts, error) bool) {
 				t.Fatal("dropped conformance read receipts")
-			}, selection, 1)
+			}, selection)
 			require.NoError(t, err)
 			require.Zero(t, stats)
 			require.Empty(t, rebuildSwiftObjCPrivateEdges(t, b))
@@ -350,7 +349,7 @@ func TestRebuildSwiftObjCRefusesUnprovedEndpointsBeforeWriting(t *testing.T) {
 				facts[tc.file] = proof
 			}
 
-			stats, err := RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(facts...), selection, 1)
+			stats, err := RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(facts...), selection)
 			var refusal *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
 			require.Equal(t, tc.count, refusal.Count)
@@ -395,7 +394,7 @@ func TestRebuildSwiftObjCProtocolOrder(t *testing.T) {
 	require.Len(t, want, 1)
 	require.Equal(t, winner.ID, want[0].To)
 	b := openRebuildGRPCBuild(t, facts...)
-	_, err = RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(facts...), selection, 1)
+	_, err = RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(facts...), selection)
 	require.NoError(t, err)
 	var got []*graph.Edge
 	for _, edge := range rebuildSwiftObjCPrivateEdges(t, b) {
@@ -422,7 +421,7 @@ func TestRebuildSwiftObjCProtocolOrder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			bad := openRebuildGRPCBuild(t, facts...)
 			before := rebuildSwiftObjCPrivateEdges(t, bad)
-			stats, err := RunRebuildSwiftObjC(t.Context(), bad, rebuildGRPCReceipts(tc.receipts...), selection, 1)
+			stats, err := RunRebuildSwiftObjC(t.Context(), bad, rebuildGRPCReceipts(tc.receipts...), selection)
 			var refusal *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
 			require.Equal(t, uint64(1), refusal.Count)

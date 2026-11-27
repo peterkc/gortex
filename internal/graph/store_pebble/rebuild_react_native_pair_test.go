@@ -26,7 +26,7 @@ func TestRebuildReactNativeNativePairingLightNodeScan(t *testing.T) {
 			require.NoError(t, b.pending.Set(pendingNodeKey(n.ID), raw, pebble.NoSync))
 			stats, err := b.RebuildReactNativeNativePairing(t.Context(), func(func(ParseFacts, error) bool) {
 				t.Fatal("no pair can require receipts")
-			}, 1, func(language string) string {
+			}, func(language string) string {
 				if language == "swift" {
 					return "ios"
 				}
@@ -54,7 +54,7 @@ func TestRebuildReactNativeNativePairingRefusesMismatchedNodeKey(t *testing.T) {
 	require.NoError(t, b.pending.Set(pendingNodeKey("other"), raw, pebble.NoSync))
 	stats, err := b.RebuildReactNativeNativePairing(t.Context(), func(func(ParseFacts, error) bool) {
 		t.Fatal("refusal must precede receipt reads")
-	}, 1, func(string) string { return "" }, func(*graph.Node, *graph.Node, string, string) *graph.Edge {
+	}, func(string) string { return "" }, func(*graph.Node, *graph.Node, string, string) *graph.Edge {
 		t.Fatal("a Go row cannot pair")
 		return nil
 	})
@@ -67,23 +67,17 @@ func TestRebuildReactNativeNativePairingRefusesMismatchedNodeKey(t *testing.T) {
 func TestRebuildReactNativeNativePairingScratch(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	ctx := t.Context()
-	run := func(limit int) (RebuildReactNativeNativePairingStats, error) {
+	run := func() (RebuildReactNativeNativePairingStats, error) {
 		return b.RebuildReactNativeNativePairing(ctx, func(func(ParseFacts, error) bool) {
 			t.Fatal("refusal must precede receipt reads")
-		}, limit, func(string) string { return "ios" }, func(*graph.Node, *graph.Node, string, string) *graph.Edge {
+		}, func(string) string { return "ios" }, func(*graph.Node, *graph.Node, string, string) *graph.Edge {
 			t.Fatal("refusal must precede pairing")
 			return nil
 		})
 	}
-	for _, limit := range []int{0, goldBufferBytes + 1} {
-		stats, err := run(limit)
-		require.ErrorIs(t, err, ErrRebuildReactNativeNativePairing)
-		require.ErrorIs(t, err, ErrRebuildLinkInputSize)
-		require.Zero(t, stats)
-	}
 	key := rebuildRNPairKey('i', "occupied")
 	require.NoError(t, b.pending.Set(key, []byte("owner"), pebble.NoSync))
-	stats, err := run(1)
+	stats, err := run()
 	require.ErrorIs(t, err, ErrRebuildReactNativeNativePairing)
 	require.ErrorContains(t, err, "React Native native pairing scratch range occupied")
 	require.Zero(t, stats)
@@ -99,7 +93,7 @@ func TestRebuildReactNativeNativePairingScratch(t *testing.T) {
 	} {
 		b.AddNode(n)
 	}
-	stats, err = run(1 << 20)
+	stats, err = run()
 	require.ErrorIs(t, err, ErrRebuildReactNativeNativePairing)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 	require.ErrorContains(t, err, "React Native native pairing scratch row")

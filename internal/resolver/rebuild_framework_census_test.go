@@ -53,11 +53,11 @@ func TestRebuildFrameworkCensusSetStateUsesPreLoopCalls(t *testing.T) {
 	for run := range 2 {
 		frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 		require.NoError(t, err, "run %d census", run+1)
-		_, err = RunRebuildEventChannel(ctx, b, receipts, frozen, 1)
+		_, err = RunRebuildEventChannel(ctx, b, receipts, frozen)
 		require.NoError(t, err, "run %d event channel", run+1)
-		_, err = RunRebuildReactSetState(ctx, b, receipts, frozen, 1)
+		_, err = RunRebuildReactSetState(ctx, b, receipts, frozen)
 		require.NoError(t, err, "run %d React setState", run+1)
-		_, err = RunRebuildFlutterSetState(ctx, b, receipts, frozen, 1)
+		_, err = RunRebuildFlutterSetState(ctx, b, receipts, frozen)
 		require.NoError(t, err, "run %d Flutter setState", run+1)
 
 		require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
@@ -107,7 +107,7 @@ func TestRebuildFrameworkCensusClosureCollectionAppleFamily(t *testing.T) {
 			ctx := t.Context()
 			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 			require.NoError(t, err)
-			_, err = RunRebuildClosureCollection(ctx, b, rebuildGRPCReceipts(proof...), frozen, 1)
+			_, err = RunRebuildClosureCollection(ctx, b, rebuildGRPCReceipts(proof...), frozen)
 			require.NoError(t, err)
 
 			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)

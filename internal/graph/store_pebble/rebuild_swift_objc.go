@@ -16,17 +16,15 @@ var ErrRebuildSwiftObjC = errors.New("pebble rebuild Swift/ObjC stage failed")
 var rebuildSwiftObjCPrefix = []byte{'g', 'J'}
 
 // RebuildSwiftObjCStats reports installed edges.
-// SpillBytes counts physical bytes of closed threshold SST runs consumed by
-// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildSwiftObjCStats struct {
-	Edges, SpillBytes uint64
+	Edges uint64
 }
 
 // RebuildSwiftObjC stages selector and protocol join results from the
 // resolver in the pending overlay. Preserve existing durable keys for SQLite
 // parity and prove every new edge before applying any of them. All language
 // declarations remain available.
-func (b *BuildStore) RebuildSwiftObjC(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildSwiftObjC(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	reduce func(RebuildView, func(*graph.Edge) error) error,
 ) (stats RebuildSwiftObjCStats, err error) {
 	defer func() {
@@ -35,7 +33,7 @@ func (b *BuildStore) RebuildSwiftObjC(ctx context.Context, receipts iter.Seq2[Pa
 			err = fmt.Errorf("%w: %w", ErrRebuildSwiftObjC, err)
 		}
 	}()
-	if spillAt < 1 || spillAt > goldBufferBytes || receipts == nil || reduce == nil {
+	if receipts == nil || reduce == nil {
 		return stats, fmt.Errorf("%w: invalid Swift/ObjC stage inputs", ErrRebuildLinkInputSize)
 	}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildSwiftObjCPrefix)

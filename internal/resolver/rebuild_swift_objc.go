@@ -13,12 +13,12 @@ import (
 // These private bridges can influence later retained edges, even though
 // neither endpoint is in the supported D72 language projection.
 func RunRebuildSwiftObjC(ctx context.Context, b *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error],
-	selection FrameworkSynthesizerSelection, spillAt int,
+	selection FrameworkSynthesizerSelection,
 ) (store_pebble.RebuildSwiftObjCStats, error) {
 	if !selection.allows(SynthSwiftObjC) {
 		return store_pebble.RebuildSwiftObjCStats{}, nil
 	}
-	return b.RebuildSwiftObjC(ctx, receipts, spillAt, func(view store_pebble.RebuildView, propose func(*graph.Edge) error) error {
+	return b.RebuildSwiftObjC(ctx, receipts, func(view store_pebble.RebuildView, propose func(*graph.Edge) error) error {
 		return reduceRebuildSwiftObjC(ctx, view, propose)
 	})
 }

@@ -9,11 +9,11 @@ import (
 
 // RunRebuildClosureCollection runs framework position eight after Observer.
 func RunRebuildClosureCollection(ctx context.Context, b *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error],
-	selection FrameworkSynthesizerSelection, spillAt int,
+	selection FrameworkSynthesizerSelection,
 ) (store_pebble.RebuildClosureCollectionStats, error) {
 	if !selection.allows(SynthClosureCollection) {
 		return store_pebble.RebuildClosureCollectionStats{}, nil
 	}
-	return b.RebuildClosureCollection(ctx, receipts, spillAt, ccFanoutCap, sameDispatchBoundary, closureCollectionEdge,
+	return b.RebuildClosureCollection(ctx, receipts, ccFanoutCap, sameDispatchBoundary, closureCollectionEdge,
 		func(language string) bool { return frameworkLanguageFamily(language) == "apple" })
 }

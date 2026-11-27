@@ -56,7 +56,7 @@ func TestRebuildObserverOriginalKeyAndScratchOwnership(t *testing.T) {
 			}
 			want := makeCall(dispatch, callback.ID, "field")
 			before := rebuildFrameworkCustodyRows(t, b)
-			stats, err := b.RebuildObserver(ctx, receipts, 1,
+			stats, err := b.RebuildObserver(ctx, receipts,
 				func(name string) bool { return name == "subscribe" },
 				func(name string) bool { return name == "notify" },
 				func(_, _ *graph.Node) bool { return true }, 40, makeCall)
@@ -133,7 +133,7 @@ func TestRebuildObserverRefusalNamesOnlyRegistrarCallbacks(t *testing.T) {
 		return setStateProofOutput(from, &graph.Node{ID: to}, field)
 	}
 	run := func(receipts func(func(ParseFacts, error) bool)) (RebuildObserverStats, error) {
-		return b.RebuildObserver(t.Context(), receipts, 1,
+		return b.RebuildObserver(t.Context(), receipts,
 			func(name string) bool { return name == "subscribe" },
 			func(name string) bool { return name == "notify" },
 			func(_, _ *graph.Node) bool { return true }, 40, makeCall)
@@ -237,14 +237,13 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 				}
 			}
 			ctx := t.Context()
-			const spillAt = 1 << 20
 			stats, err := b.RebuildCapabilities(ctx, receipts,
 				func(string) string { return "" }, func(string, string) (string, string) { return "", "" },
 				ReceiverMutationRules{
 					OwnerKey:        func(_ string, receiver string) string { return receiver },
 					BareCallName:    func(to string) string { return strings.TrimPrefix(to, "unresolved::") },
 					IsStdlibMutator: func(name string) bool { return name == "Lock" },
-				}, spillAt)
+				}, 1<<20)
 			require.NoError(t, err)
 			require.Equal(t, uint64(1), stats.Emitted)
 
@@ -260,7 +259,7 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 					},
 				}
 			}
-			eventStats, err := b.RebuildEventChannel(ctx, receipts, spillAt, []string{"event::emitter::"},
+			eventStats, err := b.RebuildEventChannel(ctx, receipts, []string{"event::emitter::"},
 				func(string, string) (string, int) { return "emitter", 4 },
 				func(_, _ string, emitter, listener *graph.Edge) *graph.Edge {
 					return eventCall(emitter.From, listener.From, emitter.FilePath, emitter.Line)
@@ -330,7 +329,7 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 			}
 			want := actualRows()
 			run := func() (RebuildObserverStats, error) {
-				return b.RebuildObserver(ctx, receipts, spillAt,
+				return b.RebuildObserver(ctx, receipts,
 					func(name string) bool { return name == "subscribe" || name == "onEvent" },
 					func(name string) bool { return name == "notify" || name == "notifyNext" },
 					func(from, to *graph.Node) bool {

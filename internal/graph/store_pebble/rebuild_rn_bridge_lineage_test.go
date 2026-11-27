@@ -104,7 +104,7 @@ func TestRebuildReactNativeBridgeGuardLineage(t *testing.T) {
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
 			offers := 0
-			stats, err := b.RebuildReactNativeBridge(ctx, receipts, 1<<20,
+			stats, err := b.RebuildReactNativeBridge(ctx, receipts,
 				func(language string) bool { return language == "typescript" || language == "java" },
 				func(e *graph.Edge) bool {
 					return e.Kind == graph.EdgeCalls && e.From != "" && e.Meta["via"] == "rn.native"

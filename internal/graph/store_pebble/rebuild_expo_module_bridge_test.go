@@ -44,7 +44,7 @@ func TestRebuildExpoModuleBridgeCensusAndCustody(t *testing.T) {
 	before := rebuildFrameworkCustodyRows(t, b)
 	flushed := b.pending.Metrics().Levels[0].TableBytesFlushed
 	noReceipts := func(func(ParseFacts, error) bool) { t.Fatal("rejected families must not read receipts") }
-	stats, err := b.RebuildExpoModuleBridge(ctx, noReceipts, 1, 3, family, isCall, makeCall)
+	stats, err := b.RebuildExpoModuleBridge(ctx, noReceipts, 3, family, isCall, makeCall)
 	require.NoError(t, err)
 	require.Zero(t, stats)
 	require.Equal(t, flushed, b.pending.Metrics().Levels[0].TableBytesFlushed)
@@ -53,7 +53,7 @@ func TestRebuildExpoModuleBridgeCensusAndCustody(t *testing.T) {
 	// An unrelated native-family marker admits the pass, not just the
 	// marker's own declarations. The tagged Go target can then win.
 	b.AddNode(&graph.Node{ID: "marker.swift", Kind: graph.KindFile, FilePath: "marker.swift", Language: "swift"})
-	stats, err = b.RebuildExpoModuleBridge(ctx, receipts, 1, 3, family, isCall, makeCall)
+	stats, err = b.RebuildExpoModuleBridge(ctx, receipts, 3, family, isCall, makeCall)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, stats.Edges)
 	want := makeCall(marker, target)
@@ -84,7 +84,7 @@ func TestRebuildExpoModuleBridgePreservesReactNativeCustody(t *testing.T) {
 			Origin: graph.OriginASTInferred}
 	}
 	isWeb := func(language string) bool { return language == "typescript" }
-	rn, err := b.RebuildReactNativeBridge(ctx, receipts, 1, isWeb, isCall, makeCall)
+	rn, err := b.RebuildReactNativeBridge(ctx, receipts, isWeb, isCall, makeCall)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, rn.Edges)
 	want := map[graph.EdgeIdentity]rebuildEdgeProof{graph.EdgeIdentityFor(makeCall(first, target)): rebuildProofRNBridge}
@@ -100,7 +100,7 @@ func TestRebuildExpoModuleBridgePreservesReactNativeCustody(t *testing.T) {
 			return 0
 		}
 	}
-	expo, err := b.RebuildExpoModuleBridge(ctx, receipts, 1, 3, family, isCall, makeCall)
+	expo, err := b.RebuildExpoModuleBridge(ctx, receipts, 3, family, isCall, makeCall)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, expo.Edges)
 	want[graph.EdgeIdentityFor(makeCall(first, peer))] = rebuildProofExpoModules
@@ -152,7 +152,7 @@ func TestRebuildExpoModuleBridgeRejectsLostMarker(t *testing.T) {
 				}
 			}
 			offers := 0
-			stats, err := b.RebuildExpoModuleBridge(t.Context(), receipts, 1, 3, family,
+			stats, err := b.RebuildExpoModuleBridge(t.Context(), receipts, 3, family,
 				func(e *graph.Edge) bool { return e.Kind == graph.EdgeCalls && e.Meta["via"] == "rn.native" },
 				func(e *graph.Edge, n *graph.Node) *graph.Edge {
 					offers++
@@ -180,7 +180,7 @@ func TestRebuildExpoModuleBridgeRejectsLostMarker(t *testing.T) {
 func TestRebuildReactNativeBridgeRejectsNilFamilyAdapter(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	receipts := func(func(ParseFacts, error) bool) { t.Fatal("must not read receipts") }
-	stats, err := b.RebuildReactNativeBridge(t.Context(), receipts, 1, nil,
+	stats, err := b.RebuildReactNativeBridge(t.Context(), receipts, nil,
 		func(*graph.Edge) bool { return false }, func(*graph.Edge, *graph.Node) *graph.Edge { return nil })
 	require.ErrorIs(t, err, ErrRebuildReactNativeBridge)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
@@ -234,7 +234,7 @@ func TestRebuildNativeModuleBridgeCaptureCountsLostCustodyOutputs(t *testing.T) 
 			var stats RebuildReactNativeBridgeStats
 			var err error
 			if name == "Expo" {
-				stats, err = b.RebuildExpoModuleBridge(ctx, receipts, 1, 3, func(language string) uint8 {
+				stats, err = b.RebuildExpoModuleBridge(ctx, receipts, 3, func(language string) uint8 {
 					if language == "typescript" {
 						return 1
 					}
@@ -242,7 +242,7 @@ func TestRebuildNativeModuleBridgeCaptureCountsLostCustodyOutputs(t *testing.T) 
 				}, isCall, makeCall)
 				require.ErrorIs(t, err, ErrRebuildExpoModuleBridge)
 			} else {
-				stats, err = b.RebuildReactNativeBridge(ctx, receipts, 1, func(language string) bool {
+				stats, err = b.RebuildReactNativeBridge(ctx, receipts, func(language string) bool {
 					return language == "typescript" || language == "swift"
 				}, isCall, makeCall)
 				require.ErrorIs(t, err, ErrRebuildReactNativeBridge)

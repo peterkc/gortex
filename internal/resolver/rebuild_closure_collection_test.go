@@ -16,8 +16,8 @@ const (
 )
 
 func TestRebuildClosureCollectionSQLiteOracle(t *testing.T) {
-	for _, spillAt := range []int{1, 1 << 20} {
-		t.Run(fmt.Sprint(spillAt), func(t *testing.T) {
+	for _, fixtureSize := range []int{1, 1 << 20} {
+		t.Run(fmt.Sprint(fixtureSize), func(t *testing.T) {
 			const file, language = "request.swift", "swift"
 			dispatch := rebuildClosureCollectionNode(file, "dispatch", language, rebuildCCDispatch, "handlers")
 			keep := rebuildClosureCollectionNode(file, "keep", language, rebuildCCAppend, "handlers")
@@ -26,7 +26,7 @@ func TestRebuildClosureCollectionSQLiteOracle(t *testing.T) {
 			incumbent.Meta = map[string]any{"fixture": "durable incumbent"}
 			nodes := []*graph.Node{dispatch, keep, register}
 			var extra int
-			if spillAt == 1<<20 {
+			if fixtureSize == 1<<20 {
 				// Each role's candidate stream exceeds 1 MiB, but no field is over cap.
 				const pairs = 40
 				padding := strings.Repeat("x", 32<<10)
@@ -46,7 +46,7 @@ func TestRebuildClosureCollectionSQLiteOracle(t *testing.T) {
 			before := rebuildEventSavedRows(t, b)
 			disabled, err := NewFrameworkSynthesizerSelection(nil)
 			require.NoError(t, err)
-			stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, disabled, spillAt)
+			stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, disabled)
 			require.NoError(t, err)
 			require.Zero(t, stats)
 			require.Equal(t, before, rebuildEventSavedRows(t, b))
@@ -58,11 +58,10 @@ func TestRebuildClosureCollectionSQLiteOracle(t *testing.T) {
 				want := rebuildEventSQLiteRows(native)
 				require.Len(t, want.edges, 2+extra)
 				require.Contains(t, want.edges, incumbent)
-				stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, selection, spillAt)
+				stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, selection)
 				require.NoError(t, err)
 				got := rebuildEventSavedRows(t, b)
 				require.Equal(t, want, got)
-				require.Zero(t, stats.SpillBytes)
 				if run == 0 {
 					require.Positive(t, stats.Edges)
 					first = got
@@ -112,7 +111,7 @@ func TestRebuildClosureCollectionRawRoleCaps(t *testing.T) {
 				require.NoError(t, report.Err)
 				want := rebuildEventSQLiteRows(native)
 				require.Len(t, want.edges, wantCount)
-				stats, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
+				stats, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
 				require.NoError(t, err)
 				require.Equal(t, uint64(wantCount), stats.Edges)
 				require.Equal(t, want, rebuildEventSavedRows(t, b))
@@ -122,7 +121,7 @@ func TestRebuildClosureCollectionRawRoleCaps(t *testing.T) {
 					receipts := func(func(store_pebble.ParseFacts, error) bool) {
 						t.Fatal("replayed receipts for an over-cap field")
 					}
-					stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, selection, 1)
+					stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, selection)
 					require.NoError(t, err)
 					require.Zero(t, stats)
 					require.Equal(t, want, rebuildEventSavedRows(t, b))
@@ -148,7 +147,7 @@ func TestRebuildClosureCollectionSkipsReceiptsWithoutRegistrars(t *testing.T) {
 			receipts := func(func(store_pebble.ParseFacts, error) bool) {
 				t.Fatal("replayed receipts without a registrar")
 			}
-			stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, selection, 1)
+			stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, selection)
 			require.NoError(t, err)
 			require.Zero(t, stats.Edges)
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
@@ -200,7 +199,7 @@ func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
 			case "different non-strings":
 				proof[1].Nodes[1].Meta[rebuildCCDispatch] = []string{"other"}
 			}
-			stats, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
+			stats, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
 			if mode != "missing" && mode != "changed field" {
 				require.NoError(t, err)
 				require.Equal(t, uint64(2), stats.Edges)
@@ -284,7 +283,7 @@ func TestRebuildClosureCollectionProvesFrozenAppleAdmission(t *testing.T) {
 				f.Nodes = []*graph.Node{&n}
 				receipts = append(receipts, f)
 			}
-			stats, err := RunRebuildClosureCollection(ctx, b, rebuildGRPCReceipts(receipts...), frozen, 1)
+			stats, err := RunRebuildClosureCollection(ctx, b, rebuildGRPCReceipts(receipts...), frozen)
 			if !tc.wantEdge {
 				var refusal *store_pebble.RebuildUnknownProvenanceError
 				require.ErrorIs(t, err, store_pebble.ErrRebuildClosureCollection)

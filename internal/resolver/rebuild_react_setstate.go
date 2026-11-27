@@ -9,10 +9,10 @@ import (
 
 // RunRebuildReactSetState executes framework position nine.
 func RunRebuildReactSetState(ctx context.Context, b *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error],
-	selection FrameworkSynthesizerSelection, spillAt int,
+	selection FrameworkSynthesizerSelection,
 ) (store_pebble.RebuildReactSetStateStats, error) {
 	if !selection.allows(SynthReactSetState) {
 		return store_pebble.RebuildReactSetStateStats{}, nil
 	}
-	return b.RebuildReactSetState(ctx, receipts, spillAt, isSetStateTarget, reactSetStateEdge)
+	return b.RebuildReactSetState(ctx, receipts, isSetStateTarget, reactSetStateEdge)
 }

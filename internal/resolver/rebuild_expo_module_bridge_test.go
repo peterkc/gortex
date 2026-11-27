@@ -37,7 +37,7 @@ func TestRebuildExpoModuleBridgeSQLiteOracle(t *testing.T) {
 	report := RunFrameworkSynthesizersWithSelection(native, disabled)
 	require.NoError(t, report.Err)
 	require.Zero(t, report.Total)
-	stats, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), disabled, 1)
+	stats, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), disabled)
 	require.NoError(t, err)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildEventSQLiteRows(native))
@@ -75,10 +75,9 @@ func TestRebuildExpoModuleBridgeSQLiteOracle(t *testing.T) {
 		require.NoError(t, report.Err)
 		require.Equal(t, 3, report.Total) // Native counts the incumbent attempt too.
 		require.Equal(t, want, rebuildEventSQLiteRows(native))
-		stats, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+		stats, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection)
 		require.NoError(t, err)
 		require.Equal(t, wantNew, stats.Edges)
-		require.Zero(t, stats.SpillBytes)
 		require.Equal(t, want, rebuildEventSavedRows(t, private))
 	}
 }
@@ -153,13 +152,13 @@ func TestRebuildExpoModuleBridgePreservesReactNativeCollision(t *testing.T) {
 		require.Equal(t, tc.synth, want.edges[i].Meta[MetaSynthesizedBy])
 	}
 
-	rn, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1)
+	rn, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), frozen)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, rn.Edges)
 	wantRN := want
 	wantRN.edges = slices.DeleteFunc(slices.Clone(want.edges), func(e *graph.Edge) bool { return e.To == peer.ID })
 	require.Equal(t, wantRN, rebuildEventSavedRows(t, private))
-	expo, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1)
+	expo, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), frozen)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, expo.Edges)
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
@@ -191,7 +190,7 @@ func TestRebuildExpoModuleBridgeRejectsUnprovedParticipants(t *testing.T) {
 				proof[0].Edges = slices.Delete(slices.Clone(proof[0].Edges), 2, 3)
 				proof[0] = roundTripRebuildRNBridgeFacts(t, proof[0])
 			}
-			stats, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
+			stats, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(proof...), selection)
 			require.ErrorIs(t, err, store_pebble.ErrRebuildExpoModuleBridge)
 			var refused *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refused)
@@ -231,10 +230,9 @@ func TestRebuildExpoModuleBridgeSQLiteLargeScratch(t *testing.T) {
 	report := RunFrameworkSynthesizersWithSelection(native, selection)
 	require.NoError(t, report.Err)
 	require.Equal(t, 3+extraTargets, report.Total)
-	stats, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1<<20)
+	stats, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection)
 	require.NoError(t, err)
 	require.EqualValues(t, 2+extraTargets, stats.Edges)
-	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
 }
 

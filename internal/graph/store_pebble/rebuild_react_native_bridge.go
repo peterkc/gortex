@@ -21,15 +21,13 @@ var (
 var rebuildReactNativePrefix = []byte{'g', 'K'}
 
 // RebuildReactNativeBridgeStats describes installed Calls.
-// SpillBytes counts physical bytes of closed threshold SST runs consumed by
-// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildReactNativeBridgeStats struct {
-	Edges, SpillBytes uint64
+	Edges uint64
 }
 
 // RebuildReactNativeBridge joins live markers and methods at the fifth
 // framework turn. Frozen receipt order elects the first site per output pair.
-func (b *BuildStore) RebuildReactNativeBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildReactNativeBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	inFamily func(string) bool, isCall func(*graph.Edge) bool, buildCall func(*graph.Edge, *graph.Node) *graph.Edge,
 ) (RebuildReactNativeBridgeStats, error) {
 	var family func(string) uint8
@@ -41,7 +39,7 @@ func (b *BuildStore) RebuildReactNativeBridge(ctx context.Context, receipts iter
 			return 0
 		}
 	}
-	return b.rebuildNativeModuleBridge(ctx, receipts, spillAt, rebuildNativeModuleBridgePolicy{
+	return b.rebuildNativeModuleBridge(ctx, receipts, rebuildNativeModuleBridgePolicy{
 		stage:    ErrRebuildReactNativeBridge,
 		label:    "React Native bridge",
 		proof:    rebuildProofRNBridge,
@@ -57,10 +55,10 @@ type RebuildExpoModuleBridgeStats = RebuildReactNativeBridgeStats
 // RebuildExpoModuleBridge joins live RN call markers to Expo declarations.
 // The family census applies to the whole pass, not individual endpoints.
 // The resolver supplies one required bit per native registry family group.
-func (b *BuildStore) RebuildExpoModuleBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildExpoModuleBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	required uint8, family func(string) uint8, isCall func(*graph.Edge) bool, buildCall func(*graph.Edge, *graph.Node) *graph.Edge,
 ) (RebuildExpoModuleBridgeStats, error) {
-	return b.rebuildNativeModuleBridge(ctx, receipts, spillAt, rebuildNativeModuleBridgePolicy{
+	return b.rebuildNativeModuleBridge(ctx, receipts, rebuildNativeModuleBridgePolicy{
 		stage:            ErrRebuildExpoModuleBridge,
 		label:            "Expo module bridge",
 		proof:            rebuildProofExpoModules,
@@ -81,7 +79,7 @@ type rebuildNativeModuleBridgePolicy struct {
 	precheckFamilies bool
 }
 
-func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	policy rebuildNativeModuleBridgePolicy, isCall func(*graph.Edge) bool, buildCall func(*graph.Edge, *graph.Node) *graph.Edge,
 ) (stats RebuildReactNativeBridgeStats, err error) {
 	defer func() {
@@ -90,7 +88,7 @@ func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts ite
 			err = fmt.Errorf("%w: %w", policy.stage, err)
 		}
 	}()
-	if spillAt < 1 || spillAt > goldBufferBytes || receipts == nil || policy.family == nil || isCall == nil || buildCall == nil {
+	if receipts == nil || policy.family == nil || isCall == nil || buildCall == nil {
 		return stats, fmt.Errorf("%w: invalid %s inputs", ErrRebuildLinkInputSize, policy.label)
 	}
 	busy, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildReactNativePrefix)

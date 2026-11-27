@@ -24,10 +24,8 @@ const rebuildGRPCWindow = 5000
 const rebuildGRPCRowLimit = 16 << 20
 
 // RebuildGRPCStats reports candidates and mutations in the first registry turn.
-// SpillBytes counts physical bytes of closed threshold SST runs consumed by
-// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildGRPCStats struct {
-	Stubs, Registrations, Resolved, Moves, SpillBytes uint64
+	Stubs, Registrations, Resolved, Moves uint64
 }
 
 type rebuildGRPC struct {
@@ -38,7 +36,7 @@ type rebuildGRPC struct {
 // RebuildGRPC runs on a quiet private graph at the first framework turn.
 // rebind computes the native payload for one typed stub; it returns false
 // for a stationary row. The worker must discard the graph on any error.
-func (b *BuildStore) RebuildGRPC(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildGRPC(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	rebind func(e *graph.Edge, service, method, handler, origin string) bool,
 ) (stats RebuildGRPCStats, err error) {
 	defer func() {
@@ -47,7 +45,7 @@ func (b *BuildStore) RebuildGRPC(ctx context.Context, receipts iter.Seq2[ParseFa
 			err = fmt.Errorf("%w: %w", ErrRebuildGRPC, err)
 		}
 	}()
-	if spillAt < 1 || spillAt > goldBufferBytes || rebind == nil || receipts == nil {
+	if rebind == nil || receipts == nil {
 		return stats, fmt.Errorf("%w: invalid gRPC stage inputs", ErrRebuildLinkInputSize)
 	}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildGRPCPrefix)

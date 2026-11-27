@@ -15,14 +15,14 @@ import (
 )
 
 func TestRebuildReactSetStateSQLiteOracle(t *testing.T) {
-	for _, spillAt := range []int{1, 1 << 20} {
-		t.Run(fmt.Sprint(spillAt), func(t *testing.T) {
-			facts, want := rebuildReactSetStateFixture("widget.go", spillAt == 1<<20)
+	for _, fixtureSize := range []int{1, 1 << 20} {
+		t.Run(fmt.Sprint(fixtureSize), func(t *testing.T) {
+			facts, want := rebuildReactSetStateFixture("widget.go", fixtureSize == 1<<20)
 			b, native, proof := openRebuildReactSetStateStores(t, facts)
 			before := rebuildEventSavedRows(t, b)
 			disabled, err := NewFrameworkSynthesizerSelection(nil)
 			require.NoError(t, err)
-			stats, err := RunRebuildReactSetState(t.Context(), b, rebuildGRPCReceipts(proof...), disabled, spillAt)
+			stats, err := RunRebuildReactSetState(t.Context(), b, rebuildGRPCReceipts(proof...), disabled)
 			require.NoError(t, err)
 			require.Zero(t, stats)
 			require.Equal(t, before, rebuildEventSavedRows(t, b))
@@ -56,9 +56,8 @@ func TestRebuildReactSetStateSQLiteOracle(t *testing.T) {
 				for _, e := range before.edges {
 					require.Contains(t, oracle.edges, e)
 				}
-				stats, err := RunRebuildReactSetState(t.Context(), b, rebuildGRPCReceipts(proof...), selection, spillAt)
+				stats, err := RunRebuildReactSetState(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
 				require.NoError(t, err)
-				require.Zero(t, stats.SpillBytes)
 				if run == 0 {
 					require.Positive(t, stats.Edges)
 				}
@@ -94,10 +93,9 @@ func (w *Widget) noop() {}
 	oracle := rebuildEventSQLiteRows(native)
 	require.Len(t, oracle.edges, len(before.edges)+1)
 	require.Contains(t, oracle.edges, want)
-	stats, err := RunRebuildReactSetState(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
+	stats, err := RunRebuildReactSetState(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stats.Edges)
-	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, oracle, rebuildEventSavedRows(t, b))
 }
 
@@ -159,7 +157,7 @@ func TestRebuildSetStateLifecycleCallerProofScope(t *testing.T) {
 					require.Contains(t, oracle.edges, output(from.ID, target.ID, class, file, from.StartLine))
 				}
 				require.Equal(t, want, report.Total)
-				stats, err := run(t.Context(), b, receipts, selection, 1)
+				stats, err := run(t.Context(), b, receipts, selection)
 				require.NoError(t, err)
 				require.EqualValues(t, want, stats.Edges)
 				require.Equal(t, oracle, rebuildEventSavedRows(t, b))
@@ -196,7 +194,7 @@ func TestRebuildReactSetStateRefusesMissingProof(t *testing.T) {
 					}
 				}
 			}
-			stats, err := RunRebuildReactSetState(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
+			stats, err := RunRebuildReactSetState(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
 			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 			require.Zero(t, stats)
 			require.Equal(t, before, rebuildEventSavedRows(t, b))

@@ -49,7 +49,7 @@ func TestRebuildReactSetStateRejectsWrongMembershipRecordingPath(t *testing.T) {
 				}
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
-			stats, err := b.RebuildReactSetState(t.Context(), receipts, 1<<20, setStateProofTarget, setStateProofOutput)
+			stats, err := b.RebuildReactSetState(t.Context(), receipts, setStateProofTarget, setStateProofOutput)
 			if tc.wrongBefore || tc.wrongAfter {
 				require.ErrorIs(t, err, ErrRebuildReactSetState)
 				var refusal *RebuildUnknownProvenanceError
@@ -73,7 +73,7 @@ func TestRebuildReactSetStateSkipsReceiptsWithoutLiveGate(t *testing.T) {
 		setStateProofMember(caller, "Widget"), setStateProofMember(render, "Widget"), setStateProofCall(caller, "helper")))
 	before := rebuildFrameworkCustodyRows(t, b)
 	receipts := func(func(ParseFacts, error) bool) { t.Fatal("replayed receipts without a live setState call") }
-	stats, err := b.RebuildReactSetState(t.Context(), receipts, 1<<20, setStateProofTarget, setStateProofOutput)
+	stats, err := b.RebuildReactSetState(t.Context(), receipts, setStateProofTarget, setStateProofOutput)
 	require.NoError(t, err)
 	require.Zero(t, stats.Edges)
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
@@ -110,7 +110,7 @@ func TestRebuildReactSetStateProvesOnlyGatedMemberships(t *testing.T) {
 			})
 			receipts := func(yield func(ParseFacts, error) bool) { yield(recorded, nil) }
 			before := rebuildFrameworkCustodyRows(t, b)
-			stats, err := b.RebuildReactSetState(t.Context(), receipts, 1<<20, setStateProofTarget, setStateProofOutput)
+			stats, err := b.RebuildReactSetState(t.Context(), receipts, setStateProofTarget, setStateProofOutput)
 			if tc.missing != nil {
 				require.ErrorIs(t, err, ErrRebuildReactSetState)
 				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
@@ -160,7 +160,7 @@ func TestRebuildSetStateCountsMissingMembershipsByLiveKey(t *testing.T) {
 			if tc.stage == ErrRebuildFlutterSetState {
 				run = b.RebuildFlutterSetState
 			}
-			stats, err := run(ctx, receipts, 1, setStateProofTarget, setStateProofOutput)
+			stats, err := run(ctx, receipts, setStateProofTarget, setStateProofOutput)
 			require.ErrorIs(t, err, tc.stage)
 			var refusal *RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
@@ -214,7 +214,7 @@ func TestRebuildReactSetStateStaleGateDigest(t *testing.T) {
 				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
-			stats, err := b.RebuildReactSetState(t.Context(), receipts, 1<<20, setStateProofTarget, setStateProofOutput)
+			stats, err := b.RebuildReactSetState(t.Context(), receipts, setStateProofTarget, setStateProofOutput)
 			if tc.incumbent {
 				require.NoError(t, err)
 				require.Zero(t, stats)
@@ -268,7 +268,7 @@ func TestRebuildSetStateRejectsIneligibleCustodyAsGate(t *testing.T) {
 			if tc.stage == ErrRebuildFlutterSetState {
 				run = b.RebuildFlutterSetState
 			}
-			stats, err := run(t.Context(), receipts, 1, setStateProofTarget, setStateProofOutput)
+			stats, err := run(t.Context(), receipts, setStateProofTarget, setStateProofOutput)
 			require.ErrorIs(t, err, tc.stage)
 			var refusal *RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
@@ -358,7 +358,7 @@ func TestRebuildSetStateMovesAndOutputRefusals(t *testing.T) {
 				if tc.proof == rebuildProofFlutterSetState {
 					run = b.RebuildFlutterSetState
 				}
-				stats, err := run(ctx, receipts, 1, setStateProofTarget, setStateProofOutput)
+				stats, err := run(ctx, receipts, setStateProofTarget, setStateProofOutput)
 				firstOut := setStateProofOutput(first, target, owner)
 				switch mode {
 				case "checked moves":
@@ -415,7 +415,7 @@ func TestRebuildSetStateRefusesReceiptKeyCollisions(t *testing.T) {
 			before := rebuildFrameworkCustodyRows(t, b)
 			stats, err := b.RebuildReactSetState(t.Context(), func(func(ParseFacts, error) bool) {
 				t.Fatal("replayed receipts after a conflicting input key")
-			}, 1, setStateProofTarget, setStateProofOutput)
+			}, setStateProofTarget, setStateProofOutput)
 			var refusal *RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
 			require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(bad)}, refusal)
@@ -427,7 +427,7 @@ func TestRebuildSetStateRefusesReceiptKeyCollisions(t *testing.T) {
 
 func TestRebuildReactSetStateInvalidInputWording(t *testing.T) {
 	b := newBuild(t, FullProfile)
-	stats, err := b.RebuildReactSetState(t.Context(), nil, 1, setStateProofTarget, setStateProofOutput)
+	stats, err := b.RebuildReactSetState(t.Context(), nil, setStateProofTarget, setStateProofOutput)
 	require.ErrorIs(t, err, ErrRebuildReactSetState)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 	require.ErrorContains(t, err, "invalid React setState inputs")

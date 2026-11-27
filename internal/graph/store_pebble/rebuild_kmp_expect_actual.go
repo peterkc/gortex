@@ -22,15 +22,13 @@ var rebuildKMPPrefix = []byte{'g', 'M'}
 const rebuildKMPRowLimit = 16 << 20
 
 // RebuildKMPExpectActualStats reports installed edges.
-// SpillBytes counts physical bytes of closed threshold SST runs consumed by
-// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildKMPExpectActualStats struct {
-	Edges, SpillBytes uint64
+	Edges uint64
 }
 
 // RebuildKMPExpectActual pairs all eligible live declarations by name and kind.
 // Verify both receipt owners of every proposed new row before applying any.
-func (b *BuildStore) RebuildKMPExpectActual(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildKMPExpectActual(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	makeEdge func(*graph.Node, string, graph.EdgeKind) *graph.Edge,
 ) (stats RebuildKMPExpectActualStats, err error) {
 	defer func() {
@@ -39,7 +37,7 @@ func (b *BuildStore) RebuildKMPExpectActual(ctx context.Context, receipts iter.S
 			err = fmt.Errorf("%w: %w", ErrRebuildKMPExpectActual, err)
 		}
 	}()
-	if receipts == nil || spillAt < 1 || spillAt > goldBufferBytes || makeEdge == nil {
+	if receipts == nil || makeEdge == nil {
 		return stats, fmt.Errorf("%w: invalid KMP expect/actual inputs", ErrRebuildLinkInputSize)
 	}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildKMPPrefix)

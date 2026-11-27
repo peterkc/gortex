@@ -69,7 +69,7 @@ func TestRebuildReexportsNativeEquality(t *testing.T) {
 			{name: "empty", repos: map[string]struct{}{}},
 		} {
 			t.Run(fmt.Sprintf("%s/reversed=%t", scope.name, reverse), func(t *testing.T) {
-				stats := assertRebuildReexportRows(t, nodes, edges, scope.repos, 1, func(c *store_pebble.RebuildImportClosure) {
+				stats := assertRebuildReexportRows(t, nodes, edges, scope.repos, func(c *store_pebble.RebuildImportClosure) {
 					for _, query := range []struct {
 						file, dir string
 						want      bool
@@ -95,15 +95,15 @@ func TestRebuildReexportsNativeEquality(t *testing.T) {
 					if stats.Rounds != 0 || stats.Directories != 0 {
 						t.Fatalf("empty scope processed a caller: %+v", stats)
 					}
-				} else if stats.Rounds != 3 || stats.Directories == 0 || stats.SpillBytes != 0 {
-					t.Fatalf("expected a persisted closure, a three-hop frontier, and zero SST spill: %+v", stats)
+				} else if stats.Rounds != 3 || stats.Directories == 0 {
+					t.Fatalf("expected a persisted closure and a three-hop frontier: %+v", stats)
 				}
 			})
 		}
 	}
 }
 
-func TestRebuildReexportsSpill1MiB(t *testing.T) {
+func TestRebuildReexportsNativeEqualityAbove1MiB(t *testing.T) {
 	const caller = "app/main.ts"
 	const barrel = "barrels/index.ts"
 	const leaves = 2600
@@ -112,22 +112,21 @@ func TestRebuildReexportsSpill1MiB(t *testing.T) {
 		{ID: barrel, Kind: graph.KindFile, FilePath: barrel, RepoPrefix: "barrels"},
 	}
 	edges := []*graph.Edge{{From: caller, To: barrel, Kind: graph.EdgeImports, FilePath: caller}}
-	// Encoded re-export and placement keys alone exceed the requested
-	// threshold. Distinct directories ensure no-op reduction cannot pass.
+	// Encoded re-export and placement keys alone exceed 1 MiB. Distinct
+	// directories ensure no-op reduction cannot pass.
 	for i := range leaves {
 		file := fmt.Sprintf("barrels/%s/%04d/value.ts", strings.Repeat("p", 140), i)
 		nodes = append(nodes, &graph.Node{ID: file, Kind: graph.KindFile, FilePath: file, RepoPrefix: "barrels"})
 		edges = append(edges, &graph.Edge{From: barrel, To: file, Kind: graph.EdgeReExports, FilePath: barrel, Line: i + 1})
 	}
-	const spillAt = 1 << 20
-	stats := assertRebuildReexportRows(t, nodes, edges, map[string]struct{}{"app": {}}, spillAt, nil)
-	if stats.ScratchBytes <= spillAt || stats.SpillBytes != 0 || stats.Rounds != 2 || stats.Directories != leaves+2 {
-		t.Fatalf("expected more than 1 MiB of scratch writes, closure rows, and zero SST spill: %+v", stats)
+	stats := assertRebuildReexportRows(t, nodes, edges, map[string]struct{}{"app": {}}, nil)
+	if stats.ScratchBytes <= 1<<20 || stats.Rounds != 2 || stats.Directories != leaves+2 {
+		t.Fatalf("expected more than 1 MiB of scratch writes and a two-round closure with %d rows: %+v", leaves+2, stats)
 	}
 	t.Logf("saved closure and logical scratch bytes: %+v", stats)
 }
 
-func assertRebuildReexportRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge, repos map[string]struct{}, spillAt int, check func(*store_pebble.RebuildImportClosure)) store_pebble.RebuildReexportStats {
+func assertRebuildReexportRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge, repos map[string]struct{}, check func(*store_pebble.RebuildImportClosure)) store_pebble.RebuildReexportStats {
 	t.Helper()
 	g := graph.New()
 	for _, n := range nodes {
@@ -160,7 +159,7 @@ func assertRebuildReexportRows(t *testing.T, nodes []*graph.Node, edges []*graph
 	})
 	b.AddBatch(nodes, edges)
 	var got [][2]string
-	stats, err := withRebuildImportClosure(t.Context(), b.RebuildView(), repos, spillAt, func(c *store_pebble.RebuildImportClosure) error {
+	stats, err := withRebuildImportClosure(t.Context(), b.RebuildView(), repos, func(c *store_pebble.RebuildImportClosure) error {
 		if check != nil {
 			check(c)
 		}

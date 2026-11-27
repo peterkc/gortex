@@ -52,7 +52,7 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 				}
 				before := rebuildFrameworkCustodyRows(t, b)
 				boundary := func(_, _ *graph.Node) bool { return true }
-				stats, err := b.RebuildClosureCollection(t.Context(), receipts, 1, 8, boundary, setStateProofOutput, closureTestApple)
+				stats, err := b.RebuildClosureCollection(t.Context(), receipts, 8, boundary, setStateProofOutput, closureTestApple)
 				var refusal *RebuildUnknownProvenanceError
 				require.ErrorIs(t, err, ErrRebuildClosureCollection)
 				require.ErrorAs(t, err, &refusal)
@@ -62,7 +62,7 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 				}, refusal)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
-				stats, err = b.RebuildClosureCollection(t.Context(), exact, 1, 8, boundary, setStateProofOutput, closureTestApple)
+				stats, err = b.RebuildClosureCollection(t.Context(), exact, 8, boundary, setStateProofOutput, closureTestApple)
 				require.NoError(t, err)
 				require.EqualValues(t, 2, stats.Edges)
 			})
@@ -79,7 +79,7 @@ func TestRebuildClosureCollectionCountsUnprovedRoleWithoutOutput(t *testing.T) {
 	before := rebuildFrameworkCustodyRows(t, b)
 	stats, err := b.RebuildClosureCollection(t.Context(), func(yield func(ParseFacts, error) bool) {
 		yield(facts, nil)
-	}, 1, 2, func(_, _ *graph.Node) bool { return false }, setStateProofOutput, closureTestApple)
+	}, 2, func(_, _ *graph.Node) bool { return false }, setStateProofOutput, closureTestApple)
 	var refusal *RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refusal)
 	require.Equal(t, &RebuildUnknownProvenanceError{
@@ -131,7 +131,7 @@ func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
 			before := rebuildFrameworkCustodyRows(t, b)
 			stats, err := b.RebuildClosureCollection(t.Context(), func(func(ParseFacts, error) bool) {
 				t.Fatal("replayed receipts before validating closure input and proposals")
-			}, 1, cap, boundary, makeCall, isApple)
+			}, cap, boundary, makeCall, isApple)
 			require.ErrorIs(t, err, ErrRebuildClosureCollection)
 			require.ErrorContains(t, err, want)
 			if mode != "scratch occupied" {
@@ -166,7 +166,7 @@ func TestRebuildClosureCollectionInstalledCustody(t *testing.T) {
 		File:              graph.FileMetaRow{FilePath: file},
 		Nodes:             []*graph.Node{dispatch, registrar},
 	})
-	stats, err := b.RebuildClosureCollection(t.Context(), receipts, 1, 8,
+	stats, err := b.RebuildClosureCollection(t.Context(), receipts, 8,
 		func(d, r *graph.Node) bool { return d.WorkspaceID == r.WorkspaceID }, makeCall, closureTestApple)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, stats.Edges)

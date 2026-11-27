@@ -109,7 +109,7 @@ func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
 			receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
-			stats, err := b.RebuildGRPC(ctx, receipts, 1,
+			stats, err := b.RebuildGRPC(ctx, receipts,
 				func(e *graph.Edge, _, _, to, _ string) bool {
 					if to == "" || e.To == to {
 						return false
@@ -171,7 +171,7 @@ func TestRebuildGRPCRefusesDuplicateRawCustody(t *testing.T) {
 		EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: raw.FilePath}, Edges: []*graph.Edge{&raw},
 	}
 	receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
-	stats, err := b.RebuildGRPC(ctx, receipts, 1, func(*graph.Edge, string, string, string, string) bool { return false })
+	stats, err := b.RebuildGRPC(ctx, receipts, func(*graph.Edge, string, string, string, string) bool { return false })
 	require.ErrorIs(t, err, ErrRebuildGRPC)
 	var refused *RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refused)
@@ -209,8 +209,6 @@ func TestRebuildGRPCWindowPreservesInheritedProof(t *testing.T) {
 
 	pass := rebuildGRPC{b: b, stats: RebuildGRPCStats{Moves: 1}}
 	require.NoError(t, b.withWrites(func() error { return pass.apply(ctx) }))
-	// The inherited raw key is the only window scratch write.
-	require.Zero(t, pass.stats.SpillBytes)
 	stored, err := b.pendingEdge(pendingEdgeKey(&old))
 	require.NoError(t, err)
 	require.Nil(t, stored)

@@ -29,7 +29,6 @@ type RebuildTemporalStats struct {
 	WrapperRounds                         int
 	WrapperCapped                         bool
 	Wrappers, Resolved, Moves, SpillBytes uint64
-	ConstSpillBytes                       uint64
 }
 
 // RebuildTemporalPass owns one scratch range for the second framework turn.
@@ -82,7 +81,7 @@ func (b *BuildStore) RebuildTemporal(ctx context.Context, receipts iter.Seq2[Par
 		}
 	}
 	err = b.withWrites(func() error { return p.apply(ctx) })
-	stats.SpillBytes = p.spill + stats.ConstSpillBytes
+	stats.SpillBytes = p.spill
 	return stats, err
 }
 

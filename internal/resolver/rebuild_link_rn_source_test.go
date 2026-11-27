@@ -142,7 +142,7 @@ func checkRebuildRNSourceCuts(t *testing.T, native *store_sqlite.Store, private 
 	require.Contains(t, rows, bridged)
 	require.Equal(t, "rn.bridge", rows[bridged].Meta["via"])
 
-	stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(receipts...), selection, 1)
+	stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(receipts...), selection)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stats.Edges)
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private), "bridge cut")

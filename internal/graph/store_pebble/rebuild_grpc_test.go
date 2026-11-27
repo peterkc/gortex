@@ -24,15 +24,9 @@ func TestRebuildGRPCRejectsInvalidScratch(t *testing.T) {
 		ran = true
 		return false
 	}
-	for _, limit := range []int{0, goldBufferBytes + 1} {
-		stats, err := b.RebuildGRPC(ctx, receipts, limit, rebind)
-		require.ErrorIs(t, err, ErrRebuildGRPC)
-		require.ErrorIs(t, err, ErrRebuildLinkInputSize)
-		require.Zero(t, stats)
-	}
 	key := rebuildGRPCKey('s', "occupied")
 	require.NoError(t, b.pending.Set(key, []byte("owner"), pebble.NoSync))
-	stats, err := b.RebuildGRPC(ctx, receipts, 1, rebind)
+	stats, err := b.RebuildGRPC(ctx, receipts, rebind)
 	require.ErrorIs(t, err, ErrRebuildGRPC)
 	require.ErrorContains(t, err, "gRPC scratch range occupied")
 	require.Zero(t, stats)
@@ -80,7 +74,8 @@ func TestRebuildGRPCWinnerCustody(t *testing.T) {
 	}
 	require.NoError(t, b.AddParsedFile("", facts))
 	require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: live, OldTo: raw.To}}))
-	stats, err := b.RebuildGRPC(ctx, func(yield func(ParseFacts, error) bool) { yield(facts, nil) }, 1,
+	flushed := b.pending.Metrics().Levels[0].TableBytesFlushed
+	stats, err := b.RebuildGRPC(ctx, func(yield func(ParseFacts, error) bool) { yield(facts, nil) },
 		func(e *graph.Edge, _, _, to, _ string) bool {
 			if to == "" || e.To == to {
 				return false
@@ -90,6 +85,7 @@ func TestRebuildGRPCWinnerCustody(t *testing.T) {
 		})
 	require.NoError(t, err)
 	require.Equal(t, uint64(4), stats.Moves)
+	require.Equal(t, flushed, b.pending.Metrics().Levels[0].TableBytesFlushed)
 	for _, tc := range []struct {
 		line int
 		raw  *graph.Edge

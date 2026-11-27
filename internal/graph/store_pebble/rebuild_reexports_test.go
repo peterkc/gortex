@@ -27,7 +27,7 @@ func TestRebuildReexportsFailureCleanup(t *testing.T) {
 		}
 	}
 	withClosure := func(consume func(*RebuildImportClosure) error) (RebuildReexportStats, error) {
-		return v.WithImportClosure(ctx, nil, 1, func(string) bool { return false }, path.Dir, consume)
+		return v.WithImportClosure(ctx, nil, func(string) bool { return false }, path.Dir, consume)
 	}
 	bad := pendingEdgeKey(&graph.Edge{From: seed.ID, To: "target.ts", Kind: graph.EdgeReExports})
 	if err := b.pending.Set(bad, []byte("corrupt"), pebble.NoSync); err != nil {
@@ -63,9 +63,13 @@ func TestRebuildReexportsFailureCleanup(t *testing.T) {
 	if found, err := expired.Reachable(ctx, seed.FilePath, "r"); found || !errors.Is(err, ErrRebuildReexports) {
 		t.Fatalf("expired result = %t, %v", found, err)
 	}
+	flushed := b.pending.Metrics().Levels[0].TableBytesFlushed
 	stats, err = withClosure(func(*RebuildImportClosure) error { return nil })
-	if err != nil || stats.Directories != 1 || stats.SpillBytes != 0 {
+	if err != nil || stats.Directories != 1 {
 		t.Fatalf("fresh pass after refusal = %+v, %v", stats, err)
+	}
+	if after := b.pending.Metrics().Levels[0].TableBytesFlushed; after != flushed {
+		t.Fatalf("small import closure flushed pending table bytes: before=%d, after=%d", flushed, after)
 	}
 	assertClean()
 }

@@ -18,7 +18,7 @@ func TestRebuildFlutterSetStateInstalledCustody(t *testing.T) {
 }
 
 func testRebuildSetStateInstalledCustody(t *testing.T, lifecycle string, proof rebuildEdgeProof,
-	run func(*BuildStore, context.Context, iter.Seq2[ParseFacts, error], int, func(string) bool,
+	run func(*BuildStore, context.Context, iter.Seq2[ParseFacts, error], func(string) bool,
 		func(*graph.Node, *graph.Node, string) *graph.Edge) (RebuildReactSetStateStats, error),
 ) {
 	t.Helper()
@@ -39,7 +39,7 @@ func testRebuildSetStateInstalledCustody(t *testing.T, lifecycle string, proof r
 		return &graph.Edge{From: from.ID, To: to.ID, Kind: graph.EdgeCalls, FilePath: from.FilePath, Line: from.StartLine,
 			Origin: graph.OriginASTInferred, Meta: map[string]any{"component_class": owner}}
 	}
-	stats, err := run(b, t.Context(), receipts, 1, func(id string) bool { return id == call.To }, makeCall)
+	stats, err := run(b, t.Context(), receipts, func(id string) bool { return id == call.To }, makeCall)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, stats.Edges)
 	want := makeCall(caller, target, class)

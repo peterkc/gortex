@@ -35,10 +35,8 @@ var rebuildMyBatisPrefix = []byte{'g', 'I'}
 const rebuildMyBatisRowBytes = 16 << 20
 
 // RebuildMyBatisStats describes the live census and planned moves.
-// SpillBytes counts physical bytes of closed threshold SST runs consumed by
-// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildMyBatisStats struct {
-	Stubs, Resolved, Moves, SpillBytes uint64
+	Stubs, Resolved, Moves uint64
 }
 
 type rebuildMyBatisPass struct {
@@ -55,7 +53,7 @@ type rebuildMyBatisRules struct {
 
 // RebuildMyBatis runs at the live mapper turn on a quiet private build.
 // The reducer elects from all live Java candidates before checking receipts.
-func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	methodKey func(*graph.Node) string, stub func(*graph.Edge) (string, string),
 	join func(string, string) string, rebind func(*graph.Edge, string, string, string) bool,
 ) (stats RebuildMyBatisStats, err error) {
@@ -65,7 +63,7 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 			err = fmt.Errorf("%w: %w", ErrRebuildMyBatis, err)
 		}
 	}()
-	if receipts == nil || spillAt < 1 || spillAt > goldBufferBytes || methodKey == nil || stub == nil || join == nil || rebind == nil {
+	if receipts == nil || methodKey == nil || stub == nil || join == nil || rebind == nil {
 		return stats, fmt.Errorf("%w: invalid MyBatis inputs", ErrRebuildLinkInputSize)
 	}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildMyBatisPrefix)

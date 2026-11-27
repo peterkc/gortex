@@ -434,7 +434,7 @@ func buildRebuildStages(
 		if err != nil {
 			return err
 		}
-		grpc, err := resolver.RunRebuildGRPC(ctx, private, receipts, selection, 1<<20)
+		grpc, err := resolver.RunRebuildGRPC(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
@@ -443,8 +443,7 @@ func buildRebuildStages(
 				zap.Uint64("stubs", grpc.Stubs),
 				zap.Uint64("registrations", grpc.Registrations),
 				zap.Uint64("resolved", grpc.Resolved),
-				zap.Uint64("moves", grpc.Moves),
-				zap.Uint64("spill_bytes", grpc.SpillBytes))
+				zap.Uint64("moves", grpc.Moves))
 		}
 		temporal, err := resolver.RunRebuildTemporal(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
@@ -459,113 +458,102 @@ func buildRebuildStages(
 				zap.Uint64("moves", temporal.Moves),
 				zap.Uint64("spill_bytes", temporal.SpillBytes))
 		}
-		eventChannel, err := resolver.RunRebuildEventChannel(ctx, private, receipts, selection, 1<<20)
+		eventChannel, err := resolver.RunRebuildEventChannel(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
-		if eventChannel.Pairs != 0 || eventChannel.SpillBytes != 0 {
+		if eventChannel.Pairs != 0 {
 			logger.Info("rebuild event channel applied to private build",
-				zap.Uint64("pairs", eventChannel.Pairs),
-				zap.Uint64("spill_bytes", eventChannel.SpillBytes))
+				zap.Uint64("pairs", eventChannel.Pairs))
 		}
-		swiftObjC, err := resolver.RunRebuildSwiftObjC(ctx, private, receipts, selection, 1<<20)
+		swiftObjC, err := resolver.RunRebuildSwiftObjC(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
 		if swiftObjC.Edges != 0 {
 			logger.Info("rebuild Swift/ObjC applied to private build",
-				zap.Uint64("edges", swiftObjC.Edges),
-				zap.Uint64("spill_bytes", swiftObjC.SpillBytes))
+				zap.Uint64("edges", swiftObjC.Edges))
 		}
-		reactNative, err := resolver.RunRebuildReactNativeBridge(ctx, private, receipts, selection, 1<<20)
+		reactNative, err := resolver.RunRebuildReactNativeBridge(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
-		if reactNative.Edges != 0 || reactNative.SpillBytes != 0 {
+		if reactNative.Edges != 0 {
 			logger.Info("rebuild React Native bridge applied to private build",
-				zap.Uint64("edges", reactNative.Edges),
-				zap.Uint64("spill_bytes", reactNative.SpillBytes))
+				zap.Uint64("edges", reactNative.Edges))
 		}
-		nativePairing, err := resolver.RunRebuildReactNativeNativePairing(ctx, private, receipts, selection, 1<<20)
+		nativePairing, err := resolver.RunRebuildReactNativeNativePairing(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
-		if nativePairing.Edges != 0 || nativePairing.SpillBytes != 0 {
+		if nativePairing.Edges != 0 {
 			logger.Info("rebuild React Native native pairing applied to private build",
-				zap.Uint64("edges", nativePairing.Edges),
-				zap.Uint64("spill_bytes", nativePairing.SpillBytes))
+				zap.Uint64("edges", nativePairing.Edges))
 		}
-		observer, err := resolver.RunRebuildObserver(ctx, private, receipts, selection, 1<<20)
+		observer, err := resolver.RunRebuildObserver(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
-		if observer.Edges != 0 || observer.SpillBytes != 0 {
+		if observer.Edges != 0 {
 			logger.Info("rebuild Observer applied to private build",
-				zap.Uint64("edges", observer.Edges),
-				zap.Uint64("spill_bytes", observer.SpillBytes))
+				zap.Uint64("edges", observer.Edges))
 		}
-		closureCollection, err := resolver.RunRebuildClosureCollection(ctx, private, receipts, selection, 1<<20)
+		closureCollection, err := resolver.RunRebuildClosureCollection(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
-		if closureCollection.Edges != 0 || closureCollection.SpillBytes != 0 {
+		if closureCollection.Edges != 0 {
 			logger.Info("rebuild closure collection applied to private build",
-				zap.Uint64("edges", closureCollection.Edges),
-				zap.Uint64("spill_bytes", closureCollection.SpillBytes))
+				zap.Uint64("edges", closureCollection.Edges))
 		}
-		reactSetState, err := resolver.RunRebuildReactSetState(ctx, private, receipts, selection, 1<<20)
+		reactSetState, err := resolver.RunRebuildReactSetState(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
-		if reactSetState.Edges != 0 || reactSetState.SpillBytes != 0 {
+		if reactSetState.Edges != 0 {
 			logger.Info("rebuild React setState applied to private build",
-				zap.Uint64("edges", reactSetState.Edges),
-				zap.Uint64("spill_bytes", reactSetState.SpillBytes))
+				zap.Uint64("edges", reactSetState.Edges))
 		}
-		flutterSetState, err := resolver.RunRebuildFlutterSetState(ctx, private, receipts, selection, 1<<20)
+		flutterSetState, err := resolver.RunRebuildFlutterSetState(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
-		if flutterSetState.Edges != 0 || flutterSetState.SpillBytes != 0 {
+		if flutterSetState.Edges != 0 {
 			logger.Info("rebuild Flutter setState applied to private build",
-				zap.Uint64("edges", flutterSetState.Edges),
-				zap.Uint64("spill_bytes", flutterSetState.SpillBytes))
+				zap.Uint64("edges", flutterSetState.Edges))
 		}
-		kmp, err := resolver.RunRebuildKMPExpectActual(ctx, private, receipts, selection, 1<<20)
+		kmp, err := resolver.RunRebuildKMPExpectActual(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
-		if kmp.Edges != 0 || kmp.SpillBytes != 0 {
+		if kmp.Edges != 0 {
 			logger.Info("rebuild KMP expect/actual applied to private build",
-				zap.Uint64("edges", kmp.Edges),
-				zap.Uint64("spill_bytes", kmp.SpillBytes))
+				zap.Uint64("edges", kmp.Edges))
 		}
-		expoModules, err := resolver.RunRebuildExpoModuleBridge(ctx, private, receipts, selection, 1<<20)
+		expoModules, err := resolver.RunRebuildExpoModuleBridge(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
-		if expoModules.Edges != 0 || expoModules.SpillBytes != 0 {
+		if expoModules.Edges != 0 {
 			logger.Info("rebuild Expo module bridge applied to private build",
-				zap.Uint64("edges", expoModules.Edges),
-				zap.Uint64("spill_bytes", expoModules.SpillBytes))
+				zap.Uint64("edges", expoModules.Edges))
 		}
-		fabric, err := resolver.RunRebuildFabric(ctx, private, receipts, selection, 1<<20)
+		fabric, err := resolver.RunRebuildFabric(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
-		if fabric.Edges != 0 || fabric.SpillBytes != 0 {
+		if fabric.Edges != 0 {
 			logger.Info("rebuild Fabric applied to private build",
-				zap.Uint64("edges", fabric.Edges),
-				zap.Uint64("spill_bytes", fabric.SpillBytes))
+				zap.Uint64("edges", fabric.Edges))
 		}
-		mybatis, err := resolver.RunRebuildMyBatis(ctx, private, receipts, selection, 1<<20)
+		mybatis, err := resolver.RunRebuildMyBatis(ctx, private, receipts, selection)
 		if err != nil {
 			return err
 		}
-		if mybatis.Stubs != 0 || mybatis.SpillBytes != 0 {
+		if mybatis.Stubs != 0 {
 			logger.Info("rebuild MyBatis applied to private build",
 				zap.Uint64("stubs", mybatis.Stubs), zap.Uint64("resolved", mybatis.Resolved),
-				zap.Uint64("moves", mybatis.Moves), zap.Uint64("spill_bytes", mybatis.SpillBytes))
+				zap.Uint64("moves", mybatis.Moves))
 		}
 	}
 	// The supported tails only changed private scratch. Relation projection

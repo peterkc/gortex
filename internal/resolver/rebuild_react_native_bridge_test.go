@@ -15,7 +15,7 @@ import (
 func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
-		spillAt    int
+		padding    int
 		firstLine  int
 		firstWrite uint64
 	}{
@@ -25,9 +25,9 @@ func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			module := "Calendar"
-			if tc.spillAt > 1 {
+			if tc.padding > 1 {
 				// Exercise a join key larger than 1 MiB.
-				module += strings.Repeat("x", tc.spillAt)
+				module += strings.Repeat("x", tc.padding)
 			}
 			facts := rebuildRNBridgeFacts(t, module)
 			if tc.firstLine == 4 {
@@ -59,9 +59,8 @@ func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
 				report := RunFrameworkSynthesizersWithSelection(native, selection)
 				require.NoError(t, report.Err)
 				require.Equal(t, 3, report.Total) // Native counts the attempt on the existing key too.
-				stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, tc.spillAt)
+				stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection)
 				require.NoError(t, err)
-				require.Zero(t, stats.SpillBytes)
 				require.Equal(t, wantNew, stats.Edges)
 
 				want := rebuildEventSQLiteRows(native)
@@ -106,7 +105,7 @@ func TestRebuildReactNativeBridgeRejectsMissingFirstSite(t *testing.T) {
 
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
 	require.NoError(t, err)
-	stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
+	stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(proof...), selection)
 	var refused *store_pebble.RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refused)
 	// Missing order affects all three pairs before election. The existing
@@ -151,7 +150,7 @@ func TestRebuildReactNativeBridgeDuplicateRecorder(t *testing.T) {
 
 			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
 			require.NoError(t, err)
-			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(proof...), selection)
 			if tc.wantCount != 0 {
 				var refused *store_pebble.RebuildUnknownProvenanceError
 				require.ErrorAs(t, err, &refused)
@@ -206,7 +205,7 @@ func TestRebuildReactNativeBridgeRejectsOverwrittenMarker(t *testing.T) {
 			report := RunFrameworkSynthesizersWithSelection(native, selection)
 			require.NoError(t, report.Err)
 			require.Equal(t, 3, report.Total)
-			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection)
 			var refused *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refused)
 			require.ErrorIs(t, err, store_pebble.ErrRebuildReactNativeBridge)
@@ -282,7 +281,7 @@ function show() {
 						private.AddNode(&changed)
 					}
 					before := rebuildEventSavedRows(t, private)
-					stats, err := run(t.Context(), private, rebuildGRPCReceipts(receipts...), selection, 1)
+					stats, err := run(t.Context(), private, rebuildGRPCReceipts(receipts...), selection)
 					if liveLanguage != caller.Language {
 						require.ErrorIs(t, err, tc.stage)
 						require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
@@ -345,7 +344,7 @@ func TestRebuildReactNativeBridgeRejectsUnprovedEndpoints(t *testing.T) {
 
 			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
 			require.NoError(t, err)
-			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection)
 			var refused *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refused)
 			require.Equal(t, tc.count, refused.Count)
@@ -378,7 +377,7 @@ func TestRebuildReactNativeBridgeRejectsChangedLiveCaller(t *testing.T) {
 			require.Equal(t, &live, stored)
 			before := rebuildEventSavedRows(t, private)
 
-			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection)
 			var refused *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refused)
 			require.Equal(t, uint64(2), refused.Count)
@@ -409,7 +408,7 @@ func TestRebuildReactNativeBridgeRejectsConflictingLinks(t *testing.T) {
 	before := rebuildEventSavedRows(t, private)
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
 	require.NoError(t, err)
-	stats, err := RunRebuildReactNativeBridge(ctx, private, rebuildGRPCReceipts(facts...), selection, 1)
+	stats, err := RunRebuildReactNativeBridge(ctx, private, rebuildGRPCReceipts(facts...), selection)
 	var refused *store_pebble.RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refused)
 	require.Equal(t, uint64(3), refused.Count)
@@ -464,7 +463,7 @@ func TestRebuildReactNativeBridgeEligibility(t *testing.T) {
 			require.Equal(t, tc.want, report.Total)
 			want := rebuildEventSQLiteRows(native)
 			require.Len(t, want.edges, len(before.edges)+tc.want)
-			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection)
 			require.NoError(t, err)
 			require.Equal(t, uint64(tc.want), stats.Edges)
 			require.Equal(t, want, rebuildEventSavedRows(t, private))
@@ -519,7 +518,7 @@ func TestRebuildReactNativeBridgeSkipsSelfCall(t *testing.T) {
 				reads++
 				rebuildGRPCReceipts(facts...)(yield)
 			}
-			stats, err := RunRebuildReactNativeBridge(t.Context(), private, receipts, selection, 1)
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, receipts, selection)
 			require.NoError(t, err)
 			// Order still scans for hidden markers; only a new edge needs endpoint proof.
 			require.Equal(t, tc.wantReads, reads)

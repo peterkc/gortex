@@ -46,7 +46,7 @@ func TestRebuildKMPExpectActualProvesNativeRole(t *testing.T) {
 			makeEdge := func(n *graph.Node, to string, kind graph.EdgeKind) *graph.Edge {
 				return &graph.Edge{From: n.ID, To: to, Kind: kind, FilePath: n.FilePath, Line: n.StartLine}
 			}
-			stats, err := b.RebuildKMPExpectActual(t.Context(), receipts, 1, makeEdge)
+			stats, err := b.RebuildKMPExpectActual(t.Context(), receipts, makeEdge)
 			implements := graph.EdgeIdentityFor(makeEdge(actual, expect.ID, graph.EdgeImplements))
 			if tc.changeRole {
 				require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
@@ -107,7 +107,7 @@ func TestRebuildReactNativeNativePairingProvesNativeMetadata(t *testing.T) {
 				}
 				return
 			}
-			stats, err := b.RebuildReactNativeNativePairing(t.Context(), receipts, 1, func(language string) string {
+			stats, err := b.RebuildReactNativeNativePairing(t.Context(), receipts, func(language string) string {
 				if language == "swift" {
 					return "ios"
 				}
@@ -149,7 +149,7 @@ func TestRebuildSwiftObjCProvesNativeMetadata(t *testing.T) {
 			live.Meta = tc.live
 			b.AddNode(&live)
 			e := &graph.Edge{From: swift.ID, To: objc.ID, Kind: graph.EdgeReferences, FilePath: swift.FilePath}
-			stats, err := b.RebuildSwiftObjC(t.Context(), receipts, 1, func(_ RebuildView, propose func(*graph.Edge) error) error {
+			stats, err := b.RebuildSwiftObjC(t.Context(), receipts, func(_ RebuildView, propose func(*graph.Edge) error) error {
 				return propose(e)
 			})
 			id := graph.EdgeIdentityFor(e)

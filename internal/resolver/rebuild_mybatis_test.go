@@ -85,7 +85,7 @@ func TestRebuildMyBatisSQLiteOracle(t *testing.T) {
 
 				// The elected same-repo method still exists in the private graph.
 				// Losing its receipt must refuse, not elect the proved remote method.
-				stats, err := RunRebuildMyBatis(t.Context(), private, rebuildGRPCReceipts(xml, remote), frozen, 1)
+				stats, err := RunRebuildMyBatis(t.Context(), private, rebuildGRPCReceipts(xml, remote), frozen)
 				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, private))
@@ -97,12 +97,11 @@ func TestRebuildMyBatisSQLiteOracle(t *testing.T) {
 				require.EqualValues(t, tc.resolved, report.Total)
 				gotNative := rebuildEventSQLiteRows(native)
 				require.Equal(t, want, gotNative)
-				stats, err := RunRebuildMyBatis(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1)
+				stats, err := RunRebuildMyBatis(t.Context(), private, rebuildGRPCReceipts(facts...), frozen)
 				require.NoError(t, err)
 				require.EqualValues(t, 1, stats.Stubs)
 				require.EqualValues(t, tc.resolved, stats.Resolved)
 				require.EqualValues(t, wantMoves, stats.Moves)
-				require.Zero(t, stats.SpillBytes)
 				require.Equal(t, gotNative, rebuildEventSavedRows(t, private))
 			}
 		})
@@ -191,7 +190,7 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 			if tc.affected != 0 {
 				b := openRebuildGRPCBuild(t, stored, methods)
 				before := rebuildEventSavedRows(t, b)
-				stats, err := RunRebuildMyBatis(t.Context(), b, rebuildGRPCReceipts(stored, methods), selection, 1)
+				stats, err := RunRebuildMyBatis(t.Context(), b, rebuildGRPCReceipts(stored, methods), selection)
 				require.ErrorIs(t, err, store_pebble.ErrRebuildMyBatisOrder)
 				var order *store_pebble.RebuildMyBatisOrderError
 				require.ErrorAs(t, err, &order)
@@ -241,12 +240,11 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 				}
 				require.Equal(t, []string{alphaTarget, betaTarget}, targets)
 
-				stats, err := RunRebuildMyBatis(t.Context(), b, rebuildGRPCReceipts(stored, methods), selection, 1)
+				stats, err := RunRebuildMyBatis(t.Context(), b, rebuildGRPCReceipts(stored, methods), selection)
 				require.NoError(t, err, "reversed=%t", reversed)
 				require.EqualValues(t, 2, stats.Stubs)
 				require.EqualValues(t, 2, stats.Resolved)
 				require.EqualValues(t, 2, stats.Moves)
-				require.Zero(t, stats.SpillBytes)
 				got := rebuildEventSavedRows(t, b)
 				require.Equal(t, want, got, "reversed=%t", reversed)
 				if reversed {
@@ -304,7 +302,7 @@ func TestRebuildMyBatisRestubAndIncumbent(t *testing.T) {
 	report := RunFrameworkSynthesizersWithSelection(native, selection)
 	require.NoError(t, report.Err)
 	require.EqualValues(t, 1, report.Total)
-	stats, err := RunRebuildMyBatis(t.Context(), b, rebuildGRPCReceipts(xml, methods), selection, 1)
+	stats, err := RunRebuildMyBatis(t.Context(), b, rebuildGRPCReceipts(xml, methods), selection)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, stats.Moves)
 	got := rebuildEventSavedRows(t, b)

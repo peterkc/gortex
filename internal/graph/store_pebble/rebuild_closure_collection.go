@@ -17,16 +17,14 @@ var ErrRebuildClosureCollection = errors.New("pebble rebuild closure collection 
 var rebuildClosurePrefix = []byte{'g', 'U'}
 
 // RebuildClosureCollectionStats reports installed edges.
-// SpillBytes counts physical bytes of closed threshold SST runs consumed by
-// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildClosureCollectionStats struct {
-	Edges, SpillBytes uint64
+	Edges uint64
 }
 
 // RebuildClosureCollection streams the native callable field join. Both
 // raw role counts precede receipt proof and the workspace and self filters.
 // Preserve SQLite durable keys when installing calls.
-func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	maxFanout int, sameBoundary func(*graph.Node, *graph.Node) bool, makeEdge func(*graph.Node, *graph.Node, string) *graph.Edge,
 	appleLanguage func(string) bool,
 ) (stats RebuildClosureCollectionStats, err error) {
@@ -36,7 +34,7 @@ func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter
 			err = fmt.Errorf("%w: %w", ErrRebuildClosureCollection, err)
 		}
 	}()
-	if spillAt < 1 || spillAt > goldBufferBytes || receipts == nil || maxFanout < 1 || sameBoundary == nil || makeEdge == nil || appleLanguage == nil {
+	if receipts == nil || maxFanout < 1 || sameBoundary == nil || makeEdge == nil || appleLanguage == nil {
 		return stats, fmt.Errorf("%w: invalid closure collection stage inputs", ErrRebuildLinkInputSize)
 	}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildClosurePrefix)

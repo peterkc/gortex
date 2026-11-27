@@ -10,13 +10,13 @@ import (
 
 // RunRebuildExpoModuleBridge executes framework position twelve after KMP.
 func RunRebuildExpoModuleBridge(ctx context.Context, b *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error],
-	selection FrameworkSynthesizerSelection, spillAt int,
+	selection FrameworkSynthesizerSelection,
 ) (store_pebble.RebuildExpoModuleBridgeStats, error) {
 	if !selection.allows(SynthExpoModules) {
 		return store_pebble.RebuildExpoModuleBridgeStats{}, nil
 	}
 	required, family := expoBridgeFamilyMask()
-	return b.RebuildExpoModuleBridge(ctx, receipts, spillAt, required, family, func(e *graph.Edge) bool {
+	return b.RebuildExpoModuleBridge(ctx, receipts, required, family, func(e *graph.Edge) bool {
 		return e.Kind == graph.EdgeCalls && e.From != "" && e.Meta["via"] == rnNativeVia
 	}, func(e *graph.Edge, native *graph.Node) *graph.Edge {
 		return &graph.Edge{

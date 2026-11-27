@@ -86,7 +86,7 @@ func TestRebuildSyntheticCustodyEventChannel(t *testing.T) {
 	b, receipts := seedSyntheticCustody(t, ParseFacts{
 		EffectiveLanguage: "typescript", File: graph.FileMetaRow{FilePath: file}, Nodes: nodes, Edges: edges,
 	})
-	stats, err := b.RebuildEventChannel(t.Context(), receipts, 1,
+	stats, err := b.RebuildEventChannel(t.Context(), receipts,
 		[]string{"event:"}, func(_ string, label string) (string, int) { return label, 4 },
 		func(event, _ string, emitter, listener *graph.Edge) *graph.Edge {
 			return &graph.Edge{From: emitter.From, To: listener.From, Kind: graph.EdgeCalls, FilePath: emitter.FilePath, Line: emitter.Line, Via: event}
@@ -121,7 +121,7 @@ func TestRebuildSyntheticCustodySwiftObjC(t *testing.T) {
 		}
 		return nil
 	}
-	stats, err := b.RebuildSwiftObjC(t.Context(), func(func(ParseFacts, error) bool) {}, 1, reduce)
+	stats, err := b.RebuildSwiftObjC(t.Context(), func(func(ParseFacts, error) bool) {}, reduce)
 	require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
 	require.Zero(t, stats)
 	live, err := b.pendingEdge(pendingEdgeKey(winner))
@@ -129,7 +129,7 @@ func TestRebuildSyntheticCustodySwiftObjC(t *testing.T) {
 	require.Nil(t, live)
 	requireSyntheticCustody(t, b, nil)
 
-	stats, err = b.RebuildSwiftObjC(t.Context(), receipts, 1, reduce)
+	stats, err = b.RebuildSwiftObjC(t.Context(), receipts, reduce)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, stats.Edges)
 	requireSyntheticCustody(t, b, map[graph.EdgeIdentity]rebuildEdgeProof{graph.EdgeIdentityFor(winner): rebuildProofSwiftObjC})
@@ -156,12 +156,12 @@ func TestRebuildSyntheticCustodyReactNative(t *testing.T) {
 		ParseFacts{EffectiveLanguage: ios.Language, File: graph.FileMetaRow{FilePath: ios.FilePath}, Nodes: []*graph.Node{ios}},
 		ParseFacts{EffectiveLanguage: android.Language, File: graph.FileMetaRow{FilePath: android.FilePath}, Nodes: []*graph.Node{android}, Edges: []*graph.Edge{pairKeeper}},
 	)
-	bridgeStats, err := b.RebuildReactNativeBridge(t.Context(), receipts, 1,
+	bridgeStats, err := b.RebuildReactNativeBridge(t.Context(), receipts,
 		func(lang string) bool { return lang == "typescript" },
 		func(e *graph.Edge) bool { return e.Kind == graph.EdgeCalls && e.Meta["via"] == "rn.native" }, call)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, bridgeStats.Edges)
-	pairStats, err := b.RebuildReactNativeNativePairing(t.Context(), receipts, 1,
+	pairStats, err := b.RebuildReactNativeNativePairing(t.Context(), receipts,
 		func(lang string) string {
 			switch lang {
 			case "swift":

@@ -11,13 +11,13 @@ import (
 // RunRebuildEventChannel executes registry position three. The worker has
 // already applied the private gRPC and Temporal turns.
 func RunRebuildEventChannel(ctx context.Context, b *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error],
-	selection FrameworkSynthesizerSelection, spillAt int,
+	selection FrameworkSynthesizerSelection,
 ) (store_pebble.RebuildEventChannelStats, error) {
 	if !selection.allows(SynthEventChannel) {
 		return store_pebble.RebuildEventChannelStats{}, nil
 	}
 	prefixes := []string{pubsubEventIDPrefix, emitterEventIDPrefix}
-	return b.RebuildEventChannel(ctx, receipts, spillAt, prefixes, func(event, transport string) (string, int) {
+	return b.RebuildEventChannel(ctx, receipts, prefixes, func(event, transport string) (string, int) {
 		if transport == "" {
 			transport = transportFromEventID(event)
 		}

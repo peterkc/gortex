@@ -16,17 +16,15 @@ var ErrRebuildObserver = errors.New("pebble rebuild Observer stage failed")
 var rebuildObserverPrefix = []byte{'g', 'O'}
 
 // RebuildObserverStats reports installed calls.
-// SpillBytes counts physical bytes of closed threshold SST runs consumed by
-// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildObserverStats struct {
-	Edges, SpillBytes uint64
+	Edges uint64
 }
 
 // RebuildObserver streams the native field/registrar/site join against the
 // quiet private view. The callback cutoff precedes workspace filtering. Prove
 // exact receipt or checked producer custody before writing any calls.
 // Discard the private build if applying the calls fails.
-func (b *BuildStore) RebuildObserver(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildObserver(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	registrar, dispatcher func(string) bool, sameBoundary func(*graph.Node, *graph.Node) bool, maxCallbacks int,
 	makeCall func(*graph.Node, string, string) *graph.Edge,
 ) (stats RebuildObserverStats, err error) {
@@ -36,7 +34,7 @@ func (b *BuildStore) RebuildObserver(ctx context.Context, receipts iter.Seq2[Par
 			err = fmt.Errorf("%w: %w", ErrRebuildObserver, err)
 		}
 	}()
-	if receipts == nil || spillAt < 1 || spillAt > goldBufferBytes || registrar == nil || dispatcher == nil ||
+	if receipts == nil || registrar == nil || dispatcher == nil ||
 		sameBoundary == nil || maxCallbacks < 1 || makeCall == nil {
 		return stats, fmt.Errorf("%w: invalid Observer stage inputs", ErrRebuildLinkInputSize)
 	}

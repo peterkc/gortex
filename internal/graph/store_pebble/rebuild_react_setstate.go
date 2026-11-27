@@ -20,10 +20,8 @@ var (
 var rebuildSetStatePrefix = []byte{'g', 'W'}
 
 // RebuildReactSetStateStats reports installed calls.
-// SpillBytes counts physical bytes of closed threshold SST runs consumed by
-// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildReactSetStateStats struct {
-	Edges, SpillBytes uint64
+	Edges uint64
 }
 
 // RebuildReactSetState implements the native membership and setState join.
@@ -31,10 +29,10 @@ type RebuildReactSetStateStats struct {
 // order. The native adjacency query has no ORDER BY; receipt order is not a
 // proof of all native reindex paths. The lifecycle winner uses the last
 // method ID in the native explicit sort.
-func (b *BuildStore) RebuildReactSetState(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildReactSetState(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	isSetState func(string) bool, makeCall func(*graph.Node, *graph.Node, string) *graph.Edge,
 ) (RebuildReactSetStateStats, error) {
-	return b.rebuildSetState(ctx, receipts, spillAt, "render", ErrRebuildReactSetState, rebuildProofReactSetState, isSetState, makeCall)
+	return b.rebuildSetState(ctx, receipts, "render", ErrRebuildReactSetState, rebuildProofReactSetState, isSetState, makeCall)
 }
 
 // RebuildFlutterSetStateStats reports the same counters as the React turn.
@@ -42,13 +40,13 @@ type RebuildFlutterSetStateStats = RebuildReactSetStateStats
 
 // RebuildFlutterSetState runs the shared lifecycle join with build as the
 // target. It reads the quiet view after the React turn has installed its calls.
-func (b *BuildStore) RebuildFlutterSetState(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildFlutterSetState(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	isSetState func(string) bool, makeCall func(*graph.Node, *graph.Node, string) *graph.Edge,
 ) (RebuildFlutterSetStateStats, error) {
-	return b.rebuildSetState(ctx, receipts, spillAt, "build", ErrRebuildFlutterSetState, rebuildProofFlutterSetState, isSetState, makeCall)
+	return b.rebuildSetState(ctx, receipts, "build", ErrRebuildFlutterSetState, rebuildProofFlutterSetState, isSetState, makeCall)
 }
 
-func (b *BuildStore) rebuildSetState(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) rebuildSetState(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	lifecycle string, stage error, proof rebuildEdgeProof,
 	isSetState func(string) bool, makeCall func(*graph.Node, *graph.Node, string) *graph.Edge,
 ) (stats RebuildReactSetStateStats, err error) {
@@ -58,7 +56,7 @@ func (b *BuildStore) rebuildSetState(ctx context.Context, receipts iter.Seq2[Par
 			err = fmt.Errorf("%w: %w", stage, err)
 		}
 	}()
-	if receipts == nil || spillAt < 1 || spillAt > goldBufferBytes || isSetState == nil || makeCall == nil {
+	if receipts == nil || isSetState == nil || makeCall == nil {
 		if proof == rebuildProofReactSetState {
 			return stats, fmt.Errorf("%w: invalid React setState inputs", ErrRebuildLinkInputSize)
 		}

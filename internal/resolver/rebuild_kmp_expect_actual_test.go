@@ -70,7 +70,7 @@ func TestRebuildKMPExpectActualSQLiteOracle(t *testing.T) {
 	report := RunFrameworkSynthesizersWithSelection(native, disabled)
 	require.NoError(t, report.Err)
 	require.Zero(t, report.Total)
-	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), disabled, 1)
+	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), disabled)
 	require.NoError(t, err)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildEventSQLiteRows(native))
@@ -95,10 +95,9 @@ func TestRebuildKMPExpectActualSQLiteOracle(t *testing.T) {
 		require.NoError(t, report.Err)
 		require.Equal(t, 7, report.Total) // Native counts pairs, even on replay.
 		require.Equal(t, want, rebuildEventSQLiteRows(native))
-		stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+		stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection)
 		require.NoError(t, err)
 		require.Equal(t, wantNew, stats.Edges)
-		require.Zero(t, stats.SpillBytes)
 		require.Equal(t, want, rebuildEventSavedRows(t, private))
 	}
 }
@@ -175,7 +174,7 @@ func TestRebuildKMPExpectActualRejectsUnprovedDeclaration(t *testing.T) {
 			if mode != "missing receipt" {
 				*f = roundTripRebuildRNBridgeFacts(t, *f)
 			}
-			stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
+			stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(proof...), selection)
 			require.ErrorIs(t, err, store_pebble.ErrRebuildKMPExpectActual)
 			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 			var refused *store_pebble.RebuildUnknownProvenanceError
@@ -188,10 +187,9 @@ func TestRebuildKMPExpectActualRejectsUnprovedDeclaration(t *testing.T) {
 	}
 	// Replaying with intact receipts on the same root also proves the refusal
 	// path did not leave scratch state that blocks a subsequent valid run.
-	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection)
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), stats.Edges)
-	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
 }
 
@@ -221,7 +219,7 @@ func TestRebuildKMPExpectActualCountsDistinctUnprovedOutputs(t *testing.T) {
 		{facts[2], facts[3], bad},
 		{bad, facts[3], facts[2]},
 	} {
-		stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
+		stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(proof...), selection)
 		require.ErrorIs(t, err, store_pebble.ErrRebuildKMPExpectActual)
 		var refused *store_pebble.RebuildUnknownProvenanceError
 		require.ErrorAs(t, err, &refused)
@@ -229,7 +227,7 @@ func TestRebuildKMPExpectActualCountsDistinctUnprovedOutputs(t *testing.T) {
 		require.Zero(t, stats)
 		require.Equal(t, before, rebuildEventSavedRows(t, private))
 	}
-	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection)
 	require.NoError(t, err)
 	require.EqualValues(t, 4, stats.Edges)
 }
@@ -269,7 +267,7 @@ func TestRebuildKMPExpectActualNeedsProvedKotlinMarker(t *testing.T) {
 		)
 	}
 	for _, proof := range proofs {
-		stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(proof...), frozen, 1)
+		stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(proof...), frozen)
 		require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 		var refused *store_pebble.RebuildUnknownProvenanceError
 		require.ErrorAs(t, err, &refused)
@@ -289,14 +287,14 @@ func TestRebuildKMPExpectActualNeedsProvedKotlinMarker(t *testing.T) {
 	markerClaim.Kind, markerClaim.Name, markerClaim.StartLine = graph.KindFile, "other", 2
 	proof := rebuildEventFacts(markerClaim.FilePath, markerClaim.Language, []*graph.Node{&markerClaim})
 	proof = roundTripRebuildRNBridgeFacts(t, proof)
-	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts[0], facts[1], proof), frozen, 1)
+	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts[0], facts[1], proof), frozen)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, stats.Edges)
 	want := rebuildEventSQLiteRows(native)
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
 
 	// With both directions installed, missing marker proof cannot affect output.
-	stats, err = RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts[:2]...), frozen, 1)
+	stats, err = RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts[:2]...), frozen)
 	require.NoError(t, err)
 	require.Zero(t, stats.Edges)
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
@@ -321,10 +319,9 @@ func TestRebuildKMPExpectActualSQLiteLargeScratch(t *testing.T) {
 	report := RunFrameworkSynthesizersWithSelection(native, selection)
 	require.NoError(t, report.Err)
 	require.Equal(t, pairs, report.Total)
-	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1<<20)
+	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection)
 	require.NoError(t, err)
 	require.EqualValues(t, 2*pairs, stats.Edges)
-	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
 }
 

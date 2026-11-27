@@ -156,7 +156,7 @@ public class ColorViewManager extends SimpleViewManager<ColorView> {
 				proof[3] = roundTripRebuildRNBridgeFacts(t, proof[3])
 			}
 			slices.Reverse(proof)
-			stats, err := RunRebuildFabric(t.Context(), private, rebuildGRPCReceipts(proof...), frozen, 1)
+			stats, err := RunRebuildFabric(t.Context(), private, rebuildGRPCReceipts(proof...), frozen)
 			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 			var refused *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refused)
@@ -174,10 +174,9 @@ public class ColorViewManager extends SimpleViewManager<ColorView> {
 		require.NoError(t, report.Err)
 		require.Equal(t, 2, report.Total) // Native counts bound specs, even on replay.
 		require.Equal(t, want, rebuildEventSQLiteRows(native))
-		stats, err := RunRebuildFabric(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1)
+		stats, err := RunRebuildFabric(t.Context(), private, rebuildGRPCReceipts(facts...), frozen)
 		require.NoError(t, err)
 		require.Equal(t, wantNew, stats.Edges)
-		require.Zero(t, stats.SpillBytes)
 		require.Equal(t, want, rebuildEventSavedRows(t, private))
 	}
 }
@@ -221,10 +220,9 @@ func TestRebuildFabricSQLiteLargeScratch(t *testing.T) {
 	require.Equal(t, count, report.Total)
 	want := rebuildEventSQLiteRows(native)
 	require.Len(t, want.edges, 2*count*count)
-	stats, err := RunRebuildFabric(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1<<20)
+	stats, err := RunRebuildFabric(t.Context(), private, rebuildGRPCReceipts(facts...), frozen)
 	require.NoError(t, err)
 	require.EqualValues(t, 2*count*count, stats.Edges)
-	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
 }
 
@@ -293,7 +291,7 @@ func TestRebuildFabricFrozenFamilyAndDisabledSelection(t *testing.T) {
 	for _, excluded := range []FrameworkSynthesizerSelection{frozen, disabled} {
 		stats, err := RunRebuildFabric(t.Context(), b, func(func(store_pebble.ParseFacts, error) bool) {
 			t.Fatal("ineligible Fabric selection read receipts")
-		}, excluded, 1)
+		}, excluded)
 		require.NoError(t, err)
 		require.Zero(t, stats)
 		require.Equal(t, before, rebuildEventSavedRows(t, b))
@@ -308,7 +306,7 @@ func TestRebuildFabricFrozenFamilyAndDisabledSelection(t *testing.T) {
 	require.NoError(t, report.Err)
 	want := rebuildEventSQLiteRows(native)
 	require.Len(t, want.edges, 2)
-	stats, err := RunRebuildFabric(t.Context(), b, rebuildGRPCReceipts(facts...), fresh, 1)
+	stats, err := RunRebuildFabric(t.Context(), b, rebuildGRPCReceipts(facts...), fresh)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, stats.Edges)
 	require.Equal(t, want, rebuildEventSavedRows(t, b))

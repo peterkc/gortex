@@ -21,7 +21,8 @@ func TestRebuildTemporalConstScratchRows(t *testing.T) {
 		Constants: []graph.ConstantValueRow{{NodeID: id, FilePath: file, Value: literal}},
 	}))
 	var result *TemporalConstDeref
-	stats, err := b.RebuildView().WithTemporalConstDeref(ctx, 1, func(yield func(string) error) error {
+	flushed := b.pending.Metrics().Levels[0].TableBytesFlushed
+	stats, err := b.RebuildView().WithTemporalConstDeref(ctx, func(yield func(string) error) error {
 		return yield("Name")
 	}, func(*graph.Node) TemporalConstCandidate {
 		return TemporalConstCandidate{ReadSidecar: true}
@@ -44,7 +45,7 @@ func TestRebuildTemporalConstScratchRows(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.Names)
-	require.Zero(t, stats.SpillBytes)
+	require.Equal(t, flushed, b.pending.Metrics().Levels[0].TableBytesFlushed)
 	value, err := result.Value(ctx, "Name")
 	require.ErrorIs(t, err, ErrRebuildTemporalConst)
 	require.Empty(t, value)
@@ -69,7 +70,7 @@ func TestRebuildTemporalConstRefusesErrorsAndCleansScratch(t *testing.T) {
 				want = errInvalidRecord
 			}
 			consumes := 0
-			stats, err := b.RebuildView().WithTemporalConstDeref(ctx, 1, func(yield func(string) error) error {
+			stats, err := b.RebuildView().WithTemporalConstDeref(ctx, func(yield func(string) error) error {
 				if err := yield(n.Name); err != nil {
 					return err
 				}

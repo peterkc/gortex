@@ -21,15 +21,13 @@ const rebuildFabricRowBytes = 16 << 20
 type rebuildFabricCandidate func(*graph.Node) (component, normalized string, native bool)
 
 // RebuildFabricStats reports installed edges.
-// SpillBytes counts physical bytes of closed threshold SST runs consumed by
-// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildFabricStats struct {
-	Edges, SpillBytes uint64
+	Edges uint64
 }
 
 // RebuildFabric pairs live specs with every matching native manager after
 // the frozen registry admits Fabric. It proves every new edge before apply.
-func (b *BuildStore) RebuildFabric(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildFabric(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	candidate rebuildFabricCandidate, makeEdge func(*graph.Node, *graph.Node, string) *graph.Edge,
 ) (stats RebuildFabricStats, err error) {
 	defer func() {
@@ -38,7 +36,7 @@ func (b *BuildStore) RebuildFabric(ctx context.Context, receipts iter.Seq2[Parse
 			err = fmt.Errorf("%w: %w", ErrRebuildFabric, err)
 		}
 	}()
-	if receipts == nil || spillAt < 1 || spillAt > goldBufferBytes || candidate == nil || makeEdge == nil {
+	if receipts == nil || candidate == nil || makeEdge == nil {
 		return stats, fmt.Errorf("%w: invalid Fabric inputs", ErrRebuildLinkInputSize)
 	}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildFabricPrefix)

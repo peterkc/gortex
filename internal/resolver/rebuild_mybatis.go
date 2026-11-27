@@ -9,10 +9,10 @@ import (
 
 // RunRebuildMyBatis executes framework position fourteen after Fabric.
 func RunRebuildMyBatis(ctx context.Context, b *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error],
-	selection FrameworkSynthesizerSelection, spillAt int,
+	selection FrameworkSynthesizerSelection,
 ) (store_pebble.RebuildMyBatisStats, error) {
 	if !selection.allows(SynthMyBatis) {
 		return store_pebble.RebuildMyBatisStats{}, nil
 	}
-	return b.RebuildMyBatis(ctx, receipts, spillAt, javaMethodJoinKey, myBatisStub, myBatisJoinKey, rebindMyBatisCall)
+	return b.RebuildMyBatis(ctx, receipts, javaMethodJoinKey, myBatisStub, myBatisJoinKey, rebindMyBatisCall)
 }

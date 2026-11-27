@@ -178,7 +178,7 @@ func runTestRebuildMyBatis(t *testing.T, b *BuildStore, facts ...ParseFacts) (Re
 			}
 		}
 	}
-	return b.RebuildMyBatis(t.Context(), receipts, 1,
+	return b.RebuildMyBatis(t.Context(), receipts,
 		func(n *graph.Node) string {
 			receiver, _ := n.Meta["receiver"].(string)
 			return receiver + "." + n.Name

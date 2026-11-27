@@ -21,7 +21,7 @@ func TestRebuildFabricStoreCustody(t *testing.T) {
 	rawKey := pendingEdgeKey(facts[0].Edges[0])
 	require.Equal(t, rawKey, before[string(rebuildLinkRecorderKey(incumbentKey))])
 
-	stats, err := b.RebuildFabric(t.Context(), rebuildFabricStoreReceipts(facts), 1, rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
+	stats, err := b.RebuildFabric(t.Context(), rebuildFabricStoreReceipts(facts), rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
 	require.NoError(t, err)
 	require.EqualValues(t, 3, stats.Edges)
 	after := rebuildFrameworkCustodyRows(t, b)
@@ -86,7 +86,7 @@ func TestRebuildFabricStoreRefusesPortableDamage(t *testing.T) {
 			}
 
 			before := rebuildFrameworkCustodyRows(t, b)
-			stats, err := b.RebuildFabric(t.Context(), rebuildFabricStoreReceipts(presented), 1, rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
+			stats, err := b.RebuildFabric(t.Context(), rebuildFabricStoreReceipts(presented), rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
 			require.ErrorIs(t, err, ErrRebuildFabric)
 			require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
 			var refused *RebuildUnknownProvenanceError
@@ -108,18 +108,15 @@ func TestRebuildFabricStoreRefusesInvalidInputs(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		receipts  iter.Seq2[ParseFacts, error]
-		spillAt   int
 		candidate rebuildFabricCandidate
 		makeEdge  func(*graph.Node, *graph.Node, string) *graph.Edge
 	}{
-		{"nil receipts", nil, 1, rebuildFabricStoreCandidate, rebuildFabricStoreEdge},
-		{"zero spill threshold", receipts, 0, rebuildFabricStoreCandidate, rebuildFabricStoreEdge},
-		{"spill threshold above bound", receipts, goldBufferBytes + 1, rebuildFabricStoreCandidate, rebuildFabricStoreEdge},
-		{"nil candidate", receipts, 1, nil, rebuildFabricStoreEdge},
-		{"nil edge maker", receipts, 1, rebuildFabricStoreCandidate, nil},
+		{"nil receipts", nil, rebuildFabricStoreCandidate, rebuildFabricStoreEdge},
+		{"nil candidate", receipts, nil, rebuildFabricStoreEdge},
+		{"nil edge maker", receipts, rebuildFabricStoreCandidate, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stats, err := b.RebuildFabric(t.Context(), tc.receipts, tc.spillAt, tc.candidate, tc.makeEdge)
+			stats, err := b.RebuildFabric(t.Context(), tc.receipts, tc.candidate, tc.makeEdge)
 			require.ErrorIs(t, err, ErrRebuildFabric)
 			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 			require.Zero(t, stats)
@@ -133,7 +130,7 @@ func TestRebuildFabricStorePreservesOccupiedScratch(t *testing.T) {
 	key := rebuildFabricKey('s', facts[0].Nodes[0].ID)
 	require.NoError(t, b.pending.Set(key, []byte("existing Fabric scratch"), pebble.NoSync))
 	before := rebuildFrameworkCustodyRows(t, b)
-	stats, err := b.RebuildFabric(t.Context(), rebuildFabricStoreReceipts(facts), 1, rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
+	stats, err := b.RebuildFabric(t.Context(), rebuildFabricStoreReceipts(facts), rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
 	require.ErrorIs(t, err, ErrRebuildFabric)
 	require.ErrorIs(t, err, errInvalidRecord)
 	require.Zero(t, stats)
@@ -151,7 +148,7 @@ func TestRebuildFabricStoreRefusesOversizedNode(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, rowBytes, 16<<20)
 
-	stats, err := b.RebuildFabric(t.Context(), receipts, 1, rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
+	stats, err := b.RebuildFabric(t.Context(), receipts, rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
 	require.ErrorIs(t, err, ErrRebuildFabric)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 	require.Zero(t, stats)

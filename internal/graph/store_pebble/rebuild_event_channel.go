@@ -20,16 +20,14 @@ var ErrRebuildEventChannel = errors.New("pebble rebuild event channel stage fail
 var rebuildEventPrefix = []byte{'g', 'X'}
 
 // RebuildEventChannelStats reports actual added pairs.
-// SpillBytes counts physical bytes of closed threshold SST runs consumed by
-// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildEventChannelStats struct {
-	Pairs, SpillBytes uint64
+	Pairs uint64
 }
 
 // RebuildEventChannel runs the cold event turn on the quiet private graph.
 // Fanout and payload semantics are supplied by the resolver. No published
 // state changes before the owning worker validates and offers the full tail.
-func (b *BuildStore) RebuildEventChannel(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+func (b *BuildStore) RebuildEventChannel(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	topicPrefixes []string, channelPolicy func(event, label string) (transport string, fanoutCap int),
 	makeCall func(event, transport string, emitter, listener *graph.Edge) *graph.Edge,
 ) (stats RebuildEventChannelStats, err error) {
@@ -39,7 +37,7 @@ func (b *BuildStore) RebuildEventChannel(ctx context.Context, receipts iter.Seq2
 			err = fmt.Errorf("%w: %w", ErrRebuildEventChannel, err)
 		}
 	}()
-	if spillAt < 1 || spillAt > goldBufferBytes || receipts == nil || len(topicPrefixes) == 0 || channelPolicy == nil || makeCall == nil {
+	if receipts == nil || len(topicPrefixes) == 0 || channelPolicy == nil || makeCall == nil {
 		return stats, fmt.Errorf("%w: invalid event channel inputs", ErrRebuildLinkInputSize)
 	}
 	found, err := b.hasRebuildEventTopic(ctx, topicPrefixes)

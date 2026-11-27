@@ -142,10 +142,10 @@ func rebuildGRPCSavedCalls(t *testing.T, b *store_pebble.BuildStore) []*graph.Ed
 }
 
 func TestRebuildGRPCNativeRowsWithoutSpill(t *testing.T) {
-	for _, spillAt := range []int{1, 1 << 20} {
-		t.Run(fmt.Sprint(spillAt), func(t *testing.T) {
+	for _, fixtureSize := range []int{1, 1 << 20} {
+		t.Run(fmt.Sprint(fixtureSize), func(t *testing.T) {
 			var extra int
-			if spillAt == 1<<20 {
+			if fixtureSize == 1<<20 {
 				extra = 270
 			}
 			facts := rebuildGRPCFixture(extra)
@@ -161,13 +161,12 @@ func TestRebuildGRPCNativeRowsWithoutSpill(t *testing.T) {
 			slices.Reverse(live.Edges)
 			b := openRebuildGRPCBuild(t, live)
 			receipts := rebuildGRPCReceipts(facts)
-			stats, err := RunRebuildGRPC(t.Context(), b, receipts, selection, spillAt)
+			stats, err := RunRebuildGRPC(t.Context(), b, receipts, selection)
 			require.NoError(t, err)
 			require.Equal(t, uint64(6+extra), stats.Stubs)
 			require.Equal(t, uint64(2), stats.Registrations)
 			require.Equal(t, uint64(5+extra), stats.Resolved)
 			require.Equal(t, uint64(5+extra), stats.Moves)
-			require.Zero(t, stats.SpillBytes)
 			got := rebuildGRPCSavedCalls(t, b)
 			require.Equal(t, want, got)
 			at := make(map[int]*graph.Edge)
@@ -183,7 +182,7 @@ func TestRebuildGRPCNativeRowsWithoutSpill(t *testing.T) {
 			require.NotContains(t, at[12].Meta, "grpc_resolution")
 			require.Equal(t, "keep stationary", at[13].Meta["unrelated"])
 			require.Equal(t, "stationary destination", at[14].Meta["unrelated"])
-			again, err := RunRebuildGRPC(t.Context(), b, receipts, selection, spillAt)
+			again, err := RunRebuildGRPC(t.Context(), b, receipts, selection)
 			require.NoError(t, err)
 			require.Zero(t, again.Moves)
 			require.Equal(t, want, rebuildGRPCSavedCalls(t, b))
@@ -216,7 +215,7 @@ func TestRebuildGRPCRefusesBeforeMoving(t *testing.T) {
 				default:
 					t.Fatal("disabled gRPC read its input")
 				}
-			}, selection, 1)
+			}, selection)
 			switch mode {
 			case "read failure":
 				require.ErrorIs(t, err, readErr)
@@ -275,7 +274,7 @@ func TestRebuildGRPCMoveWindows(t *testing.T) {
 	require.Equal(t, graph.EdgeIdentityFor(acrossSecond), order[5000])
 	want := rebuildGRPCNativeCalls(t, native, 5001)
 	b, receipts := openRebuildGRPCFixture(t, facts)
-	stats, err := RunRebuildGRPC(t.Context(), b, receipts, AllFrameworkSynthesizers(), 1<<20)
+	stats, err := RunRebuildGRPC(t.Context(), b, receipts, AllFrameworkSynthesizers())
 	require.NoError(t, err)
 	require.Equal(t, uint64(5001), stats.Moves)
 	got := rebuildGRPCSavedCalls(t, b)
@@ -416,7 +415,7 @@ func TestRebuildGRPCNativeElection(t *testing.T) {
 			want := rebuildGRPCNativeCalls(t, rebuildGRPCNative(t, facts), resolved)
 			receipts := rebuildGRPCFileReceipts(facts)
 			b := openRebuildGRPCBuild(t, receipts...)
-			stats, err := RunRebuildGRPC(t.Context(), b, rebuildGRPCReceipts(receipts...), AllFrameworkSynthesizers(), 1<<20)
+			stats, err := RunRebuildGRPC(t.Context(), b, rebuildGRPCReceipts(receipts...), AllFrameworkSynthesizers())
 			require.NoError(t, err)
 			require.Equal(t, uint64(1), stats.Stubs)
 			require.Equal(t, uint64(1), stats.Moves)
@@ -496,7 +495,7 @@ func TestRebuildGRPCExactReceiptProof(t *testing.T) {
 					File: graph.FileMetaRow{FilePath: rebuildGRPCFixtureFile, NodeCount: 1},
 				})
 			}
-			stats, err := RunRebuildGRPC(t.Context(), b, rebuildGRPCReceipts(receipts...), AllFrameworkSynthesizers(), 1<<20)
+			stats, err := RunRebuildGRPC(t.Context(), b, rebuildGRPCReceipts(receipts...), AllFrameworkSynthesizers())
 			got := rebuildGRPCSavedCalls(t, b)
 			if mode == "complete proof" {
 				require.NoError(t, err)

@@ -20,7 +20,7 @@ func TestRebuildTemporalMoveSizeWireRefusal(t *testing.T) {
 	stats, err := b.RebuildTemporal(ctx, func(func(store_pebble.ParseFacts, error) bool) {
 		t.Fatal("an oversized move must refuse before receipt proof")
 	}, 1<<20, func(p *store_pebble.RebuildTemporalPass) (store_pebble.RebuildTemporalStats, error) {
-		_, err := p.View().WithTemporalConstDeref(ctx, 1<<20, func(func(string) error) error {
+		_, err := p.View().WithTemporalConstDeref(ctx, func(func(string) error) error {
 			return nil
 		}, func(*graph.Node) store_pebble.TemporalConstCandidate {
 			return store_pebble.TemporalConstCandidate{}

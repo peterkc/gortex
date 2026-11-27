@@ -21,7 +21,7 @@ func RunRebuildTemporal(ctx context.Context, b *store_pebble.BuildStore, receipt
 	}
 	return b.RebuildTemporal(ctx, receipts, spillAt, func(s *store_pebble.RebuildTemporalPass) (store_pebble.RebuildTemporalStats, error) {
 		p := rebuildTemporal{ctx: ctx, s: s}
-		return p.run(spillAt)
+		return p.run()
 	})
 }
 
@@ -36,7 +36,7 @@ func temporalOrdinal(n uint64) string {
 	return string(binary.BigEndian.AppendUint64(nil, n))
 }
 
-func (p *rebuildTemporal) run(spillAt int) (stats store_pebble.RebuildTemporalStats, err error) {
+func (p *rebuildTemporal) run() (stats store_pebble.RebuildTemporalStats, err error) {
 	active, err := p.s.IndexInputs(p.ctx, func(e *graph.Edge) (candidate, active bool) {
 		if e.Kind == graph.EdgeAnnotated {
 			iface, method := temporalRoleForJavaAnnotation(e.To)
@@ -86,7 +86,7 @@ func (p *rebuildTemporal) run(spillAt int) (stats store_pebble.RebuildTemporalSt
 	if err := p.buildIndex(); err != nil {
 		return stats, err
 	}
-	if err := p.rebind(spillAt, &stats); err != nil {
+	if err := p.rebind(&stats); err != nil {
 		return stats, err
 	}
 	return stats, p.crossLanguage()
@@ -123,8 +123,8 @@ func (p *rebuildTemporal) visitDispatches(yield func(e *graph.Edge, kind, name s
 	return p.visitNewWrappers(func(e *graph.Edge) error { return one(e, true) })
 }
 
-func (p *rebuildTemporal) rebind(spillAt int, stats *store_pebble.RebuildTemporalStats) error {
-	constants, err := withRebuildTemporalConstants(p.ctx, p.s.View(), spillAt, func(seed func(string) error) error {
+func (p *rebuildTemporal) rebind(stats *store_pebble.RebuildTemporalStats) error {
+	_, err := withRebuildTemporalConstants(p.ctx, p.s.View(), func(seed func(string) error) error {
 		return p.visitDispatches(func(e *graph.Edge, _, name string, _ bool) error {
 			if err := seed(name); err != nil {
 				return err
@@ -196,7 +196,6 @@ func (p *rebuildTemporal) rebind(spillAt int, stats *store_pebble.RebuildTempora
 			return nil
 		})
 	})
-	stats.ConstSpillBytes = constants.SpillBytes
 	return err
 }
 
