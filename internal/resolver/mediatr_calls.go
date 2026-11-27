@@ -26,7 +26,7 @@ func ResolveMediatRCalls(g graph.Store) int {
 	index := map[string]map[string][]*graph.Node{"request": {}, "notification": {}}
 	for _, n := range nodesByKindsOrAll(g, graph.KindMethod, graph.KindFunction) {
 		kind, reqType := mediatrHandlerKey(n)
-		if reqType == "" {
+		if kind == "" {
 			continue
 		}
 		index[kind][reqType] = append(index[kind][reqType], n)
@@ -87,7 +87,11 @@ func mediatrHandlerKey(n *graph.Node) (kind, reqType string) {
 	if n == nil {
 		return "", ""
 	}
-	return mediatrRouteKey(n.Meta)
+	kind, reqType = mediatrRouteKey(n.Meta)
+	if reqType == "" {
+		return "", ""
+	}
+	return kind, reqType
 }
 
 func mediatrCallKey(e *graph.Edge) (kind, reqType string) {
