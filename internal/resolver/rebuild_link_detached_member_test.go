@@ -173,13 +173,22 @@ func (Second) Ambiguous(int) {}
 						got = append(got, graph.EdgeReindex{Edge: edge, OldTo: original.To, OldKind: original.Kind})
 					}
 				}
-				call := cloneFrameworkEdge(page[0])
-				call.Kind, call.To = graph.EdgeCalls, "unresolved::*.Receive"
-				before := cloneFrameworkEdge(call)
-				err := resolveRebuildMember(ctx, f, call, "Receive")
-				require.ErrorIs(t, err, errRebuildMainRule)
-				require.ErrorContains(t, err, "native page direct-import reachability")
-				require.Equal(t, before, call)
+				for _, tc := range []struct {
+					from, file, name, reason string
+					kind                     graph.EdgeKind
+				}{
+					{page[0].From, client, "Receive", "native page direct-import reachability", graph.EdgeCalls},
+					{"missing-source", client, "Receive", "native page direct-import reachability", graph.EdgeArgOf},
+					{page[0].From, "", "Local", "method locality or interface dispatch fallback", graph.EdgeArgOf},
+				} {
+					edge := &graph.Edge{From: tc.from, To: "unresolved::*." + tc.name, Kind: tc.kind, FilePath: tc.file,
+						Origin: graph.OriginASTInferred, Meta: map[string]any{"arg_position": 0}}
+					before := cloneFrameworkEdge(edge)
+					err := resolveRebuildMember(ctx, f, edge, tc.name)
+					require.ErrorIs(t, err, errRebuildMainRule)
+					require.ErrorContains(t, err, tc.reason)
+					require.Equal(t, before, edge)
+				}
 				return nil
 			}))
 			t.Logf("fixture positions=%d native_moves=%d product_moves=%d refusals=%v", len(pending), len(want), len(got), refusals)

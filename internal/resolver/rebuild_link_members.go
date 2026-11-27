@@ -46,7 +46,7 @@ func prepareRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	// D71 callers use the native direct-import cut and ordered member
 	// fallbacks. Other callers retain the existing refusal paths.
 	selected := lang == "go" || lang == "javascript" || lang == "typescript"
-	// The receipt selector already admitted the recording file. A detached
+	// census.selectPendingCallers admitted the recording file. A detached
 	// dataflow source still has native file reachability, but no caller scope.
 	if caller == nil && graph.IsUnresolvedTarget(edge.From) && edge.FilePath != "" &&
 		(edge.Kind == graph.EdgeArgOf || edge.Kind == graph.EdgeValueFlow) {
