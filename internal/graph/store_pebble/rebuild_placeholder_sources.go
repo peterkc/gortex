@@ -55,6 +55,10 @@ type RebuildPlaceholderSources struct {
 // nonempty main reindex commit, before its cross-repo parallels. Record that
 // same batch and each subsequent commit. Do not capture for an empty pass.
 // This is the enabled cold path; the caller owns configuration policy.
+// spillAt bounds buffered move key and value bytes, not total heap use.
+// The pre-append check may hold up to about twice that payload while it
+// spills the buffer with the next ordinary row still in hand. An oversized
+// row spills on its own. The live census is separate from this budget.
 func (b *BuildStore) CapturePlaceholderSources(ctx context.Context, spillAt int) (*RebuildPlaceholderSources, error) {
 	if spillAt < 1 {
 		return nil, fmt.Errorf("%w: invalid spill threshold", ErrRebuildPlaceholderSources)

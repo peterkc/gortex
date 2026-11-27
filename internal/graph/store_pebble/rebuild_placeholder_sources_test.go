@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,10 +19,13 @@ func TestRebuildPlaceholderSourcesSpill(t *testing.T) {
 		threshold int
 		padding   int
 		runs      int
+		tail      int
 	}{
-		{"each move spills", 1, 0, 9},
-		{"run and tail", 1 << 20, 128 << 10, 1},
-		{"tail only", 1 << 20, 0, 0},
+		{"each move spills", 1, 0, 9, 0},
+		// The eighth row exceeds the remaining space. Spill seven rows
+		// before appending it and leave the last two in the tail.
+		{"run and tail", 1 << 20, 128 << 10, 1, 2},
+		{"tail only", 1 << 20, 0, 0, 9},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -49,6 +53,15 @@ func TestRebuildPlaceholderSourcesSpill(t *testing.T) {
 			paths, err := filepath.Glob(filepath.Join(b.scratchParent, "pending", "placeholder-moves-*", "*.sst"))
 			require.NoError(t, err)
 			require.Len(t, paths, tc.runs)
+			require.Len(t, p.moves, tc.tail)
+			var next uint64
+			require.NoError(t, p.visitMoves(ctx, func(r row) error {
+				require.GreaterOrEqual(t, len(r.key), len(placeholderMoves)+8)
+				require.Equal(t, next, binary.BigEndian.Uint64(r.key[len(placeholderMoves):]))
+				next++
+				return nil
+			}))
+			require.EqualValues(t, 9, next)
 			var spill uint64
 			for _, path := range paths {
 				info, err := os.Stat(path)
