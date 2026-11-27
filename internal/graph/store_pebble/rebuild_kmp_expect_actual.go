@@ -77,9 +77,9 @@ type rebuildKMPPass struct {
 	stats     RebuildKMPExpectActualStats
 }
 
-// e/a: eligible expect/actual row by name, kind, ID; n: wanted endpoint
-// proof by ID; k: Kotlin marker proof by ID; w: proposal by traversal
-// ordinal then full edge key.
+// e/a: eligible expect/actual row by name, kind, ID (size flag then node);
+// n: wanted endpoint proof by ID; k: Kotlin marker proof by ID;
+// w: proposal by traversal ordinal then full edge key.
 func rebuildKMPKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildKMPPrefix), col), fields...)
 }
@@ -120,9 +120,10 @@ func (p *rebuildKMPPass) collect(ctx context.Context, view RebuildView) error {
 		default:
 			return nil
 		}
-		// Bound the full eligible row, including its key, before writing scratch.
+		// A full-row cap matters only if this declaration has a partner.
+		var oversized byte
 		if len(r.key)+len(r.value) > rebuildKMPRowLimit {
-			return fmt.Errorf("%w: KMP expect/actual node row", ErrRebuildLinkInputSize)
+			oversized = 1
 		}
 		// Only the fields read by kmpEdge or the join need to enter scratch.
 		projection, err := encodeNode(&graph.Node{
@@ -131,7 +132,7 @@ func (p *rebuildKMPPass) collect(ctx context.Context, view RebuildView) error {
 		if err != nil {
 			return err
 		}
-		return p.put(rebuildKMPKey(col, n.Name, string(n.Kind), n.ID), projection)
+		return p.put(rebuildKMPKey(col, n.Name, string(n.Kind), n.ID), append([]byte{oversized}, projection...))
 	})
 }
 
@@ -139,13 +140,23 @@ func (p *rebuildKMPPass) pair(ctx context.Context, makeEdge func(*graph.Node, st
 	// Preserve native (name, kind), then expect ID and actual ID order.
 	// Each range is streamed; the pair product is never held in memory.
 	return pendingVisit(ctx, p.b.pending, rebuildKMPKey('e'), func(r row) error {
-		expect, err := decodeNodeLight(r.value)
+		if len(r.value) == 0 {
+			return invalid("KMP expect row")
+		}
+		oversized := r.value[0] != 0
+		expect, err := decodeNodeLight(r.value[1:])
 		if err != nil {
 			return err
 		}
 		prefix := rebuildKMPKey('a', expect.Name, string(expect.Kind))
 		return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-			actual, err := decodeNodeLight(r.value)
+			if len(r.value) == 0 {
+				return invalid("KMP actual row")
+			}
+			if oversized || r.value[0] != 0 {
+				return fmt.Errorf("%w: KMP expect/actual node row", ErrRebuildLinkInputSize)
+			}
+			actual, err := decodeNodeLight(r.value[1:])
 			if err != nil {
 				return err
 			}

@@ -151,10 +151,28 @@ func TestRebuildKMPExpectActualLightScanAndCandidateRowLimit(t *testing.T) {
 	require.NoError(t, err) // A named function without a role is not a candidate.
 	require.Zero(t, stats)
 
-	n.Meta["kmp_role"] = "actual"
+	for _, role := range []string{"expect", "actual"} {
+		n.Meta["kmp_role"] = role
+		raw, err = encodeNode(n)
+		require.NoError(t, err)
+		require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+		stats, err = b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
+		require.NoError(t, err) // No counterpart; the full row is not needed.
+		require.Zero(t, stats)
+	}
+	b.AddNode(&graph.Node{ID: "counterpart", Name: "clock", Kind: graph.KindFunction, Language: "kotlin",
+		Meta: map[string]any{"kmp_role": "expect"}})
+	stats, err = b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
+	require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.Zero(t, stats)
+	// The same cap must apply when the oversized declaration is the expect.
+	n.Meta["kmp_role"] = "expect"
 	raw, err = encodeNode(n)
 	require.NoError(t, err)
 	require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+	b.AddNode(&graph.Node{ID: "actual", Name: "clock", Kind: graph.KindFunction, Language: "kotlin",
+		Meta: map[string]any{"kmp_role": "actual"}})
 	stats, err = b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
 	require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
