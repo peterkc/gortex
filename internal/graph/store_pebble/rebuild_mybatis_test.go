@@ -184,6 +184,9 @@ func runTestRebuildMyBatis(t *testing.T, b *BuildStore, facts ...ParseFacts) (Re
 			return receiver + "." + n.Name
 		},
 		func(e *graph.Edge) (string, string) {
+			if via, _ := e.Meta["via"].(string); via != "mybatis.mapper" {
+				return "", ""
+			}
 			ns, _ := e.Meta["mybatis_namespace"].(string)
 			stmt, _ := e.Meta["mybatis_statement"].(string)
 			return ns, stmt
@@ -226,4 +229,154 @@ func requireRebuildMyBatisRefusal(t *testing.T, err error, old *graph.Edge, to s
 	want := graph.EdgeIdentityFor(old)
 	want.To = to
 	require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: want}, refusal)
+}
+
+func TestRebuildMyBatisMoverReceiptFields(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*ParseFacts, *graph.Edge)
+	}{
+		{name: "exact"},
+		{name: "from", change: func(_ *ParseFacts, e *graph.Edge) { e.From += "::other" }},
+		{name: "to", change: func(_ *ParseFacts, e *graph.Edge) { e.To = myBatisTestLocal }},
+		{name: "kind", change: func(_ *ParseFacts, e *graph.Edge) { e.Kind = graph.EdgeReferences }},
+		{name: "edge_file", change: func(f *ParseFacts, e *graph.Edge) {
+			// Keep receipt attribution valid so only the old edge key differs.
+			e.FilePath = "other/UserMapper.xml"
+			f.File.FilePath = e.FilePath
+		}},
+		{name: "line", change: func(_ *ParseFacts, e *graph.Edge) { e.Line++ }},
+		{name: "receipt_file", change: func(f *ParseFacts, _ *graph.Edge) { f.File.FilePath = "other/UserMapper.xml" }},
+		{name: "effective_language", change: func(f *ParseFacts, _ *graph.Edge) { f.EffectiveLanguage = "xml" }},
+		{name: "legacy_no_effective_language", change: func(f *ParseFacts, _ *graph.Edge) { f.EffectiveLanguage = "" }},
+		{name: "via", change: func(_ *ParseFacts, e *graph.Edge) { e.Meta["via"] = "other.mapper" }},
+		{name: "namespace", change: func(_ *ParseFacts, e *graph.Edge) { e.Meta["mybatis_namespace"] = "other.UserMapper" }},
+		{name: "statement", change: func(_ *ParseFacts, e *graph.Edge) { e.Meta["mybatis_statement"] = "other" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			old := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
+			xml := myBatisTestXML(t, "local", old)
+			require.NoError(t, b.AddParsedFile("local", xml))
+			java := myBatisTestMethod(t, b, "local")
+
+			// A unique Java candidate does not need a caller receipt.
+			xml.Nodes, xml.File.NodeCount = nil, 0
+			raw := myBatisTestStub(old.To, "find")
+			if tc.change != nil {
+				tc.change(&xml, raw)
+			}
+			xml.Edges = []*graph.Edge{raw}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := runTestRebuildMyBatis(t, b, xml, java)
+			if tc.change == nil {
+				require.NoError(t, err)
+				require.Equal(t, RebuildMyBatisStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+				requireRebuildMyBatisMove(t, b, old, old, myBatisTestLocal)
+				return
+			}
+			requireRebuildMyBatisRefusal(t, err, old, myBatisTestLocal)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildMyBatisMoverPriorRawCustody(t *testing.T) {
+	for _, name := range []string{"raw_not_live", "duplicate_with_stationary"} {
+		t.Run(name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			const statement = "missing"
+			target := myBatisTestPlaceholder(statement)
+			raw := myBatisTestStub("original::UserMapper.missing", statement)
+			if name == "duplicate_with_stationary" {
+				raw.To = target
+			}
+			live := *raw
+			live.To = "previous::UserMapper.missing"
+			xml := myBatisTestXML(t, "local", raw)
+			require.NoError(t, b.AddParsedFile("local", xml))
+			require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: &live, OldTo: raw.To}}))
+			custody, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(&live))
+			require.NoError(t, err)
+			require.Equal(t, rebuildEdgeCustody{raw: pendingEdgeKey(raw)}, custody)
+
+			receipt := xml
+			if name == "duplicate_with_stationary" {
+				// The reinserted original stays at the canonical placeholder.
+				// Both live rows claim its raw receipt; only one is a mover.
+				require.NoError(t, b.withWrites(func() error { return b.addEdge(raw) }))
+			} else {
+				receipt.Edges = []*graph.Edge{&live}
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := runTestRebuildMyBatis(t, b, receipt)
+			requireRebuildMyBatisRefusal(t, err, &live, target)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			if name == "raw_not_live" {
+				stats, err = runTestRebuildMyBatis(t, b, xml)
+				require.NoError(t, err)
+				require.Equal(t, RebuildMyBatisStats{Stubs: 1, Moves: 1}, stats)
+				requireRebuildMyBatisMove(t, b, &live, raw, target)
+			}
+		})
+	}
+}
+
+func TestRebuildMyBatisMoverCustodyRefusalBatch(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	raw := myBatisTestStub("original::UserMapper.zulu", "zulu")
+	untracked := *raw
+	untracked.To = "previous::a_untracked"
+	producer := myBatisTestStub("previous::b_producer", "bravo")
+	missing := myBatisTestStub("previous::c_missing", "alpha")
+	proved := myBatisTestStub("previous::0_proved", "aardvark")
+	xml := myBatisTestXML(t, "local", raw)
+	xml.Edges = append(xml.Edges, missing, proved)
+	require.NoError(t, b.AddParsedFile("local", xml))
+	b.ReindexEdges([]graph.EdgeReindex{{Edge: &untracked, OldTo: raw.To}})
+	stamp := rebuildEdgeCustody{proof: rebuildProofReceiver}
+	require.NoError(t, b.withWrites(func() error { return b.addEdgeWithCustody(producer, stamp) }))
+	got, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(producer))
+	require.NoError(t, err)
+	require.Equal(t, stamp, got)
+	got, err = readRebuildEdgeCustody(b.pending, pendingEdgeKey(&untracked))
+	require.NoError(t, err)
+	require.Equal(t, rebuildEdgeCustody{proof: rebuildProofUntrackedMove}, got)
+
+	// Both stamps are intact. The live-key lookalikes cannot prove them as
+	// raw receipts. The unstamped alpha mover has no receipt at all.
+	xml.Edges = []*graph.Edge{&untracked, producer, proved}
+	before := rebuildFrameworkCustodyRows(t, b)
+	stats, err := runTestRebuildMyBatis(t, b, xml)
+	require.ErrorIs(t, err, ErrRebuildMyBatis)
+	var refusal *RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refusal)
+	// Alpha has the last refused old key but the first refused destination.
+	first := graph.EdgeIdentityFor(missing)
+	first.To = myBatisTestPlaceholder("alpha")
+	require.Equal(t, &RebuildUnknownProvenanceError{Count: 3, First: first}, refusal)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func TestRebuildMyBatisMoverCallerReceiptRepo(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	old := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
+	xml := myBatisTestXML(t, "local", old)
+	require.NoError(t, b.AddParsedFile("local", xml))
+	local := myBatisTestMethod(t, b, "local")
+	remote := myBatisTestMethod(t, b, "remote")
+
+	// The live caller elects local from two candidates. A receipt that differs
+	// only in its qualified repo cannot establish that choice.
+	caller := *xml.Nodes[0]
+	caller.RepoPrefix = "remote"
+	xml.Nodes = []*graph.Node{&caller}
+	before := rebuildFrameworkCustodyRows(t, b)
+	stats, err := runTestRebuildMyBatis(t, b, xml, local, remote)
+	requireRebuildMyBatisRefusal(t, err, old, myBatisTestLocal)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
