@@ -178,9 +178,7 @@ func prepareRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 			return rebuildImportNeeds(edge, spec, "valid native external target")
 		}
 		edge.To = id
-		if edge.Kind == graph.EdgeImports {
-			f.noteExternalTarget(edge, spec)
-		}
+		f.noteExternalTarget(edge, spec)
 		return nil
 	}}, nil
 }

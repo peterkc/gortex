@@ -197,7 +197,7 @@ func rebuildGoArgumentSource(e *graph.Edge, extractorOf func(string) string) boo
 // and the exact frozen receipt at the original recording site.
 func (b *BuildStore) rebuildExternalProved(r row, e *graph.Edge) (bool, error) {
 	digest := sha256.Sum256(r.value)
-	if e.To == "external::error" && (e.Kind == graph.EdgeReturns || e.Kind == graph.EdgeThrows) {
+	if (e.To == "external::error" && (e.Kind == graph.EdgeReturns || e.Kind == graph.EdgeThrows)) || rebuildCodegenExternal(e) {
 		proof, err := pendingGet(b.pending, rebuildExternalEvidenceKey('p', r.key), copyValue)
 		if err != nil || bytes.Equal(proof, digest[:]) {
 			return err == nil, err
@@ -234,8 +234,11 @@ func (b *BuildStore) rebuildExternalProved(r row, e *graph.Edge) (bool, error) {
 	if original, ok := strings.CutPrefix(name, "extern::"); ok {
 		return original == spec && !strings.Contains(original, "::"), nil
 	}
+	if original, ok := strings.CutPrefix(name, "pyrel::"); ok {
+		return e.Kind == graph.EdgeImports && original == spec, nil
+	}
 	original, ok := strings.CutPrefix(name, "import::")
-	return ok && original != "" && e.Kind == graph.EdgeImports &&
+	return ok && original != "" &&
 		(original == spec || string(lang) == "typescript" || string(lang) == "javascript"), nil
 }
 

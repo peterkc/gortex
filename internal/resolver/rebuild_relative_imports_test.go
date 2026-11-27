@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"path/filepath"
@@ -295,5 +296,49 @@ func TestRebuildCppIncludesCollisionOrder(t *testing.T) {
 		got, _ := rebuildImportsSaved(t, nodes, edges, 1, paths)
 		require.Equal(t, first, got, "complete old-key order on both arrivals")
 		slices.Reverse(edges)
+	}
+}
+
+func TestRebuildRelativeImportDowngradeSeals(t *testing.T) {
+	for _, incumbent := range []bool{false, true} {
+		t.Run(fmt.Sprint(incumbent), func(t *testing.T) {
+			ctx, b, _ := frontierFixture(t, 0)
+			const file = "py/main.py"
+			node := rebuildImportFile(file, "python")
+			raw := &graph.Edge{From: file, To: "unresolved::pyrel::py/missing", Kind: graph.EdgeImports, FilePath: file, Line: 1, Origin: graph.OriginASTInferred}
+			want := *raw
+			want.To = "external::py/missing"
+			edges := []*graph.Edge{raw}
+			if incumbent {
+				edges = append(edges, &want)
+			}
+			require.Equal(t, []*graph.Edge{&want}, rebuildImportsNative(t, []*graph.Node{node}, edges, nil, nil))
+			require.NoError(t, b.AddParsedFile("", store_pebble.ParseFacts{
+				EffectiveLanguage: "python",
+				File:              graph.FileMetaRow{FilePath: file, NodeCount: 1},
+				Nodes:             []*graph.Node{node},
+				Edges:             edges,
+			}))
+			manifest, err := store_pebble.PrepareManifest(ctx, t.TempDir(), []store_pebble.ManifestFile{{Path: file, Kind: 'f', Language: "python"}}, store_pebble.Witness{
+				Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest, Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2},
+			}, "relative-import")
+			require.NoError(t, err)
+			fileGraph, err := b.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, manifest.Incarnation)
+			require.NoError(t, err)
+			base, err := b.RetainFileGraph(ctx, fileGraph)
+			require.NoError(t, err)
+			stats, err := RunRebuildFileImports(ctx, b, 1, nil)
+			require.NoError(t, err)
+			require.Equal(t, 1, stats.RelativeMoves)
+			require.Equal(t, []*graph.Edge{&want}, rebuildFnPointerSaved(t, b))
+			stage, err := b.PrepareRelations(ctx, t.TempDir(), base, nil)
+			if incumbent {
+				require.ErrorAs(t, err, new(*store_pebble.RebuildUnknownProvenanceError))
+				require.Empty(t, stage)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.StageRelations, stage.Witness.Stage)
+		})
 	}
 }

@@ -346,7 +346,7 @@ func (p *fileImportPass) apply(ctx context.Context, stream *fileImportMoves) err
 		if len(moves) < nativeChunk {
 			return nil
 		}
-		if err := p.build.reindexChunk(moves); err != nil {
+		if err := p.install(ctx, stream, moves); err != nil {
 			return err
 		}
 		clear(moves)
@@ -355,7 +355,28 @@ func (p *fileImportPass) apply(ctx context.Context, stream *fileImportMoves) err
 	}); err != nil {
 		return err
 	}
-	return p.build.reindexChunk(moves)
+	return p.install(ctx, stream, moves)
+}
+
+func (p *fileImportPass) install(ctx context.Context, stream *fileImportMoves, moves []graph.EdgeReindex) error {
+	if !bytes.Equal(stream.prefix, fileImportRelative) {
+		return p.build.reindexChunk(moves)
+	}
+	// The relative pass alone can downgrade an unbound pyrel marker to
+	// a node-free external target. Carry the actual installed raw key.
+	effective := make(map[*graph.Edge]string)
+	for _, move := range moves {
+		if stem, ok := strings.CutPrefix(move.OldTo, "unresolved::pyrel::"); ok && move.Edge.To == "external::"+stem {
+			effective[move.Edge] = stem
+		}
+	}
+	if len(effective) == 0 {
+		return p.build.reindexChunk(moves)
+	}
+	if err := p.build.reindexChunkWithRecorders(moves, true); err != nil {
+		return err
+	}
+	return p.build.recordRebuildExternalMoves(ctx, moves, effective)
 }
 
 func fileImportBase(id string) string { return id[strings.LastIndexByte(id, '/')+1:] }
