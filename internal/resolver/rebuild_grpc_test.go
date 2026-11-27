@@ -346,8 +346,8 @@ func TestRebuildGRPCNativeElection(t *testing.T) {
 	wrongMethod.methodKind, wrongMethod.methodRepo = graph.KindFunction, "local"
 
 	for _, tc := range []struct {
-		name          string
-		candidates    []candidate
+		name         string
+		candidates   []candidate
 		registration string
 		fallback     string
 		extraMethod  bool
