@@ -57,7 +57,7 @@ func TestDefaultOffGroupsAreVisible(t *testing.T) {
 	}
 }
 
-func TestDefaultFTSWinnerFromOffGroup(t *testing.T) {
+func TestProfileFTSProjectsOffGroupDocuments(t *testing.T) {
 	for _, profile := range []Profile{DefaultProfile, FullProfile} {
 		t.Run(string(profile), func(t *testing.T) {
 			b := newBuild(t, profile)
@@ -71,11 +71,11 @@ func TestDefaultFTSWinnerFromOffGroup(t *testing.T) {
 			s := snapshot(t, b)
 			hits, err := s.SearchSymbols("needle", 1)
 			if profile == DefaultProfile {
-				if len(hits) != 0 || !errors.Is(err, ErrGroupOff) {
-					t.Fatalf("default FTS = %v, %v; want ErrGroupOff without dangling hit", hits, err)
+				if len(hits) != 0 || err != nil {
+					t.Fatalf("default FTS = %v, %v; want no document", hits, err)
 				}
-				if bundles, err := s.SearchSymbolBundles("needle", 1); len(bundles) != 0 || !errors.Is(err, ErrGroupOff) {
-					t.Fatalf("default bundles = %v, %v; want ErrGroupOff", bundles, err)
+				if bundles, err := s.SearchSymbolBundles("needle", 1); len(bundles) != 0 || err != nil {
+					t.Fatalf("default bundles = %v, %v; want no document", bundles, err)
 				}
 			} else if err != nil || len(hits) != 1 || hits[0].NodeID != "param" {
 				t.Fatalf("full FTS = %v, %v; want param", hits, err)
@@ -107,8 +107,8 @@ func TestRepoIncomingRequiresVisibleSource(t *testing.T) {
 			}
 			out, complete, err = s.GetInEdgesByNodeIDsFromRepos([]string{"target"}, []string{"repo"})
 			if profile == DefaultProfile {
-				if out != nil || complete || !errors.Is(err, ErrGroupOff) {
-					t.Fatalf("default repo sources = %v, complete = %t, error = %v; want ErrGroupOff", out, complete, err)
+				if len(out["target"]) != 0 || !complete || err != nil {
+					t.Fatalf("default repo sources = %v, complete = %t, error = %v; want projected empty result", out, complete, err)
 				}
 			} else if got := out["target"]; err != nil || !complete || len(got) != 1 || got[0].From != "closure" {
 				t.Fatalf("full repo sources = %v, complete = %t, error = %v; want closure", got, complete, err)

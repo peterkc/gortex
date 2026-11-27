@@ -197,7 +197,7 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, extractorOf fu
 	// The same lock covers this private lookup and the final node projection.
 	// A saved logical node may be omitted by the profile; an unknown ID may
 	// not. Native unresolved targets carry no declared node by design.
-	check := func(id string, e *graph.Edge, target bool) error {
+	check := func(id string, e *graph.Edge, target, kept bool) error {
 		if graph.IsProxyID(id) {
 			return invalid("proxy relations endpoint")
 		}
@@ -223,12 +223,16 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, extractorOf fu
 				if !valid || key != id {
 					return invalid("malformed external import endpoint")
 				}
-				counts.externalImports++
+				if kept {
+					counts.externalImports++
+				}
 				return nil
 			}
 		}
 		if !target && rebuildGoArgumentSource(e, extractorOf) {
-			counts.goArguments++
+			if kept {
+				counts.goArguments++
+			}
 			return nil
 		}
 		return fmt.Errorf("%w: dangling relations endpoint %q", errInvalidRecord, id)
@@ -241,10 +245,17 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, extractorOf fu
 		if !bytes.Equal(r.key, pendingEdgeKey(e)) {
 			return invalid("working edge identity does not match key")
 		}
-		if err := check(e.From, e, false); err != nil {
+		kept := true
+		if b.profile != FullProfile {
+			_, kept, err = b.projectedEdgeOwner(e)
+			if err != nil {
+				return err
+			}
+		}
+		if err := check(e.From, e, false, kept); err != nil {
 			return err
 		}
-		return check(e.To, e, true)
+		return check(e.To, e, true, kept)
 	})
 	return counts, err
 }

@@ -3,11 +3,13 @@ package store_pebble
 import (
 	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 func TestRebuildSearchStageMatchesLegacySeal(t *testing.T) {
@@ -27,9 +29,15 @@ func TestRebuildSearchStageMatchesLegacySeal(t *testing.T) {
 			require.NoError(t, err)
 			retained := &graph.Node{ID: path + "::Retained", Name: "Retained", Kind: graph.KindFunction, RepoPrefix: repo, FilePath: path, Language: language}
 			noTerms := &graph.Node{ID: path + "::NoTerms", Name: "NoTerms", Kind: graph.KindFunction, RepoPrefix: repo, FilePath: path, Language: language}
-			param := &graph.Node{ID: path + "::Retained#param:p", Name: "p", Kind: graph.KindParam, RepoPrefix: repo, FilePath: path, Language: language}
+			decls := []*graph.Node{retained, noTerms}
+			wantTokens := map[string]string{retained.ID: "ctx path ctx", noTerms.ID: "..."}
+			for i, kind := range []graph.NodeKind{graph.KindLocal, graph.KindParam, graph.KindGenericParam, graph.KindClosure} {
+				n := &graph.Node{ID: path + "::" + string(kind), Name: "ctx", Kind: kind, RepoPrefix: repo, FilePath: path, Language: language}
+				decls = append(decls, n)
+				wantTokens[n.ID] = strings.TrimSpace(strings.Repeat("ctx ", i+4))
+			}
 			require.NoError(t, worker.AddParsedFile(repo, ParseFacts{
-				Nodes: []*graph.Node{retained, noTerms, param}, File: graph.FileMetaRow{FilePath: path, NodeCount: 3},
+				Nodes: decls, File: graph.FileMetaRow{FilePath: path, NodeCount: len(decls)},
 			}))
 			fileGraph, err := worker.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, manifest.Incarnation)
 			require.NoError(t, err)
@@ -45,7 +53,7 @@ func TestRebuildSearchStageMatchesLegacySeal(t *testing.T) {
 			pinned := stageRead(t, head)
 			require.NoError(t, worker.UpsertSymbolFTS(linked.ID, "linkalias"))
 			// Declare the corpus explicitly, rather than classifying by language.
-			wantTokens := map[string]string{retained.ID: "retained arg", noTerms.ID: "...", param.ID: "arg", module.ID: "lib"}
+			wantTokens[module.ID] = "lib"
 			stage, err := worker.PrepareSearch(ctx, t.TempDir(), derived.Witness, derived.Incarnation, func(n *graph.Node) (string, bool) {
 				text, ok := wantTokens[n.ID]
 				return text, ok
@@ -76,7 +84,7 @@ func TestRebuildSearchStageMatchesLegacySeal(t *testing.T) {
 				exact     bool
 			}{
 				{query: "Retained", id: retained.ID, exact: true},
-				{query: "retained retained", id: retained.ID}, // Two terms bypass exact lookup.
+				{query: "path path", id: retained.ID}, // Two terms bypass exact lookup.
 				{query: "NoTerms", id: noTerms.ID, exact: true},
 				{query: "noterms noterms"},
 				{query: "LinkAlias"},
@@ -98,29 +106,57 @@ func TestRebuildSearchStageMatchesLegacySeal(t *testing.T) {
 				}
 			}
 
-			// The legacy oracle contains exactly the declared corpus.
+			// Select the SQLite corpus before inserting any FTS document. Use
+			// fixture membership, not the Pebble profile predicate, for the oracle.
+			projected := append([]*graph.Node{module}, decls[:2]...)
+			wantStats := searchStats{Rows: 3, Tokens: 4, Count: 3, Repos: []string{"", repo}}
+			if profile == FullProfile {
+				projected = append(projected, decls[2:]...)
+				wantStats.Rows, wantStats.Tokens, wantStats.Count = 7, 26, 7
+			}
+			native, err := store_sqlite.Open(filepath.Join(t.TempDir(), "oracle.sqlite"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, native.Close()) })
 			legacy := newBuild(t, profile)
-			for _, n := range []*graph.Node{module, param, noTerms, retained} {
+			for _, n := range projected {
+				native.AddNode(n)
+				require.NoError(t, native.UpsertSymbolFTS(n.ID, wantTokens[n.ID]))
 				legacy.AddNode(n)
 				require.NoError(t, legacy.UpsertSymbolFTS(n.ID, wantTokens[n.ID]))
 			}
 			require.NoError(t, legacy.Publish(ctx))
-			oracle, err := legacy.OpenSnapshot()
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, oracle.Close()) })
+			oracle := snapshot(t, legacy)
 			saved := rebuildSearchRows(t, current, []byte{familySymbol})
 			require.NotEmpty(t, saved)
 			require.Equal(t, rebuildSearchRows(t, oracle, []byte{familySymbol}), saved)
 			stats, err := point(current, searchKey("stats"), searchReadStats)
 			require.NoError(t, err)
-			require.Equal(t, searchStats{Rows: 4, Tokens: 4, Count: 4, Repos: []string{"", repo}}, stats)
+			require.Equal(t, wantStats, stats)
+			for _, query := range []string{"ctx ctx", "path path"} {
+				want, err := native.SearchSymbols(query, 10)
+				require.NoError(t, err)
+				if profile == FullProfile && query == "ctx ctx" {
+					require.Len(t, want, 5)
+					require.NotEqual(t, retained.ID, want[0].NodeID)
+				} else {
+					require.Len(t, want, 1)
+					require.Equal(t, retained.ID, want[0].NodeID)
+				}
+				got, err := current.SearchSymbols(query, 10)
+				require.NoError(t, err)
+				require.Equal(t, want, got)
+			}
 			docs := make(map[string]bool)
 			for _, r := range rebuildSearchRows(t, current, searchKey("doc")) {
 				d, err := searchReadDoc(r.value)
 				require.NoError(t, err)
 				docs[d.ID] = d.NodePresent
 			}
-			require.Equal(t, map[string]bool{retained.ID: true, noTerms.ID: true, param.ID: profile == FullProfile, module.ID: true}, docs)
+			wantDocs := make(map[string]bool)
+			for _, n := range projected {
+				wantDocs[n.ID] = true
+			}
+			require.Equal(t, wantDocs, docs)
 		})
 	}
 }

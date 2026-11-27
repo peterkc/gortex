@@ -146,16 +146,18 @@ func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns, exactSo
 			if n == nil {
 				return invalid("symbol document has no source node")
 			}
+			if !b.profile.keepsNode(n.Kind) {
+				continue
+			}
 			// A selected document can have no terms and still match its exact name.
 			if exactSource == exactFromDocuments {
 				if err := writeExact(n); err != nil {
 					return err
 				}
 			}
-			// Keep the full ranking corpus; an off-group winner must not become a dangling graph hit.
 			stats.Rows++
 			stats.Count++
-			d := searchDoc{Rowid: stats.Rows, Length: int64(len(terms)), NodePresent: b.profile.keepsNode(n.Kind), ID: id, Repo: n.RepoPrefix, Path: searchPath(n.FilePath, n.RepoPrefix), Name: n.Name, Kind: string(n.Kind)}
+			d := searchDoc{Rowid: stats.Rows, Length: int64(len(terms)), NodePresent: true, ID: id, Repo: n.RepoPrefix, Path: searchPath(n.FilePath, n.RepoPrefix), Name: n.Name, Kind: string(n.Kind)}
 			freq := make(map[string]int64)
 			for _, term := range terms {
 				freq[term]++
@@ -217,6 +219,9 @@ func (b *BuildStore) writeSymbols(ctx context.Context, gold *sortedRuns, exactSo
 			n, err := decodeNode(r.value)
 			if err != nil {
 				return err
+			}
+			if !b.profile.keepsNode(n.Kind) {
+				return nil
 			}
 			repos[n.RepoPrefix] = struct{}{}
 			return writeExact(n)

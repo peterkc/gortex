@@ -195,6 +195,20 @@ func (b *BuildStore) keptOwner(id string) (sourceOwner, error) {
 	return sourceOwner{repo: n.RepoPrefix, present: kept, off: !kept}, nil
 }
 
+// projectedEdgeOwner distinguishes an omitted declaration from an absent
+// endpoint. Only the former removes the edge and its adjacency counts.
+func (b *BuildStore) projectedEdgeOwner(e *graph.Edge) (sourceOwner, bool, error) {
+	owner, err := b.keptOwner(e.From)
+	if err != nil || owner.off {
+		return owner, false, err
+	}
+	if b.profile == FullProfile {
+		return owner, true, nil
+	}
+	target, err := b.keptOwner(e.To)
+	return owner, !target.off, err
+}
+
 func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns, stage Stage) error {
 	// Counters include per-node adjacency totals, so they must spill too.
 	// Reset just the derived counter keys. Legacy logical rows stay intact.
@@ -250,6 +264,14 @@ func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns, stage Stag
 		if err != nil {
 			return err
 		}
+		var owner sourceOwner
+		if b.profile != FullProfile {
+			var keep bool
+			owner, keep, err = b.projectedEdgeOwner(e)
+			if err != nil || !keep {
+				return err
+			}
+		}
 		kind := string(e.Kind)
 		if err := addCounts(countKey("out total", e.From), countKey("in total", e.To), countKey("out kind", e.From, kind), countKey("in kind", e.To, kind)); err != nil {
 			return err
@@ -257,18 +279,15 @@ func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns, stage Stag
 		if !b.profile.keepsEdge(e.Kind) {
 			return nil
 		}
-		owner, err := b.keptOwner(e.From)
-		if err != nil {
-			return err
-		}
-		if owner.off {
-			if err := addCounts(countKey("off incoming owner", e.To, owner.repo)); err != nil {
+		if b.profile == FullProfile {
+			owner, err = b.keptOwner(e.From)
+			if err != nil {
 				return err
 			}
 		}
 		repo := owner.repo
 		if !owner.present {
-			repo = "" // Preserve the existing edge accounting for omitted sources.
+			repo = "" // Keep existing accounting for valid node-free sources.
 		}
 		id := edgeIdentity(e)
 		key, value := outEdgeKey(e, id), bytes.Clone(r.value)

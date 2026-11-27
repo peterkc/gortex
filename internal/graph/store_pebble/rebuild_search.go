@@ -17,7 +17,7 @@ var ErrSearchSeal = errors.New("pebble search stage seal failed")
 
 // PrepareSearch replaces private symbol documents from the final logical node
 // union and seals only the search family. Render selects the input for both
-// exact and ranked search. Profile-hidden documents still affect ranking.
+// exact and ranked search from the selected profile.
 // The worker must finish all graph mutations before calling and must discard
 // its lease on error. Dir is a fresh, absolute stage directory owned by that lease.
 func (b *BuildStore) PrepareSearch(
@@ -55,6 +55,9 @@ func (b *BuildStore) PrepareSearch(
 		return StageTables{}, err
 	}
 	if err := b.RebuildView().VisitNodes(ctx, func(n *graph.Node) error {
+		if !b.profile.keepsNode(n.Kind) {
+			return nil
+		}
 		if text, ok := render(n); ok {
 			return b.UpsertSymbolFTS(n.ID, text)
 		}

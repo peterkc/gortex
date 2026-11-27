@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 func TestRelationsStagePublishesExactDiff(t *testing.T) {
@@ -379,32 +380,88 @@ func TestRelationsStageRefusesDanglingOrProxyEndpoint(t *testing.T) {
 	}
 }
 
-func TestRelationsStageKeepsProfileOmittedEndpointAccounting(t *testing.T) {
-	ctx := t.Context()
-	worker, head, base, declared, raw, _, _ := relationsStageFixture(t, DefaultProfile)
-	param := &graph.Node{ID: "old.go::OldName#param:p", Name: "p", Kind: graph.KindParam, FilePath: declared.FilePath, RepoPrefix: declared.RepoPrefix, Language: "go"}
-	edge := &graph.Edge{From: param.ID, To: declared.ID, Kind: graph.EdgeTypedAs, FilePath: declared.FilePath, Line: raw.Line}
-	worker.AddBatch([]*graph.Node{param}, []*graph.Edge{edge})
-	require.True(t, worker.RemoveEdge(raw.From, raw.To, raw.Kind))
+func TestRelationsStageProjectsOmittedEndpoints(t *testing.T) {
+	for _, profile := range []Profile{DefaultProfile, FullProfile} {
+		t.Run(string(profile), func(t *testing.T) {
+			ctx := t.Context()
+			worker, head, base, declared, raw, _, _ := relationsStageFixture(t, profile)
+			peer := &graph.Node{ID: "peer", Name: "peer", Kind: graph.KindFunction, RepoPrefix: declared.RepoPrefix, FilePath: declared.FilePath}
+			nodes := []*graph.Node{peer}
+			edges := []*graph.Edge{
+				raw, // A real unresolved target is not an omitted declaration.
+				{From: declared.ID, To: peer.ID, Kind: graph.EdgeCalls, FilePath: declared.FilePath, Line: raw.Line + 1},
+				{From: peer.ID, To: declared.ID, Kind: graph.EdgeContains, FilePath: declared.FilePath, Line: raw.Line + 2},
+			}
+			for _, kind := range []graph.NodeKind{graph.KindLocal, graph.KindParam, graph.KindGenericParam, graph.KindClosure} {
+				n := &graph.Node{ID: string(kind), Name: string(kind), Kind: kind, RepoPrefix: declared.RepoPrefix, FilePath: declared.FilePath}
+				nodes = append(nodes, n)
+				edges = append(edges,
+					&graph.Edge{From: n.ID, To: declared.ID, Kind: graph.EdgeCalls, FilePath: declared.FilePath},
+					&graph.Edge{From: declared.ID, To: n.ID, Kind: graph.EdgeReferences, FilePath: declared.FilePath},
+					&graph.Edge{From: n.ID, To: peer.ID, Kind: graph.EdgeContains, FilePath: declared.FilePath},
+				)
+			}
+			worker.AddBatch(nodes, edges[1:])
+			tables, err := worker.PrepareRelations(ctx, t.TempDir(), base, nil)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, tables)
+			require.NoError(t, err)
+			current := stageRead(t, head)
+			w, err := current.Publication()
+			require.NoError(t, err)
+			require.Equal(t, profile, w.Profile)
+			require.Equal(t, w.Families, relationsSavedWitness(t, current))
 
-	tables, err := worker.PrepareRelations(ctx, t.TempDir(), base, nil)
-	require.NoError(t, err)
-	_, err = head.PublishStage(ctx, tables)
-	require.NoError(t, err)
-	current := stageRead(t, head)
-	w, err := current.Publication()
-	require.NoError(t, err)
-	require.Equal(t, StageRelations, w.Stage)
-	require.Equal(t, w.Families, relationsSavedWitness(t, current))
-	require.Equal(t, 1, current.NodeCount())
-	require.Equal(t, 1, current.EdgeCount())
-	require.Nil(t, current.GetNode(param.ID))
-	require.Equal(t, []*graph.Edge{edge}, current.GetInEdges(declared.ID))
-	require.Equal(t, 1, current.count("out total", param.ID))
-	require.Equal(t, 1, current.count("in total", declared.ID))
-	require.Equal(t, 1, current.count("off incoming owner", declared.ID, param.RepoPrefix))
-	require.Equal(t, 1, current.count("repo edges", ""))
-	require.Zero(t, current.count("repo edges", param.RepoPrefix))
+			// Build independent controls from an explicit fixture cut. The
+			// off-group edge between retained nodes still contributes a count.
+			keptNodes, keptEdges, visibleEdges := nodes[:1], edges[:3], edges[:2]
+			if profile == FullProfile {
+				keptNodes, keptEdges, visibleEdges = nodes, edges, edges
+			}
+			native, err := store_sqlite.Open(filepath.Join(t.TempDir(), "oracle.sqlite"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, native.Close()) })
+			native.AddBatch(append([]*graph.Node{declared}, keptNodes...), visibleEdges)
+			require.Equal(t, native.NodeCount(), current.NodeCount())
+			require.Equal(t, native.EdgeCount(), current.EdgeCount())
+			for _, id := range []string{declared.ID, peer.ID, raw.To} {
+				require.ElementsMatch(t, native.GetInEdges(id), current.GetInEdges(id))
+				require.ElementsMatch(t, native.GetOutEdges(id), current.GetOutEdges(id))
+			}
+			oracle := newBuild(t, profile)
+			oracle.AddBatch(append([]*graph.Node{declared}, keptNodes...), keptEdges)
+			require.NoError(t, oracle.Publish(ctx))
+			var wantRows, gotRows []row
+			for _, r := range relationsSavedRows(t, snapshot(t, oracle)) {
+				if r.key[0] == familyEdge {
+					wantRows = append(wantRows, r)
+				}
+			}
+			for _, r := range relationsSavedRows(t, current) {
+				if r.key[0] == familyEdge {
+					gotRows = append(gotRows, r)
+				}
+			}
+			require.Equal(t, wantRows, gotRows)
+			adj, err := current.ReadKindAdjacency(ctx, peer.ID, graph.DirectionForward, []graph.EdgeKind{graph.EdgeCalls})
+			require.NoError(t, err)
+			require.Equal(t, 1, adj.Total)
+			require.Empty(t, adj.Edges)
+			if profile == DefaultProfile {
+				for _, n := range nodes[1:] {
+					require.Nil(t, current.GetNode(n.ID))
+					require.Zero(t, current.count("out total", n.ID))
+					require.Zero(t, current.count("in total", n.ID))
+					require.Zero(t, current.count("off incoming owner", declared.ID, n.RepoPrefix))
+				}
+			}
+			privateNodes, privateEdges := 0, 0
+			require.NoError(t, worker.RebuildView().VisitNodes(ctx, func(*graph.Node) error { privateNodes++; return nil }))
+			require.NoError(t, worker.RebuildView().VisitEdges(ctx, func(*graph.Edge) error { privateEdges++; return nil }))
+			require.Equal(t, len(nodes)+1, privateNodes)
+			require.Equal(t, len(edges), privateEdges)
+		})
+	}
 }
 
 func TestRelationsStageRefusesIncompleteRetainedBase(t *testing.T) {
