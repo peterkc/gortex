@@ -88,11 +88,11 @@ func (b *BuildStore) RebuildSpringEvents(ctx context.Context, receipts iter.Seq2
 		}
 		return stats, nil
 	}
-	if p.stats.Moves == 0 && !p.hasAdds && !p.entrants {
-		return p.stats, nil
-	}
 	if err := p.proveMoves(ctx); err != nil {
 		return stats, err
+	}
+	if p.stats.Moves == 0 && !p.hasAdds && !p.entrants {
+		return p.stats, nil
 	}
 	if err := p.planAdds(ctx); err != nil {
 		return stats, err
@@ -481,7 +481,13 @@ func (p *rebuildSpringEventPass) planMoves(ctx context.Context) error {
 		}
 		p.stats.Resolved += count
 		p.hasAdds = p.hasAdds || count > 1
-		if !p.guard || !p.rules.Rebind(e, t, first, count > 0) {
+		if !p.guard {
+			return nil
+		}
+		if !p.rules.Rebind(e, t, first, count > 0) {
+			if count == 1 {
+				return p.put(append(p.column('i'), old...), nil)
+			}
 			return nil
 		}
 		p.stats.Moves++
@@ -513,6 +519,25 @@ func (p *rebuildSpringEventPass) proveMoves(ctx context.Context) error {
 			ok = first == e.To
 		}
 		if !ok {
+			p.refused.add(graph.EdgeIdentityFor(e), pendingEdgeKey(e))
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	prefix := p.column('i')
+	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		e, err := p.call(r.key[len(prefix):])
+		if err != nil {
+			return err
+		}
+		t := p.rules.Event(e)
+		_, first, err := p.listeners(ctx, p.rules.Simple(t), 'T')
+		if err != nil || first == e.To {
+			return err
+		}
+		// If this listener was absent, a native reset may move this Call.
+		if p.rules.Rebind(e, t, "", false) {
 			p.refused.add(graph.EdgeIdentityFor(e), pendingEdgeKey(e))
 		}
 		return nil

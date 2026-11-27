@@ -350,3 +350,35 @@ func TestRebuildSpringEventsListenerReceiptFields(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildSpringEventsStationarySoleListener(t *testing.T) {
+	pub := springRebuildNode("publish", "")
+	first := springRebuildNode("A", "Event")
+	other := springRebuildNode("B", "Other")
+	call := springRebuildCall(pub.ID, first.ID, "Event", 10)
+	input := rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, first, other}, call)
+	for _, listenerProved := range []bool{false, true} {
+		b := openRebuildGRPCBuild(t, input)
+		before := rebuildEventSavedRows(t, b)
+		nodes := []*graph.Node{pub, other}
+		if listenerProved {
+			nodes = append(nodes, first)
+		}
+		// With the listener proved, neither the presence nor the absence of
+		// this Call can cause a write, so the Call receipt is unnecessary.
+		receipt := rebuildEventFacts(springRebuildFile, "java", nodes)
+		stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(receipt), springRebuildSelection(t, b))
+		if listenerProved {
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildSpringEventStats{Stubs: 1, Resolved: 1}, stats)
+		} else {
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			want := graph.EdgeIdentityFor(call)
+			want.To = "unresolved::*.Event"
+			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
+			require.Zero(t, stats)
+		}
+		require.Equal(t, before, rebuildEventSavedRows(t, b))
+	}
+}
