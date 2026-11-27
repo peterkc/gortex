@@ -124,7 +124,7 @@ func gdPreloadAliases(g graph.Store) map[string]map[string]string {
 		}
 	}
 	for f := range g.NodesByKind(graph.KindFile) {
-		if f == nil || f.Language != "gdscript" {
+		if !isGDScriptFile(f) {
 			continue
 		}
 		for path := range wanted {
@@ -156,8 +156,12 @@ func gdPreloadAliases(g graph.Store) map[string]map[string]string {
 	return out
 }
 
+func gdPreloadAliasDeclCandidate(n *graph.Node) bool {
+	return n != nil && n.Kind == graph.KindVariable && n.Language == "gdscript"
+}
+
 func gdPreloadAliasDecl(n *graph.Node) (fileID, path string) {
-	if n == nil || n.Language != "gdscript" {
+	if !gdPreloadAliasDeclCandidate(n) {
 		return "", ""
 	}
 	path, _ = n.Meta["gd_preload"].(string)

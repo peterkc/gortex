@@ -86,8 +86,12 @@ func gdAutoloadRebind(e *graph.Edge, target string) graph.EdgeReindex {
 	return graph.EdgeReindex{Edge: e, OldTo: oldTo}
 }
 
+func gdAutoloadDeclCandidate(n *graph.Node) bool {
+	return n != nil && n.Kind == graph.KindType && n.Language == "godot_project"
+}
+
 func gdAutoloadDecl(n *graph.Node) (name, script string) {
-	if n == nil || n.Kind != graph.KindType || n.Language != "godot_project" {
+	if !gdAutoloadDeclCandidate(n) {
 		return "", ""
 	}
 	if kind, _ := n.Meta["gd_kind"].(string); kind != "autoload" {
@@ -129,7 +133,7 @@ func gdAutoloadScripts(g graph.Store) map[string]string {
 	out := make(map[string]string, len(decls))
 	ambiguous := make(map[string]bool, len(decls))
 	for f := range g.NodesByKind(graph.KindFile) {
-		if f == nil || f.Language != "gdscript" {
+		if !isGDScriptFile(f) {
 			continue
 		}
 		for name, script := range decls {
@@ -159,6 +163,12 @@ func gdPathMatches(filePath, script string) bool {
 	return strings.HasSuffix(p, "/"+script)
 }
 
+func isGDScriptFile(n *graph.Node) bool {
+	return n != nil && n.Kind == graph.KindFile && n.Language == "gdscript"
+}
+
+var gdScriptMemberKinds = [...]graph.NodeKind{graph.KindMethod, graph.KindFunction}
+
 // gdMembersByFileSet indexes the callable members declared by each of the
 // named script files, by name. Signals are included: `Game.started.emit()`
 // and a direct connect both reference the signal as a member.
@@ -167,7 +177,7 @@ func gdMembersByFileSet(g graph.Store, want map[string]bool) map[string]map[stri
 		return nil
 	}
 	out := make(map[string]map[string]string, len(want))
-	for _, kind := range []graph.NodeKind{graph.KindMethod, graph.KindFunction} {
+	for _, kind := range gdScriptMemberKinds {
 		for n := range g.NodesByKind(kind) {
 			fileID, ok := gdScriptMemberFile(n)
 			if !ok || !want[fileID] {
