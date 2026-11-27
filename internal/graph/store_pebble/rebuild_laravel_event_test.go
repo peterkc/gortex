@@ -111,3 +111,59 @@ func TestRebuildLaravelRoleLimitsAndScratch(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildLaravelStationaryCallCustody(t *testing.T) {
+	const file = "app.php"
+	const target = "unresolved::*.handle"
+	listener := &graph.Node{ID: "listener", Kind: graph.KindMethod, FilePath: file, Meta: map[string]any{"listens": "Notice"}}
+	call := &graph.Edge{From: "publish", To: target, Kind: graph.EdgeCalls, FilePath: file, Line: 3, Meta: map[string]any{"event": "Missing"}}
+	for _, mode := range []string{"exact", "duplicate route", "wrong receipt file", "shared key", "wrong custody identity", "unknown custody"} {
+		t.Run(mode, func(t *testing.T) {
+			facts := ParseFacts{EffectiveLanguage: "php", File: graph.FileMetaRow{FilePath: file}, Nodes: []*graph.Node{listener}}
+			b, _ := seedSyntheticCustody(t, facts)
+			raw := *call
+			custody := rebuildEdgeCustody{}
+			switch mode {
+			case "shared key":
+				other := *call
+				other.To, other.Meta = listener.ID, nil
+				require.NoError(t, b.withWrites(func() error {
+					return b.addEdgeWithCustody(&other, rebuildEdgeCustody{raw: pendingEdgeKey(&raw)})
+				}))
+			case "wrong custody identity":
+				raw.Line++
+				custody.raw = pendingEdgeKey(&raw)
+			case "unknown custody":
+				custody.proof = rebuildProofUntrackedMove
+			}
+			require.NoError(t, b.withWrites(func() error { return b.addEdgeWithCustody(call, custody) }))
+			before := rebuildFrameworkCustodyRows(t, b)
+			receipts := func(yield func(ParseFacts, error) bool) {
+				if !yield(facts, nil) {
+					return
+				}
+				if mode == "wrong receipt file" {
+					facts.File.FilePath = "wrong.php"
+				}
+				facts.Edges = []*graph.Edge{&raw}
+				if mode == "duplicate route" {
+					duplicate := raw
+					duplicate.Meta = map[string]any{"event": "Notice"}
+					facts.Edges = append(facts.Edges, &duplicate)
+				}
+				yield(facts, nil)
+			}
+			stats, err := b.RebuildLaravelEvent(t.Context(), receipts, testLaravelEventRules())
+			if mode == "exact" || mode == "duplicate route" {
+				require.NoError(t, err)
+				require.Equal(t, RebuildLaravelEventStats{Stubs: 1}, stats)
+			} else {
+				var refusal *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refusal)
+				require.Zero(t, stats)
+			}
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}

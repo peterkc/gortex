@@ -316,14 +316,21 @@ func (p *rebuildLaravelEventPass) recordNode(ctx context.Context, n *graph.Node)
 		next[string(keyStrings([]byte{role.kind}, role.event, role.class))] = true
 	})
 	seenKey := p.key('d', n.ID)
-	seen, err := p.present(seenKey)
+	const seenRoleless, seenChecked = 1, 2
+	seen, err := rebuildScratchState(p.b.pending, seenKey, "Laravel receipt node state")
 	if err != nil {
 		return err
 	}
-	if !seen {
-		wanted, err := p.present(p.key('n', n.ID))
-		if err != nil || !wanted && len(next) == 0 {
-			return err
+	if seen != seenChecked {
+		if len(next) == 0 {
+			wanted, err := p.present(p.key('n', n.ID))
+			if err != nil {
+				return err
+			}
+			if !wanted {
+				// Keep the earlier role-less fact without loading an unrelated live row.
+				return noteRebuildScratchState(p.put, seenKey, seen, seenRoleless)
+			}
 		}
 		key := pendingNodeKey(n.ID)
 		live, err := pendingGet(p.b.pending, key, func(val []byte) (*graph.Node, error) {
@@ -335,16 +342,16 @@ func (p *rebuildLaravelEventPass) recordNode(ctx context.Context, n *graph.Node)
 		if err != nil || live == nil {
 			return err
 		}
-		if err := p.put(seenKey, nil); err != nil {
+		if err := p.put(seenKey, []byte{seenChecked}); err != nil {
 			return err
 		}
 	}
 	anchor := p.key('a', n.ID)
-	if !active && seen {
+	if !active && seen != 0 {
 		if err := p.b.pending.Delete(anchor, pebble.NoSync); err != nil {
 			return err
 		}
-	} else if active && !seen {
+	} else if active && seen == 0 {
 		if err := p.put(anchor, nil); err != nil {
 			return err
 		}
@@ -364,7 +371,7 @@ func (p *rebuildLaravelEventPass) recordNode(ctx context.Context, n *graph.Node)
 		return err
 	}
 	state := byte(exact)
-	if seen {
+	if seen != 0 {
 		state = possible
 	}
 	for key := range next {
@@ -549,9 +556,6 @@ func (p *rebuildLaravelEventPass) possibleOwners(ctx context.Context, id string)
 		if err := p.input(r.key, r.value); err != nil {
 			return err
 		}
-		if err := p.join(ctx, 'q', 'x', class, id); err != nil {
-			return err
-		}
 		if err := p.join(ctx, 'Q', 'x', class, id); err != nil {
 			return err
 		}
@@ -644,32 +648,26 @@ func (p *rebuildLaravelEventPass) listenersProved(ctx context.Context, event str
 	// A possible owner adds no new output if the same listener is proved
 	// independently, for example by its typed listener declaration.
 	for _, pair := range [...][2]byte{{'t', 'T'}, {'T', 't'}, {'x', 'T'}} {
-		prefix := p.key(pair[0], event)
-		other := p.key(pair[1], event)
-		var missing bool
-		if err := p.visit(ctx, prefix, func(r row) error {
-			present, err := p.present(append(other[:len(other):len(other)], r.key[len(prefix):]...))
-			missing = missing || !present
-			return err
-		}); err != nil || missing {
+		ok, err := p.listenerSubset(ctx, event, pair[0], pair[1])
+		if err != nil || !ok {
 			return false, err
 		}
 	}
 	return true, nil
 }
 
-func (p *rebuildLaravelEventPass) hasPossibleListener(ctx context.Context, event string) (bool, error) {
-	prefix, proved := p.key('x', event), p.key('T', event)
-	var possible bool
+func (p *rebuildLaravelEventPass) listenerSubset(ctx context.Context, event string, from, to byte) (bool, error) {
+	prefix, other := p.key(from, event), p.key(to, event)
+	ok := true
 	err := p.visit(ctx, prefix, func(r row) error {
-		if possible {
+		if !ok {
 			return nil
 		}
-		known, err := p.present(append(proved[:len(proved):len(proved)], r.key[len(prefix):]...))
-		possible = !known
+		var err error
+		ok, err = p.present(append(other[:len(other):len(other)], r.key[len(prefix):]...))
 		return err
 	})
-	return possible, err
+	return ok, err
 }
 
 func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
@@ -702,8 +700,13 @@ func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
 		moving := p.rules.Rebind(e, target, count != 0)
 		if !moving && count <= 1 {
 			raw, err := p.get(append(p.column('j'), old...))
-			if err != nil || raw == nil {
+			if err != nil {
 				return err
+			}
+			if raw == nil {
+				// A stationary row still needs an admitted, unique raw route.
+				refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
+				return nil
 			}
 			typ, rest, err := readKeyString(raw)
 			if err != nil || len(rest) != 0 {
@@ -725,11 +728,11 @@ func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
 			}); err != nil {
 				return err
 			}
-			possible, err := p.hasPossibleListener(ctx, p.rules.SimpleName(typ))
+			certain, err := p.listenerSubset(ctx, p.rules.SimpleName(typ), 'x', 'T')
 			if err != nil {
 				return err
 			}
-			if possible || p.rules.Rebind(&before, first, matched != 0) || matched > 1 {
+			if !certain || p.rules.Rebind(&before, first, matched != 0) || matched > 1 {
 				refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			}
 			return nil

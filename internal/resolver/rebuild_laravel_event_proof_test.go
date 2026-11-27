@@ -18,19 +18,34 @@ func TestRebuildLaravelCallClaim(t *testing.T) {
 		Meta: map[string]any{"via": laravelEventVia, "laravel_event_type": "Notice"},
 	}
 	facts := rebuildEventFacts(file, lang, []*graph.Node{publisher, listener}, raw)
-	b := openRebuildGRPCBuild(t, facts)
-	mover := *raw
-	mover.To = "unresolved::changed"
-	require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: &mover, OldTo: raw.To}}))
-	stationary := *raw
-	stationary.Meta = map[string]any{"incumbent": true}
-	b.AddEdge(&stationary)
-	before := rebuildEventSavedRows(t, b)
-	stats, err := RunRebuildLaravelEvent(t.Context(), b, rebuildGRPCReceipts(facts), rebuildLaravelTestSelection(t))
-	require.ErrorIs(t, err, store_pebble.ErrRebuildLaravelEvent)
-	require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
-	require.Zero(t, stats)
-	require.Equal(t, before, rebuildEventSavedRows(t, b))
+	for _, shared := range []bool{false, true} {
+		b, native := openRebuildEventStores(t, facts)
+		if shared {
+			mover := *raw
+			mover.To = "unresolved::changed"
+			require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: &mover, OldTo: raw.To}}))
+			stationary := *raw
+			stationary.Meta = map[string]any{"incumbent": true}
+			b.AddEdge(&stationary)
+		}
+		before := rebuildEventSavedRows(t, b)
+		stats, err := RunRebuildLaravelEvent(t.Context(), b, rebuildGRPCReceipts(facts), rebuildLaravelTestSelection(t))
+		if !shared {
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildLaravelEventStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+			require.Equal(t, 1, ResolveLaravelEventCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+			continue
+		}
+		require.ErrorIs(t, err, store_pebble.ErrRebuildLaravelEvent)
+		var refusal *store_pebble.RebuildUnknownProvenanceError
+		require.ErrorAs(t, err, &refusal)
+		want := graph.EdgeIdentityFor(raw)
+		want.To = listener.ID
+		require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refusal)
+		require.Zero(t, stats)
+		require.Equal(t, before, rebuildEventSavedRows(t, b))
+	}
 }
 
 func rebuildLaravelTestSelection(t *testing.T) FrameworkSynthesizerSelection {
@@ -251,7 +266,7 @@ func TestRebuildLaravelReceiptOnlyHandle(t *testing.T) {
 		Meta: map[string]any{"via": laravelEventVia, "laravel_event_type": "Notice"},
 	}
 	facts := rebuildEventFacts(file, lang, []*graph.Node{publisher, typed, provider, leaf}, member, call)
-	for _, mode := range []string{"raw handle", "wrong node receipt file", "empty node effective language", "wrong Call receipt file", "empty Call effective language", "wrong Call route"} {
+	for _, mode := range []string{"matching receipts", "raw handle", "wrong node receipt file", "empty node effective language", "wrong Call receipt file", "empty Call effective language", "wrong Call route"} {
 		t.Run(mode, func(t *testing.T) {
 			build := openRebuildGRPCBuild(t, facts)
 			before := rebuildEventSavedRows(t, build)
@@ -278,8 +293,136 @@ func TestRebuildLaravelReceiptOnlyHandle(t *testing.T) {
 				calls.Edges = []*graph.Edge{&changed}
 			}
 			stats, err := RunRebuildLaravelEvent(t.Context(), build, rebuildGRPCReceipts(declarations, calls), rebuildLaravelTestSelection(t))
-			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			if mode == "matching receipts" {
+				require.NoError(t, err)
+				require.Equal(t, store_pebble.RebuildLaravelEventStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+				return
+			}
+			var refusal *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refusal)
+			want := graph.EdgeIdentityFor(call)
+			want.To = typed.ID
+			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refusal)
 			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, build))
+		})
+	}
+}
+
+func TestRebuildLaravelRolelessReceiptCannotAnchor(t *testing.T) {
+	const file, lang = "events.php", "php"
+	publisher := rebuildEventNode(file, "publish", lang, "")
+	live := rebuildEventNode(file, "live", lang, "")
+	live.Meta = map[string]any{"laravel_listener_type": "Else"}
+	plain := rebuildEventNode(file, "plain", lang, "")
+	role := *plain
+	role.Meta = map[string]any{"laravel_listener_type": "Notice"}
+	call := &graph.Edge{From: publisher.ID, To: live.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 3,
+		Meta: map[string]any{"via": laravelEventVia, "laravel_event_type": "Missing"}}
+	for _, rolelessFirst := range []bool{false, true} {
+		b := openRebuildGRPCBuild(t, rebuildEventFacts(file, lang, []*graph.Node{publisher, live, plain}, call))
+		before := rebuildEventSavedRows(t, b)
+		first, second := &role, plain
+		if rolelessFirst {
+			first, second = second, first
+		}
+		receipt := rebuildEventFacts(file, lang, []*graph.Node{publisher, first, second}, call)
+		stats, err := RunRebuildLaravelEvent(t.Context(), b, rebuildGRPCReceipts(receipt), rebuildLaravelTestSelection(t))
+		var refusal *store_pebble.RebuildUnknownProvenanceError
+		require.ErrorAs(t, err, &refusal)
+		want := graph.EdgeIdentityFor(call)
+		want.To = "unresolved::*.handle"
+		require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refusal)
+		require.Zero(t, stats)
+		require.Equal(t, before, rebuildEventSavedRows(t, b))
+	}
+}
+
+func TestRebuildLaravelStationaryReceiptElection(t *testing.T) {
+	const file, lang = "events.php", "php"
+	publisher := rebuildEventNode(file, "publish", lang, "")
+	anchor := rebuildEventNode(file, "anchor", lang, "")
+	anchor.Meta = map[string]any{"laravel_listener_type": "Other"}
+	a := rebuildEventNode(file, "a", lang, "")
+	b := rebuildEventNode(file, "b", lang, "")
+	leaf := rebuildEventNode(file, "leaf", lang, "")
+	leaf.Kind = graph.KindMethod
+	provider := rebuildEventNode(file, "Provider", lang, "")
+	provider.Kind = graph.KindType
+	for _, tc := range []struct {
+		name, route string
+		refuse      bool
+	}{
+		{"untagged receipt", "", false},
+		{"no definite activation", "Notice", false},
+		{"stationary first with extra fanout", "Notice", true},
+		{"conflicting handle role", "Notice", true},
+		{"conflicting map with proved owner", "Notice", true},
+		{"conflicting map with possible owner", "Notice", true},
+		{"live map alone cannot add a possible listener", "Notice", false},
+		{"receipt-only handle with default owner and conflicting map", "Notice", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			typedA, typedB, handle, mapped := *a, *b, *leaf, *provider
+			typedA.Meta = map[string]any{"laravel_listener_type": "Notice"}
+			typedB.Meta = typedA.Meta
+			handle.Name = "handle"
+			mapped.Meta = map[string]any{"laravel_listen_map": "Notice=>Listener"}
+			liveMap := mapped
+			liveMap.Meta = map[string]any{"laravel_listen_map": "Other=>Listener"}
+			member := &graph.Edge{From: leaf.ID, To: file + "::Listener", Kind: graph.EdgeMemberOf, FilePath: file, Line: 3}
+			call := &graph.Edge{From: publisher.ID, To: "unresolved::*.handle", Kind: graph.EdgeCalls, FilePath: file, Line: 4,
+				Meta: map[string]any{"via": laravelEventVia, "laravel_event_type": "Missing"}}
+			live := []*graph.Node{publisher, anchor, a, b, leaf, &liveMap}
+			raw := []*graph.Node{publisher, anchor}
+			liveEdges, rawEdges := []*graph.Edge{member}, []*graph.Edge{member}
+			switch tc.name {
+			case "untagged receipt":
+				call.To = a.ID
+				call.Meta["laravel_event_type"] = "Notice"
+				live[2] = &typedA
+			case "no definite activation":
+				raw = raw[:1]
+				mapped.Meta = map[string]any{"laravel_listen_map": "Notice=>"}
+				raw = append(raw, &mapped, provider, &handle)
+				liveEdges, rawEdges = nil, nil
+			case "stationary first with extra fanout":
+				call.To = a.ID
+				call.Meta["laravel_event_type"] = "Notice"
+				live[2] = &typedA
+				raw = append(raw, &typedA, &typedB)
+			case "conflicting handle role":
+				raw = append(raw, &mapped, leaf, &handle)
+			case "conflicting map with proved owner", "conflicting map with possible owner":
+				live[4] = &handle
+				raw = append(raw, &mapped, provider, &handle)
+				if tc.name == "conflicting map with possible owner" {
+					rawEdges = nil
+				}
+			case "live map alone cannot add a possible listener":
+				live[5] = &mapped
+				raw = append(raw, leaf, &handle)
+			case "receipt-only handle with default owner and conflicting map":
+				mapped.Meta = map[string]any{"laravel_listen_map": "Notice=>"}
+				raw = append(raw, &mapped, provider, &handle)
+				liveEdges, rawEdges = nil, nil
+			}
+			rawCall := *call
+			rawCall.Meta = map[string]any{"via": laravelEventVia, "laravel_event_type": tc.route}
+			build := openRebuildGRPCBuild(t, rebuildEventFacts(file, lang, live, append(liveEdges, call)...))
+			before := rebuildEventSavedRows(t, build)
+			receipt := rebuildEventFacts(file, lang, raw, append(rawEdges, &rawCall)...)
+			stats, err := RunRebuildLaravelEvent(t.Context(), build, rebuildGRPCReceipts(receipt), rebuildLaravelTestSelection(t))
+			if tc.refuse {
+				var refusal *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refusal)
+				require.Zero(t, stats)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, uint64(1), stats.Stubs)
+				require.Zero(t, stats.Moves+stats.Adds)
+			}
 			require.Equal(t, before, rebuildEventSavedRows(t, build))
 		})
 	}
