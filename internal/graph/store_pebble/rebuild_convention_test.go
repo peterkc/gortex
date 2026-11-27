@@ -117,3 +117,67 @@ func TestRebuildConventionReceiptDecisionFields(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildConventionFreezeAndRunGuards(t *testing.T) {
+	b, receipts := seedSyntheticCustody(t)
+	ctx := t.Context()
+	rules := rebuildConventionTestRules()
+	require.ErrorIs(t, b.FreezeFastAPIInputs(ctx, nil), ErrRebuildFastAPI)
+	moves, err := b.RebuildFastAPI(ctx, receipts, rules)
+	require.ErrorIs(t, err, ErrRebuildFastAPI)
+	require.Zero(t, moves)
+	match := func(graph.FrameworkCensusEdge) bool { return true }
+	require.NoError(t, b.FreezeFastAPIInputs(ctx, match))
+	require.ErrorIs(t, b.FreezeFastAPIInputs(ctx, match), ErrRebuildFastAPI)
+	moves, err = b.RebuildFastAPI(ctx, receipts, rules)
+	require.NoError(t, err)
+	require.Zero(t, moves)
+	require.NoError(t, b.FreezeFastAPIInputs(ctx, match))
+	moves, err = b.RebuildFastAPI(ctx, nil, rules)
+	require.ErrorIs(t, err, ErrRebuildFastAPI)
+	require.Zero(t, moves)
+}
+
+func TestRebuildConventionKindAndWindowOrder(t *testing.T) {
+	const file = "app.py"
+	caller := &graph.Node{ID: "caller", Kind: graph.KindFunction, FilePath: file, Language: "python"}
+	target := &graph.Node{ID: "target", Name: "load", Kind: graph.KindFunction, FilePath: file, Language: "python"}
+	makeSite := func(to string, line int) *graph.Edge {
+		return &graph.Edge{From: caller.ID, To: "unresolved::" + to, Kind: graph.EdgeCalls, FilePath: file, Line: line,
+			Meta: map[string]any{"source": to}}
+	}
+	first, second := makeSite("z", 1), makeSite("a", 1)
+	ignored := makeSite("other-kind", 2)
+	ignored.Kind = graph.EdgeRendersChild
+	edges := []*graph.Edge{first, ignored}
+	for i := 1; i < graph.SQLiteReindexChunkSize; i++ {
+		edges = append(edges, makeSite("fill", i+2))
+	}
+	edges = append(edges, second)
+	b, receipts := seedSyntheticCustody(t, ParseFacts{
+		EffectiveLanguage: "python",
+		File:              graph.FileMetaRow{FilePath: file},
+		Nodes:             []*graph.Node{caller, target},
+		Edges:             edges,
+	})
+	rules := rebuildConventionTestRules()
+	rules.Shape = func(string, string) ([]string, []string) { return []string{"load"}, nil }
+	require.NoError(t, b.FreezeFastAPIInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
+	moves, err := b.RebuildFastAPI(t.Context(), receipts, rules)
+	require.NoError(t, err)
+	require.EqualValues(t, graph.SQLiteReindexChunkSize+1, moves)
+	want := *first
+	want.To = target.ID
+	moved, err := b.pendingEdge(pendingEdgeKey(&want))
+	require.NoError(t, err)
+	require.NotNil(t, moved)
+	require.Equal(t, "z", moved.Meta["source"])
+	for _, old := range []*graph.Edge{first, second} {
+		row, err := b.pendingEdge(pendingEdgeKey(old))
+		require.NoError(t, err)
+		require.Nil(t, row)
+	}
+	row, err := b.pendingEdge(pendingEdgeKey(ignored))
+	require.NoError(t, err)
+	require.NotNil(t, row)
+}

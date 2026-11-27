@@ -140,3 +140,20 @@ func TestRebuildVaporFrozenNodeGate(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, count)
 }
+
+func TestRebuildVaporRejectsLowerCaseReference(t *testing.T) {
+	const file = "App/routes.swift"
+	source := &graph.Node{ID: "route", Kind: graph.KindFunction, FilePath: file, Language: "swift"}
+	target := &graph.Node{ID: "configure", Name: "configure", Kind: graph.KindFunction, FilePath: file, Language: "swift"}
+	edge := &graph.Edge{From: source.ID, To: "unresolved::configure", Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+	facts := rebuildEventFacts(file, "swift", []*graph.Node{source, target}, edge)
+	b, native := openRebuildEventStores(t, facts)
+	before := rebuildEventSavedRows(t, b)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthVaporResolve})
+	require.NoError(t, err)
+	moves, err := RunRebuildVapor(t.Context(), b, rebuildGRPCReceipts(facts), selection)
+	require.NoError(t, err)
+	require.Zero(t, moves)
+	require.Zero(t, ResolveVaporRefs(native))
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
+}
