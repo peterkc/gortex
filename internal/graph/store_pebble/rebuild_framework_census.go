@@ -64,6 +64,7 @@ func (v RebuildView) VisitFrameworkGateEdges(ctx context.Context, annotations bo
 		row.Via, _ = e.Meta["via"].(string)
 		row.GRPCService, _ = e.Meta["grpc_service"].(string)
 		row.GRPCMethod, _ = e.Meta["grpc_method"].(string)
+		row.RegistryValue, _ = e.Meta["registry_value"].(string)
 		return yield(row)
 	})
 }
