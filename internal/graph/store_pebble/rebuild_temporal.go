@@ -492,7 +492,7 @@ func (p *RebuildTemporalPass) visitAdds(ctx context.Context, yield func(row) err
 	// Ordinals increase as additions enter the buffer. Each run precedes
 	// both the next run and the tail, even for repeated edge identities.
 	for i := range p.addRuns {
-		if err := visitLinkRun(ctx, p.addRunPath(i), yield); err != nil {
+		if err := visitLinkRun(ctx, p.addRunPath(i), nil, yield); err != nil {
 			return err
 		}
 	}

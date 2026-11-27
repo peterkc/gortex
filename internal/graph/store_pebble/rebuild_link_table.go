@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -91,7 +92,8 @@ func writeLinkRun(ctx context.Context, path string, rows []row) (err error) {
 	return nil
 }
 
-func visitLinkRun(ctx context.Context, path string, yield func(row) error) (err error) {
+// visitLinkRun visits the whole run when prefix is nil.
+func visitLinkRun(ctx context.Context, path string, prefix []byte, yield func(row) error) (err error) {
 	table, err := openLinkTable(ctx, path)
 	if err != nil {
 		return err
@@ -102,7 +104,7 @@ func visitLinkRun(ctx context.Context, path string, yield func(row) error) (err 
 		return err
 	}
 	defer func() { err = errors.Join(err, it.Close()) }()
-	for kv := it.First(); kv != nil; kv = it.Next() {
+	for kv := it.SeekGE(prefix, 0); kv != nil && bytes.HasPrefix(kv.K.UserKey, prefix); kv = it.Next() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

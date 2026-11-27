@@ -334,7 +334,7 @@ func (p *RebuildPlaceholderSources) writeMoves(ctx context.Context, path string)
 
 func (p *RebuildPlaceholderSources) visitMoves(ctx context.Context, yield func(row) error) error {
 	for i := range p.stats.Flushes {
-		if err := visitLinkRun(ctx, p.runPath(i), yield); err != nil {
+		if err := visitLinkRun(ctx, p.runPath(i), nil, yield); err != nil {
 			return err
 		}
 	}

@@ -336,7 +336,7 @@ func (p *RebuildFnPointerPass) visitMoves(ctx context.Context, column byte, yiel
 	stream := &p.moves[column-fnPointerRegMoves]
 	// Each run and the tail are consecutive ranges of one ordered input scan.
 	for i := range stream.runs {
-		if err := visitLinkRun(ctx, p.runPath(column, i), yield); err != nil {
+		if err := visitLinkRun(ctx, p.runPath(column, i), nil, yield); err != nil {
 			return err
 		}
 	}

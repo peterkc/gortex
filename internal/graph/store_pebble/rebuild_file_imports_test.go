@@ -109,7 +109,7 @@ func TestRebuildFileImportsRunAndTail(t *testing.T) {
 				require.NoError(t, err)
 				bytes += uint64(info.Size())
 				var got []*graph.Edge
-				require.NoError(t, visitFileImportRun(ctx, path, fileImportLua, func(r row) error {
+				require.NoError(t, visitLinkRun(ctx, path, fileImportLua, func(r row) error {
 					_, raw, err := readKeyString(r.value)
 					if err != nil {
 						return err

@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
-	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -286,32 +285,6 @@ func sortFileImportMoves(rows []row) {
 	slices.SortFunc(rows, func(a, b row) int { return bytes.Compare(a.key, b.key) })
 }
 
-func visitFileImportRun(ctx context.Context, path string, prefix []byte, yield func(row) error) (err error) {
-	table, err := openLinkTable(ctx, path)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, table.Close()) }()
-	it, err := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, it.Close()) }()
-	for kv := it.SeekGE(prefix, 0); kv != nil && bytes.HasPrefix(kv.K.UserKey, prefix); kv = it.Next() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		value, _, err := kv.Value(nil)
-		if err != nil {
-			return err
-		}
-		if err := yield(row{kv.K.UserKey, value}); err != nil {
-			return err
-		}
-	}
-	return errors.Join(ctx.Err(), it.Error())
-}
-
 func (s *fileImportMoves) visit(ctx context.Context, dir string, yield func(row) error) error {
 	sortFileImportMoves(s.rows)
 	prefixes := [][]byte{s.prefix}
@@ -324,7 +297,7 @@ func (s *fileImportMoves) visit(ctx context.Context, dir string, yield func(row)
 	// no heap merge or simultaneous readers are needed.
 	for _, prefix := range prefixes {
 		for i := range s.runs {
-			if err := visitFileImportRun(ctx, s.runPath(dir, i), prefix, yield); err != nil {
+			if err := visitLinkRun(ctx, s.runPath(dir, i), prefix, yield); err != nil {
 				return err
 			}
 		}

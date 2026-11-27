@@ -177,7 +177,7 @@ func TestRebuildTemporalSpillsBeforeAppend(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, &second, tail)
 			var added []*graph.Edge
-			require.NoError(t, visitLinkRun(ctx, p.addRunPath(0), func(r row) error {
+			require.NoError(t, visitLinkRun(ctx, p.addRunPath(0), nil, func(r row) error {
 				e, err := decodeEdge(r.value)
 				if err != nil {
 					return err
