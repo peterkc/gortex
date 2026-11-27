@@ -2,11 +2,14 @@ package store_pebble
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/pathkey"
 )
 
 // This family lives only in the private build. For each winning live key it
@@ -182,4 +185,79 @@ func decodeLinkRecorder(key []byte) (graph.EdgeIdentity, error) {
 	out.Kind = graph.EdgeKind(kind)
 	out.Line = int(int64(binary.BigEndian.Uint64(tail) ^ (1 << 63)))
 	return out, nil
+}
+
+// The raw column records eligible identities from the checked parse replay.
+// The live column binds the terminal emitter's effective input to installed
+// bytes. Neither column enters a published graph family.
+func rebuildExternalEvidenceKey(col byte, edge []byte) []byte {
+	return append([]byte{'g', 'q', '~', col}, edge...)
+}
+
+func (b *BuildStore) recordExternalReceipt(f ParseFacts, e *graph.Edge) error {
+	if e == nil || f.EffectiveLanguage == "" || e.FilePath == "" || e.FilePath != pathkey.Normalize(f.File.FilePath) {
+		return nil
+	}
+	if e.To == "external::error" && f.EffectiveLanguage == "go" && e.Origin == graph.OriginASTInferred &&
+		(e.Kind == graph.EdgeReturns || e.Kind == graph.EdgeThrows) {
+		val, err := encodeEdge(e)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(val)
+		return b.pending.Set(rebuildExternalEvidenceKey('p', pendingEdgeKey(e)), digest[:], pebble.NoSync)
+	}
+	name := graph.UnresolvedName(e.To)
+	if strings.HasPrefix(name, "extern::") || e.Kind == graph.EdgeImports && strings.HasPrefix(name, "import::") {
+		return b.pending.Set(rebuildExternalEvidenceKey('r', pendingEdgeKey(e)), []byte(f.EffectiveLanguage), pebble.NoSync)
+	}
+	return nil
+}
+
+// RecordRebuildExternalMoves records exact terminal choices from the main
+// resolver. A stationary incumbent or losing proposal receives no evidence.
+func (b *BuildStore) RecordRebuildExternalMoves(ctx context.Context, moves []graph.EdgeReindex, effective map[*graph.Edge]string) error {
+	if len(effective) == 0 {
+		return nil
+	}
+	return b.withWrites(func() error {
+		for _, move := range moves {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			e := move.Edge
+			spec, ok := effective[e]
+			if !ok {
+				continue
+			}
+			target, valid := RebuildExternalImportTarget(spec)
+			if !valid || e.To != target {
+				return invalid("terminal external emitter target")
+			}
+			old := *e
+			old.To = move.OldTo
+			if move.OldKind != "" {
+				old.Kind = move.OldKind
+			}
+			live, raw := pendingEdgeKey(e), pendingEdgeKey(&old)
+			custody, err := readRebuildEdgeCustody(b.pending, live)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(custody.raw, raw) {
+				continue
+			}
+			val, err := encodeEdge(e)
+			if err != nil {
+				return err
+			}
+			digest := sha256.Sum256(val)
+			evidence := keyStrings(nil, spec)
+			evidence = append(evidence, digest[:]...)
+			if err := b.pending.Set(rebuildExternalEvidenceKey('m', live), evidence, pebble.NoSync); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

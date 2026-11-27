@@ -178,8 +178,18 @@ func prepareRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 			return rebuildImportNeeds(edge, spec, "valid native external target")
 		}
 		edge.To = id
+		if edge.Kind == graph.EdgeImports {
+			f.noteExternalTarget(edge, spec)
+		}
 		return nil
 	}}, nil
+}
+
+func (f *rebuildLinkFrontier) noteExternalTarget(edge *graph.Edge, effective string) {
+	if f.externalTargets == nil {
+		f.externalTargets = make(map[*graph.Edge]string)
+	}
+	f.externalTargets[edge] = effective
 }
 
 func pickRebuildImportQualName(ctx context.Context, f *rebuildLinkFrontier, edge *graph.Edge, source *graph.Node, spec, key string) (*graph.Node, bool, error) {

@@ -27,6 +27,9 @@ func prepareRebuildExtern(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 	sep := strings.LastIndex(spec, "::")
 	if sep < 0 {
 		edge.To = "external::" + spec
+		if spec != "" && !strings.ContainsRune(spec, 0) {
+			f.noteExternalTarget(edge, spec)
+		}
 		return rebuildMainQuery{}, nil
 	}
 	importPath, symbol := spec[:sep], spec[sep+2:]

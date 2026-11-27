@@ -15,6 +15,7 @@ type rebuildLinkFrontier struct {
 	link                          *store_pebble.RebuildLink
 	opts                          store_pebble.RebuildLinkOptions
 	imports                       rebuildMainImportInputs
+	externalTargets               map[*graph.Edge]string         // terminal choices in the current main page
 	providesFor                   map[string]map[string]struct{} // frozen at first original typed wildcard page
 	importDirs                    *store_pebble.RebuildImportDirectories
 	closeImportDirs               func() error

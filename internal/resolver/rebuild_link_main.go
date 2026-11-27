@@ -112,11 +112,15 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 	err = runRebuildLinkFrontier(ctx, build, opts, selectCallers, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
 		f.imports = imports
 		f.providesFor = providesFor
+		clear(f.externalTargets) // only this page's terminal choices
 		moves, err := reduceRebuildMainPage(ctx, f, page)
 		if err != nil || len(moves) == 0 {
 			return err
 		}
 		if err := build.ApplyLinkReindexes(ctx, moves); err != nil {
+			return err
+		}
+		if err := build.RecordRebuildExternalMoves(ctx, moves, f.externalTargets); err != nil {
 			return err
 		}
 		if reconcileSources {
