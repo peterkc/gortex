@@ -368,6 +368,74 @@ func TestRebuildSwiftObjCRefusesUnprovedEndpointsBeforeWriting(t *testing.T) {
 	}
 }
 
+func TestRebuildSwiftObjCProtocolReceiptElection(t *testing.T) {
+	const swiftFile, objcFile = "p/Unnamed.swift", "p/Unnamed.m"
+	winner := &graph.Node{ID: swiftFile + "::b", Kind: graph.KindInterface, Language: "swift", FilePath: swiftFile,
+		Meta: map[string]any{"objc": true}, StartLine: 2}
+	lower := *winner
+	lower.ID = swiftFile + "::a"
+	higher := *winner
+	higher.ID = swiftFile + "::c"
+	higher.Meta = nil
+	adopter := &graph.Node{ID: objcFile + "::Adopter", Kind: graph.KindType, Language: "objc", FilePath: objcFile,
+		Meta: map[string]any{"objc_protocols": "Unknown, "}, StartLine: 3}
+	swift := store_pebble.ParseFacts{EffectiveLanguage: "swift", File: graph.FileMetaRow{FilePath: swiftFile, NodeCount: 3},
+		Nodes: []*graph.Node{winner, &lower, &higher}}
+	objc := store_pebble.ParseFacts{EffectiveLanguage: "objc", File: graph.FileMetaRow{FilePath: objcFile, NodeCount: 1},
+		Nodes: []*graph.Node{adopter}}
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthSwiftObjC})
+	require.NoError(t, err)
+	native := rebuildGRPCNative(t, store_pebble.ParseFacts{Nodes: append(slices.Clone(swift.Nodes), adopter)})
+	require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
+	want := slices.Collect(native.EdgesByKind(graph.EdgeImplements))
+	require.Len(t, want, 1)
+	require.Equal(t, winner.ID, want[0].To)
+
+	t.Run("lower ID needs no receipt and target line is not used", func(t *testing.T) {
+		b := openRebuildGRPCBuild(t, swift, objc)
+		rawWinner := *winner
+		rawWinner.StartLine++
+		receipt := swift
+		receipt.Nodes = []*graph.Node{&rawWinner}
+		receipt.File.NodeCount = 1
+		stats, err := RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(receipt, objc), selection)
+		require.NoError(t, err)
+		require.EqualValues(t, 1, stats.Edges)
+		require.ElementsMatch(t, want, slices.Collect(maps.Values(rebuildSwiftObjCPrivateEdges(t, b))))
+	})
+
+	for _, tc := range []struct {
+		name     string
+		kind     graph.NodeKind
+		liveName string
+	}{
+		{"live objc bit false", graph.KindInterface, ""},
+		{"live name would hide the receipt", graph.KindInterface, "Other"},
+		{"live kind would hide the receipt", graph.KindType, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live := higher
+			live.Kind, live.Name = tc.kind, tc.liveName
+			input := swift
+			input.Nodes = []*graph.Node{winner, &lower, &live}
+			b := openRebuildGRPCBuild(t, input, objc)
+			before := rebuildSwiftObjCPrivateEdges(t, b)
+			raw := higher
+			raw.Meta = map[string]any{"objc": true}
+			receipt := swift
+			receipt.Nodes = []*graph.Node{winner, &lower, &raw}
+			stats, err := RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(receipt, objc), selection)
+			require.ErrorIs(t, err, store_pebble.ErrRebuildSwiftObjC)
+			var refusal *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, graph.EdgeIdentityFor(want[0]), refusal.First)
+			require.EqualValues(t, 1, refusal.Count)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildSwiftObjCPrivateEdges(t, b))
+		})
+	}
+}
+
 func TestRebuildSwiftObjCProtocolOrder(t *testing.T) {
 	facts, _ := rebuildSwiftObjCFixture(0)
 	winner := facts[2].Nodes[0]

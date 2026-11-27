@@ -63,10 +63,10 @@ func (b *BuildStore) RebuildSwiftObjC(ctx context.Context, receipts iter.Seq2[Pa
 }
 
 type rebuildSwiftObjCPass struct {
-	b               *BuildStore
-	changed         bool
-	hasAlternatives bool
-	stats           RebuildSwiftObjCStats
+	b            *BuildStore
+	changed      bool
+	hasElections bool
+	stats        RebuildSwiftObjCStats
 }
 
 func rebuildSwiftObjCKey(col byte, fields ...string) []byte {
@@ -93,14 +93,14 @@ func (p *rebuildSwiftObjCPass) propose(ctx context.Context, e *graph.Edge) error
 	if err != nil {
 		return err
 	}
-	if err := p.put(rebuildSwiftObjCKey('n', e.From), []byte{rebuildCapabilityWanted}); err != nil {
+	if err := p.put(rebuildSwiftObjCKey('s', e.From), []byte{rebuildCapabilityWanted}); err != nil {
 		return err
 	}
 	if err := p.put(rebuildSwiftObjCKey('n', e.To), []byte{rebuildCapabilityWanted}); err != nil {
 		return err
 	}
 	if e.Kind == graph.EdgeImplements {
-		if err := p.wantProtocolAlternatives(ctx, e.To); err != nil {
+		if err := p.wantProtocolElection(ctx, e.To); err != nil {
 			return err
 		}
 	}
@@ -108,39 +108,25 @@ func (p *rebuildSwiftObjCPass) propose(ctx context.Context, e *graph.Edge) error
 	return p.put(proposal, raw)
 }
 
-func (p *rebuildSwiftObjCPass) wantProtocolAlternatives(ctx context.Context, winnerID string) error {
+func (p *rebuildSwiftObjCPass) wantProtocolElection(ctx context.Context, winnerID string) error {
 	// Conformers that chose the same protocol share one election proof.
 	group := rebuildSwiftObjCKey('g', winnerID)
 	state, err := p.state(group)
 	if err != nil || state != 0 {
 		return err
 	}
-	view := p.b.RebuildView()
-	winner, err := view.Node(ctx, winnerID)
+	winner, err := p.b.RebuildView().Node(ctx, winnerID)
 	if err != nil {
 		return err
 	}
 	if winner == nil {
 		return invalid("Swift/ObjC protocol winner missing")
 	}
-	// The winner already needs endpoint proof. Stream only the other
-	// interfaces, including ones that the live objc bit made ineligible.
-	want := func(n *graph.Node) error {
-		if n.Kind != graph.KindInterface || n.Language != "swift" || n.Name != winner.Name || n.ID == winnerID {
-			return nil
-		}
-		p.hasAlternatives = true
-		return p.put(rebuildSwiftObjCKey('p', n.ID), append([]byte{rebuildCapabilityWanted}, winnerID...))
-	}
-	if winner.Name == "" {
-		err = view.VisitNodes(ctx, want)
-	} else {
-		err = view.VisitNameCandidates(ctx, winner.Name, []string{"swift"}, want)
-	}
-	if err != nil {
+	// Index only names with a proposed winner, including the empty native map slot.
+	if err := p.put(rebuildSwiftObjCKey('p', winner.Name), []byte(winnerID)); err != nil {
 		return err
 	}
-	// The receipt sweep clears this proof if any alternative is unproved.
+	p.hasElections = true
 	return p.put(group, []byte{rebuildScratchExact})
 }
 
@@ -163,17 +149,6 @@ func (p *rebuildSwiftObjCPass) prove(ctx context.Context, receipts iter.Seq2[Par
 			}
 		}
 	}
-	if err := pendingVisit(ctx, p.b.pending, rebuildSwiftObjCKey('p'), func(r row) error {
-		if len(r.value) < 2 {
-			return invalid("Swift/ObjC protocol proof state")
-		}
-		if r.value[0] != rebuildScratchExact {
-			return p.put(rebuildSwiftObjCKey('g', string(r.value[1:])), []byte{rebuildCapabilityUnproved})
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
 	var refused rebuildScratchRefusals
 	if err := p.visit(ctx, func(e *graph.Edge) error {
 		ok, err := p.proved(e)
@@ -188,44 +163,48 @@ func (p *rebuildSwiftObjCPass) prove(ctx context.Context, receipts iter.Seq2[Par
 }
 
 func (p *rebuildSwiftObjCPass) noteReceipt(ctx context.Context, raw *graph.Node, file, language string) error {
-	key := rebuildSwiftObjCKey('n', raw.ID)
-	state, err := p.state(key)
-	if err != nil {
-		return err
-	}
-	var alt, alternative []byte
-	if p.hasAlternatives {
-		alt = rebuildSwiftObjCKey('p', raw.ID)
-		alternative, err = pendingGet(p.b.pending, alt, copyValue)
+	if objc, _ := raw.Meta["objc"].(bool); p.hasElections && objc && raw.Kind == graph.KindInterface && raw.Language == "swift" {
+		winner, err := pendingGet(p.b.pending, rebuildSwiftObjCKey('p', raw.Name), copyValue)
 		if err != nil {
 			return err
 		}
+		// Native's greatest eligible ID wins. Earlier declarations cannot
+		// change this proposal, even if they lack a checked receipt.
+		if len(winner) != 0 && string(winner) < raw.ID {
+			if err := p.put(rebuildSwiftObjCKey('g', string(winner)), []byte{rebuildCapabilityUnproved}); err != nil {
+				return err
+			}
+		}
 	}
-	if state == 0 && len(alternative) == 0 {
-		return nil
+	source, target := rebuildSwiftObjCKey('s', raw.ID), rebuildSwiftObjCKey('n', raw.ID)
+	fromState, err := p.state(source)
+	if err != nil {
+		return err
+	}
+	toState, err := p.state(target)
+	if err != nil || (fromState == 0 && toState == 0) {
+		return err
 	}
 	live, err := p.b.RebuildView().Node(ctx, raw.ID)
 	if err != nil {
 		return err
 	}
-	inReceipt := language == raw.Language && raw.FilePath == file
-	if state != 0 {
-		proved := inReceipt && sameRebuildSwiftObjCInput(raw, live)
-		if err := noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(proved)); err != nil {
+	proved := language == raw.Language && raw.FilePath == file && sameRebuildSwiftObjCInput(raw, live)
+	if fromState != 0 {
+		// Native uses only the source's line to write the edge.
+		if err := noteRebuildScratchState(p.put, source, fromState, rebuildScratchProofBit(proved && raw.StartLine == live.StartLine)); err != nil {
 			return err
 		}
 	}
-	if len(alternative) != 0 {
-		proved := inReceipt && live != nil && live.Kind == raw.Kind && live.Language == raw.Language &&
-			live.Name == raw.Name && sameRebuildSwiftObjCBit(raw, live)
-		return noteRebuildScratchPayload(p.put, alt, alternative, rebuildScratchProofBit(proved))
+	if toState != 0 {
+		return noteRebuildScratchState(p.put, target, toState, rebuildScratchProofBit(proved))
 	}
 	return nil
 }
 
 func (p *rebuildSwiftObjCPass) proved(e *graph.Edge) (bool, error) {
-	for _, id := range [...]string{e.From, e.To} {
-		state, err := p.state(rebuildSwiftObjCKey('n', id))
+	for _, key := range [...][]byte{rebuildSwiftObjCKey('s', e.From), rebuildSwiftObjCKey('n', e.To)} {
+		state, err := p.state(key)
 		if err != nil || state != rebuildScratchExact {
 			return false, err
 		}
@@ -245,7 +224,7 @@ func sameRebuildSwiftObjCBit(raw, live *graph.Node) bool {
 
 func sameRebuildSwiftObjCInput(raw, live *graph.Node) bool {
 	if live == nil || live.ID != raw.ID || live.Kind != raw.Kind || live.Language != raw.Language ||
-		live.Name != raw.Name || live.FilePath != raw.FilePath || live.StartLine != raw.StartLine || live.RepoPrefix != raw.RepoPrefix {
+		live.Name != raw.Name || live.FilePath != raw.FilePath || live.RepoPrefix != raw.RepoPrefix {
 		return false
 	}
 	switch raw.Language {

@@ -120,7 +120,7 @@ func (p *rebuildKMPPass) collect(ctx context.Context, view RebuildView) error {
 		default:
 			return nil
 		}
-		// FR-57 deliberately refuses oversized eligible input rows by type.
+		// Bound the full eligible row, including its key, before writing scratch.
 		if len(r.key)+len(r.value) > rebuildKMPRowLimit {
 			return fmt.Errorf("%w: KMP expect/actual node row", ErrRebuildLinkInputSize)
 		}
