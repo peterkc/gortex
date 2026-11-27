@@ -17,7 +17,7 @@ func RunRebuildGodotAutoload(ctx context.Context, build *store_pebble.BuildStore
 	return build.RebuildGodotAutoload(ctx, receipts, store_pebble.RebuildGodotAutoloadRules{
 		Decl:       gdAutoloadDecl,
 		MemberFile: gdScriptMemberFile,
-		Call:       gdAutoloadCallKey,
+		Call:       gdScriptCallKey,
 		Rebind:     gdAutoloadRebind,
 	})
 }

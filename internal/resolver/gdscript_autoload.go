@@ -42,7 +42,7 @@ func ResolveGDScriptAutoloads(g graph.Store) int {
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		recv, method := gdAutoloadCallKey(e)
+		recv, method := gdScriptCallKey(e)
 		if recv == "" {
 			continue
 		}
@@ -63,7 +63,7 @@ func ResolveGDScriptAutoloads(g graph.Store) int {
 	return resolved
 }
 
-func gdAutoloadCallKey(e *graph.Edge) (receiver, member string) {
+func gdScriptCallKey(e *graph.Edge) (receiver, member string) {
 	if e == nil || !graph.IsUnresolvedTarget(e.To) {
 		return "", ""
 	}

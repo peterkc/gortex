@@ -46,7 +46,7 @@ func ResolveGDScriptPreloadAliases(g graph.Store) int {
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		recv, member := gdAutoloadCallKey(e)
+		recv, member := gdScriptCallKey(e)
 		if recv == "" {
 			continue
 		}

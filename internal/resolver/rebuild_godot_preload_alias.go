@@ -17,7 +17,7 @@ func RunRebuildGodotPreloadAlias(ctx context.Context, build *store_pebble.BuildS
 	return build.RebuildGodotPreloadAlias(ctx, receipts, store_pebble.RebuildGodotPreloadAliasRules{
 		Decl:       gdPreloadAliasDecl,
 		MemberFile: gdScriptMemberFile,
-		Call:       gdAutoloadCallKey,
+		Call:       gdScriptCallKey,
 		SourceFile: gdEdgeSourceFile,
 		Rebind:     gdPreloadAliasRebind,
 	})
