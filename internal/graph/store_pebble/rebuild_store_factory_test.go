@@ -936,3 +936,59 @@ func TestRebuildReduxThunkSkipsActionCapWithoutThunk(t *testing.T) {
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
+
+func TestRebuildStoreFactoryReceiptOnlyNodeCaps(t *testing.T) {
+	const storeFile, otherFile = "store.ts", "other.ts"
+	caller := storeFactoryTestCaller()
+	local := storeFactoryTestAction(caller.FilePath+"::reset", caller.FilePath, caller.WorkspaceID)
+	winner := storeFactoryTestAction(storeFile+"::reset", storeFile, caller.WorkspaceID)
+	getter := storeFactoryTestGetter(storeFile+"::getter", storeFile)
+	call := storeFactoryTestCall("retired", 2)
+	large := strings.Repeat("x", rebuildStoreFactoryRowBytes)
+	for _, tc := range []struct {
+		name, file, workspace string
+		getter, refuse        bool
+	}{
+		{"candidate enters winning scope", storeFile, caller.WorkspaceID, false, true},
+		{"candidate stays outside winning scope", storeFile, "foreign", false, false},
+		{"getter adds another file", otherFile, "", true, true},
+		{"getter repeats the unique file", storeFile, "", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := tc.file + "::extra"
+			live := &graph.Node{ID: id, Name: "extra", Kind: graph.KindType, FilePath: tc.file, Language: caller.Language}
+			facts := []ParseFacts{
+				storeFactoryTestSource(call), producerProofFacts(caller), producerProofFacts(local),
+				producerProofFacts(winner), producerProofFacts(getter),
+			}
+			b, _ := seedSyntheticCustody(t, append(slices.Clone(facts), producerProofFacts(live))...)
+			live.Meta = map[string]any{"padding": large}
+			b.AddNode(live)
+			before := rebuildFrameworkCustodyRows(t, b)
+			raw := storeFactoryTestAction(id, tc.file, tc.workspace)
+			if tc.getter {
+				raw = storeFactoryTestGetter(id, tc.file)
+			}
+			receipts := sqlCallsiteTestReceipts(append(facts, producerProofFacts(raw))...)
+			stats, err := b.RebuildStoreFactory(t.Context(), receipts, storeFactoryTestRules())
+			if tc.refuse {
+				require.ErrorIs(t, err, ErrRebuildStoreFactory)
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "Store Factory node row")
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, stats.Moves)
+			want := *call
+			want.To = winner.ID
+			saved, err := b.pendingEdge(pendingEdgeKey(&want))
+			require.NoError(t, err)
+			require.Equal(t, &want, saved)
+			old, err := b.pendingEdge(pendingEdgeKey(call))
+			require.NoError(t, err)
+			require.Nil(t, old)
+		})
+	}
+}

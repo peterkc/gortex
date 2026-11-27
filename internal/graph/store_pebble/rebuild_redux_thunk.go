@@ -537,7 +537,7 @@ func (p *rebuildReduxThunkPass) recordCandidate(pool byte, raw *graph.Node, file
 		if rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name) {
 			wanted, files = p.poolKey(pool, 'u', raw.Name), p.poolKey(pool, 'i', raw.Name)
 		}
-		return p.recordStoreGetter(key, wanted, files, raw, file, lang)
+		return p.recordStoreGetter(key, wanted, files, raw, file, lang, p.node)
 	}
 	var name string
 	if raw.Kind == graph.KindMethod || rebuildStoreFactoryGetterKind(raw.Kind) {
@@ -553,7 +553,7 @@ func (p *rebuildReduxThunkPass) recordCandidate(pool byte, raw *graph.Node, file
 	}
 	// One live eligible thunk proves native reaches the Call scan, even
 	// if that thunk's cohort does not take part in the election.
-	return p.recordStoreCandidate(key, cohort, len(p.prefix)+1, 'i', pool == 't', raw, file, lang)
+	return p.recordStoreCandidate(key, cohort, len(p.prefix)+1, 'i', pool == 't', raw, file, lang, p.node)
 }
 
 func (p *rebuildReduxThunkPass) proved(old []byte, e *graph.Edge, anchor bool) (bool, error) {

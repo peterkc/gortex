@@ -118,7 +118,9 @@ func (p *rebuildCallMoves) candidateBucketsProved(buckets []rebuildStoreCandidat
 
 // A receipt for a live ID can enter a deciding cohort without a live claim
 // for that role. Only live claims can supply exact or activation witnesses.
-func (p *rebuildCallMoves) recordStoreCandidate(key, after []byte, column int, global byte, anchor bool, raw *graph.Node, file, lang string) error {
+func (p *rebuildCallMoves) recordStoreCandidate(key, after []byte, column int, global byte, anchor bool,
+	raw *graph.Node, file, lang string, node func(string) (*graph.Node, error),
+) error {
 	claim, err := p.marked(key)
 	if err != nil {
 		return err
@@ -144,10 +146,27 @@ func (p *rebuildCallMoves) recordStoreCandidate(key, after []byte, column int, g
 		}
 		entered = state != 0
 	}
-	if !wanted && !entered && (!anchor || before == nil) {
-		return nil
+	if !wanted && (!anchor || before == nil) {
+		if !entered || lang == "" || raw.FilePath != file {
+			return nil
+		}
+		// A receipt-only role must enter a bucket used by the proof,
+		// not just share a name with a consulted cohort.
+		needed := false
+		for _, bucket := range rebuildStoreScopeKeys(after, column, global, raw) {
+			needed, err = p.present(p.candidateProofKey(bucket))
+			if err != nil {
+				return err
+			}
+			if needed {
+				break
+			}
+		}
+		if !needed {
+			return nil
+		}
 	}
-	live, err := p.storeReceiptNode(raw.ID)
+	live, err := node(raw.ID)
 	if err != nil {
 		return err
 	}
@@ -169,7 +188,9 @@ func (p *rebuildCallMoves) recordStoreCandidate(key, after []byte, column int, g
 
 // Getter claims prove live files. A new role or a move can add a file
 // without supplying an exact claim for it.
-func (p *rebuildCallMoves) recordStoreGetter(key, wanted, files []byte, raw *graph.Node, file, lang string) error {
+func (p *rebuildCallMoves) recordStoreGetter(key, wanted, files []byte, raw *graph.Node, file, lang string,
+	node func(string) (*graph.Node, error),
+) error {
 	claim, err := p.marked(key)
 	if err != nil || len(claim) <= 1 && wanted == nil {
 		return err
@@ -194,10 +215,22 @@ func (p *rebuildCallMoves) recordStoreGetter(key, wanted, files []byte, raw *gra
 			return err
 		}
 	}
-	if beforeState == 0 && afterState == 0 {
-		return nil
+	if beforeState == 0 {
+		if afterState == 0 || lang == "" || raw.FilePath != file {
+			return nil
+		}
+		// An extra getter in the sole live file cannot change the pick.
+		liveFile, _, err := p.unique(files)
+		if err != nil || file == liveFile {
+			return err
+		}
+		live, err := node(raw.ID)
+		if err != nil || live == nil {
+			return err
+		}
+		return noteRebuildScratchState(p.put, wanted, afterState, rebuildCapabilityUnproved)
 	}
-	live, err := p.storeReceiptNode(raw.ID)
+	live, err := node(raw.ID)
 	if err != nil {
 		return err
 	}
@@ -213,9 +246,6 @@ func (p *rebuildCallMoves) recordStoreGetter(key, wanted, files []byte, raw *gra
 				return err
 			}
 		}
-	}
-	if beforeState == 0 {
-		return nil
 	}
 	return p.noteStoreNodeProof(key, claim, rebuildScratchProofBit(exact))
 }

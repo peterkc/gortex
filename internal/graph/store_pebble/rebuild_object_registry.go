@@ -529,7 +529,7 @@ func (p *rebuildObjectRegistryPass) recordNode(ctx context.Context, raw *graph.N
 	if rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name) {
 		wanted, files = p.key('v', raw.Name), p.key('t', raw.Name)
 	}
-	if err := p.recordStoreGetter(getterKey, wanted, files, raw, file, lang); err != nil || (caller == 0 && candidate == nil) {
+	if err := p.recordStoreGetter(getterKey, wanted, files, raw, file, lang, p.node); err != nil || (caller == 0 && candidate == nil) {
 		return err
 	}
 	live, err := p.node(raw.ID)

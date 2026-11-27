@@ -259,7 +259,7 @@ func (p *rebuildSidekiqPass) prove(ctx context.Context, receipts iter.Seq2[Parse
 				after = p.aliases(p.sidekiq.Worker(raw))
 			}
 			for i, cohort := range after {
-				if err := p.recordStoreCandidate(p.key("cd"[i], raw.ID), cohort, len(p.prefix), 'a', i == 0 && p.needsAnchor, raw, file, lang); err != nil {
+				if err := p.recordStoreCandidate(p.key("cd"[i], raw.ID), cohort, len(p.prefix), 'a', i == 0 && p.needsAnchor, raw, file, lang, p.node); err != nil {
 					return err
 				}
 			}

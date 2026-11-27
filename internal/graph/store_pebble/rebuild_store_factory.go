@@ -473,13 +473,13 @@ func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, fil
 				cohort = p.key('u', binding, member)
 			}
 		}
-		return p.recordStoreCandidate(key, cohort, len(p.prefix), 'a', p.needsAnchor, raw, file, lang)
+		return p.recordStoreCandidate(key, cohort, len(p.prefix), 'a', p.needsAnchor, raw, file, lang, p.node)
 	}
 	var wanted, files []byte
 	if rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.getter(raw, raw.Name) {
 		wanted, files = p.key('v', raw.Name), p.key('t', raw.Name)
 	}
-	return p.recordStoreGetter(key, wanted, files, raw, file, lang)
+	return p.recordStoreGetter(key, wanted, files, raw, file, lang, p.node)
 }
 
 func (p *rebuildStoreFactoryPass) proveActions(ctx context.Context) (anchor bool, err error) {
