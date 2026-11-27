@@ -112,16 +112,21 @@ func (b *BuildStore) RebuildRails(ctx context.Context, receipts iter.Seq2[ParseF
 					id := rules.Owner(e)
 					return id, id != ""
 				},
-				Candidate: rules.Candidate,
-				Names:     func(name, _ string) []string { return []string{name} },
-				Preferred: rules.Preferred,
-				Directory: rules.Directory,
+				Candidate:  rules.Candidate,
+				Names:      func(name, _ string) []string { return []string{name} },
+				SimpleName: func(id string) string { return id },
+				Preferred:  rules.Preferred,
+				Directory:  rules.Directory,
 			},
 		},
 		rails: rules,
 	}
-	if err := p.capture(ctx); err != nil || p.stats.Stubs == 0 {
-		return p.stats, err
+	if err := p.capture(ctx); err != nil {
+		return stats, err
+	}
+	active, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('h'))
+	if err != nil || !active {
+		return stats, err
 	}
 	if err := p.captureCallClaims(ctx); err != nil {
 		return stats, err
@@ -132,7 +137,7 @@ func (b *BuildStore) RebuildRails(ctx context.Context, receipts iter.Seq2[ParseF
 	if err := p.captureModels(ctx); err != nil {
 		return stats, err
 	}
-	if err := p.record(ctx, p.modelReceipts(ctx, receipts)); err != nil {
+	if err := p.record(ctx, p.railsReceipts(ctx, receipts)); err != nil {
 		return stats, err
 	}
 	if err := p.joinMembers(ctx); err != nil {
@@ -160,8 +165,11 @@ func (p *rebuildRails) capture(ctx context.Context) error {
 			return nil
 		}
 		caller, err := p.storeReceiptNode(e.From)
-		if err != nil || caller == nil || !p.rails.Source(caller.FilePath) {
+		if err != nil {
 			return err
+		}
+		if caller != nil && p.rails.Source(caller.FilePath) {
+			p.stats.Stubs++
 		}
 		raw, err := p.inputKey(old)
 		if err != nil {
@@ -175,13 +183,15 @@ func (p *rebuildRails) capture(ctx context.Context) error {
 		if err := p.put(p.key('q', q.class), nil); err != nil {
 			return err
 		}
+		if err := p.put(p.key('c', q.class), nil); err != nil {
+			return err
+		}
 		if err := p.put(p.key('w', q.method), nil); err != nil {
 			return err
 		}
 		if err := p.put(p.key('n', e.From), []byte{rebuildCapabilityWanted}); err != nil {
 			return err
 		}
-		p.stats.Stubs++
 		return p.put(append(p.column('h'), old...), raw)
 	})
 }
@@ -251,13 +261,12 @@ func (p *rebuildRails) captureModels(ctx context.Context) error {
 	})
 }
 
-// ModelsTable raw receipts prove a positive live model witness only. Feed
-// them through the same replay that records convention and member facts.
-func (p *rebuildRails) modelReceipts(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) iter.Seq2[ParseFacts, error] {
+// Rails adds caller paths and model facts to the shared Express replay.
+func (p *rebuildRails) railsReceipts(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) iter.Seq2[ParseFacts, error] {
 	return func(yield func(ParseFacts, error) bool) {
 		for facts, err := range receipts {
 			if err == nil && facts.EffectiveLanguage != "" {
-				err = p.recordModels(ctx, facts)
+				err = p.recordRailsFacts(ctx, facts)
 			}
 			if !yield(facts, err) || err != nil {
 				return
@@ -266,8 +275,25 @@ func (p *rebuildRails) modelReceipts(ctx context.Context, receipts iter.Seq2[Par
 	}
 }
 
-func (p *rebuildRails) recordModels(ctx context.Context, facts ParseFacts) error {
+func (p *rebuildRails) recordRailsFacts(ctx context.Context, facts ParseFacts) error {
 	file := pathkey.Normalize(facts.File.FilePath)
+	for _, n := range facts.Nodes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if n.FilePath != file {
+			continue
+		}
+		wanted, err := p.present(p.key('n', n.ID))
+		if err != nil {
+			return err
+		}
+		if wanted {
+			if err := p.put(p.key('F', n.ID, file), nil); err != nil {
+				return err
+			}
+		}
+	}
 	for _, e := range facts.Edges {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -335,27 +361,47 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 			return errors.Join(err, invalid("rails owned Call missing"))
 		}
 		caller, err := p.storeReceiptNode(e.From)
-		if err != nil || caller == nil {
-			return errors.Join(err, invalid("rails caller disappeared"))
-		}
-		q, _ := p.query(e)
-		fromDir := p.rails.Directory(caller.FilePath)
-		target, uncertain, err := p.elect(ctx, q, fromDir, false)
 		if err != nil {
 			return err
 		}
-		if uncertain {
+		q, _ := p.query(e)
+		var target string
+		var uncertain bool
+		if caller != nil && p.rails.Source(caller.FilePath) {
+			target, uncertain, err = p.elect(ctx, q, p.rails.Directory(caller.FilePath), false)
+			if err != nil {
+				return err
+			}
+		}
+		var sourceSeen, changed bool
+		sources := p.key('F', e.From)
+		if err := p.visit(ctx, sources, func(r row) error {
+			file, _, err := readKeyString(r.key[len(sources):])
+			if err != nil {
+				return err
+			}
+			sourceSeen = true
+			var proved string
+			var rawUncertain bool
+			if p.rails.Source(file) {
+				proved, rawUncertain, err = p.elect(ctx, q, p.rails.Directory(file), true)
+				if err != nil {
+					return err
+				}
+			}
+			changed = changed || target != proved || rawUncertain
+			return nil
+		}); err != nil {
+			return err
+		}
+		if changed || uncertain {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil
 		}
-		proved, uncertain, err := p.elect(ctx, q, fromDir, true)
-		if err != nil {
-			return err
-		}
-		if target == "" && proved == "" && !uncertain {
+		if target == "" {
 			return nil
 		}
-		callerProof, err := rebuildScratchState(p.b.pending, p.key('n', e.From), "rails caller proof")
+		conflict, err := p.present(p.key('D', target))
 		if err != nil {
 			return err
 		}
@@ -366,7 +412,7 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 				return err
 			}
 		}
-		if target != proved || uncertain || callerProof != rebuildScratchExact ||
+		if !sourceSeen || conflict ||
 			len(claim) <= 1 || claim[0] != rebuildScratchExact || !bytes.Equal(claim[1:], old) {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil

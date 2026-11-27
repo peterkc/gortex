@@ -81,3 +81,30 @@ func TestRebuildRailsComparesEmptyLiveElection(t *testing.T) {
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
+
+func TestRebuildRailsReceiptCallerEntersSource(t *testing.T) {
+	const file = "routes.txt"
+	caller := &graph.Node{ID: "caller", Kind: graph.KindFunction, FilePath: file, Language: "ruby"}
+	class := &graph.Node{ID: "first", Name: "MailService", Kind: graph.KindType, FilePath: file, Language: "ruby"}
+	call := &graph.Edge{From: caller.ID, To: "unresolved::send", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
+		Meta: map[string]any{"recv_const": class.Name}}
+	facts := ParseFacts{EffectiveLanguage: "ruby", File: graph.FileMetaRow{FilePath: file},
+		Nodes: []*graph.Node{caller, class}, Edges: []*graph.Edge{call}}
+	b, _ := seedSyntheticCustody(t, facts)
+	before := rebuildFrameworkCustodyRows(t, b)
+	facts.Nodes = []*graph.Node{class}
+	rawCaller := *caller
+	rawCaller.FilePath = "routes.rb"
+	receipts := func(yield func(ParseFacts, error) bool) {
+		if yield(facts, nil) {
+			yield(producerProofFacts(&rawCaller), nil)
+		}
+	}
+	require.NoError(t, b.FreezeRailsInputs(t.Context(), func(*graph.Edge) bool { return true }))
+	stats, err := b.RebuildRails(t.Context(), receipts, rebuildRailsReviewRules())
+	var refused *RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refused)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
