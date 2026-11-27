@@ -103,8 +103,8 @@ func TestRebuildLaravelListenMapScope(t *testing.T) {
 	member := &graph.Edge{From: handle.ID, To: file + "::Listener", Kind: graph.EdgeMemberOf, FilePath: file, Line: 3}
 	for _, tc := range []struct {
 		name, event, rawMap string
-		want               string
-		refuse             bool
+		want                string
+		refuse              bool
 	}{
 		{"unrelated entry changed", "Notice", "Notice=>Listener;Other=>Another", handle.ID, false},
 		{"empty elected event with another activation", "Missing", "Else=>Another", "unresolved::*.handle", false},
