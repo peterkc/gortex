@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -50,4 +51,54 @@ func TestRebuildScratchRefusalsKeepLowestCompleteKey(t *testing.T) {
 		Count: 3,
 		First: graph.EdgeIdentity{From: "caller", To: "target", Kind: graph.EdgeCalls, FilePath: "call.go", Line: 10},
 	}, got)
+}
+
+func TestRebuildFactoryChainGuards(t *testing.T) {
+	const file = "worker.go"
+	for _, mode := range []string{"nil inputs", "occupied freeze", "no frozen candidates", "candidate edge cap"} {
+		t.Run(mode, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			ctx := t.Context()
+			rules := RebuildFactoryChainRules{
+				Call: func(*graph.Edge) (string, string) { return "New()", "Run" },
+				Target: func(RebuildFactoryChainLookup, string, string, string) (string, bool) {
+					t.Error("guard allowed target election")
+					return "", false
+				},
+				Rebind: func(*graph.Edge, string, bool) graph.EdgeReindex { return graph.EdgeReindex{} },
+			}
+			if mode == "nil inputs" {
+				count, err := b.RebuildFactoryChain(ctx, nil, rules)
+				require.ErrorIs(t, err, ErrRebuildFactoryChain)
+				require.ErrorContains(t, err, "factory chain inputs")
+				require.Zero(t, count)
+				return
+			}
+			match := func(graph.FrameworkCensusEdge) bool { return true }
+			if mode == "occupied freeze" {
+				require.NoError(t, b.FreezeFactoryChainInputs(ctx, match))
+				before := rebuildFrameworkCustodyRows(t, b)
+				require.ErrorIs(t, b.FreezeFactoryChainInputs(ctx, match), ErrRebuildFactoryChain)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			call := &graph.Edge{From: "caller", To: "unresolved::*.Run", Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+			if mode == "candidate edge cap" {
+				call.Context = strings.Repeat("x", 16<<20)
+				b.AddEdge(call)
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			require.NoError(t, b.FreezeFactoryChainInputs(ctx, match))
+			receipts := func(func(ParseFacts, error) bool) { t.Error("guard opened receipts") }
+			count, err := b.RebuildFactoryChain(ctx, receipts, rules)
+			if mode == "candidate edge cap" {
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.NotContains(t, err.Error(), "live edge missing")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, count)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
 }

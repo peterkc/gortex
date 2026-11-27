@@ -55,7 +55,8 @@ func (b *BuildStore) freezeConventionInputs(ctx context.Context, p rebuildCallMo
 		}
 		via, _ := e.Meta["via"].(string)
 		recv, _ := e.Meta["recv_const"].(string)
-		if !match(graph.FrameworkCensusEdge{EdgeIdentity: id, Via: via, RecvConst: recv}) {
+		expr, _ := e.Meta["receiver_expr"].(string)
+		if !match(graph.FrameworkCensusEdge{EdgeIdentity: id, Via: via, RecvConst: recv, ReceiverExpr: expr}) {
 			return nil
 		}
 		return p.put(append(p.column('i'), r.key...), nil)

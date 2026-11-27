@@ -46,6 +46,15 @@ func (p *rebuildFactoryChain) query(e *graph.Edge) rebuildFactoryChainQuery {
 	return rebuildFactoryChainQuery{expr, method}
 }
 
+func rebuildFactoryChainColumns(b *BuildStore) rebuildCallMoves {
+	return rebuildCallMoves{b: b, prefix: rebuildFactoryChainPrefix, rowBytes: 16 << 20, label: "factory chain", inputRow: "input row"}
+}
+
+// FreezeFactoryChainInputs captures the native pre-loop Calls and References.
+func (b *BuildStore) FreezeFactoryChainInputs(ctx context.Context, match func(graph.FrameworkCensusEdge) bool) error {
+	return b.freezeConventionInputs(ctx, rebuildFactoryChainColumns(b), ErrRebuildFactoryChain, match)
+}
+
 func (b *BuildStore) RebuildFactoryChain(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules RebuildFactoryChainRules) (moves uint64, err error) {
 	defer func() {
 		if err != nil {
@@ -56,27 +65,28 @@ func (b *BuildStore) RebuildFactoryChain(ctx context.Context, receipts iter.Seq2
 	if receipts == nil || rules.Call == nil || rules.Target == nil || rules.Rebind == nil {
 		return 0, invalid("factory chain inputs")
 	}
-	prefix := rebuildFactoryChainPrefix
-	busy, err := rebuildGuardHasPrefix(ctx, b.pending, prefix)
+	cols := rebuildFactoryChainColumns(b)
+	frozen, err := cols.present(cols.column('I'))
 	if err != nil {
 		return 0, err
 	}
-	if busy {
-		return 0, invalid("factory chain scratch occupied")
+	if !frozen {
+		return 0, invalid("factory chain census missing")
 	}
-	defer func() { err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync)) }()
-	p := rebuildFactoryChain{
-		rebuildCallMoves: rebuildCallMoves{b: b, prefix: prefix, rowBytes: 16 << 20, label: "factory chain", inputRow: "input row"},
-		rules:            rules,
+	defer func() { err = errors.Join(err, b.pending.DeleteRange(cols.prefix, prefixEnd(cols.prefix), pebble.NoSync)) }()
+	active, err := rebuildGuardHasPrefix(ctx, b.pending, cols.column('i'))
+	if err != nil || !active {
+		return 0, err
 	}
+	p := rebuildFactoryChain{rebuildCallMoves: cols, rules: rules}
 	if err := p.capture(ctx); err != nil {
 		return 0, err
 	}
-	if err := p.record(ctx, receipts); err != nil {
+	active, err = rebuildGuardHasPrefix(ctx, b.pending, p.column('h'))
+	if err != nil || !active {
 		return 0, err
 	}
-	active, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('h'))
-	if err != nil || !active {
+	if err := p.record(ctx, receipts); err != nil {
 		return 0, err
 	}
 	if err := p.captureNames(ctx); err != nil {
@@ -137,8 +147,9 @@ func (p *rebuildFactoryChain) capture(ctx context.Context) error {
 				return err
 			}
 		}
-		if !graph.IsUnresolvedTarget(id.To) {
-			return nil
+		frozen, err := p.present(append(p.column('i'), r.key...))
+		if err != nil || !frozen || !graph.IsUnresolvedTarget(id.To) {
+			return err
 		}
 		e, err := p.decodeKeyedEdge(r.key, r.value)
 		if err != nil || p.query(e).expr == "" {
@@ -297,6 +308,10 @@ func (p *rebuildFactoryChain) recordCall(e *graph.Edge, ordinal uint64) error {
 	old := claim[1:]
 	id, err := decodeLinkRecorder(old)
 	if err != nil || id.Kind != e.Kind || id.From != e.From || id.FilePath != e.FilePath || id.Line != e.Line || !graph.IsUnresolvedTarget(id.To) {
+		return err
+	}
+	active, err := p.present(append(p.column('h'), old...))
+	if err != nil || !active {
 		return err
 	}
 	key := append(p.column('H'), old...)
@@ -481,8 +496,11 @@ func (p *rebuildFactoryChain) plan(ctx context.Context) (uint64, error) {
 	if err := p.visit(ctx, prefix, func(item row) error {
 		old := item.key[len(prefix):]
 		e, err := p.edge(old)
-		if err != nil || e == nil {
-			return errors.Join(err, invalid("factory chain live edge missing"))
+		if err != nil {
+			return err
+		}
+		if e == nil {
+			return invalid("factory chain live edge missing")
 		}
 		q := p.query(e)
 		live, walked, unknown, err := p.elect(ctx, q, e.From, false)

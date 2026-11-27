@@ -7,6 +7,14 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
+// FreezeRebuildFactoryChainInputs captures the native census candidates before any stage writes.
+func FreezeRebuildFactoryChainInputs(ctx context.Context, b *store_pebble.BuildStore, selection FrameworkSynthesizerSelection) error {
+	if !selection.allows(SynthFactoryChain) {
+		return nil
+	}
+	return b.FreezeFactoryChainInputs(ctx, factoryChainCandidateEdge)
+}
+
 // RunRebuildFactoryChain settles cross-file Calls and References after the
 // earlier framework turns, using settled Implements and Extends.
 func RunRebuildFactoryChain(ctx context.Context, b *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error],

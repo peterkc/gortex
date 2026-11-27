@@ -68,17 +68,12 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				stationary.Meta = nil
 				b.AddEdge(&stationary)
 			}
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthFactoryChain))
+			require.NoError(t, FreezeRebuildFactoryChainInputs(t.Context(), b, frozen))
 			before := rebuildEventSavedRows(t, b)
-			selected := selection
-			// The census has its own node limit. Exercise the stage's role
-			// limit directly for these two deliberately oversized fixtures.
-			if mode != "unrelated large row" && mode != "related large row" {
-				frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
-				require.NoError(t, err)
-				require.True(t, frozen.allows(SynthFactoryChain))
-				selected = frozen
-			}
-			count, err := RunRebuildFactoryChain(t.Context(), b, rebuildGRPCReceipts(route, raw), selected)
+			count, err := RunRebuildFactoryChain(t.Context(), b, rebuildGRPCReceipts(route, raw), frozen)
 			switch mode {
 			case "conformance", "unrelated large row":
 				require.NoError(t, err)
@@ -123,4 +118,27 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRebuildFactoryChainIgnoresLateCandidate(t *testing.T) {
+	const file = "worker.go"
+	factory := rebuildEventNode(file, "New", "go", "")
+	factory.Meta = map[string]any{"return_type": "Worker"}
+	m := rebuildEventNode(file, "Run", "go", "")
+	m.Kind = graph.KindMethod
+	m.Meta = map[string]any{"receiver": "Worker"}
+	caller := rebuildEventNode(file, "caller", "go", "")
+	nodes := []*graph.Node{factory, m, caller}
+	b := openRebuildGRPCBuild(t, rebuildEventFacts(file, "go", nodes))
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthFactoryChain})
+	require.NoError(t, err)
+	require.NoError(t, FreezeRebuildFactoryChainInputs(t.Context(), b, selection))
+	late := &graph.Edge{From: caller.ID, To: "unresolved::*.Run", Kind: graph.EdgeCalls, FilePath: file, Line: 2,
+		Meta: map[string]any{"receiver_expr": "New()"}}
+	b.AddEdge(late)
+	before := rebuildEventSavedRows(t, b)
+	count, err := RunRebuildFactoryChain(t.Context(), b, rebuildGRPCReceipts(rebuildEventFacts(file, "go", nodes, late)), selection)
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
 }

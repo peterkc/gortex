@@ -486,6 +486,9 @@ func buildRebuildStages(
 		if err := resolver.FreezeRebuildUIKitInputs(ctx, private, selection); err != nil {
 			return err
 		}
+		if err := resolver.FreezeRebuildFactoryChainInputs(ctx, private, selection); err != nil {
+			return err
+		}
 		grpc, err := resolver.RunRebuildGRPC(ctx, private, receipts, selection)
 		if err != nil {
 			return err
