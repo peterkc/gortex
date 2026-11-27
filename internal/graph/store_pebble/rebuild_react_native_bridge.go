@@ -478,7 +478,8 @@ func (p *rebuildReactNativeBridge) prove(ctx context.Context, receipts iter.Seq2
 			}
 			mod, method := p.policy.names(n.Meta)
 			bit := byte(rebuildCapabilityUnproved)
-			if live != nil && n.FilePath == file && live.FilePath == file && facts.EffectiveLanguage == n.Language &&
+			// HTML receipts can contain delegated JavaScript callers.
+			if live != nil && n.FilePath == file && live.FilePath == file && facts.EffectiveLanguage != "" &&
 				live.Language == n.Language && live.Kind == n.Kind && live.Name == n.Name && live.RepoPrefix == n.RepoPrefix {
 				liveMod, liveMethod := p.policy.names(live.Meta)
 				if liveMod == mod && liveMethod == method {

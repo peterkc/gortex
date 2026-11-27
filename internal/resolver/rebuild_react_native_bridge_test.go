@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
@@ -202,6 +203,88 @@ func TestRebuildReactNativeBridgeRejectsOverwrittenMarker(t *testing.T) {
 	}
 }
 
+func TestRebuildNativeModuleBridgeHTMLCaller(t *testing.T) {
+	const page = "page.html"
+	parsed, err := languages.NewHTMLExtractor().Extract(page, []byte(`<script>
+function show() {
+    NativeModules.Calendar.open();
+}
+</script>`))
+	require.NoError(t, err)
+	var markers []*graph.Edge
+	for _, e := range parsed.Edges {
+		if e.Kind == graph.EdgeCalls && e.Meta["via"] == rnNativeVia {
+			markers = append(markers, e)
+		}
+	}
+	require.Len(t, markers, 1)
+	marker := markers[0]
+	require.Equal(t, page, marker.FilePath)
+	require.Equal(t, "Calendar", marker.Meta["rn_module"])
+	require.Equal(t, "open", marker.Meta["rn_method"])
+	index := slices.IndexFunc(parsed.Nodes, func(n *graph.Node) bool {
+		return n.ID == marker.From
+	})
+	require.GreaterOrEqual(t, index, 0)
+	caller := parsed.Nodes[index]
+	require.Equal(t, page, caller.FilePath)
+	require.Equal(t, "javascript", caller.Language)
+	require.Equal(t, true, caller.Meta["inline_script"])
+
+	for _, tc := range []struct {
+		synth, file, language, metaPrefix string
+		stage                             error
+	}{
+		{SynthReactNative, "Calendar.java", "java", "rn", store_pebble.ErrRebuildReactNativeBridge},
+		{SynthExpoModules, "Calendar.kt", "kotlin", "expo", store_pebble.ErrRebuildExpoModuleBridge},
+	} {
+		t.Run(tc.synth, func(t *testing.T) {
+			target := &graph.Node{
+				ID:       tc.file + "::open",
+				Name:     "open",
+				Kind:     graph.KindMethod,
+				Language: tc.language,
+				FilePath: tc.file,
+				Meta:     map[string]any{tc.metaPrefix + "_module": "Calendar", tc.metaPrefix + "_method": "open"},
+			}
+			selection, err := NewFrameworkSynthesizerSelection([]string{tc.synth})
+			require.NoError(t, err)
+			run := RunRebuildReactNativeBridge
+			if tc.synth == SynthExpoModules {
+				run = RunRebuildExpoModuleBridge
+			}
+			for _, liveLanguage := range []string{"javascript", "typescript"} {
+				t.Run(liveLanguage, func(t *testing.T) {
+					receipts, private, native := openRebuildObserverStores(t, nil,
+						rebuildEventFacts(page, "html", []*graph.Node{caller}, marker),
+						rebuildEventFacts(tc.file, tc.language, []*graph.Node{target}),
+					)
+					if liveLanguage != caller.Language {
+						changed := *caller
+						changed.Language = liveLanguage
+						private.AddNode(&changed)
+					}
+					before := rebuildEventSavedRows(t, private)
+					stats, err := run(t.Context(), private, rebuildGRPCReceipts(receipts...), selection, 1)
+					if liveLanguage != caller.Language {
+						require.ErrorIs(t, err, tc.stage)
+						require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+						require.Zero(t, stats)
+						require.Equal(t, before, rebuildEventSavedRows(t, private))
+						return
+					}
+					require.NoError(t, err)
+					require.Equal(t, uint64(1), stats.Edges)
+					report := RunFrameworkSynthesizersWithSelection(native, selection)
+					require.NoError(t, report.Err)
+					require.Equal(t, 1, report.Total)
+					require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
+				})
+			}
+		})
+	}
+}
+
 func TestRebuildReactNativeBridgeRejectsUnprovedEndpoints(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -217,7 +300,7 @@ func TestRebuildReactNativeBridgeRejectsUnprovedEndpoints(t *testing.T) {
 		{"missing iOS declaration", 2, func(f *store_pebble.ParseFacts) {
 			f.Nodes, f.File.NodeCount = f.Nodes[1:], 1
 		}, 1},
-		{"wrong iOS receipt language", 2, func(f *store_pebble.ParseFacts) { f.EffectiveLanguage = "swift" }, 1},
+		{"empty iOS extractor", 2, func(f *store_pebble.ParseFacts) { f.EffectiveLanguage = "" }, 1},
 		{"wrong iOS node language", 2, func(f *store_pebble.ParseFacts) { f.Nodes[0].Language = "swift" }, 1},
 		{"wrong iOS kind", 2, func(f *store_pebble.ParseFacts) { f.Nodes[0].Kind = graph.KindFunction }, 1},
 		{"wrong iOS module", 2, func(f *store_pebble.ParseFacts) { f.Nodes[0].Meta["rn_module"] = "Contacts" }, 1},
