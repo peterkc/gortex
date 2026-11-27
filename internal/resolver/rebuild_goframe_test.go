@@ -217,7 +217,7 @@ func TestRebuildGoFrameRoutes(t *testing.T) {
 		for _, conflict := range []bool{false, true} {
 			first, dup := cloneFrameworkEdge(call), cloneFrameworkEdge(call)
 			if conflict {
-				first.Meta["goframe_route"] = route.ID
+				dup.Meta["goframe_route"] = route.ID
 			} else {
 				dup.Meta["observer"] = "not the first payload"
 			}
@@ -238,6 +238,32 @@ func TestRebuildGoFrameRoutes(t *testing.T) {
 		}
 	})
 
+	t.Run("stationary duplicate disagreement", func(t *testing.T) {
+		bound := cloneFrameworkEdge(call)
+		bound.To = winner.ID
+		dup := cloneFrameworkEdge(bound)
+		dup.Meta["goframe_request_pkg"] = "other-package"
+		facts := rebuildEventFacts(file, "go", callFacts.Nodes, bound)
+		build := openRebuildGRPCBuild(t, facts, factsFor(winner))
+		before := rebuildEventSavedRows(t, build)
+		receipts := rebuildGRPCReceipts(facts, rebuildEventFacts(file, "go", nil, dup), factsFor(winner))
+		moves, err := RunRebuildGoFrame(t.Context(), build, receipts, freeze(t, build))
+		require.NoError(t, err)
+		require.Zero(t, moves)
+		require.Equal(t, before, rebuildEventSavedRows(t, build))
+	})
+
+	t.Run("stationary foreign handler with source receipt", func(t *testing.T) {
+		facts := rebuildEventFacts(file, "go", callFacts.Nodes, call)
+		build := openRebuildGRPCBuild(t, facts, factsFor(otherWorkspace))
+		before := rebuildEventSavedRows(t, build)
+		receipts := rebuildGRPCReceipts(rebuildEventFacts(file, "go", callFacts.Nodes), factsFor(otherWorkspace))
+		moves, err := RunRebuildGoFrame(t.Context(), build, receipts, freeze(t, build))
+		require.NoError(t, err)
+		require.Zero(t, moves)
+		require.Equal(t, before, rebuildEventSavedRows(t, build))
+	})
+
 	t.Run("ambiguous receipt of a stationary tagged Call", func(t *testing.T) {
 		bound := cloneFrameworkEdge(call)
 		bound.To = winner.ID
@@ -250,6 +276,25 @@ func TestRebuildGoFrameRoutes(t *testing.T) {
 		require.NoError(t, build.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: moved, OldTo: bound.To}}))
 		build.AddEdge(bound)
 		checkRefusal(t, build, bound, rebuildEventFacts(file, "go", callFacts.Nodes, raw), factsFor(winner))
+	})
+
+	t.Run("unassigned claimant keeps its live role", func(t *testing.T) {
+		bound := cloneFrameworkEdge(call)
+		bound.To = winner.ID
+		other := cloneFrameworkEdge(bound)
+		other.To = "unresolved::*.MissingReq"
+		other.Meta["goframe_request_type"] = "MissingReq"
+		plain := cloneFrameworkEdge(bound)
+		plain.Meta = nil
+		rawWinner := *winner
+		rawWinner.Meta = otherPkg.Meta
+		input := rebuildEventFacts(file, "go", callFacts.Nodes, bound)
+		build := openRebuildGRPCBuild(t, input, factsFor(winner))
+		require.NoError(t, build.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: other, OldTo: bound.To}}))
+		build.AddEdge(bound)
+		// Assigning the untagged receipt to the other row would leave the
+		// bound row tagged, but its handler receipt no longer matches.
+		checkRefusal(t, build, bound, rebuildEventFacts(file, "go", callFacts.Nodes, plain), factsFor(&rawWinner))
 	})
 
 	t.Run("raw role and receipt scope guards", func(t *testing.T) {

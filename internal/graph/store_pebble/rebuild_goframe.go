@@ -171,13 +171,11 @@ func (p *rebuildGoFrame) capture(ctx context.Context) error {
 		if err := p.put(append(p.column('s'), r.key...), raw); err != nil {
 			return err
 		}
+		if err := p.put(p.key('f', e.From), nil); err != nil {
+			return err
+		}
 		if raw == nil {
 			return nil
-		}
-		if taggedReceipt {
-			if err := p.put(p.key('f', e.From), nil); err != nil {
-				return err
-			}
 		}
 		return p.claim(raw, r.key)
 	})
@@ -276,8 +274,9 @@ func (p *rebuildGoFrame) record(ctx context.Context, receipts iter.Seq2[ParseFac
 // can disprove its route role, but cannot replace that payload or its position.
 func (p *rebuildGoFrame) recordCall(e *graph.Edge) error {
 	raw := pendingEdgeKey(e)
-	claimed, err := p.present(append(p.column('r'), raw...))
-	if err != nil || !claimed {
+	claimKey := append(p.column('r'), raw...)
+	claim, err := p.marked(claimKey)
+	if err != nil || claim == nil {
 		return err
 	}
 	key := append(p.column('j'), raw...)
@@ -287,7 +286,7 @@ func (p *rebuildGoFrame) recordCall(e *graph.Edge) error {
 	}
 	if first != nil {
 		if !p.sameRouteRole(first, e) {
-			return p.put(append(p.column('d'), raw...), nil)
+			return noteRebuildScratchPayload(p.put, claimKey, claim, rebuildCapabilityUnproved)
 		}
 		return nil
 	}
@@ -448,23 +447,20 @@ func (p *rebuildGoFrame) compareCall(ctx context.Context, rawKey []byte, live *g
 	rawOn bool, optionalCount int, move, mirror *graph.Edge,
 ) (bool, error) {
 	var raw *graph.Edge
-	var ambiguous bool
+	var ambiguous, conflict bool
 	if len(rawKey) != 0 {
 		claim, err := p.marked(append(p.column('r'), rawKey...))
 		if err != nil {
 			return false, err
 		}
 		ambiguous = len(claim) == 1
-		conflict, err := p.present(append(p.column('d'), rawKey...))
-		if err != nil || conflict {
-			return false, err
-		}
+		conflict = len(claim) != 0 && claim[0]&rebuildCapabilityUnproved != 0
 		raw, err = pendingGet(p.b.pending, append(p.column('j'), rawKey...), decodeEdge)
 		if err != nil {
 			return false, err
 		}
 	}
-	if move != nil && (raw == nil || ambiguous) {
+	if move != nil && (raw == nil || conflict || ambiguous) {
 		return false, nil
 	}
 	if raw == nil {
@@ -477,6 +473,13 @@ func (p *rebuildGoFrame) compareCall(ctx context.Context, rawKey []byte, live *g
 	workspace, err := p.get(p.key('F', raw.From))
 	if err != nil {
 		return false, err
+	}
+	if ambiguous {
+		// The other claimant may own the receipt, leaving this live role.
+		ok, err := p.matches(ctx, live, workspace, source, rawOn, optionalCount, move, mirror)
+		if err != nil || !ok {
+			return false, err
+		}
 	}
 	return p.matches(ctx, raw, workspace, source, rawOn, optionalCount, move, mirror)
 }
