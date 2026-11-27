@@ -540,23 +540,37 @@ func TestRebuildMyBatisRejectsInvalidInputAndOccupiedScratch(t *testing.T) {
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
 
-func TestRebuildMyBatisRejectsOversizedCall(t *testing.T) {
-	b := newBuild(t, FullProfile)
-	old := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
-	xml := myBatisTestXML(t, "local", old)
-	require.NoError(t, b.AddParsedFile("local", xml))
-	large := *old
-	large.Context = strings.Repeat("x", rebuildMyBatisRowBytes)
-	key := pendingEdgeKey(&large)
-	raw, err := encodeEdge(&large)
-	require.NoError(t, err)
-	require.Greater(t, len(key)+len(raw), rebuildMyBatisRowBytes)
-	require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
-	before := rebuildFrameworkCustodyRows(t, b)
-	stats, err := runTestRebuildMyBatis(t, b, xml)
-	require.ErrorIs(t, err, ErrRebuildMyBatis)
-	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
-	require.ErrorContains(t, err, "MyBatis input row")
-	require.Zero(t, stats)
-	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+func TestRebuildMyBatisCaptureCapsOnlyMapperCalls(t *testing.T) {
+	for _, owned := range []bool{false, true} {
+		b := newBuild(t, FullProfile)
+		large := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
+		large.Context = strings.Repeat("x", rebuildMyBatisRowBytes)
+		if !owned {
+			delete(large.Meta, "via")
+		}
+		key := pendingEdgeKey(large)
+		raw, err := encodeEdge(large)
+		require.NoError(t, err)
+		require.Greater(t, len(key)+len(raw), rebuildMyBatisRowBytes)
+		require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+		before := rebuildFrameworkCustodyRows(t, b)
+		p := rebuildMyBatisPass{b: b}
+		err = p.capture(t.Context(), RebuildMyBatisRules{
+			Stub: func(e *graph.Edge) (string, string) {
+				if e.Meta["via"] != "mybatis.mapper" {
+					return "", ""
+				}
+				return myBatisTestNamespace, "find"
+			},
+			Join: func(ns, stmt string) string { return ns + "." + stmt },
+		})
+		if owned {
+			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+			require.ErrorContains(t, err, "MyBatis input row")
+		} else {
+			require.NoError(t, err)
+		}
+		require.Zero(t, p.stats)
+		require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+	}
 }

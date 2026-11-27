@@ -173,6 +173,9 @@ func (p *rebuildSQLCallsitePass) plan(ctx context.Context) error {
 		if name == "" {
 			return nil
 		}
+		if err := rebuildSQLCallsiteEdgeInput(r.key, r.value); err != nil {
+			return err
+		}
 		p.stats.Stubs++
 		custody, err := readRebuildEdgeCustody(snap, r.key)
 		if err != nil && !errors.Is(err, ErrRebuildUnknownProvenance) {
@@ -228,9 +231,6 @@ func (p *rebuildSQLCallsitePass) claim(raw, old []byte) error {
 }
 
 func decodeRebuildSQLCallsiteEdge(key, val []byte) (*graph.Edge, error) {
-	if len(key)+len(val) > rebuildSQLCallsiteRowBytes {
-		return nil, fmt.Errorf("%w: SQL callsite edge row", ErrRebuildLinkInputSize)
-	}
 	e, err := decodeEdge(val)
 	if err == nil && !bytes.Equal(key, pendingEdgeKey(e)) {
 		return nil, invalid("SQL callsite edge does not match key")
@@ -238,8 +238,18 @@ func decodeRebuildSQLCallsiteEdge(key, val []byte) (*graph.Edge, error) {
 	return e, err
 }
 
+func rebuildSQLCallsiteEdgeInput(key, val []byte) error {
+	if len(key)+len(val) > rebuildSQLCallsiteRowBytes {
+		return fmt.Errorf("%w: SQL callsite edge row", ErrRebuildLinkInputSize)
+	}
+	return nil
+}
+
 func (p *rebuildSQLCallsitePass) edge(key []byte) (*graph.Edge, error) {
 	return pendingGet(p.b.pending, key, func(val []byte) (*graph.Edge, error) {
+		if err := rebuildSQLCallsiteEdgeInput(key, val); err != nil {
+			return nil, err
+		}
 		return decodeRebuildSQLCallsiteEdge(key, val)
 	})
 }

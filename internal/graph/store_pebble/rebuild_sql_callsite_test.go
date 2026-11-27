@@ -3,12 +3,41 @@ package store_pebble
 import (
 	"iter"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
+
+func TestRebuildSQLCallsitePlanCapsOnlyOwnedCalls(t *testing.T) {
+	for _, owned := range []bool{false, true} {
+		b := newBuild(t, FullProfile)
+		large := sqlCallsiteStoreEdge("unresolved::sqlfn::find", "find")
+		large.Context = strings.Repeat("x", rebuildSQLCallsiteRowBytes)
+		if !owned {
+			delete(large.Meta, "via")
+		}
+		key := pendingEdgeKey(large)
+		raw, err := encodeEdge(large)
+		require.NoError(t, err)
+		require.Greater(t, len(key)+len(raw), rebuildSQLCallsiteRowBytes)
+		require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+		before := rebuildFrameworkCustodyRows(t, b)
+		p := rebuildSQLCallsitePass{b: b, fn: sqlCallsiteStoreMarker,
+			rebind: func(*graph.Edge, string, string, bool) bool { return false }}
+		err = p.plan(t.Context())
+		if owned {
+			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+			require.ErrorContains(t, err, "SQL callsite edge row")
+		} else {
+			require.NoError(t, err)
+		}
+		require.Zero(t, p.stats)
+		require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+	}
+}
 
 func TestRebuildSQLCallsiteWithoutFunctionsSkipsCallsAndReceipts(t *testing.T) {
 	b, _ := seedSyntheticCustody(t, sqlCallsiteStoreSource(sqlCallsiteStoreEdge("retired", "find")))
@@ -161,13 +190,6 @@ func sqlCallsiteStoreFunction(id, name string) ParseFacts {
 
 func runSQLCallsiteStore(t *testing.T, b *BuildStore, receipts iter.Seq2[ParseFacts, error]) (RebuildSQLCallsiteStats, error) {
 	t.Helper()
-	marker := func(e *graph.Edge) string {
-		if e.Meta["via"] != "sql.callsite" {
-			return ""
-		}
-		name, _ := e.Meta["sql_function"].(string)
-		return name
-	}
 	rebind := func(e *graph.Edge, name, target string, matched bool) bool {
 		if !matched {
 			target = "unresolved::sqlfn::" + name
@@ -178,5 +200,13 @@ func runSQLCallsiteStore(t *testing.T, b *BuildStore, receipts iter.Seq2[ParseFa
 		e.To = target
 		return true
 	}
-	return b.RebuildSQLCallsites(t.Context(), receipts, marker, rebind)
+	return b.RebuildSQLCallsites(t.Context(), receipts, sqlCallsiteStoreMarker, rebind)
+}
+
+func sqlCallsiteStoreMarker(e *graph.Edge) string {
+	if e.Meta["via"] != "sql.callsite" {
+		return ""
+	}
+	name, _ := e.Meta["sql_function"].(string)
+	return name
 }

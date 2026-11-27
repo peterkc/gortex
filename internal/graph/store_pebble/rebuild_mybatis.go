@@ -233,9 +233,6 @@ func (p *rebuildMyBatisPass) capture(ctx context.Context, rules RebuildMyBatisRu
 		if err != nil || kind != graph.EdgeCalls {
 			return err
 		}
-		if err := rebuildMyBatisInput(r.key, r.value); err != nil {
-			return err
-		}
 		e, err := decodeEdge(r.value)
 		if err != nil {
 			return err
@@ -246,6 +243,9 @@ func (p *rebuildMyBatisPass) capture(ctx context.Context, rules RebuildMyBatisRu
 		ns, stmt := rules.Stub(e)
 		if ns == "" || stmt == "" {
 			return nil
+		}
+		if err := rebuildMyBatisInput(r.key, r.value); err != nil {
+			return err
 		}
 		p.stats.Stubs++
 		custody, err := readRebuildEdgeCustody(snap, r.key)

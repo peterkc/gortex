@@ -150,7 +150,7 @@ type rebuildBuildReply struct {
 	Detail            string
 	AttributionChains uint64 // present only on a refused attribution pass
 	UnknownProvenance uint64 // present only on a refused provenance check
-	MyBatisOrder      uint64 // conservative interacting-move refusal count, not proof of order dependence
+	MyBatisOrder      uint64 // present only on a refused MyBatis order; conservative interacting-move count
 	SQLCallsiteOrder  uint64 // interacting SQL callsite move destinations on refusal
 }
 
