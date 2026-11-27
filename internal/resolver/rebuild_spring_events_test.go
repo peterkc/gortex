@@ -272,3 +272,45 @@ func TestRebuildSpringEventsReceiptListenerEntrants(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildSpringEventsProofTerms(t *testing.T) {
+	pub := springRebuildNode("publish", "")
+	first := springRebuildNode("A", "Child")
+	second := springRebuildNode("B", "Base")
+	arc := springRebuildArc("Child", "Base", graph.EdgeExtends, 1)
+	move := springRebuildCall(pub.ID, "unresolved::old", "Child", 10)
+	reset := springRebuildCall(pub.ID, pub.ID, "Miss", 11)
+	stationary := springRebuildCall(pub.ID, first.ID, "Child", 12)
+	for _, tc := range []struct {
+		name       string
+		nodes      []*graph.Node
+		rawNodes   []*graph.Node
+		input      []*graph.Edge
+		rawEdges   []*graph.Edge
+		misfileArc bool
+		want       *graph.Edge
+		to         string
+	}{
+		{name: "primary without listener proof", nodes: []*graph.Node{pub, first}, rawNodes: []*graph.Node{pub}, input: []*graph.Edge{move}, rawEdges: []*graph.Edge{move}, want: move, to: first.ID},
+		{name: "reset without global witness", nodes: []*graph.Node{pub, first}, rawNodes: []*graph.Node{pub}, input: []*graph.Edge{reset}, rawEdges: []*graph.Edge{reset}, want: reset, to: "unresolved::*.Miss"},
+		{name: "add without earlier listener proof", nodes: []*graph.Node{pub, first, second}, rawNodes: []*graph.Node{pub, second}, input: []*graph.Edge{arc, stationary}, rawEdges: []*graph.Edge{arc, stationary}, want: stationary, to: second.ID},
+		{name: "arc in wrong receipt file", nodes: []*graph.Node{pub, second}, rawNodes: []*graph.Node{pub, second}, input: []*graph.Edge{arc, move}, rawEdges: []*graph.Edge{move}, misfileArc: true, want: move, to: second.ID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, rebuildEventFacts(springRebuildFile, "java", tc.nodes, tc.input...))
+			before := rebuildEventSavedRows(t, b)
+			receipts := []store_pebble.ParseFacts{rebuildEventFacts(springRebuildFile, "java", tc.rawNodes, tc.rawEdges...)}
+			if tc.misfileArc {
+				receipts = append(receipts, rebuildEventFacts("Other.java", "java", nil, arc))
+			}
+			stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(receipts...), springRebuildSelection(t, b))
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			want := graph.EdgeIdentityFor(tc.want)
+			want.To = tc.to
+			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
