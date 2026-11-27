@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"iter"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -48,12 +49,7 @@ func DemoteGDScriptReceiverMismatches(g graph.Store) int {
 			if !gdReceiverMismatch(g, e, classes, autoloads, aliases) {
 				continue
 			}
-			e.Origin = graph.OriginSpeculative
-			if e.Meta == nil {
-				e.Meta = map[string]any{}
-			}
-			e.Meta[graph.MetaSpeculative] = true
-			e.Meta["demoted"] = "receiver_type_mismatch"
+			gdDemoteReceiverMismatch(e)
 			reindex = append(reindex, graph.EdgeReindex{
 				Edge: e, OldFrom: e.From, OldTo: e.To,
 				OldFilePath: e.FilePath, OldLine: e.Line, RefreshIdentity: true,
@@ -64,6 +60,23 @@ func DemoteGDScriptReceiverMismatches(g graph.Store) int {
 		g.ReindexEdges(reindex)
 	}
 	return len(reindex)
+}
+
+func gdDemoteReceiverMismatch(e *graph.Edge) {
+	e.Origin = graph.OriginSpeculative
+	if e.Meta == nil {
+		e.Meta = map[string]any{}
+	}
+	e.Meta[graph.MetaSpeculative] = true
+	e.Meta["demoted"] = "receiver_type_mismatch"
+}
+
+type gdKindNodes interface {
+	NodesByKind(graph.NodeKind) iter.Seq[*graph.Node]
+}
+
+type gdNodeLookup interface {
+	GetNode(string) *graph.Node
 }
 
 // gdClass is one GDScript class the gate can reason about: the file that
@@ -82,7 +95,7 @@ type gdClass struct {
 // declared by two different files is ambiguous — the gate cannot tell
 // which one a receiver means, so it is marked opaque rather than dropped,
 // which keeps it from being read as "no such class exists".
-func gdClassIndex(g graph.Store) map[string]*gdClass {
+func gdClassIndex(g gdKindNodes) map[string]*gdClass {
 	out := map[string]*gdClass{}
 	for n := range g.NodesByKind(graph.KindType) {
 		if n == nil || n.Language != "gdscript" || n.Meta == nil {
@@ -110,7 +123,7 @@ func gdClassIndex(g graph.Store) map[string]*gdClass {
 // gdReceiverMismatch reports whether a resolved GDScript edge binds to a
 // member that its stated receiver provably does not own.
 func gdReceiverMismatch(
-	g graph.Store,
+	g gdNodeLookup,
 	e *graph.Edge,
 	classes map[string]*gdClass,
 	autoloads map[string]string,
@@ -207,7 +220,7 @@ func gdReceiverMismatch(
 // receiver name itself — a `var`/`const` holding a value whose type the
 // graph does not track. Such a receiver is a local alias, not a claim
 // about a class, so no mismatch can be proven from it.
-func gdReceiverLocallyDeclared(g graph.Store, e *graph.Edge, recv string) bool {
+func gdReceiverLocallyDeclared(g gdNodeLookup, e *graph.Edge, recv string) bool {
 	n := g.GetNode(gdEdgeSourceFile(e) + "::" + recv)
 	return n != nil && n.Language == "gdscript" && n.Kind == graph.KindVariable
 }

@@ -105,7 +105,7 @@ func gdAutoloadDecl(n *graph.Node) (name, script string) {
 // ID of the script it names. An entry whose script is not indexed, and
 // a name declared by two different manifests with conflicting targets,
 // are both dropped — a wrong binding here is worse than none.
-func gdAutoloadScripts(g graph.Store) map[string]string {
+func gdAutoloadScripts(g gdKindNodes) map[string]string {
 	var decls map[string]string
 	for n := range g.NodesByKind(graph.KindType) {
 		name, script := gdAutoloadDecl(n)

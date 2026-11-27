@@ -93,7 +93,7 @@ func gdEdgeSourceFile(e *graph.Edge) string {
 // gdPreloadAliases maps, per GDScript file, each preload-alias name to
 // the graph file ID of the script it loads. An alias whose path is not
 // indexed, or is ambiguous across two indexed scripts, is dropped.
-func gdPreloadAliases(g graph.Store) map[string]map[string]string {
+func gdPreloadAliases(g gdKindNodes) map[string]map[string]string {
 	// decls[fileID][alias] = declared res:// path (project-relative).
 	var decls map[string]map[string]string
 	for n := range g.NodesByKind(graph.KindVariable) {
