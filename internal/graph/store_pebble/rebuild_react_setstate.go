@@ -12,7 +12,10 @@ import (
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
-var ErrRebuildReactSetState = errors.New("pebble rebuild React setState stage failed")
+var (
+	ErrRebuildReactSetState   = errors.New("pebble rebuild React setState stage failed")
+	ErrRebuildFlutterSetState = errors.New("pebble rebuild Flutter setState stage failed")
+)
 
 var rebuildSetStatePrefix = []byte{'g', 'W'}
 
@@ -28,15 +31,33 @@ type RebuildReactSetStateStats struct {
 // method ID in the native explicit sort.
 func (b *BuildStore) RebuildReactSetState(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
 	isSetState func(string) bool, makeCall func(*graph.Node, *graph.Node, string) *graph.Edge,
+) (RebuildReactSetStateStats, error) {
+	return b.rebuildSetState(ctx, receipts, spillAt, "render", ErrRebuildReactSetState, rebuildProofReactSetState, isSetState, makeCall)
+}
+
+// RebuildFlutterSetStateStats reports the same counters as the React turn.
+type RebuildFlutterSetStateStats = RebuildReactSetStateStats
+
+// RebuildFlutterSetState runs the shared lifecycle join with build as the
+// target. It reads the quiet view after the React turn has installed its calls.
+func (b *BuildStore) RebuildFlutterSetState(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+	isSetState func(string) bool, makeCall func(*graph.Node, *graph.Node, string) *graph.Edge,
+) (RebuildFlutterSetStateStats, error) {
+	return b.rebuildSetState(ctx, receipts, spillAt, "build", ErrRebuildFlutterSetState, rebuildProofFlutterSetState, isSetState, makeCall)
+}
+
+func (b *BuildStore) rebuildSetState(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+	lifecycle string, stage error, proof rebuildEdgeProof,
+	isSetState func(string) bool, makeCall func(*graph.Node, *graph.Node, string) *graph.Edge,
 ) (stats RebuildReactSetStateStats, err error) {
 	defer func() {
 		if err != nil {
 			stats = RebuildReactSetStateStats{}
-			err = fmt.Errorf("%w: %w", ErrRebuildReactSetState, err)
+			err = fmt.Errorf("%w: %w", stage, err)
 		}
 	}()
 	if receipts == nil || spillAt < 1 || spillAt > goldBufferBytes || isSetState == nil || makeCall == nil {
-		return stats, fmt.Errorf("%w: invalid React setState inputs", ErrRebuildLinkInputSize)
+		return stats, fmt.Errorf("%w: invalid setState inputs", ErrRebuildLinkInputSize)
 	}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildSetStatePrefix)
 	if err != nil {
@@ -49,17 +70,17 @@ func (b *BuildStore) RebuildReactSetState(ctx context.Context, receipts iter.Seq
 		err = errors.Join(err, b.pending.DeleteRange(rebuildSetStatePrefix, prefixEnd(rebuildSetStatePrefix), pebble.NoSync))
 	}()
 	p := rebuildSetStatePass{b: b, spillAt: spillAt}
-	active, err := p.capture(ctx, "render", isSetState)
+	active, err := p.capture(ctx, lifecycle, isSetState)
 	if err != nil || !active {
 		return p.stats, err
 	}
 	if err := p.record(ctx, receipts); err != nil {
 		return stats, err
 	}
-	if err := p.elect(ctx, "render", makeCall); err != nil {
+	if err := p.elect(ctx, lifecycle, makeCall); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx, rebuildProofReactSetState) })
+	err = b.withWrites(func() error { return p.apply(ctx, proof) })
 	return p.stats, err
 }
 
@@ -242,7 +263,7 @@ func (p *rebuildSetStatePass) wantMembership(e *graph.Edge, live []byte) error {
 
 func setStateCallProof(proof rebuildEdgeProof) bool {
 	switch proof {
-	case rebuildProofTemporalSynthetic, rebuildProofEventChannel, rebuildProofRNBridge, rebuildProofObserver, rebuildProofClosureCollection, rebuildProofReactSetState:
+	case rebuildProofTemporalSynthetic, rebuildProofEventChannel, rebuildProofRNBridge, rebuildProofObserver, rebuildProofClosureCollection, rebuildProofReactSetState, rebuildProofFlutterSetState:
 		return true
 	default:
 		return false
