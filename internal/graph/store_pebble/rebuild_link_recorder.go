@@ -2,7 +2,6 @@ package store_pebble
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/binary"
 
@@ -150,24 +149,6 @@ func (c rebuildEdgeCustody) moved(old []byte, kind graph.EdgeKind, capture bool)
 		return rebuildEdgeCustody{proof: rebuildProofUntrackedMove}
 	}
 	return rebuildEdgeCustody{}
-}
-
-// OriginalLinkRecorder returns the raw identity for an installed move.
-// A stationary row, a synthetic proof and an untracked move all return
-// found=false. A stale proof returns an error. Use full custody when the
-// caller must distinguish those cases.
-func (v RebuildView) OriginalLinkRecorder(ctx context.Context, live graph.EdgeIdentity) (raw graph.EdgeIdentity, found bool, err error) {
-	key := pendingEdgeKey(&graph.Edge{From: live.From, To: live.To, Kind: live.Kind, FilePath: live.FilePath, Line: live.Line})
-	err = v.read(ctx, func(snap *pebble.Snapshot) error {
-		custody, err := readRebuildEdgeCustody(snap, key)
-		if err != nil || custody.raw == nil {
-			return err
-		}
-		raw, err = decodeLinkRecorder(custody.raw)
-		found = err == nil
-		return err
-	})
-	return raw, found, err
 }
 
 func decodeLinkRecorder(key []byte) (graph.EdgeIdentity, error) {

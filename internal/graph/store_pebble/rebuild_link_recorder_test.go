@@ -69,31 +69,23 @@ func TestRebuildLinkRecorderFollowsInstalledMoves(t *testing.T) {
 		}
 	}
 
-	view := tracked.RebuildView()
-	lookup := func(v RebuildView, edge, original *graph.Edge) {
-		t.Helper()
-		live, want := graph.EdgeIdentityFor(edge), graph.EdgeIdentityFor(original)
-		got, found, err := v.OriginalLinkRecorder(ctx, live)
-		if err != nil || found != (original != nil) || (found && got != want) {
-			t.Fatalf("original recorder for %+v = %+v, %t, %v; want %+v, found=%t", live, got, found, err, want, original != nil)
-		}
-	}
-	lookup(control.RebuildView(), winner.Edge, nil)
-	lookup(view, winner.Edge, &raw)
-	lookup(view, &stationary, nil)
-	lookup(view, framework, nil)
+	rawCustody := rebuildEdgeCustody{raw: pendingEdgeKey(&raw)}
+	requireRebuildLinkCustody(t, control, winner.Edge, rebuildEdgeCustody{proof: rebuildProofUntrackedMove})
+	requireRebuildLinkCustody(t, tracked, winner.Edge, rawCustody)
+	requireRebuildLinkCustody(t, tracked, &stationary, rebuildEdgeCustody{})
+	requireRebuildLinkCustody(t, tracked, framework, rebuildEdgeCustody{})
 
 	second := move(*winner.Edge, "second-live")
 	if err := tracked.ApplyLinkReindexes(ctx, []graph.EdgeReindex{second}); err != nil {
 		t.Fatal(err)
 	}
-	lookup(view, winner.Edge, nil)
-	lookup(view, second.Edge, &raw)
+	requireRebuildLinkCustody(t, tracked, winner.Edge, rebuildEdgeCustody{})
+	requireRebuildLinkCustody(t, tracked, second.Edge, rawCustody)
 
 	last := move(*second.Edge, "generic-live")
 	tracked.ReindexEdges([]graph.EdgeReindex{last})
-	lookup(view, second.Edge, nil)
-	lookup(view, last.Edge, &raw)
+	requireRebuildLinkCustody(t, tracked, second.Edge, rebuildEdgeCustody{})
+	requireRebuildLinkCustody(t, tracked, last.Edge, rawCustody)
 }
 
 func TestRebuildLinkRecorderFollowsSameChunkChain(t *testing.T) {
@@ -114,18 +106,13 @@ func TestRebuildLinkRecorderFollowsSameChunkChain(t *testing.T) {
 		stored, err := view.Edge(ctx, id)
 		require.NoError(t, err)
 		require.Nil(t, stored)
-		_, found, err := view.OriginalLinkRecorder(ctx, id)
-		require.NoError(t, err)
-		require.False(t, found)
+		requireRebuildLinkCustody(t, b, e, rebuildEdgeCustody{})
 	}
 	id := graph.EdgeIdentityFor(&final)
 	stored, err := view.Edge(ctx, id)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
-	got, found, err := view.OriginalLinkRecorder(ctx, id)
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, graph.EdgeIdentityFor(&raw), got)
+	requireRebuildLinkCustody(t, b, &final, rebuildEdgeCustody{raw: pendingEdgeKey(&raw)})
 }
 
 func TestRebuildLinkRecorderFollowsGuardWinner(t *testing.T) {
@@ -180,21 +167,18 @@ func TestRebuildLinkRecorderFollowsGuardWinner(t *testing.T) {
 			stored, err := view.Edge(ctx, liveID)
 			require.NoError(t, err)
 			require.Nil(t, stored)
-			_, found, err := view.OriginalLinkRecorder(ctx, liveID)
-			require.NoError(t, err)
-			require.False(t, found)
+			requireRebuildLinkCustody(t, b, &live, rebuildEdgeCustody{})
 			winnerID := graph.EdgeIdentityFor(&reverted)
 			winner, err := view.Edge(ctx, winnerID)
 			require.NoError(t, err)
 			require.NotNil(t, winner)
 			require.Equal(t, wantRaw.Via, winner.Via)
 			require.Empty(t, winner.Origin)
-			got, found, err := view.OriginalLinkRecorder(ctx, winnerID)
-			require.NoError(t, err)
-			require.Equal(t, tc.tracked, found)
+			want := rebuildEdgeCustody{proof: rebuildProofUntrackedMove}
 			if tc.tracked {
-				require.Equal(t, graph.EdgeIdentityFor(wantRaw), got)
+				want = rebuildEdgeCustody{raw: pendingEdgeKey(wantRaw)}
 			}
+			requireRebuildLinkCustody(t, b, &reverted, want)
 		})
 	}
 }
@@ -211,10 +195,8 @@ func TestRebuildLinkRecorderFollowsGuardSourceRestoration(t *testing.T) {
 	require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &live, OldTo: original.To}}))
 	view := b.RebuildView()
 	liveID := graph.EdgeIdentityFor(&live)
-	got, found, err := view.OriginalLinkRecorder(ctx, liveID)
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, graph.EdgeIdentityFor(&original), got)
+	rawCustody := rebuildEdgeCustody{raw: pendingEdgeKey(&original)}
+	requireRebuildLinkCustody(t, b, &live, rawCustody)
 
 	reverted := call
 	reverted.To = "unresolved::callee"
@@ -226,17 +208,19 @@ func TestRebuildLinkRecorderFollowsGuardSourceRestoration(t *testing.T) {
 	stored, err := view.Edge(ctx, liveID)
 	require.NoError(t, err)
 	require.Nil(t, stored)
-	_, found, err = view.OriginalLinkRecorder(ctx, liveID)
-	require.NoError(t, err)
-	require.False(t, found)
+	requireRebuildLinkCustody(t, b, &live, rebuildEdgeCustody{})
 	restored := live
 	restored.From = reverted.To
 	restoredID := graph.EdgeIdentityFor(&restored)
 	stored, err = view.Edge(ctx, restoredID)
 	require.NoError(t, err)
 	require.Equal(t, &restored, stored)
-	got, found, err = view.OriginalLinkRecorder(ctx, restoredID)
+	requireRebuildLinkCustody(t, b, &restored, rawCustody)
+}
+
+func requireRebuildLinkCustody(t *testing.T, b *BuildStore, e *graph.Edge, want rebuildEdgeCustody) {
+	t.Helper()
+	got, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(e))
 	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, graph.EdgeIdentityFor(&original), got)
+	require.Equal(t, want, got, "custody for %+v", graph.EdgeIdentityFor(e))
 }

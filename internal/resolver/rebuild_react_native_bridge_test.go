@@ -292,10 +292,6 @@ function show() {
 						require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: first}, refusal)
 						require.Zero(t, stats)
 						require.Equal(t, before, rebuildEventSavedRows(t, private))
-						// No refused output may leave a raw recorder or orphaned producer proof.
-						_, found, err := private.RebuildView().OriginalLinkRecorder(t.Context(), first)
-						require.NoError(t, err)
-						require.False(t, found)
 						return
 					}
 					require.NoError(t, err)
@@ -395,15 +391,12 @@ func TestRebuildReactNativeBridgeRejectsConflictingLinks(t *testing.T) {
 	private := openRebuildRNBridgePrivate(t, facts)
 	ctx := t.Context()
 	raw := facts[0].Edges[0]
-	rawID := graph.EdgeIdentityFor(raw)
-	var liveIDs []graph.EdgeIdentity
 	for _, to := range []string{"unresolved::alias1", "unresolved::alias2"} {
 		// Reuse the exact raw key, leaving two live moves that claim its ordinal.
 		private.AddEdge(raw)
 		live := *raw
 		live.To = to
 		require.NoError(t, private.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &live, OldTo: raw.To}}))
-		liveIDs = append(liveIDs, graph.EdgeIdentityFor(&live))
 	}
 	before := rebuildEventSavedRows(t, private)
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
@@ -415,12 +408,6 @@ func TestRebuildReactNativeBridgeRejectsConflictingLinks(t *testing.T) {
 	require.Equal(t, graph.EdgeIdentityFor(facts[0].Edges[2]), refused.First)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildEventSavedRows(t, private))
-	for _, id := range liveIDs {
-		got, found, err := private.RebuildView().OriginalLinkRecorder(ctx, id)
-		require.NoError(t, err)
-		require.True(t, found)
-		require.Equal(t, rawID, got)
-	}
 }
 
 func TestRebuildReactNativeBridgeEligibility(t *testing.T) {

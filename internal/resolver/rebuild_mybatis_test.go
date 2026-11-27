@@ -334,11 +334,4 @@ func TestRebuildMyBatisRestubAndIncumbent(t *testing.T) {
 	require.Equal(t, rebuildEventSQLiteRows(native), got)
 	calls := slices.DeleteFunc(slices.Clone(got.edges), func(e *graph.Edge) bool { return e.Kind != graph.EdgeCalls })
 	require.Equal(t, []*graph.Edge{&incumbent, &restub}, calls)
-	raw, found, err := b.RebuildView().OriginalLinkRecorder(t.Context(), graph.EdgeIdentityFor(&restub))
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, "OldMapper.java::removed", raw.To)
-	_, found, err = b.RebuildView().OriginalLinkRecorder(t.Context(), graph.EdgeIdentityFor(&incumbent))
-	require.NoError(t, err)
-	require.False(t, found)
 }

@@ -118,12 +118,11 @@ func TestRebuildReactNativeBridgeGuardLineage(t *testing.T) {
 			removed, err := view.Edge(ctx, graph.EdgeIdentityFor(&live))
 			require.NoError(t, err)
 			require.Nil(t, removed)
+			wantCustody := rebuildEdgeCustody{proof: rebuildProofUntrackedMove}
 			if tc.tracked {
-				recorder, found, err := view.OriginalLinkRecorder(ctx, inputID)
-				require.NoError(t, err)
-				require.True(t, found)
-				require.Equal(t, graph.EdgeIdentityFor(&raw), recorder)
+				wantCustody = rebuildEdgeCustody{raw: pendingEdgeKey(&raw)}
 			}
+			requireRebuildLinkCustody(t, b, &reverted, wantCustody)
 
 			app := ParseFacts{
 				File: graph.FileMetaRow{FilePath: caller.FilePath, NodeCount: 1}, Nodes: []*graph.Node{caller},
