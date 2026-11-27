@@ -221,10 +221,10 @@ func TestContractParseFactsRejectsSemanticViolations(t *testing.T) {
 			Records:   []contracts.Contract{record},
 			Questions: []contracts.EndpointContractQuestion{q, q2},
 			Shapes:    map[string]*contracts.Shape{},
-			Handlers:  map[string]contracts.HandlerFacts{handler: {
+			Handlers: map[string]contracts.HandlerFacts{handler: {
 				Regex: map[string]any{}, AST: map[string]any{}, Bindings: map[string]contracts.Binding{},
 			}},
-			Router:    &contracts.RouterFacts{LineCount: 2, Lines: []contracts.RouterLineFacts{{Line: 1}, {Line: 2}}},
+			Router: &contracts.RouterFacts{LineCount: 2, Lines: []contracts.RouterLineFacts{{Line: 1}, {Line: 2}}},
 			ConfigKeys: []*graph.Node{{
 				ID:       "cfg::spring::app.key",
 				Kind:     graph.KindConfigKey,
