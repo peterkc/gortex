@@ -40,49 +40,59 @@ func ResolveSQLCallsites(g graph.Store) int {
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if v, _ := e.Meta["via"].(string); v != sqlCallsiteVia {
-			continue
-		}
-		fn, _ := e.Meta["sql_function"].(string)
+		fn := sqlCallsiteFunction(e)
 		if fn == "" {
 			continue
 		}
-		var target *graph.Node
-		if cands := sqlFns[fn]; len(cands) == 1 {
-			target = cands[0]
-		}
-		want := sqlCallPrefix + fn
-		if target != nil {
-			want = target.ID
-		}
-		if e.To == want {
-			if target != nil {
-				resolved++
-			}
-			continue
+		cands := sqlFns[fn]
+		matched := len(cands) == 1
+		target := ""
+		if matched {
+			target = cands[0].ID
+			resolved++
 		}
 		oldTo := e.To
-		e.To = want
-		if target != nil {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = 0.6
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.6)
-			StampSynthesized(e, SynthSQLCallsite)
-			resolved++
-		} else {
-			// Re-orphaned (the SQL function disappeared / became ambiguous).
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = 0
-			e.ConfidenceLabel = ""
-			UnstampSynthesized(e)
+		if rebindSQLCallsite(e, fn, target, matched) {
+			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func sqlCallsiteFunction(e *graph.Edge) string {
+	if e != nil {
+		if via, _ := e.Meta["via"].(string); via == sqlCallsiteVia {
+			fn, _ := e.Meta["sql_function"].(string)
+			return fn
+		}
+	}
+	return ""
+}
+
+// The caller elects from the live function census. Do not restamp a
+// stationary Call, even if its saved payload differs from a new move.
+func rebindSQLCallsite(e *graph.Edge, fn, target string, matched bool) bool {
+	want := target
+	if !matched {
+		want = sqlCallPrefix + fn
+	}
+	if e.To == want {
+		return false
+	}
+	e.To = want
+	e.Origin = graph.OriginASTInferred
+	if matched {
+		e.Confidence = 0.6
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.6)
+		StampSynthesized(e, SynthSQLCallsite)
+	} else {
+		// Re-orphaned (the SQL function disappeared / became ambiguous).
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		UnstampSynthesized(e)
+	}
+	return true
 }
