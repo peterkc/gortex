@@ -57,6 +57,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Sidekiq", "moves", 1},
 		{"Laravel event", "moves", 1},
 		{"function pointer", "moves", 1},
+		{"macro expansion", "adds", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -685,6 +686,16 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 			map[string]any{"via": "fn-pointer-dispatch", "fnptr_struct": "Slot", "fnptr_field": "fn"}),
 	)
 
+	const macroFile = "macro.c"
+	macroDefinition := node(macroFile, "c", "INVOKE_MACRO", graph.KindMacro, 1)
+	macroDefinition.Meta = map[string]any{"macro_kind": "function"}
+	macroCallee := node(macroFile, "c", "macroBodyTarget", graph.KindFunction, 4)
+	macroCaller := node(macroFile, "c", "macroUse", graph.KindFunction, 7)
+	macroFacts := receipt([]*graph.Node{macroDefinition, macroCallee, macroCaller},
+		edge(macroDefinition, macroCallee.ID, graph.EdgeCalls, 1, nil),
+		edge(macroCaller, "unresolved::"+macroDefinition.Name, graph.EdgeCalls, 8, nil),
+	)
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -695,6 +706,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
-		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts,
+		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts,
 	}
 }

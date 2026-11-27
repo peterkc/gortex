@@ -431,6 +431,9 @@ func buildRebuildStages(
 		if err := resolver.FreezeRebuildFnPointerInputs(ctx, private, selection); err != nil {
 			return err
 		}
+		if err := resolver.FreezeRebuildMacroExpansionInputs(ctx, private, selection); err != nil {
+			return err
+		}
 		grpc, err := resolver.RunRebuildGRPC(ctx, private, receipts, selection)
 		if err != nil {
 			return err
@@ -689,6 +692,15 @@ func buildRebuildStages(
 				zap.Uint64("resolved", fnPointer.Resolved), zap.Uint64("ref_moves", fnPointer.RefMoves),
 				zap.Uint64("moves", fnPointer.CallMoves), zap.Uint64("adds", fnPointer.Adds),
 				zap.Int("sweeps", fnPointer.Sweeps))
+		}
+		macroExpansion, err := resolver.RunRebuildMacroExpansion(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if macroExpansion.Sites != 0 {
+			logger.Info("rebuild macro expansion applied to private build",
+				zap.Uint64("sites", macroExpansion.Sites), zap.Uint64("owned", macroExpansion.Owned),
+				zap.Uint64("adds", macroExpansion.Adds))
 		}
 	}
 	// The supported tails only changed private scratch. Relation projection

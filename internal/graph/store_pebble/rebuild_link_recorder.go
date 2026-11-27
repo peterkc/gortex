@@ -59,6 +59,8 @@ const (
 	rebuildProofLaravelEventFanout
 	// Exact function pointer inputs and elected slot member for fanout.
 	rebuildProofFnPointerFanout
+	// Exact macro declaration, body Call and use-site receipts.
+	rebuildProofMacroExpansion
 	rebuildProofLimit
 )
 

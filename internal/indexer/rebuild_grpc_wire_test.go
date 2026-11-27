@@ -49,6 +49,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"function pointer", store_pebble.ErrRebuildFnPointer, 73},
 		{"C# interface dispatch", store_pebble.ErrRebuildCSharpIfaceDispatch, 74},
 		{"EF Core models", store_pebble.ErrRebuildEFCoreModels, 75},
+		{"macro expansion", store_pebble.ErrRebuildMacroExpansion, 76},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {
