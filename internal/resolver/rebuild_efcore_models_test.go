@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -142,4 +143,93 @@ func TestRebuildEFCoreModelsSQLiteAssembly(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), changed)
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, build))
+}
+
+func TestRebuildEFCoreModelsReceiptFactAndCohort(t *testing.T) {
+	const cs = "Models.cs"
+	entity := &graph.Node{ID: "widget", Name: "Widget", FilePath: cs, Kind: graph.KindType, Language: "csharp"}
+	file := &graph.Node{ID: cs, Name: cs, FilePath: cs, Kind: graph.KindFile, Language: "csharp"}
+	fluent := *file
+	fluent.Meta = map[string]any{"ef_fluent": []map[string]any{efMappingAction("Ctx", "Widget", "widgets", "", "table", 0, 10)}}
+	other := &graph.Node{ID: "other", Name: "Widget", FilePath: cs, Kind: graph.KindType, Language: "csharp", WorkspaceID: "elsewhere"}
+	entrant := *other
+	entrant.WorkspaceID = ""
+	for _, fixture := range []struct {
+		name string
+		live []*graph.Node
+		raw  []*graph.Node
+	}{
+		{"receipt-only fact", []*graph.Node{entity, file}, []*graph.Node{entity, &fluent}},
+		{"receipt-only cohort entrant", []*graph.Node{entity, &fluent, other}, []*graph.Node{entity, &fluent, &entrant}},
+		{"unproved stationary cohort member", []*graph.Node{entity, &fluent, &entrant}, []*graph.Node{entity, &fluent}},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			live := rebuildEventFacts(cs, "csharp", fixture.live)
+			raw := rebuildEventFacts(cs, "csharp", fixture.raw)
+			build := openRebuildGRPCBuild(t, live)
+			before := rebuildEventSavedRows(t, build)
+			changed, err := RunRebuildEFCoreModels(t.Context(), build, rebuildGRPCReceipts(raw), efRebuildSelection(t, build))
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, graph.EdgeIdentity{From: entity.ID, To: "db::orm::widgets", Kind: graph.EdgeModelsTable, FilePath: cs, Line: 10}, refused.First)
+			require.Zero(t, changed)
+			require.Equal(t, before, rebuildEventSavedRows(t, build))
+		})
+	}
+}
+
+func TestRebuildEFCoreModelsOwnedReceiptPayload(t *testing.T) {
+	const cs = "Models.cs"
+	entity := &graph.Node{ID: "widget", Name: "Widget", FilePath: cs, Kind: graph.KindType, Language: "csharp", StartLine: 2,
+		Meta: map[string]any{"ef_attribute_table": "old_widgets"}}
+	file := &graph.Node{ID: cs, Name: cs, FilePath: cs, Kind: graph.KindFile, Language: "csharp",
+		Meta: map[string]any{"ef_fluent": []map[string]any{efMappingAction("Ctx", "Widget", "widgets", "", "table", 0, 10)}}}
+	old := &graph.Edge{From: entity.ID, To: "db::orm::old_widgets", Kind: graph.EdgeModelsTable, FilePath: cs, Line: 2,
+		Origin: graph.OriginASTInferred, Confidence: ConfidenceTyped,
+		Meta: map[string]any{"orm": "efcore", "binding": "attribute", "table_name": "old_widgets"}}
+	live := rebuildEventFacts(cs, "csharp", []*graph.Node{entity, file}, old)
+	for _, drift := range []string{"binding", "origin", "confidence"} {
+		t.Run(drift, func(t *testing.T) {
+			build := openRebuildGRPCBuild(t, live)
+			before := rebuildEventSavedRows(t, build)
+			wrong := *old
+			switch drift {
+			case "binding":
+				wrong.Meta = map[string]any{"orm": "efcore", "binding": "dbset", "table_name": "old_widgets"}
+			case "origin":
+				wrong.Origin = graph.OriginTextMatched
+			case "confidence":
+				wrong.Confidence = 0
+			}
+			receipt := rebuildEventFacts(cs, "csharp", live.Nodes, &wrong)
+			changed, err := RunRebuildEFCoreModels(t.Context(), build, rebuildGRPCReceipts(receipt), efRebuildSelection(t, build))
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, graph.EdgeIdentityFor(old), refused.First)
+			require.Zero(t, changed)
+			require.Equal(t, before, rebuildEventSavedRows(t, build))
+		})
+	}
+}
+
+func TestRebuildEFCoreModelsBudgetOnlyNamedTypes(t *testing.T) {
+	const cs = "Models.cs"
+	entity := &graph.Node{ID: "widget", Name: "Widget", FilePath: cs, Kind: graph.KindType, Language: "csharp"}
+	file := &graph.Node{ID: cs, Name: cs, FilePath: cs, Kind: graph.KindFile, Language: "csharp",
+		Meta: map[string]any{"ef_fluent": []map[string]any{efMappingAction("Ctx", "Widget", "widgets", "", "table", 0, 10)}}}
+	large := &graph.Node{ID: "unused", Name: "Unused", FilePath: cs, Kind: graph.KindType, Language: "csharp",
+		Meta: map[string]any{"unrelated": strings.Repeat("x", 16<<20)}}
+	facts := rebuildEventFacts(cs, "csharp", []*graph.Node{entity, file, large})
+	build := openRebuildGRPCBuild(t, facts)
+	changed, err := RunRebuildEFCoreModels(t.Context(), build, rebuildGRPCReceipts(facts), efRebuildSelection(t, build))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, changed)
+	for _, e := range rebuildEventSavedRows(t, build).edges {
+		if e.Kind == graph.EdgeModelsTable {
+			require.Equal(t, entity.ID, e.From)
+			require.Equal(t, "db::orm::widgets", e.To)
+			return
+		}
+	}
+	t.Fatal("missing EF model projection")
 }

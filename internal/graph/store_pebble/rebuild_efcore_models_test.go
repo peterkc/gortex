@@ -42,7 +42,9 @@ func TestRebuildEFCoreModelProducerCustodyOnly(t *testing.T) {
 
 	changed, err := actual.RebuildEFCoreModels(ctx, receipts, RebuildEFCoreRules{
 		Fact:     func(*graph.Node) (bool, bool) { return true, true },
-		SameFact: func(a, b *graph.Node) bool { return a.ID == b.ID },
+		Names:    func(*graph.Node, func(string) error) error { return nil },
+		BareName: func(name string) string { return name },
+		RoleNode: func(n *graph.Node) *graph.Node { return n },
 		Owned:    func(*graph.Edge) bool { return false },
 		SameEdge: func(a, b *graph.Edge) bool { return graph.EdgeIdentityFor(a) == graph.EdgeIdentityFor(b) },
 		Project: func(nodes []*graph.Node) func(*graph.Node, []*graph.Edge) (*graph.Edge, bool) {

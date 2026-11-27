@@ -3,7 +3,6 @@ package resolver
 import (
 	"context"
 	"iter"
-	"reflect"
 	"sort"
 	"strings"
 
@@ -20,7 +19,9 @@ func RunRebuildEFCoreModels(ctx context.Context, build *store_pebble.BuildStore,
 	}
 	return build.RebuildEFCoreModels(ctx, receipts, store_pebble.RebuildEFCoreRules{
 		Fact:     rebuildEFCoreFact,
-		SameFact: sameRebuildEFCoreFact,
+		Names:    rebuildEFCoreNames,
+		BareName: csharpEFBareName,
+		RoleNode: rebuildEFCoreRoleNode,
 		Owned:    csharpEFOwnsModelsTableEdge,
 		SameEdge: csharpEFEdgesEqual,
 		Project:  rebuildEFCoreProjection,
@@ -48,24 +49,51 @@ func rebuildEFCoreFact(n *graph.Node) (keep, active bool) {
 	}
 }
 
-func sameRebuildEFCoreFact(raw, live *graph.Node) bool {
-	if raw.Kind != live.Kind || raw.RepoPrefix != live.RepoPrefix || raw.WorkspaceID != live.WorkspaceID {
-		return false
-	}
-	switch live.Kind {
+// Rebuild retains only these receipt fields; use the same native readers to
+// decide which class-name cohorts need their full declarations.
+func rebuildEFCoreRoleNode(n *graph.Node) *graph.Node {
+	role := &graph.Node{ID: n.ID, Kind: n.Kind, Name: n.Name, Language: n.Language, FilePath: n.FilePath,
+		StartLine: n.StartLine, RepoPrefix: n.RepoPrefix, WorkspaceID: n.WorkspaceID}
+	var keys []string
+	switch n.Kind {
 	case graph.KindFile:
-		return reflect.DeepEqual(csharpEFActionsFromFile(raw), csharpEFActionsFromFile(live))
+		keys = []string{"ef_fluent"}
 	case graph.KindField:
-		a, aOK := csharpDbSetFactFromNode(raw)
-		b, bOK := csharpDbSetFactFromNode(live)
-		return aOK == bOK && a == b
-	default:
-		a, aOK := csharpEFAttributeMapping(raw)
-		b, bOK := csharpEFAttributeMapping(live)
-		ac, acOK := csharpEFConfigFactFromNode(raw)
-		bc, bcOK := csharpEFConfigFactFromNode(live)
-		return raw.Name == live.Name && aOK == bOK && acOK == bcOK && reflect.DeepEqual(a, b) && reflect.DeepEqual(ac, bc)
+		keys = []string{"kind", "field_type"}
+	case graph.KindType:
+		keys = []string{"ef_attribute_table", "ef_attribute_schema", "ef_config_entity", "ef_config_table", "ef_config_schema", "ef_config_relation"}
 	}
+	for _, key := range keys {
+		if val, ok := n.Meta[key]; ok {
+			if role.Meta == nil {
+				role.Meta = make(map[string]any)
+			}
+			role.Meta[key] = val
+		}
+	}
+	return role
+}
+
+func rebuildEFCoreNames(n *graph.Node, visit func(string) error) error {
+	switch n.Kind {
+	case graph.KindFile:
+		for _, action := range csharpEFActionsFromFile(n) {
+			if action.kind == csharpEFActionMapping {
+				if err := visit(action.mapping.entity); err != nil {
+					return err
+				}
+			}
+		}
+	case graph.KindField:
+		if fact, ok := csharpDbSetFactFromNode(n); ok {
+			return visit(fact.entity)
+		}
+	case graph.KindType:
+		if cfg, ok := csharpEFConfigFactFromNode(n); ok {
+			return visit(cfg.mapping.entity)
+		}
+	}
+	return nil
 }
 
 func rebuildEFCoreProjection(nodes []*graph.Node) func(*graph.Node, []*graph.Edge) (*graph.Edge, bool) {
@@ -74,24 +102,11 @@ func rebuildEFCoreProjection(nodes []*graph.Node) func(*graph.Node, []*graph.Edg
 	configsByEntity := make(map[string][]csharpEFConfigFact)
 	var actions []csharpEFAction
 	var dbsets []csharpDbSetFact
+	collect := csharpEFCollectInput(nil, classes, byName, configsByEntity, &actions, &dbsets, func(cfg csharpEFConfigFact) string {
+		return csharpEFNameKey(cfg.repoPrefix, cfg.workspaceID, cfg.mapping.entity)
+	})
 	for _, n := range nodes {
-		switch n.Kind {
-		case graph.KindFile:
-			actions = append(actions, csharpEFActionsFromFile(n)...)
-		case graph.KindType:
-			key := csharpEFNameKey(n.RepoPrefix, n.WorkspaceID, n.Name)
-			classes[key] = append(classes[key], n)
-			if cfg, ok := csharpEFConfigFactFromNode(n); ok {
-				key := csharpEFNameKey(cfg.repoPrefix, cfg.workspaceID, cfg.name)
-				byName[key] = append(byName[key], cfg)
-				entity := csharpEFNameKey(cfg.repoPrefix, cfg.workspaceID, cfg.mapping.entity)
-				configsByEntity[entity] = append(configsByEntity[entity], cfg)
-			}
-		case graph.KindField:
-			if fact, ok := csharpDbSetFactFromNode(n); ok {
-				dbsets = append(dbsets, fact)
-			}
-		}
+		collect(n)
 	}
 	// Reuse the native action reducer one entity at a time. An assembly
 	// action can otherwise retain a decision per context and per entity.
