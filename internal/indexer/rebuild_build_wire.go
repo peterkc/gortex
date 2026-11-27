@@ -214,6 +214,8 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildUIKit,
 	store_pebble.ErrRebuildVapor,
 	store_pebble.ErrRebuildGoFrame,
+	nil, // 89: SvelteKit, reserved until its stage lands
+	nil, // 90: deferred Rust scope
 }
 
 func buildRefusal(err error) rebuildBuildReply {
