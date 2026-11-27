@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"errors"
 	"iter"
 	"maps"
 	"slices"
@@ -47,6 +48,13 @@ func TestRebuildFabricStoreBindsNewCustodyAndPreservesIncumbent(t *testing.T) {
 	// Only the three new edges, reverse rows and proofs may differ. This
 	// includes byte equality of the incumbent edge and its raw recorder.
 	require.Equal(t, before, after)
+
+	installed := rebuildFrameworkCustodyRows(t, b)
+	unread := func(func(ParseFacts, error) bool) { t.Fatal("Fabric replay read receipts") }
+	stats, err = b.RebuildFabric(t.Context(), unread, rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
+	require.NoError(t, err)
+	require.Zero(t, stats)
+	require.Equal(t, installed, rebuildFrameworkCustodyRows(t, b))
 }
 
 func TestRebuildFabricStorePreservesOccupiedPairWithoutProof(t *testing.T) {
@@ -138,6 +146,26 @@ func TestRebuildFabricStoreRefusesUnprovedEndpointsBeforeWriting(t *testing.T) {
 			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})
 	}
+}
+
+func TestRebuildFabricStoreLeavesRowsUnchangedWhenReceiptScanFails(t *testing.T) {
+	b, facts := seedRebuildFabricStore(t)
+	before := rebuildFrameworkCustodyRows(t, b)
+	interrupted := errors.New("Fabric receipt read failed")
+	receipts := func(yield func(ParseFacts, error) bool) {
+		for _, f := range facts[:2] {
+			if !yield(f, nil) {
+				return
+			}
+		}
+		yield(ParseFacts{}, interrupted)
+	}
+
+	stats, err := b.RebuildFabric(t.Context(), receipts, rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
+	require.ErrorIs(t, err, ErrRebuildFabric)
+	require.ErrorIs(t, err, interrupted)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
 
 func TestRebuildFabricStoreRefusesInvalidInputs(t *testing.T) {

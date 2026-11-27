@@ -181,6 +181,40 @@ public class ColorViewManager extends SimpleViewManager<ColorView> {
 	}
 }
 
+func TestRebuildFabricGraphReplacesIncumbentSQLiteKeeps(t *testing.T) {
+	spec := &graph.Node{ID: "spec.ts::View", Kind: graph.KindType, FilePath: "spec.ts", Language: "typescript", StartLine: 2,
+		Meta: map[string]any{"fabric_component": "View"}}
+	manager := &graph.Node{ID: "View.java::RCTView", Kind: graph.KindType, FilePath: "View.java", Language: "java", StartLine: 3,
+		Meta: map[string]any{"fabric_component": "RCTView", "fabric_native": "java"}}
+	forward := rebuildFabricExpectedEdge(spec, manager, "View")
+	reverse := rebuildFabricExpectedEdge(manager, spec, "View")
+	incumbent := *forward
+	incumbent.Confidence = 0.9
+	incumbent.ConfidenceLabel = graph.ConfidenceLabelFor(incumbent.Kind, incumbent.Confidence)
+	incumbent.Origin = graph.OriginASTResolved
+	incumbent.Meta = map[string]any{"fixture": "incumbent"}
+	specFacts := rebuildEventFacts(spec.FilePath, spec.Language, []*graph.Node{spec}, &incumbent)
+	managerFacts := rebuildEventFacts(manager.FilePath, manager.Language, []*graph.Node{manager})
+
+	direct := openRebuildTemporalOracle(t, specFacts, managerFacts)
+	shadow := graph.New()
+	shadow.AddBatch(specFacts.Nodes, specFacts.Edges)
+	shadow.AddBatch(managerFacts.Nodes, managerFacts.Edges)
+	require.Equal(t, []*graph.Edge{&incumbent}, direct.AllEdges())
+	require.Equal(t, []*graph.Edge{&incumbent}, shadow.AllEdges())
+
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthFabric})
+	require.NoError(t, err)
+	for _, store := range []graph.Store{direct, shadow} {
+		report := RunFrameworkSynthesizersWithSelection(store, selection)
+		require.NoError(t, report.Err)
+		require.Equal(t, 1, report.Total)
+	}
+	// Graph replaces the exact key before drain; direct SQLite ignores it.
+	require.ElementsMatch(t, []*graph.Edge{forward, reverse}, shadow.AllEdges())
+	require.ElementsMatch(t, []*graph.Edge{&incumbent, reverse}, direct.AllEdges())
+}
+
 func TestRebuildFabricSQLiteLargeScratch(t *testing.T) {
 	// 23 x 23 pairs give 1,058 proposals. The pending overlay is not
 	// bounded by the separate sorted-run helper's 1,024-run cap.
