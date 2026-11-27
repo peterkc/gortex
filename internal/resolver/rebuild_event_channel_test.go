@@ -224,8 +224,10 @@ func TestRebuildEventChannelRejectsUnprovedWinner(t *testing.T) {
 			case "missing endpoint":
 				proof.Nodes = []*graph.Node{emitter, facts.Nodes[2]}
 			case "incompatible endpoint":
+				// Parse receipts carry no workspace ID (checkParseNode), so the
+				// endpoint proof compares receipt fields such as Kind.
 				wrong := *listener
-				wrong.WorkspaceID = "receipt-only"
+				wrong.Kind = graph.KindMethod
 				proof.Nodes = []*graph.Node{emitter, &wrong, facts.Nodes[2]}
 			}
 			proof.File.NodeCount = len(proof.Nodes)
