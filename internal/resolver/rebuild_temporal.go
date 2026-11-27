@@ -21,7 +21,7 @@ func RunRebuildTemporal(ctx context.Context, b *store_pebble.BuildStore, receipt
 	}
 	return b.RebuildTemporal(ctx, receipts, spillAt, func(s *store_pebble.RebuildTemporalPass) (store_pebble.RebuildTemporalStats, error) {
 		p := rebuildTemporal{ctx: ctx, s: s}
-		return p.run()
+		return p.run(receipts)
 	})
 }
 
@@ -36,15 +36,18 @@ func temporalOrdinal(n uint64) string {
 	return string(binary.BigEndian.AppendUint64(nil, n))
 }
 
-func (p *rebuildTemporal) run() (stats store_pebble.RebuildTemporalStats, err error) {
-	active, err := p.s.IndexInputs(p.ctx, func(e *graph.Edge) (candidate, active bool) {
+func (p *rebuildTemporal) run(receipts iter.Seq2[store_pebble.ParseFacts, error]) (stats store_pebble.RebuildTemporalStats, err error) {
+	active, err := p.s.IndexInputs(p.ctx, receipts, func(e *graph.Edge) (candidate, active, wrapperSeed bool) {
 		if e.Kind == graph.EdgeAnnotated {
 			iface, method := temporalRoleForJavaAnnotation(e.To)
 			match := iface != "" || method != ""
-			return match, match
+			return match, match, false
 		}
 		via, _ := e.Meta["via"].(string)
-		return strings.HasPrefix(via, "temporal."), via == "temporal.register" || via == "temporal.stub" || via == "temporal.start"
+		param, _ := e.Meta["temporal_name_param"].(string)
+		kind, _ := e.Meta["temporal_kind"].(string)
+		seed := via == "temporal.stub" && e.From != "" && param != "" && kind != ""
+		return strings.HasPrefix(via, "temporal."), via == "temporal.register" || via == "temporal.stub" || via == "temporal.start", seed
 	})
 	if err != nil || !active {
 		return stats, err

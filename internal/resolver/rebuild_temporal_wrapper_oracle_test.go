@@ -112,6 +112,106 @@ func TestRebuildTemporalSQLiteOracleWrapperLookup(t *testing.T) {
 	require.Zero(t, stats.SpillBytes, "the final add tail does not count as spill")
 }
 
+func TestRebuildTemporalSQLiteOracleWrapperReceiptOrder(t *testing.T) {
+	const (
+		file   = "wf/order.go"
+		wrap   = file + "::Wrap"
+		caller = file + "::Caller"
+	)
+	first := rebuildTemporalOracleStub(file, wrap, "ZSeed")
+	first.Meta["temporal_name_param"] = "activityName"
+	other := rebuildTemporalOracleStub(file, wrap, "ASeed")
+	other.Meta["temporal_name_param"] = "otherName"
+	param := rebuildTemporalOracleWrapperParam(file, wrap, 0)
+	param.ID, param.Name = wrap+"#param:otherName", "otherName"
+	nodes := []*graph.Node{
+		{ID: wrap, Name: "Wrap", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		{ID: caller, Name: "Caller", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		rebuildTemporalOracleWrapperParam(file, wrap, 1),
+		param,
+	}
+	// The first receipt seed reads argument 1. The first receipt call
+	// also has the greater old key. Each choice changes the output key.
+	firstCall := &graph.Edge{From: caller, To: wrap, Kind: graph.EdgeCalls, FilePath: file, Line: 90,
+		Meta: map[string]any{"arg_names": []string{"Loser", "Winner"}}}
+	otherCall := *firstCall
+	otherCall.Line = 50
+	facts := rebuildEventFacts(file, "go", nodes, first, other, firstCall, &otherCall)
+	native := runRebuildTemporalReducerOracle(t, 1, facts)
+	calls := native.GetOutEdges(caller)
+	require.Len(t, calls, 3) // Two ordinary calls and one wrapper stub.
+	require.True(t, native.EdgeExists(caller, temporalStubPlaceholder("activity", "Winner"), graph.EdgeCalls, file, 90))
+}
+
+func TestRebuildTemporalSQLiteOracleWrapperSlotOverwrite(t *testing.T) {
+	const (
+		file   = "wf/slot.go"
+		z      = file + "::ZWrap"
+		a      = file + "::AWrap"
+		caller = file + "::Caller"
+	)
+	// Two different kind/name pairs produce the same placeholder key.
+	// The second receipt for the caller overwrites the first staged slot.
+	zSeed := rebuildTemporalOracleStub(file, z, "activityName")
+	zSeed.Meta["temporal_name_param"] = "activityName"
+	zSeed.Meta["temporal_kind"] = "activity::scope"
+	zSeed.To = temporalStubPlaceholder("activity::scope", "activityName")
+	aSeed := rebuildTemporalOracleStub(file, a, "activityName")
+	aSeed.Meta["temporal_name_param"] = "activityName"
+	nodes := []*graph.Node{
+		{ID: z, Name: "ZWrap", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		{ID: a, Name: "AWrap", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		{ID: caller, Name: "Caller", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		rebuildTemporalOracleWrapperParam(file, z, 0),
+		rebuildTemporalOracleWrapperParam(file, a, 0),
+	}
+	zCall := &graph.Edge{From: caller, To: z, Kind: graph.EdgeCalls, FilePath: file, Line: 20,
+		Meta: map[string]any{"arg_names": []string{"Choice"}}}
+	aCall := &graph.Edge{From: caller, To: a, Kind: graph.EdgeCalls, FilePath: file, Line: 20,
+		Meta: map[string]any{"arg_names": []string{"scope::Choice"}}}
+	facts := rebuildEventFacts(file, "go", nodes, zSeed, aSeed, zCall, aCall)
+	native := runRebuildTemporalReducerOracle(t, 1, facts)
+	calls := native.GetOutEdges(caller)
+	require.Len(t, calls, 3)
+	for _, e := range calls {
+		if e.To == temporalStubPlaceholder("activity", "scope::Choice") {
+			require.Equal(t, "AWrap", e.Meta["temporal_via_wrapper"])
+			return
+		}
+	}
+	t.Fatal("missing shared wrapper slot")
+}
+
+func TestRebuildTemporalSQLiteOracleWrapperShadowsBase(t *testing.T) {
+	const (
+		file   = "wf/shadow.go"
+		wrap   = file + "::Wrap"
+		caller = file + "::Caller"
+	)
+	shadow := temporalStubPlaceholder("activity", "Pending")
+	seed := rebuildTemporalOracleStub(file, wrap, "activityName")
+	seed.Meta["temporal_name_param"] = "activityName"
+	nodes := []*graph.Node{
+		{ID: wrap, Name: "Wrap", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		{ID: caller, Name: "Caller", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		{ID: shadow, Name: "Transit", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		rebuildTemporalOracleWrapperParam(file, wrap, 0),
+		rebuildTemporalOracleWrapperParam(file, shadow, 0),
+	}
+	call := func(from, to, arg string) *graph.Edge {
+		return &graph.Edge{From: from, To: to, Kind: graph.EdgeCalls, FilePath: file, Line: 20,
+			Meta: map[string]any{"arg_names": []string{arg}}}
+	}
+	// Sweep one installs a staged stub over the call to shadow and turns
+	// shadow into a wrapper. Sweep two must not read the hidden args.
+	baseCall := call(caller, shadow, "Unexpected")
+	facts := rebuildEventFacts(file, "go", nodes, seed, baseCall,
+		call(caller, wrap, "Pending"), call(shadow, wrap, "activityName"))
+	native := runRebuildTemporalReducerOracle(t, 1, facts)
+	require.True(t, native.EdgeExists(shadow, seed.To, graph.EdgeCalls, file, 20))
+	require.False(t, native.EdgeExists(caller, temporalStubPlaceholder("activity", "Unexpected"), graph.EdgeCalls, file, 20))
+}
+
 func rebuildTemporalOracleWrapperParam(file, caller string, position int) *graph.Node {
 	return &graph.Node{
 		ID:       caller + "#param:activityName",

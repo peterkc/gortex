@@ -222,34 +222,129 @@ func (p *RebuildTemporalPass) edge(reader pebble.Reader, key []byte) (*graph.Edg
 	})
 }
 
-// IndexInputs freezes the tagged census in complete edge-key order. First
-// probe for a row that can drive a write. A marker-only checkout needs no
-// census scratch. Only an active turn pays a second scan and exact refetches.
-func (p *RebuildTemporalPass) IndexInputs(ctx context.Context, classify func(*graph.Edge) (candidate, active bool)) (bool, error) {
+// IndexInputs freezes the tagged and wrapper caller streams in receipt order.
+// Probe first: an inactive turn needs neither replay nor census scratch.
+func (p *RebuildTemporalPass) IndexInputs(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
+	classify func(*graph.Edge) (candidate, active, wrapperSeed bool),
+) (bool, error) {
 	prefix := []byte{familyEdge, edgeOut}
-	active := false
+	active, wrappers := false, false
 	err := p.viewEdges(ctx, prefix, func(e *graph.Edge) error {
-		_, drive := classify(e)
+		_, drive, seed := classify(e)
 		active = active || drive
+		wrappers = wrappers || seed
 		return nil
 	}, graph.EdgeCalls, graph.EdgeAnnotated)
 	if err != nil || !active {
 		return false, err
 	}
+	wrapperCall := func(e *graph.Edge) bool {
+		_, hasArgs := e.Meta["arg_names"]
+		return wrappers && e.Kind == graph.EdgeCalls && hasArgs
+	}
+	if err := p.indexInputOrder(ctx, receipts, func(e *graph.Edge) bool {
+		candidate, _, _ := classify(e)
+		return candidate || wrapperCall(e)
+	}); err != nil {
+		return false, err
+	}
 	err = p.viewEdges(ctx, prefix, func(e *graph.Edge) error {
-		if candidate, _ := classify(e); !candidate {
+		candidate, _, _ := classify(e)
+		caller := wrapperCall(e)
+		if !candidate && !caller {
 			return nil
 		}
-		key := append(rebuildTemporalKey('i', string(e.Kind)), pendingEdgeKey(e)...)
-		return p.put(ctx, key, nil)
+		key := pendingEdgeKey(e)
+		ordinal, err := p.inputOrdinal(key)
+		if err != nil {
+			return err
+		}
+		if candidate {
+			index := binary.BigEndian.AppendUint64(rebuildTemporalKey('i', string(e.Kind)), ordinal)
+			if err := p.put(ctx, append(index, key...), nil); err != nil {
+				return err
+			}
+		}
+		if caller {
+			index := binary.BigEndian.AppendUint64(rebuildTemporalKey('j'), ordinal)
+			return p.put(ctx, append(index, key...), nil)
+		}
+		return nil
 	}, graph.EdgeCalls, graph.EdgeAnnotated)
 	return err == nil, err
 }
 
+func (p *RebuildTemporalPass) indexInputOrder(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
+	candidate func(*graph.Edge) bool,
+) error {
+	var ordinal uint64
+	for facts, err := range receipts {
+		if err != nil {
+			return err
+		}
+		if facts.EffectiveLanguage == "" {
+			continue
+		}
+		file := pathkey.Normalize(facts.File.FilePath)
+		for _, e := range facts.Edges {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if (e.Kind != graph.EdgeCalls && e.Kind != graph.EdgeAnnotated) || e.FilePath != file || !candidate(e) {
+				continue
+			}
+			key := append(rebuildTemporalKey('o'), pendingEdgeKey(e)...)
+			_, found, err := p.get(key)
+			if err != nil {
+				return err
+			}
+			if !found {
+				if err := p.put(ctx, key, binary.BigEndian.AppendUint64(nil, ordinal)); err != nil {
+					return err
+				}
+				ordinal++
+			}
+		}
+	}
+	return ctx.Err()
+}
+
+// Direct SQLite's surviving base rows follow insertion position. As in
+// gRPC, unmatched rows enter a tail but cannot borrow a raw receipt.
+func (p *RebuildTemporalPass) inputOrdinal(live []byte) (uint64, error) {
+	const unordered = ^uint64(0)
+	raw, err := rebuildReceiptKey(p.build.pending, live)
+	if errors.Is(err, ErrRebuildUnknownProvenance) {
+		return unordered, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	ordinal, found, err := p.get(append(rebuildTemporalKey('o'), raw...))
+	if err != nil || !found {
+		return unordered, err
+	}
+	if len(ordinal) != 8 {
+		return 0, invalid("Temporal input ordinal")
+	}
+	return binary.BigEndian.Uint64([]byte(ordinal)), nil
+}
+
 func (p *RebuildTemporalPass) VisitInputs(ctx context.Context, kind graph.EdgeKind, yield func(*graph.Edge) error) error {
-	prefix := rebuildTemporalKey('i', string(kind))
+	return p.visitInputs(ctx, rebuildTemporalKey('i', string(kind)), kind, yield)
+}
+
+// VisitWrapperCalls streams durable calls eligible for the wrapper caller scan.
+func (p *RebuildTemporalPass) VisitWrapperCalls(ctx context.Context, yield func(*graph.Edge) error) error {
+	return p.visitInputs(ctx, rebuildTemporalKey('j'), graph.EdgeCalls, yield)
+}
+
+func (p *RebuildTemporalPass) visitInputs(ctx context.Context, prefix []byte, kind graph.EdgeKind, yield func(*graph.Edge) error) error {
 	return p.View().visit(ctx, prefix, func(snap *pebble.Snapshot, r row) error {
-		e, err := p.edge(snap, r.key[len(prefix):])
+		if len(r.key) <= len(prefix)+8 {
+			return invalid("Temporal census key")
+		}
+		e, err := p.edge(snap, r.key[len(prefix)+8:])
 		if err != nil {
 			return err
 		}
@@ -258,11 +353,6 @@ func (p *RebuildTemporalPass) VisitInputs(ctx context.Context, kind graph.EdgeKi
 		}
 		return yield(e)
 	})
-}
-
-// VisitEdges reads durable edges of the selected kind in complete key order.
-func (p *RebuildTemporalPass) VisitEdges(ctx context.Context, kind graph.EdgeKind, yield func(*graph.Edge) error) error {
-	return p.viewEdges(ctx, []byte{familyEdge, edgeOut}, yield, kind)
 }
 
 func (p *RebuildTemporalPass) viewEdges(ctx context.Context, prefix []byte, yield func(*graph.Edge) error, kinds ...graph.EdgeKind) error {

@@ -23,8 +23,8 @@ func TestRebuildTemporalConstCollapseOrder(t *testing.T) {
 		passes    int
 		rows      int
 	}{
-		{name: "dependent-first", passes: 8, rows: 9},
-		{name: "referent-first", reverse: true, wideNames: true, passes: 1, rows: 10},
+		{name: "referent-first", passes: 1, rows: 10},
+		{name: "dependent-first", reverse: true, wideNames: true, passes: 8, rows: 9},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts, aliases := temporalConstChain(tc.reverse)
@@ -43,12 +43,9 @@ func TestRebuildTemporalConstCollapseOrder(t *testing.T) {
 			}
 			forwardRows := orderedTemporalConstRows(forceTemporalConstSweep(order, aliases, maps.Clone(seed)))
 			backwardRows := orderedTemporalConstRows(forceTemporalConstSweep(backward, aliases, maps.Clone(seed)))
-			require.Len(t, forwardRows, tc.rows)
-			if tc.reverse {
-				require.Len(t, backwardRows, 9)
-			} else {
-				require.Len(t, backwardRows, 10)
-			}
+			require.Len(t, backwardRows, tc.rows)
+			// The alphabetic traversal settles a different set at the cap.
+			require.NotEqual(t, forwardRows, backwardRows)
 			t.Logf("raw sorted sweep: %v; raw reverse sweep: %v", forwardRows, backwardRows)
 
 			names := append(slices.Clone(backward), "Terminal", "A01", "")
@@ -63,7 +60,7 @@ func TestRebuildTemporalConstCollapseOrder(t *testing.T) {
 				}
 			}
 			got, stats := readRebuildTemporalConst(t, view, names, names)
-			require.Equal(t, forwardRows, got)
+			require.Equal(t, backwardRows, got)
 			require.Equal(t, len(names)-2, stats.Names)
 			require.Zero(t, stats.DiscoveryPasses)
 			require.Equal(t, tc.passes, stats.CollapsePasses)

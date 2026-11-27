@@ -112,6 +112,40 @@ func TestRebuildTemporalSQLiteOracleGoRegistrationMoves(t *testing.T) {
 	}
 }
 
+func TestRebuildTemporalSQLiteOracleMoveReceiptOrder(t *testing.T) {
+	const (
+		file    = "wf/order-moves.go"
+		caller  = file + "::Run"
+		setup   = file + "::setup"
+		handler = file + "::ChargeCard"
+	)
+	register := func(alias string, line int) *graph.Edge {
+		return &graph.Edge{From: setup, To: "unresolved::RegisterActivity", Kind: graph.EdgeCalls, FilePath: file, Line: line,
+			Meta: map[string]any{
+				"via":                      "temporal.register",
+				"temporal_kind":            "activity",
+				"temporal_name":            "ChargeCard",
+				"temporal_registered_name": alias,
+			}}
+	}
+	// The last receipt registration supplies the node role. Both stubs
+	// move within one native window, where the first receipt mover wins.
+	facts := rebuildEventFacts(file, "go", []*graph.Node{
+		{ID: caller, Name: "Run", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		{ID: setup, Name: "setup", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		{ID: handler, Name: "ChargeCard", Kind: graph.KindFunction, Language: "go", FilePath: file},
+	}, register("ZCharge", 6), register("ACharge", 5),
+		rebuildTemporalOracleStub(file, caller, "ZCharge"), rebuildTemporalOracleStub(file, caller, "ACharge"))
+	native := runRebuildTemporalReducerOracle(t, 1, facts)
+	provider := native.GetNode(handler)
+	require.NotNil(t, provider)
+	require.Equal(t, "ACharge", provider.Meta["temporal_name"])
+	calls := native.GetOutEdges(caller)
+	require.Len(t, calls, 1)
+	require.Equal(t, handler, calls[0].To)
+	require.Equal(t, "ZCharge", calls[0].Meta["temporal_name"])
+}
+
 func TestRebuildTemporalSQLiteOracleJavaInterfaces(t *testing.T) {
 	const (
 		file       = "java/OrderAPI.java"

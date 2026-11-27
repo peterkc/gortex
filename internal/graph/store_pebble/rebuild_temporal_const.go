@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -145,11 +146,12 @@ type temporalConstPass struct {
 	view    RebuildView
 	project func(*graph.Node) TemporalConstCandidate
 	stats   TemporalConstStats
+	next    uint64
 }
 
 func (p *temporalConstPass) resolve(ctx context.Context) error {
-	if err := p.visit(ctx, temporalConstName, func(name, _ string) error {
-		return p.resolveName(ctx, name)
+	if err := p.visit(ctx, temporalConstName, func(name, ordinal string) error {
+		return p.resolveName(ctx, name, ordinal)
 	}); err != nil {
 		return fmt.Errorf("resolve seed names: %w", err)
 	}
@@ -158,11 +160,11 @@ func (p *temporalConstPass) resolve(ctx context.Context) error {
 		// The iterator sees only aliases known at the start of this round.
 		// The live name-set read deduplicates referents discovered in it.
 		if err := p.visit(ctx, temporalConstAlias, func(_, ref string) error {
-			added, err := p.discover(ref)
-			if err != nil || !added {
+			ordinal, err := p.discover(ref)
+			if err != nil || ordinal == "" {
 				return err
 			}
-			return p.resolveName(ctx, ref)
+			return p.resolveName(ctx, ref, ordinal)
 		}); err != nil {
 			return fmt.Errorf("discover alias names: %w", err)
 		}
@@ -173,8 +175,8 @@ func (p *temporalConstPass) resolve(ctx context.Context) error {
 	}
 	for range temporalConstPassLimit {
 		progress := false
-		// Keys sort by alias name. Reads see earlier writes in this sweep;
-		// reading values through the iterator snapshot would change the cap.
+		// Native's capped result depends on Go map order. Use first discovery
+		// from the frozen dispatch stream, with live reads in each sweep.
 		if err := p.visit(ctx, temporalConstAlias, func(name, ref string) error {
 			db := p.view.build.pending
 			value, err := readTemporalConstValue(db, name)
@@ -198,16 +200,18 @@ func (p *temporalConstPass) resolve(ctx context.Context) error {
 	return nil
 }
 
-func (p *temporalConstPass) discover(name string) (bool, error) {
+func (p *temporalConstPass) discover(name string) (string, error) {
 	key := temporalConstKey(temporalConstName, name)
 	known, err := temporalConstHas(p.view.build.pending, key)
 	if err != nil || known {
-		return false, err
+		return "", err
 	}
-	return true, p.set(key, "")
+	ordinal := string(binary.BigEndian.AppendUint64(nil, p.next))
+	p.next++
+	return ordinal, p.set(key, ordinal)
 }
 
-func (p *temporalConstPass) resolveName(ctx context.Context, name string) error {
+func (p *temporalConstPass) resolveName(ctx context.Context, name, ordinal string) error {
 	p.stats.Names++
 	var alias, aliasID, javaLiteral, javaID, literal string
 	var conflict bool
@@ -243,7 +247,11 @@ func (p *temporalConstPass) resolveName(ctx context.Context, name string) error 
 		return fmt.Errorf("read candidates for %q: %w", name, err)
 	}
 	if alias != "" {
-		if err := p.set(temporalConstKey(temporalConstAlias, name), alias); err != nil {
+		if len(ordinal) != 8 {
+			return invalid("Temporal constant name ordinal")
+		}
+		key := appendKeyString(append(temporalConstKey(temporalConstAlias), ordinal...), name)
+		if err := p.set(key, alias); err != nil {
 			return err
 		}
 	}
@@ -263,7 +271,14 @@ func (p *temporalConstPass) resolveName(ctx context.Context, name string) error 
 func (p *temporalConstPass) visit(ctx context.Context, col byte, yield func(name, value string) error) error {
 	prefix := temporalConstKey(col)
 	return pendingVisit(ctx, p.view.build.pending, prefix, func(r row) error {
-		name, tail, err := readKeyString(r.key[len(prefix):])
+		key := r.key[len(prefix):]
+		if col == temporalConstAlias {
+			if len(key) <= 8 {
+				return invalid("Temporal constant alias ordinal")
+			}
+			key = key[8:]
+		}
+		name, tail, err := readKeyString(key)
 		if err != nil || name == "" || len(tail) != 0 {
 			return invalid("Temporal constant scratch key")
 		}

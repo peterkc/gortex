@@ -78,7 +78,7 @@ func (p *rebuildTemporal) indexWrappers(ordinal *uint64) error {
 
 func (p *rebuildTemporal) wrapperSweep(round string) (bool, error) {
 	var pending uint64
-	err := p.s.VisitEdges(p.ctx, graph.EdgeCalls, func(call *graph.Edge) error {
+	err := p.s.VisitWrapperCalls(p.ctx, func(call *graph.Edge) error {
 		if call == nil || call.From == "" {
 			return nil
 		}
