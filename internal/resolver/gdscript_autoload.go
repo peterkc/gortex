@@ -42,10 +42,7 @@ func ResolveGDScriptAutoloads(g graph.Store) int {
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil || !graph.IsUnresolvedTarget(e.To) {
-			continue
-		}
-		recv, _ := e.Meta["receiver_type"].(string)
+		recv, method := gdAutoloadCallKey(e)
 		if recv == "" {
 			continue
 		}
@@ -53,28 +50,51 @@ func ResolveGDScriptAutoloads(g graph.Store) int {
 		if !ok {
 			continue
 		}
-		method := strings.TrimPrefix(graph.UnresolvedName(e.To), "*.")
 		target := members[fileID][method]
 		if target == "" {
 			continue
 		}
-		oldTo := e.To
-		e.To = target
-		// The binding is structural, not a name guess: project.godot
-		// states which script the receiver names, and the script
-		// declares the member. That is the same grade of evidence the
-		// extractor's own receiver_type match carries.
-		e.Origin = graph.OriginASTResolved
-		e.Confidence = 0.9
-		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.9)
-		StampSynthesized(e, SynthGodotAutoload)
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		reindex = append(reindex, gdAutoloadRebind(e, target))
 		resolved++
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func gdAutoloadCallKey(e *graph.Edge) (receiver, member string) {
+	if e == nil || !graph.IsUnresolvedTarget(e.To) {
+		return "", ""
+	}
+	receiver, _ = e.Meta["receiver_type"].(string)
+	if receiver == "" {
+		return "", ""
+	}
+	return receiver, strings.TrimPrefix(graph.UnresolvedName(e.To), "*.")
+}
+
+func gdAutoloadRebind(e *graph.Edge, target string) graph.EdgeReindex {
+	oldTo := e.To
+	e.To = target
+	// The manifest names the script and the script declares the member.
+	// That is the same evidence as the extractor's receiver_type match.
+	e.Origin = graph.OriginASTResolved
+	e.Confidence = 0.9
+	e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.9)
+	StampSynthesized(e, SynthGodotAutoload)
+	return graph.EdgeReindex{Edge: e, OldTo: oldTo}
+}
+
+func gdAutoloadDecl(n *graph.Node) (name, script string) {
+	if n == nil || n.Kind != graph.KindType || n.Language != "godot_project" {
+		return "", ""
+	}
+	if kind, _ := n.Meta["gd_kind"].(string); kind != "autoload" {
+		return "", ""
+	}
+	script, _ = n.Meta["gd_script"].(string)
+	return n.Name, script
 }
 
 // gdAutoloadScripts maps each autoload singleton name to the graph file
@@ -84,24 +104,18 @@ func ResolveGDScriptAutoloads(g graph.Store) int {
 func gdAutoloadScripts(g graph.Store) map[string]string {
 	var decls map[string]string
 	for n := range g.NodesByKind(graph.KindType) {
-		if n == nil || n.Meta == nil || n.Language != "godot_project" {
-			continue
-		}
-		if kind, _ := n.Meta["gd_kind"].(string); kind != "autoload" {
-			continue
-		}
-		script, _ := n.Meta["gd_script"].(string)
+		name, script := gdAutoloadDecl(n)
 		if script == "" {
 			continue
 		}
 		if decls == nil {
 			decls = map[string]string{}
 		}
-		if prev, dup := decls[n.Name]; dup && prev != script {
-			decls[n.Name] = ""
+		if prev, dup := decls[name]; dup && prev != script {
+			decls[name] = ""
 			continue
 		}
-		decls[n.Name] = script
+		decls[name] = script
 	}
 	if len(decls) == 0 {
 		return nil
@@ -155,10 +169,7 @@ func gdMembersByFileSet(g graph.Store, want map[string]bool) map[string]map[stri
 	out := make(map[string]map[string]string, len(want))
 	for _, kind := range []graph.NodeKind{graph.KindMethod, graph.KindFunction} {
 		for n := range g.NodesByKind(kind) {
-			if n == nil || n.Language != "gdscript" {
-				continue
-			}
-			fileID, _, ok := strings.Cut(n.ID, "::")
+			fileID, ok := gdScriptMemberFile(n)
 			if !ok || !want[fileID] {
 				continue
 			}
@@ -171,4 +182,12 @@ func gdMembersByFileSet(g graph.Store, want map[string]bool) map[string]map[stri
 		}
 	}
 	return out
+}
+
+func gdScriptMemberFile(n *graph.Node) (string, bool) {
+	if n == nil || n.Language != "gdscript" {
+		return "", false
+	}
+	fileID, _, ok := strings.Cut(n.ID, "::")
+	return fileID, ok
 }
