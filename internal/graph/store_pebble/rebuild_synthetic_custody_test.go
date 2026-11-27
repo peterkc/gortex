@@ -45,7 +45,7 @@ func TestRebuildSyntheticCustodyCapabilities(t *testing.T) {
 		BareCallName:    func(to string) string { return strings.TrimPrefix(to, "unresolved::") },
 		IsStdlibMutator: func(name string) bool { return name == "Lock" },
 	}
-	stats, err := b.RebuildCapabilities(t.Context(), receipts, mechanism, noImport, &rules, 1)
+	stats, err := b.RebuildCapabilities(t.Context(), receipts, mechanism, noImport, rules, 1)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stats.Emitted)
 	kept, err := b.pendingEdge(pendingEdgeKey(&keeper))
