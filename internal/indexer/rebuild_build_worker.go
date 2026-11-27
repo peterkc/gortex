@@ -654,6 +654,15 @@ func buildRebuildStages(
 				zap.Uint64("stubs", sidekiq.Stubs), zap.Uint64("resolved", sidekiq.Resolved),
 				zap.Uint64("moves", sidekiq.Moves))
 		}
+		laravel, err := resolver.RunRebuildLaravelEvent(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if laravel.Stubs != 0 {
+			logger.Info("rebuild Laravel event applied to private build",
+				zap.Uint64("stubs", laravel.Stubs), zap.Uint64("resolved", laravel.Resolved),
+				zap.Uint64("moves", laravel.Moves), zap.Uint64("adds", laravel.Adds))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

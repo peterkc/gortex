@@ -55,6 +55,8 @@ const (
 	rebuildProofFabric
 	// Exact notification Call and handler receipts for a fresh fanout row.
 	rebuildProofMediatRFanout
+	// Exact Laravel Call, handler, and listener route receipts for fanout.
+	rebuildProofLaravelEventFanout
 	rebuildProofLimit
 )
 

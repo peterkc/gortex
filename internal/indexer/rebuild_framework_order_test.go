@@ -53,6 +53,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"MediatR", "moves", 1},
 		{"C# interface dispatch", "edges", 1},
 		{"Sidekiq", "moves", 1},
+		{"Laravel event", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -80,7 +81,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				ProvidersOff: true,
 				Recipes: map[string]rebuildDigest{
 					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1}, "kotlin": {1}, "mybatis": {1},
-					"sql": {1}, "python": {1}, "csharp": {1}, "ruby": {1},
+					"sql": {1}, "python": {1}, "csharp": {1}, "ruby": {1}, "php": {1},
 				},
 				Policy:  freezeRebuildParsePolicy(root, cfg),
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
@@ -643,6 +644,13 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	sidekiqFacts := receipt([]*graph.Node{enqueue, perform}, edge(enqueue, enqueue.ID, graph.EdgeCalls, 2,
 		map[string]any{"via": "sidekiq-dispatch", "sidekiq_worker": "Jobs::ClockJob"}))
 
+	const laravelFile = "event.php"
+	publish := node(laravelFile, "php", "publish", graph.KindFunction, 1)
+	laravelHandler := node(laravelFile, "php", "handle", graph.KindMethod, 4)
+	laravelHandler.Meta = map[string]any{"laravel_listener_type": "OrderShipped"}
+	laravelFacts := receipt([]*graph.Node{publish, laravelHandler}, edge(publish, publish.ID, graph.EdgeCalls, 2,
+		map[string]any{"via": "laravel-event", "laravel_event_type": "OrderShipped"}))
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -653,6 +661,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
-		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts,
+		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts,
 	}
 }
