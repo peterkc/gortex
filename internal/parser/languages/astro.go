@@ -30,6 +30,10 @@ func (e *AstroExtractor) Language() string     { return "astro" }
 func (e *AstroExtractor) Extensions() []string { return []string{".astro"} }
 
 func (e *AstroExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
+	return e.ExtractWithOptions(filePath, src, parser.ExtractionOptions{})
+}
+
+func (e *AstroExtractor) ExtractWithOptions(filePath string, src []byte, opts parser.ExtractionOptions) (*parser.ExtractionResult, error) {
 	result := &parser.ExtractionResult{}
 	lineCount := 1 + strings.Count(string(src), "\n")
 
@@ -54,11 +58,11 @@ func (e *AstroExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	if m := astroFrontmatterRe.FindSubmatchIndex(src); m != nil {
 		if contentStart, contentEnd := m[2], m[3]; contentStart >= 0 {
 			lineOffset := strings.Count(string(src[:contentStart]), "\n")
-			delegateInlineScriptSlice(e.ts, src[contentStart:contentEnd], lineOffset, filePath, fileNode.ID, "astro", result)
+			delegateInlineScriptSlice(e.ts, src[contentStart:contentEnd], lineOffset, filePath, fileNode.ID, "astro", result, opts)
 		}
 	}
 	// Client-side <script> blocks (in addition to the frontmatter).
-	carveAndDelegateScripts(src, filePath, fileNode.ID, "astro", e.ts, e.js, result)
+	carveAndDelegateScripts(src, filePath, fileNode.ID, "astro", e.ts, e.js, result, opts)
 	mineTemplateComponentUsages(src, filePath, componentID, "astro", result)
 	applyFrameworkTemplatePasses(src, filePath, componentID, "astro", result)
 	return result, nil

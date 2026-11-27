@@ -26,6 +26,10 @@ func (e *SvelteExtractor) Language() string     { return "svelte" }
 func (e *SvelteExtractor) Extensions() []string { return []string{".svelte"} }
 
 func (e *SvelteExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
+	return e.ExtractWithOptions(filePath, src, parser.ExtractionOptions{})
+}
+
+func (e *SvelteExtractor) ExtractWithOptions(filePath string, src []byte, opts parser.ExtractionOptions) (*parser.ExtractionResult, error) {
 	result := &parser.ExtractionResult{}
 	lineCount := 1 + strings.Count(string(src), "\n")
 
@@ -46,7 +50,7 @@ func (e *SvelteExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		From: fileNode.ID, To: componentID, Kind: graph.EdgeDefines, FilePath: filePath, Line: 1,
 	})
 
-	carveAndDelegateScripts(src, filePath, fileNode.ID, "svelte", e.ts, e.js, result)
+	carveAndDelegateScripts(src, filePath, fileNode.ID, "svelte", e.ts, e.js, result, opts)
 	mineTemplateComponentUsages(src, filePath, componentID, "svelte", result)
 	applyFrameworkTemplatePasses(src, filePath, componentID, "svelte", result)
 	// `$store` auto-subscriptions in markup resolve to the imported store.

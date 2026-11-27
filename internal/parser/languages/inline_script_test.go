@@ -13,7 +13,7 @@ func TestInlineScriptDelegateOffsets(t *testing.T) {
 	const lineOffset = 4 // the carved block starts on host line 5 (0-based row 4)
 
 	result := &parser.ExtractionResult{}
-	delegateInlineScriptSlice(NewJavaScriptExtractor(), []byte(script), lineOffset, "App.vue", "App.vue", "vue", result)
+	delegateInlineScriptSlice(NewJavaScriptExtractor(), []byte(script), lineOffset, "App.vue", "App.vue", "vue", result, parser.ExtractionOptions{})
 
 	var greet *graph.Node
 	for _, n := range result.Nodes {
@@ -53,7 +53,7 @@ func TestInlineScriptDelegateOffsets(t *testing.T) {
 
 	// Whitespace-only content is a no-op.
 	empty := &parser.ExtractionResult{}
-	delegateInlineScriptSlice(NewJavaScriptExtractor(), []byte("   \n  "), 0, "x.vue", "x.vue", "vue", empty)
+	delegateInlineScriptSlice(NewJavaScriptExtractor(), []byte("   \n  "), 0, "x.vue", "x.vue", "vue", empty, parser.ExtractionOptions{})
 	if len(empty.Nodes) != 0 || len(empty.Edges) != 0 {
 		t.Errorf("whitespace script should be a no-op, got %d nodes %d edges", len(empty.Nodes), len(empty.Edges))
 	}

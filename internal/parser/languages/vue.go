@@ -34,6 +34,10 @@ func (e *VueExtractor) Language() string     { return "vue" }
 func (e *VueExtractor) Extensions() []string { return []string{".vue"} }
 
 func (e *VueExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
+	return e.ExtractWithOptions(filePath, src, parser.ExtractionOptions{})
+}
+
+func (e *VueExtractor) ExtractWithOptions(filePath string, src []byte, opts parser.ExtractionOptions) (*parser.ExtractionResult, error) {
 	result := &parser.ExtractionResult{}
 	lineCount := 1 + strings.Count(string(src), "\n")
 
@@ -70,7 +74,7 @@ func (e *VueExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 		if vueScriptIsTypeScript(attrs) {
 			delegate = e.ts
 		}
-		delegateInlineScriptSlice(delegate, content, lineOffset, filePath, fileNode.ID, "vue", result)
+		delegateInlineScriptSlice(delegate, content, lineOffset, filePath, fileNode.ID, "vue", result, opts)
 	}
 	mineTemplateComponentUsages(src, filePath, componentID, "vue", result)
 	applyFrameworkTemplatePasses(src, filePath, componentID, "vue", result)

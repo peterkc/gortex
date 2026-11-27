@@ -31,7 +31,7 @@ func scriptTagIsTypeScript(attrs []byte) bool {
 // the TypeScript or JavaScript extractor (per its lang attribute) and merges the
 // result rebased into host-file coordinates. It is the shared carving loop behind
 // the Svelte and Astro extractors.
-func carveAndDelegateScripts(src []byte, filePath, fileID, language string, ts, js parser.Extractor, result *parser.ExtractionResult) {
+func carveAndDelegateScripts(src []byte, filePath, fileID, language string, ts, js parser.Extractor, result *parser.ExtractionResult, opts parser.ExtractionOptions) {
 	for _, m := range markupScriptRe.FindAllSubmatchIndex(src, -1) {
 		contentStart, contentEnd := m[4], m[5]
 		if contentStart < 0 {
@@ -42,7 +42,7 @@ func carveAndDelegateScripts(src []byte, filePath, fileID, language string, ts, 
 			delegate = ts
 		}
 		lineOffset := strings.Count(string(src[:contentStart]), "\n")
-		delegateInlineScriptSlice(delegate, src[contentStart:contentEnd], lineOffset, filePath, fileID, language, result)
+		delegateInlineScriptSlice(delegate, src[contentStart:contentEnd], lineOffset, filePath, fileID, language, result, opts)
 	}
 }
 
@@ -58,12 +58,12 @@ func carveAndDelegateScripts(src []byte, filePath, fileID, language string, ts, 
 // It is the shared spine behind every markup extractor that embeds another
 // language (HTML/Vue/Svelte/Astro <script>, Razor @code), so the error-prone
 // offset-rebase math lives — and is tested — in exactly one place.
-func delegateInlineScriptSlice(delegate parser.Extractor, content []byte, lineOffset int, filePath, fileID, language string, result *parser.ExtractionResult) {
+func delegateInlineScriptSlice(delegate parser.Extractor, content []byte, lineOffset int, filePath, fileID, language string, result *parser.ExtractionResult, opts parser.ExtractionOptions) {
 	if delegate == nil || result == nil || strings.TrimSpace(string(content)) == "" {
 		return
 	}
 	virtual := filePath + "#script:" + strconv.Itoa(lineOffset+1)
-	sub, err := delegate.Extract(virtual, content)
+	sub, err := parser.Extract(delegate, virtual, content, opts)
 	if err != nil || sub == nil {
 		return
 	}
