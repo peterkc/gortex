@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
@@ -26,7 +27,7 @@ type RebuildEventChannelStats struct {
 // Fanout and payload semantics are supplied by the resolver. No published
 // state changes before the owning worker validates and offers the full tail.
 func (b *BuildStore) RebuildEventChannel(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
-	isEvent func(string) bool, fanout func(event, transport string) int,
+	topicPrefixes []string, channelPolicy func(event, label string) (transport string, fanoutCap int),
 	makeCall func(event, transport string, emitter, listener *graph.Edge) *graph.Edge,
 ) (stats RebuildEventChannelStats, err error) {
 	defer func() {
@@ -35,16 +36,11 @@ func (b *BuildStore) RebuildEventChannel(ctx context.Context, receipts iter.Seq2
 			err = fmt.Errorf("%w: %w", ErrRebuildEventChannel, err)
 		}
 	}()
-	if spillAt < 1 || spillAt > goldBufferBytes || receipts == nil || isEvent == nil || fanout == nil || makeCall == nil {
+	if spillAt < 1 || spillAt > goldBufferBytes || receipts == nil || len(topicPrefixes) == 0 || channelPolicy == nil || makeCall == nil {
 		return stats, fmt.Errorf("%w: invalid event channel inputs", ErrRebuildLinkInputSize)
 	}
-	found := false
-	if err := b.RebuildView().VisitNodes(ctx, func(n *graph.Node) error {
-		if isEvent(n.ID) {
-			found = true
-		}
-		return nil
-	}); err != nil || !found {
+	found, err := b.hasRebuildEventTopic(ctx, topicPrefixes)
+	if err != nil || !found {
 		return stats, err
 	}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildEventPrefix)
@@ -58,16 +54,42 @@ func (b *BuildStore) RebuildEventChannel(ctx context.Context, receipts iter.Seq2
 		err = errors.Join(err, b.pending.DeleteRange(rebuildEventPrefix, prefixEnd(rebuildEventPrefix), pebble.NoSync))
 	}()
 	p := rebuildEventChannel{b: b, threshold: spillAt}
-	if err := p.capture(ctx, isEvent); err != nil {
+	if err := p.capture(ctx, topicPrefixes); err != nil {
 		return stats, err
 	}
-	if err := p.elect(ctx, fanout, makeCall); err != nil {
+	if err := p.elect(ctx, channelPolicy, makeCall); err != nil {
 		return stats, err
 	}
 	if err := p.prove(ctx, receipts); err != nil {
 		return stats, err
 	}
-	return p.stats, b.withWrites(func() error { return p.apply(ctx) })
+	err = b.withWrites(func() error { return p.apply(ctx) })
+	return p.stats, err
+}
+
+// The native framework gate needs only a topic ID prefix. Seek the node
+// keys directly and stop at the first match without decoding node payloads.
+func (b *BuildStore) hasRebuildEventTopic(ctx context.Context, prefixes []string) (found bool, err error) {
+	err = b.RebuildView().read(ctx, func(snap *pebble.Snapshot) (err error) {
+		it, err := snap.NewIterWithContext(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { err = errors.Join(err, it.Close()) }()
+		for _, topic := range prefixes {
+			key := pendingNodeKey(topic)
+			prefix := key[:len(key)-2] // drop the ID terminator, not escaped ID bytes
+			if it.SeekGE(prefix) && bytes.HasPrefix(it.Key(), prefix) {
+				found = true
+				return nil
+			}
+			if err := it.Error(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return found, err
 }
 
 type rebuildEventChannel struct {
@@ -100,7 +122,7 @@ func (p *rebuildEventChannel) put(key, value []byte) error {
 	return nil
 }
 
-func (p *rebuildEventChannel) capture(ctx context.Context, isEvent func(string) bool) error {
+func (p *rebuildEventChannel) capture(ctx context.Context, topicPrefixes []string) error {
 	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
 		kind, err := rebuildAttributionEdgeKind(r.key)
 		if err != nil || kind != graph.EdgeEmits && kind != graph.EdgeListensOn {
@@ -116,7 +138,17 @@ func (p *rebuildEventChannel) capture(ctx context.Context, isEvent func(string) 
 		if !bytes.Equal(r.key, pendingEdgeKey(e)) {
 			return invalid("event channel edge identity")
 		}
-		if e.From == "" || !isEvent(e.To) {
+		if e.From == "" {
+			return nil
+		}
+		found := false
+		for _, prefix := range topicPrefixes {
+			if strings.HasPrefix(e.To, prefix) {
+				found = true
+				break
+			}
+		}
+		if !found {
 			return nil
 		}
 		col := byte('l')
@@ -144,7 +176,7 @@ func (p *rebuildEventChannel) sites(ctx context.Context, col byte, event string,
 	})
 }
 
-func (p *rebuildEventChannel) elect(ctx context.Context, fanout func(string, string) int,
+func (p *rebuildEventChannel) elect(ctx context.Context, channelPolicy func(event, label string) (transport string, fanoutCap int),
 	makeCall func(string, string, *graph.Edge, *graph.Edge) *graph.Edge,
 ) error {
 	return pendingVisit(ctx, p.b.pending, eventScratch('t'), func(r row) error {
@@ -170,27 +202,27 @@ func (p *rebuildEventChannel) elect(ctx context.Context, fanout func(string, str
 		}); err != nil {
 			return err
 		}
-		cap := fanout(event, transport)
-		if cap == 0 || emits > cap {
+		transport, fanoutCap := channelPolicy(event, transport)
+		if fanoutCap == 0 || emits > fanoutCap {
 			return nil
 		}
 		if err := p.sites(ctx, 'l', event, func(*graph.Edge) error {
 			listens++
 			return nil
-		}); err != nil || listens == 0 || listens > cap {
+		}); err != nil || listens == 0 || listens > fanoutCap {
 			return err
 		}
 		if err := p.sites(ctx, 'e', event, func(em *graph.Edge) error {
-			a, err := p.b.RebuildView().Node(ctx, em.From)
-			if err != nil || a == nil {
+			emitter, err := p.b.RebuildView().Node(ctx, em.From)
+			if err != nil || emitter == nil {
 				return err
 			}
 			return p.sites(ctx, 'l', event, func(li *graph.Edge) error {
 				if em.From == li.From {
 					return nil
 				}
-				b, err := p.b.RebuildView().Node(ctx, li.From)
-				if err != nil || b == nil || a.WorkspaceID != b.WorkspaceID {
+				listener, err := p.b.RebuildView().Node(ctx, li.From)
+				if err != nil || listener == nil || emitter.WorkspaceID != listener.WorkspaceID {
 					return err
 				}
 				return p.represent(event, em, li)

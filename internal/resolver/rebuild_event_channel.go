@@ -16,23 +16,19 @@ func RunRebuildEventChannel(ctx context.Context, b *store_pebble.BuildStore, rec
 	if !selection.allows(SynthEventChannel) {
 		return store_pebble.RebuildEventChannelStats{}, nil
 	}
-	return b.RebuildEventChannel(ctx, receipts, spillAt, func(id string) bool {
-		return isPubsubEventNode(id) || isEmitterEventNode(id)
-	}, func(event, transport string) int {
+	prefixes := []string{"event::pubsub::", "event::emitter::"}
+	return b.RebuildEventChannel(ctx, receipts, spillAt, prefixes, func(event, transport string) (string, int) {
 		if transport == "" {
 			transport = transportFromEventID(event)
 		}
 		if !eventChannelInProcess(transport) {
-			return 0
+			return transport, 0
 		}
 		if transport == emitterLiteralTransport {
-			return emitterLiteralFanoutCap
+			return transport, emitterLiteralFanoutCap
 		}
-		return maxEventChannelFanout
+		return transport, maxEventChannelFanout
 	}, func(event, transport string, emitter, listener *graph.Edge) *graph.Edge {
-		if transport == "" {
-			transport = transportFromEventID(event)
-		}
 		return &graph.Edge{
 			From:            emitter.From,
 			To:              listener.From,

@@ -149,8 +149,12 @@ func TestRebuildEventChannelRawSiteCaps(t *testing.T) {
 	}{
 		{"emitter at cap", "event::emitter::bus::tick", "emitter", 6, 1, 1},
 		{"emitter over cap", "event::emitter::bus::tick", "emitter", 7, 1, 0},
+		{"emitter literal listeners at cap", "event::emitter::bus::tick", "emitter", 1, 6, 1},
+		{"emitter literal listeners over cap", "event::emitter::bus::tick", "emitter", 1, 7, 0},
 		{"listener at cap", "event::pubsub::socketio::tick", "socketio", 1, 32, 1},
 		{"listener over cap", "event::pubsub::socketio::tick", "socketio", 1, 33, 0},
+		{"socketio emitters at cap", "event::pubsub::socketio::tick", "socketio", 32, 1, 1},
+		{"socketio emitters over cap", "event::pubsub::socketio::tick", "socketio", 33, 1, 0},
 		{"broker skipped", "event::pubsub::kafka::tick", "kafka", 1, 1, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,6 +179,124 @@ func TestRebuildEventChannelRawSiteCaps(t *testing.T) {
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 		})
 	}
+}
+
+func TestRebuildEventChannelNodeGates(t *testing.T) {
+	const file, lang = "bus.ts", "typescript"
+	const topic, transport = "event::pubsub::eventemitter::tick", "eventemitter"
+	emitter := rebuildEventNode(file, "emit", lang, "")
+	listener := rebuildEventNode(file, "listen", lang, "")
+	topicNode := rebuildEventTopic(file, lang, topic, "tick", transport)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthEventChannel})
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name  string
+		nodes []*graph.Node
+	}{
+		{"missing topic", []*graph.Node{emitter, listener}},
+		{"missing listener node", []*graph.Node{emitter, topicNode}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := rebuildEventFacts(file, lang, tc.nodes,
+				rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, transport),
+				rebuildEventSite(listener, topic, graph.EdgeListensOn, 8, transport))
+			b, native := openRebuildEventStores(t, facts)
+			before := rebuildEventSQLiteRows(native)
+			require.Len(t, before.edges, 2)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+
+			report := RunFrameworkSynthesizersWithSelection(native, selection)
+			require.NoError(t, report.Err)
+			require.Zero(t, report.Total)
+			require.Equal(t, before, rebuildEventSQLiteRows(native))
+			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), selection, 1<<20)
+			require.NoError(t, err)
+			require.Zero(t, stats.Pairs)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+
+			if tc.name == "missing topic" {
+				// The bare resolver can pair these sites. Only the framework
+				// driver checks for a topic node before running it.
+				require.Equal(t, 1, ResolveEventChannelCalls(native))
+			}
+		})
+	}
+}
+
+func TestRebuildEventChannelTransportFallback(t *testing.T) {
+	const file, lang = "bus.ts", "typescript"
+	const topic, transport = "event::pubsub::eventemitter::tick", "eventemitter"
+	emitter := rebuildEventNode(file, "emit", lang, "")
+	listener := rebuildEventNode(file, "listen", lang, "")
+	web := rebuildEventFacts(file, lang, []*graph.Node{
+		emitter, listener, rebuildEventTopic(file, lang, topic, "tick", transport),
+	}, rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, ""),
+		rebuildEventSite(listener, topic, graph.EdgeListensOn, 8, "kafka"))
+	// The Python site supplies the only Emit label and changes the
+	// transport for both publishers, including the unlabeled one.
+	pyEmitter := rebuildEventNode("producer.py", "produce", "python", "")
+	py := rebuildEventFacts(pyEmitter.FilePath, pyEmitter.Language, []*graph.Node{pyEmitter},
+		rebuildEventSite(pyEmitter, topic, graph.EdgeEmits, 2, "socketio"))
+
+	for _, tc := range []struct {
+		name          string
+		facts         []store_pebble.ParseFacts
+		pairs         int
+		wantTransport string
+	}{
+		{"topic ID beats listener label", []store_pebble.ParseFacts{web}, 1, transport},
+		{"Python emit label overrides topic ID", []store_pebble.ParseFacts{web, py}, 2, "socketio"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, native := openRebuildEventStores(t, tc.facts...)
+			require.Equal(t, tc.pairs, ResolveEventChannelCalls(native))
+			calls := slices.Collect(native.EdgesByKind(graph.EdgeCalls))
+			require.Len(t, calls, tc.pairs)
+			require.NotNil(t, synthEventEdge(native, emitter.ID, listener.ID))
+			for _, call := range calls {
+				require.Equal(t, tc.wantTransport, call.Meta["event_transport"])
+			}
+
+			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(tc.facts...), AllFrameworkSynthesizers(), 1<<20)
+			require.NoError(t, err)
+			require.Equal(t, uint64(tc.pairs), stats.Pairs)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+			if tc.pairs == 2 {
+				unproved, _ := openRebuildEventStores(t, tc.facts...)
+				before := rebuildEventSavedRows(t, unproved)
+				stats, err := RunRebuildEventChannel(t.Context(), unproved, rebuildGRPCReceipts(web), AllFrameworkSynthesizers(), 1<<20)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, unproved))
+			}
+		})
+	}
+}
+
+func TestRebuildEventChannelLowerLineInLaterPath(t *testing.T) {
+	const file, laterFile, lang = "a.ts", "z.ts", "typescript"
+	const topic, transport = "event::pubsub::eventemitter::tick", "eventemitter"
+	emitter := rebuildEventNode(file, "emit", lang, "")
+	listener := rebuildEventNode(file, "listen", lang, "")
+	early := rebuildEventFacts(file, lang, []*graph.Node{
+		emitter, listener, rebuildEventTopic(file, lang, topic, "tick", transport),
+	}, rebuildEventSite(emitter, topic, graph.EdgeEmits, 11, transport),
+		rebuildEventSite(listener, topic, graph.EdgeListensOn, 15, transport))
+	lower := rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, transport)
+	lower.FilePath = laterFile
+	later := rebuildEventFacts(laterFile, lang, nil, lower)
+	b, native := openRebuildEventStores(t, early, later)
+	require.Equal(t, 1, ResolveEventChannelCalls(native))
+	call := synthEventEdge(native, emitter.ID, listener.ID)
+	require.NotNil(t, call)
+	require.Equal(t, laterFile, call.FilePath)
+	require.Equal(t, 4, call.Line)
+
+	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(early, later), AllFrameworkSynthesizers(), 1<<20)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), stats.Pairs)
+	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 }
 
 func TestRebuildEventChannelRejectsUnprovedWinner(t *testing.T) {
