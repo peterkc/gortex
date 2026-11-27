@@ -478,20 +478,25 @@ func (p *rebuildLaravelEventPass) recordReceiptOnlyCall(e *graph.Edge, admitted 
 		return err
 	}
 	typ := p.rules.Call(e)
-	if !admitted || typ == "" {
+	if typ == "" {
 		return nil
 	}
 	live, err := p.edge(old)
 	if err != nil || live == nil {
 		return errors.Join(err, invalid("Laravel receipt-only Call missing"))
 	}
-	if p.rules.Call(live) != "" || live.Kind != e.Kind || live.From != e.From || live.FilePath != e.FilePath || live.Line != e.Line {
+	if p.rules.Call(live) != "" {
 		return nil
+	}
+	key := append(p.column('C'), old...)
+	if !admitted || live.Kind != e.Kind || live.From != e.From || live.FilePath != e.FilePath || live.Line != e.Line {
+		// Retain the unproved tag until replay establishes whether any route can affect output.
+		return p.put(key, nil)
 	}
 	if err := p.put(p.key('e', p.rules.SimpleName(typ)), nil); err != nil {
 		return err
 	}
-	return p.put(append(p.column('C'), old...), appendKeyString(nil, typ))
+	return p.put(key, appendKeyString(nil, typ))
 }
 
 // joinHandles elects the owner from MemberOf rows, not from a class node or
@@ -713,6 +718,12 @@ func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
 		if err != nil || e == nil {
 			return errors.Join(err, invalid("Laravel planned receipt-only Call missing"))
 		}
+		if len(r.value) == 0 {
+			if anchor {
+				refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
+			}
+			return nil
+		}
 		changed, err := p.receiptChangesStationaryCall(ctx, r.value, *e, anchor)
 		if changed {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
@@ -749,8 +760,9 @@ func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
 				return err
 			}
 			if raw == nil {
-				// A stationary row still needs an admitted, unique raw route.
-				refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
+				if anchor {
+					refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
+				}
 				return nil
 			}
 			changed, err := p.receiptChangesStationaryCall(ctx, raw, before, anchor)

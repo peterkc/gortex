@@ -117,7 +117,7 @@ func TestRebuildLaravelStationaryCallCustody(t *testing.T) {
 	const target = "unresolved::*.handle"
 	listener := &graph.Node{ID: "listener", Kind: graph.KindMethod, FilePath: file, Meta: map[string]any{"listens": "Notice"}}
 	call := &graph.Edge{From: "publish", To: target, Kind: graph.EdgeCalls, FilePath: file, Line: 3, Meta: map[string]any{"event": "Missing"}}
-	for _, mode := range []string{"exact", "duplicate route", "wrong receipt file", "shared key", "wrong custody identity", "unknown custody"} {
+	for _, mode := range []string{"exact", "duplicate route", "wrong receipt file", "shared key", "wrong custody identity", "unknown custody", "unknown custody without anchor"} {
 		t.Run(mode, func(t *testing.T) {
 			facts := ParseFacts{EffectiveLanguage: "php", File: graph.FileMetaRow{FilePath: file}, Nodes: []*graph.Node{listener}}
 			b, _ := seedSyntheticCustody(t, facts)
@@ -133,13 +133,15 @@ func TestRebuildLaravelStationaryCallCustody(t *testing.T) {
 			case "wrong custody identity":
 				raw.Line++
 				custody.raw = pendingEdgeKey(&raw)
-			case "unknown custody":
+			case "unknown custody", "unknown custody without anchor":
 				custody.proof = rebuildProofUntrackedMove
 			}
 			require.NoError(t, b.withWrites(func() error { return b.addEdgeWithCustody(call, custody) }))
 			before := rebuildFrameworkCustodyRows(t, b)
 			receipts := func(yield func(ParseFacts, error) bool) {
-				if !yield(facts, nil) {
+				if mode == "unknown custody without anchor" {
+					facts.Nodes = nil
+				} else if !yield(facts, nil) {
 					return
 				}
 				if mode == "wrong receipt file" {
@@ -154,10 +156,11 @@ func TestRebuildLaravelStationaryCallCustody(t *testing.T) {
 				yield(facts, nil)
 			}
 			stats, err := b.RebuildLaravelEvent(t.Context(), receipts, testLaravelEventRules())
-			if mode == "exact" || mode == "duplicate route" {
+			switch mode {
+			case "exact", "duplicate route", "unknown custody without anchor":
 				require.NoError(t, err)
 				require.Equal(t, RebuildLaravelEventStats{Stubs: 1}, stats)
-			} else {
+			default:
 				var refusal *RebuildUnknownProvenanceError
 				require.ErrorAs(t, err, &refusal)
 				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refusal)
@@ -165,5 +168,51 @@ func TestRebuildLaravelStationaryCallCustody(t *testing.T) {
 			}
 			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})
+	}
+}
+
+func TestRebuildLaravelReceiptOnlyCallProof(t *testing.T) {
+	const file, lang = "app.php", "php"
+	listener := &graph.Node{ID: "listener", Kind: graph.KindMethod, FilePath: file, Meta: map[string]any{"listens": "Notice"}}
+	live := &graph.Edge{From: "publish", To: "unresolved::*.handle", Kind: graph.EdgeCalls, FilePath: file, Line: 3}
+	for _, mode := range []string{"wrong receipt file", "wrong custody identity"} {
+		for _, anchor := range []bool{true, false} {
+			name := mode
+			if !anchor {
+				name += " without anchor"
+			}
+			t.Run(name, func(t *testing.T) {
+				facts := ParseFacts{EffectiveLanguage: lang, File: graph.FileMetaRow{FilePath: file}, Nodes: []*graph.Node{listener}}
+				b, _ := seedSyntheticCustody(t, facts)
+				raw := *live
+				raw.Meta = map[string]any{"event": "Notice"}
+				if mode == "wrong custody identity" {
+					raw.Line++
+				}
+				require.NoError(t, b.withWrites(func() error {
+					return b.addEdgeWithCustody(live, rebuildEdgeCustody{raw: pendingEdgeKey(&raw)})
+				}))
+				callFacts := ParseFacts{EffectiveLanguage: lang, File: graph.FileMetaRow{FilePath: file}, Edges: []*graph.Edge{&raw}}
+				if mode == "wrong receipt file" {
+					callFacts.File.FilePath = "other.php"
+				}
+				receipts := sqlCallsiteTestReceipts(callFacts)
+				if anchor {
+					receipts = sqlCallsiteTestReceipts(facts, callFacts)
+				}
+				before := rebuildFrameworkCustodyRows(t, b)
+				stats, err := b.RebuildLaravelEvent(t.Context(), receipts, testLaravelEventRules())
+				if anchor {
+					require.ErrorIs(t, err, ErrRebuildLaravelEvent)
+					var refusal *RebuildUnknownProvenanceError
+					require.ErrorAs(t, err, &refusal)
+					require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(live)}, refusal)
+				} else {
+					require.NoError(t, err)
+				}
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			})
+		}
 	}
 }
