@@ -479,8 +479,7 @@ func (p *rebuildReduxThunkPass) record(ctx context.Context, facts ParseFacts) er
 		}
 		rawBinding, _ := raw.Meta["store_binding"].(string)
 		liveBinding, _ := live.Meta["store_binding"].(string)
-		source := lang == "javascript" || lang == "typescript"
-		ok := source && raw.FilePath == file && p.rules.Stub(raw) == p.rules.Stub(live) && rawBinding == liveBinding
+		ok := lang != "" && raw.FilePath == file && p.rules.Stub(raw) == p.rules.Stub(live) && rawBinding == liveBinding
 		if err := p.noteReceipt(key, claim, ok); err != nil {
 			return err
 		}

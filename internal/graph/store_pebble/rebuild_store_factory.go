@@ -421,8 +421,7 @@ func (p *rebuildStoreFactoryPass) record(ctx context.Context, facts ParseFacts) 
 		}
 		binding, member := p.rules.Stub(raw)
 		liveBinding, liveMember := p.rules.Stub(live)
-		source := lang == "javascript" || lang == "typescript"
-		ok := source && raw.FilePath == file && binding == liveBinding && member == liveMember
+		ok := lang != "" && raw.FilePath == file && binding == liveBinding && member == liveMember
 		if err := p.noteReceipt(key, claim, ok); err != nil {
 			return err
 		}

@@ -342,3 +342,83 @@ func rebuildStoreFactoryMarker(file, from, to, member string) *graph.Edge {
 	return &graph.Edge{From: from, To: to, Kind: graph.EdgeCalls, FilePath: file, Line: 9,
 		Meta: map[string]any{"via": "store-factory", "store_binding": "useStore", "store_action": member}}
 }
+
+func TestRebuildStoreFactoryAndReduxThunkVueReceipts(t *testing.T) {
+	const vue = `<script setup lang="ts">
+import { createAsyncThunk } from '@reduxjs/toolkit';
+import { useStore } from './store';
+export function hardReset() { useStore.getState().reset(); }
+const outer = createAsyncThunk('outer', async (_, { dispatch }) => {
+  dispatch(begin());
+});
+</script>
+`
+	const store = `import { create } from 'zustand';
+import { createAsyncThunk } from '@reduxjs/toolkit';
+export const useStore = create((set, get) => ({
+  reset: () => {},
+}));
+export const begin = createAsyncThunk('begin', async () => {});
+`
+	extractor := languages.NewVueExtractor()
+	parsed, err := extractor.Extract("Caller.vue", []byte(vue))
+	require.NoError(t, err)
+	t.Cleanup(parsed.ReleaseTree)
+	parsedStore, err := languages.NewTypeScriptExtractor().Extract("store.ts", []byte(store))
+	require.NoError(t, err)
+	t.Cleanup(parsedStore.ReleaseTree)
+	callerFacts := roundTripRebuildRNBridgeFacts(t,
+		rebuildEventFacts("Caller.vue", extractor.Language(), parsed.Nodes, parsed.Edges...))
+	storeFacts := roundTripRebuildRNBridgeFacts(t,
+		rebuildEventFacts("store.ts", "typescript", parsedStore.Nodes, parsedStore.Edges...))
+	for _, tc := range []struct{ synth, target string }{
+		{SynthStoreFactory, "store.ts::useStore.reset@4"},
+		{SynthReduxThunk, "store.ts::begin"},
+	} {
+		t.Run(tc.synth, func(t *testing.T) {
+			var calls []*graph.Edge
+			for _, edge := range callerFacts.Edges {
+				if edge.Kind == graph.EdgeCalls && edge.Meta["via"] == tc.synth {
+					calls = append(calls, edge)
+				}
+			}
+			require.Len(t, calls, 1)
+			require.Equal(t, "Caller.vue", calls[0].FilePath)
+			old := graph.EdgeIdentityFor(calls[0])
+			facts := []store_pebble.ParseFacts{callerFacts, storeFacts}
+			moves := map[graph.EdgeIdentity]string{old: tc.target}
+			if tc.synth == SynthStoreFactory {
+				requireRebuildStoreFactoryOracle(t, facts, moves, 1, 1)
+			} else {
+				requireRebuildReduxThunkOracle(t, facts, moves, 1, 1)
+			}
+
+			b := openRebuildGRPCBuild(t, facts...)
+			before := rebuildEventSavedRows(t, b)
+			selection, err := NewFrameworkSynthesizerSelection([]string{tc.synth})
+			require.NoError(t, err)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			// Keep the declaration receipts exact. Only the Call receipt
+			// loses its effective language.
+			decls, bad := callerFacts, callerFacts
+			decls.Edges = nil
+			bad.Nodes, bad.EffectiveLanguage = nil, ""
+			receipts := rebuildGRPCReceipts(decls, bad, storeFacts)
+			if tc.synth == SynthStoreFactory {
+				stats, proofErr := RunRebuildStoreFactory(t.Context(), b, receipts, frozen)
+				require.Zero(t, stats)
+				err = proofErr
+			} else {
+				stats, proofErr := RunRebuildReduxThunk(t.Context(), b, receipts, frozen)
+				require.Zero(t, stats)
+				err = proofErr
+			}
+			var refusal *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refusal)
+			old.To = tc.target
+			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: old}, refusal)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
