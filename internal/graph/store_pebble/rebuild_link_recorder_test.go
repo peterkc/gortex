@@ -198,3 +198,45 @@ func TestRebuildLinkRecorderFollowsGuardWinner(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildLinkRecorderFollowsGuardSourceRestoration(t *testing.T) {
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	call := graph.Edge{From: "caller", To: "resolved", Kind: graph.EdgeCalls, FilePath: "routes.ts", Line: 5}
+	original := graph.Edge{From: call.To, To: "callee", Kind: graph.EdgeArgOf, FilePath: call.FilePath, Line: call.Line}
+	live := original
+	live.To = "callee#param:arg"
+	b.AddEdge(&call)
+	b.AddEdge(&original)
+	require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &live, OldTo: original.To}}))
+	view := b.RebuildView()
+	liveID := graph.EdgeIdentityFor(&live)
+	got, found, err := view.OriginalLinkRecorder(ctx, liveID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, graph.EdgeIdentityFor(&original), got)
+
+	reverted := call
+	reverted.To = "unresolved::callee"
+	count, err := b.ApplyRebuildGuardPage(ctx, []graph.EdgeReindex{{Edge: &reverted, OldTo: call.To}}, []graph.PlaceholderRepoint{
+		{OldFrom: call.To, NewFrom: reverted.To, FilePath: call.FilePath, Line: call.Line},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	stored, err := view.Edge(ctx, liveID)
+	require.NoError(t, err)
+	require.Nil(t, stored)
+	_, found, err = view.OriginalLinkRecorder(ctx, liveID)
+	require.NoError(t, err)
+	require.False(t, found)
+	restored := live
+	restored.From = reverted.To
+	restoredID := graph.EdgeIdentityFor(&restored)
+	stored, err = view.Edge(ctx, restoredID)
+	require.NoError(t, err)
+	require.Equal(t, &restored, stored)
+	got, found, err = view.OriginalLinkRecorder(ctx, restoredID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, graph.EdgeIdentityFor(&original), got)
+}
