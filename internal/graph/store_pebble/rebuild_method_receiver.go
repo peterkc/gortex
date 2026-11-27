@@ -13,6 +13,12 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// Keep native row-order evidence separate from receipt custody. Only a Go
+// receiver repair whose source was the raw row can retain its receipt position.
+func rebuildReceiverOrderKey(live []byte) []byte {
+	return append([]byte{'g', 'q', 0}, live...)
+}
+
 // RebuildGoMethodReceivers repairs cross-file Go member_of targets in the
 // private graph. Run after main and its guard, before attribution or derived
 // reads. The coordinator owns the store serially and discards it on error.
@@ -142,6 +148,20 @@ func (b *BuildStore) RebuildGoMethodReceivers(ctx context.Context, receipts iter
 			}
 			if err := b.reindexChunkWithRecorders(page, true); err != nil {
 				return err
+			}
+			for _, move := range page {
+				live := pendingEdgeKey(move.Edge)
+				custody, err := readRebuildEdgeCustody(b.pending, live)
+				if err != nil {
+					return err
+				}
+				old := *move.Edge
+				old.To = move.OldTo
+				if bytes.Equal(custody.raw, pendingEdgeKey(&old)) {
+					if err := b.pending.Set(rebuildReceiverOrderKey(live), custody.raw, pebble.NoSync); err != nil {
+						return err
+					}
+				}
 			}
 			return ctx.Err()
 		}); err != nil {
