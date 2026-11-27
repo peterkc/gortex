@@ -51,33 +51,10 @@ func ResolveCSharpEFCoreModelsScoped(g graph.Store, scope map[string]bool) (int,
 	var actions []csharpEFAction
 	var dbsets []csharpDbSetFact
 
+	collect := csharpEFCollectInput(entitiesByID, classesByKey, configsByKey, configsByBoundary, &actions, &dbsets,
+		func(cfg csharpEFConfigFact) string { return csharpEFBoundaryKey(cfg.repoPrefix, cfg.workspaceID) })
 	for _, n := range nodes {
-		if n == nil {
-			continue
-		}
-		if n.Kind == graph.KindFile {
-			actions = append(actions, csharpEFActionsFromFile(n)...)
-			continue
-		}
-		if !strings.EqualFold(n.Language, "csharp") {
-			continue
-		}
-		switch n.Kind {
-		case graph.KindType:
-			entitiesByID[n.ID] = n
-			nameKey := csharpEFNameKey(n.RepoPrefix, n.WorkspaceID, n.Name)
-			classesByKey[nameKey] = append(classesByKey[nameKey], n)
-			if cfg, ok := csharpEFConfigFactFromNode(n); ok {
-				key := csharpEFNameKey(cfg.repoPrefix, cfg.workspaceID, cfg.name)
-				configsByKey[key] = append(configsByKey[key], cfg)
-				boundary := csharpEFBoundaryKey(cfg.repoPrefix, cfg.workspaceID)
-				configsByBoundary[boundary] = append(configsByBoundary[boundary], cfg)
-			}
-		case graph.KindField:
-			if fact, ok := csharpDbSetFactFromNode(n); ok {
-				dbsets = append(dbsets, fact)
-			}
-		}
+		collect(n)
 	}
 
 	for key := range configsByKey {
@@ -192,6 +169,44 @@ func ResolveCSharpEFCoreModelsScoped(g graph.Store, scope map[string]bool) (int,
 		return 0, fmt.Errorf("resolver: replace EF Core models: %w", err)
 	}
 	return changed, nil
+}
+
+// csharpEFCollectInput collects the native input roles. Rebuild indexes assembly
+// configurations by entity instead of boundary to reduce one entity at a time.
+func csharpEFCollectInput(entitiesByID map[string]*graph.Node, classesByKey map[string][]*graph.Node,
+	configsByKey, configsByBoundary map[string][]csharpEFConfigFact, actions *[]csharpEFAction, dbsets *[]csharpDbSetFact,
+	boundaryFor func(csharpEFConfigFact) string,
+) func(*graph.Node) {
+	return func(n *graph.Node) {
+		if n == nil {
+			return
+		}
+		if n.Kind == graph.KindFile {
+			*actions = append(*actions, csharpEFActionsFromFile(n)...)
+			return
+		}
+		if !strings.EqualFold(n.Language, "csharp") {
+			return
+		}
+		switch n.Kind {
+		case graph.KindType:
+			if entitiesByID != nil {
+				entitiesByID[n.ID] = n
+			}
+			nameKey := csharpEFNameKey(n.RepoPrefix, n.WorkspaceID, n.Name)
+			classesByKey[nameKey] = append(classesByKey[nameKey], n)
+			if cfg, ok := csharpEFConfigFactFromNode(n); ok {
+				key := csharpEFNameKey(cfg.repoPrefix, cfg.workspaceID, cfg.name)
+				configsByKey[key] = append(configsByKey[key], cfg)
+				key = boundaryFor(cfg)
+				configsByBoundary[key] = append(configsByBoundary[key], cfg)
+			}
+		case graph.KindField:
+			if fact, ok := csharpDbSetFactFromNode(n); ok {
+				*dbsets = append(*dbsets, fact)
+			}
+		}
+	}
 }
 
 func csharpEFNodesForScope(g graph.Store, scope map[string]bool) []*graph.Node {
