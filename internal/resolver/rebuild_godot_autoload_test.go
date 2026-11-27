@@ -227,17 +227,21 @@ func TestRebuildGodotScriptNodeRowCaps(t *testing.T) {
 }
 
 func TestRebuildGodotAutoloadStationaryReceipt(t *testing.T) {
-	facts, call, _ := rebuildGodotAutoloadFacts()
-	call.To = "unresolved::*.missing"
+	facts, call, method := rebuildGodotAutoloadFacts()
+	stationary := *call
+	stationary.To, stationary.Line = method.ID, call.Line+1
+	stationary.Context = strings.Repeat("x", 16<<20)
+	facts[2].Edges = []*graph.Edge{call, &stationary}
 	build, native := openRebuildEventStores(t, facts...)
-	receipt := *call
+	receipt := stationary
+	receipt.Context = "different unused context"
 	receipt.Confidence = 0.5
-	facts[2].Edges = []*graph.Edge{&receipt}
+	facts[2].Edges = []*graph.Edge{call, &receipt}
 	changed, err := RunRebuildGodotAutoload(t.Context(), build, rebuildGRPCReceipts(facts...), rebuildGodotAutoloadSelection(t, build))
 	require.NoError(t, err)
-	require.Zero(t, changed)
-	require.Zero(t, ResolveGDScriptAutoloads(native))
+	require.EqualValues(t, 1, changed)
+	require.Equal(t, 1, ResolveGDScriptAutoloads(native))
 	saved := rebuildEventSavedRows(t, build)
 	require.Equal(t, rebuildEventSQLiteRows(native), saved)
-	require.Equal(t, []*graph.Edge{call}, saved.edges)
+	require.Contains(t, saved.edges, &stationary)
 }
