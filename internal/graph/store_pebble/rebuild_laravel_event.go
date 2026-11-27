@@ -321,12 +321,23 @@ func (p *rebuildLaravelEventPass) recordEdge(e *graph.Edge, admitted bool, order
 	if e.Kind == graph.EdgeCalls {
 		raw := pendingEdgeKey(e)
 		claim, err := p.marked(append(p.column('r'), raw...))
-		if err != nil || len(claim) <= 1 {
+		if err != nil || len(claim) <= 1 || claim[0] != rebuildCapabilityWanted {
 			return err
 		}
 		owned, err := p.get(append(p.column('c'), claim[1:]...))
 		if err != nil || !bytes.Equal(owned, raw) {
 			return err
+		}
+		if admitted {
+			typ := p.rules.Call(e)
+			if err := p.put(append(p.column('j'), claim[1:]...), appendKeyString(nil, typ)); err != nil {
+				return err
+			}
+			if typ != "" {
+				if err := p.put(p.key('e', p.rules.SimpleName(typ)), nil); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return p.recordOwnerEdge(e, admitted, order, func(live *graph.Edge) bool {
@@ -519,6 +530,7 @@ func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
 			return errors.Join(err, invalid("Laravel planned Call missing"))
 		}
 		event := p.rules.SimpleName(p.rules.Call(e))
+		before := *e
 		var count uint64
 		var target string
 		if err := p.listeners(ctx, event, func(id string, first bool) error {
@@ -533,6 +545,33 @@ func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
 		p.stats.Resolved += count
 		moving := p.rules.Rebind(e, target, count != 0)
 		if !moving && count <= 1 {
+			raw, err := p.get(append(p.column('j'), old...))
+			if err != nil || raw == nil {
+				return err
+			}
+			typ, rest, err := readKeyString(raw)
+			if err != nil || len(rest) != 0 {
+				return invalid("Laravel receipt Call route")
+			}
+			if typ == "" || !anchor {
+				return nil
+			}
+			prefix := p.key('T', p.rules.SimpleName(typ))
+			var first string
+			var matched uint64
+			if err := p.visit(ctx, prefix, func(r row) error {
+				id, _, err := readKeyString(r.key[len(prefix):])
+				if matched == 0 {
+					first = id
+				}
+				matched++
+				return err
+			}); err != nil {
+				return err
+			}
+			if p.rules.Rebind(&before, first, matched != 0) || matched > 1 {
+				refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
+			}
 			return nil
 		}
 		proved, err := p.listenersProved(ctx, event)
