@@ -432,6 +432,10 @@ func buildRebuildStages(
 		if err != nil {
 			return err
 		}
+		gdReceiverGate, err := resolver.FreezeRebuildGDScriptReceiverGate(ctx, private.RebuildView(), requestedSelection)
+		if err != nil {
+			return err
+		}
 		selection, err := resolver.FreezeRebuildFrameworkSelection(ctx, private.RebuildView(), requestedSelection)
 		if err != nil {
 			return err
@@ -848,6 +852,13 @@ func buildRebuildStages(
 		}
 		if djangoClaims != 0 {
 			logger.Info("rebuild Django descriptor applied to private build", zap.Uint64("claims", djangoClaims))
+		}
+		gdDemotions, err := resolver.RunRebuildGDScriptReceiverGate(ctx, private, gdReceiverGate)
+		if err != nil {
+			return err
+		}
+		if gdDemotions != 0 {
+			logger.Info("rebuild GDScript receiver gate applied to private build", zap.Uint64("demotions", gdDemotions))
 		}
 	}
 	// The supported tails only changed private scratch. Relation projection
