@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -486,6 +487,53 @@ func TestRebuildMacroExpansionCapsOnlyReachedRoles(t *testing.T) {
 			}
 			require.EqualValues(t, 1, stats.Adds)
 			require.Equal(t, macroExpansionEdge(caller.ID, callee.ID, file, use.Line, macro.Name), added)
+		})
+	}
+}
+
+func TestRebuildMacroExpansionCFamilyMarkerNodeCap(t *testing.T) {
+	const file, lang = "macro.js", "javascript"
+	caller := rebuildEventNode(file, "run", lang, "")
+	callee := rebuildEventNode(file, "work", lang, "")
+	macro := &graph.Node{ID: file + "::APPLY", Name: "APPLY", Kind: graph.KindMacro, FilePath: file, Language: lang,
+		Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
+	marker := &graph.Node{ID: "a.c", Kind: graph.KindFile, Language: "c", FilePath: "a.c"}
+	spare := &graph.Node{ID: "b.c", Kind: graph.KindFile, Language: "c", FilePath: "b.c"}
+	body := &graph.Edge{From: macro.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+	use := &graph.Edge{From: caller.ID, To: "unresolved::APPLY", Kind: graph.EdgeCalls, FilePath: file, Line: 3}
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(file, lang, []*graph.Node{caller, callee, macro}, body, use),
+		rebuildEventFacts(marker.FilePath, marker.Language, []*graph.Node{marker}),
+		rebuildEventFacts(spare.FilePath, spare.Language, []*graph.Node{spare}),
+	}
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	for _, count := range []int{2, 3} {
+		t.Run(fmt.Sprintf("%d receipts", count), func(t *testing.T) {
+			ctx := t.Context()
+			b := openRebuildGRPCBuild(t, facts...)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthMacroExpansion))
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+			large := *marker
+			large.Meta = map[string]any{"padding": strings.Repeat("x", 16<<20)}
+			b.AddNode(&large)
+			stats, err := RunRebuildMacroExpansion(ctx, b, rebuildGRPCReceipts(facts[:count]...), frozen)
+			want := macroExpansionEdge(caller.ID, callee.ID, file, use.Line, macro.Name)
+			got, readErr := b.RebuildView().Edge(ctx, graph.EdgeIdentityFor(want))
+			require.NoError(t, readErr)
+			if count == 2 {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildMacroExpansion)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "C-family marker node")
+				require.Zero(t, stats)
+				require.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, stats.Adds)
+			require.Equal(t, want, got)
 		})
 	}
 }

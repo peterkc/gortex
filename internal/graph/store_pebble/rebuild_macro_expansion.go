@@ -35,9 +35,10 @@ type RebuildMacroExpansionStats struct {
 
 type rebuildMacroExpansion struct {
 	rebuildCallMoves
-	rules   RebuildMacroExpansionRules
-	stats   RebuildMacroExpansionStats
-	cProved bool
+	rules      RebuildMacroExpansionRules
+	stats      RebuildMacroExpansionStats
+	cProved    bool
+	cOversized bool
 }
 
 func rebuildMacroExpansionScratch(b *BuildStore) rebuildCallMoves {
@@ -183,6 +184,9 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 		return p.stats, err
 	}
 	if !p.cProved {
+		if p.cOversized {
+			return stats, fmt.Errorf("%w: macro expansion C-family marker node", ErrRebuildLinkInputSize)
+		}
 		return stats, fmt.Errorf("%w: macro expansion lacks a C-family receipt", ErrRebuildUnknownProvenance)
 	}
 	return p.stats, p.write(ctx)
@@ -442,8 +446,10 @@ func (p *rebuildMacroExpansion) record(ctx context.Context, receipts iter.Seq2[P
 				return err
 			}
 			if !p.cProved && p.rules.CFamily(n.Language) {
-				proved, err := p.b.rebuildReceiptLanguageMarker(n, file)
-				if err != nil {
+				proved, err := p.b.rebuildReceiptLanguageMarker(n, file, p.rowBytes)
+				if errors.Is(err, ErrRebuildLinkInputSize) {
+					p.cOversized = true
+				} else if err != nil {
 					return err
 				}
 				p.cProved = proved

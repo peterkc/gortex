@@ -42,12 +42,13 @@ type RebuildFnPointerStageStats struct {
 
 type rebuildFnPointerStage struct {
 	rebuildStoreFactoryPass
-	calls   rebuildCallMoves
-	decide  RebuildFnPointerStageRules
-	result  RebuildFnPointerStageStats
-	refused rebuildScratchRefusals
-	adds    uint64
-	cProved bool
+	calls      rebuildCallMoves
+	decide     RebuildFnPointerStageRules
+	result     RebuildFnPointerStageStats
+	refused    rebuildScratchRefusals
+	adds       uint64
+	cProved    bool
+	cOversized bool
 }
 
 func rebuildFnPointerStageColumns(b *BuildStore) rebuildCallMoves {
@@ -343,8 +344,10 @@ func (p *rebuildFnPointerStage) record(ctx context.Context, receipts iter.Seq2[P
 				return err
 			}
 			if !p.cProved && p.decide.CFamily(n.Language) {
-				proved, err := p.b.rebuildReceiptLanguageMarker(n, file)
-				if err != nil {
+				proved, err := p.b.rebuildReceiptLanguageMarker(n, file, p.rowBytes)
+				if errors.Is(err, ErrRebuildLinkInputSize) {
+					p.cOversized = true
+				} else if err != nil {
 					return err
 				}
 				p.cProved = proved
@@ -789,6 +792,9 @@ func (p *rebuildFnPointerStage) write(ctx context.Context) (err error) {
 		return nil
 	}
 	if !p.cProved {
+		if p.cOversized {
+			return fmt.Errorf("%w: function pointer C-family marker node", ErrRebuildLinkInputSize)
+		}
 		return fmt.Errorf("%w: function pointer lacks a C-family receipt", ErrRebuildUnknownProvenance)
 	}
 	if err := p.orderDispatch(ctx); err != nil {

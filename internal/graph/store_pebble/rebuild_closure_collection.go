@@ -283,7 +283,7 @@ func (p *rebuildClosurePass) noteApple(raw *graph.Node, file string) error {
 	if err != nil || state == 0 {
 		return err
 	}
-	proved, err := p.b.rebuildReceiptLanguageMarker(raw, file)
+	proved, err := p.b.rebuildReceiptLanguageMarker(raw, file, 0)
 	if err != nil {
 		return err
 	}

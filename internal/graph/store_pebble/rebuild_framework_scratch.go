@@ -26,9 +26,18 @@ func sameRebuildLanguageMarker(raw, live *graph.Node, file string) bool {
 }
 
 // rebuildReceiptLanguageMarker proves a live census label from its file receipt.
-func (b *BuildStore) rebuildReceiptLanguageMarker(raw *graph.Node, file string) (bool, error) {
-	live, err := pendingGet(b.pending, pendingNodeKey(raw.ID), decodeNodeLight)
-	return sameRebuildLanguageMarker(raw, live, file), err
+func (b *BuildStore) rebuildReceiptLanguageMarker(raw *graph.Node, file string, limit int) (bool, error) {
+	key := pendingNodeKey(raw.ID)
+	return pendingGet(b.pending, key, func(value []byte) (bool, error) {
+		live, err := decodeNodeLight(value)
+		if err != nil || !sameRebuildLanguageMarker(raw, live, file) {
+			return false, err
+		}
+		if limit != 0 && len(key)+len(value) > limit {
+			return false, ErrRebuildLinkInputSize
+		}
+		return true, nil
+	})
 }
 
 // One exact, bounded language marker proves admission. An oversized spare
