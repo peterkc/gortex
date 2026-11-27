@@ -137,14 +137,8 @@ func ResolveCSharpEFCoreModelsScoped(g graph.Store, scope map[string]bool) (int,
 			continue
 		}
 		current := currentByEntity[entityID]
-		sort.Slice(current, func(i, j int) bool {
-			return csharpEFEdgeOrderKey(current[i]) < csharpEFEdgeOrderKey(current[j])
-		})
-		desired := csharpEFDesiredProjection(entity, decisions[entityID], dbsetsByEntity[entityID], current)
-		if len(current) == 1 && desired != nil && csharpEFEdgesEqual(current[0], desired) {
-			continue
-		}
-		if len(current) == 0 && desired == nil {
+		desired, needsChange := csharpEFProjectionChange(entity, decisions[entityID], dbsetsByEntity[entityID], current)
+		if !needsChange {
 			continue
 		}
 		removeEdges = append(removeEdges, current...)
@@ -398,6 +392,19 @@ func csharpEFResolveDbSets(
 		out[candidates[0].ID] = append(out[candidates[0].ID], fact)
 	}
 	return out
+}
+
+// csharpEFProjectionChange elects the exact desired row for one entity.
+// Native orders current siblings before selecting an attribute fallback.
+func csharpEFProjectionChange(entity *graph.Node, decision csharpEFDecision, dbsets []csharpDbSetFact, current []*graph.Edge) (*graph.Edge, bool) {
+	sort.Slice(current, func(i, j int) bool {
+		return csharpEFEdgeOrderKey(current[i]) < csharpEFEdgeOrderKey(current[j])
+	})
+	desired := csharpEFDesiredProjection(entity, decision, dbsets, current)
+	if len(current) == 1 && desired != nil && csharpEFEdgesEqual(current[0], desired) {
+		return desired, false
+	}
+	return desired, len(current) != 0 || desired != nil
 }
 
 func csharpEFDesiredProjection(
