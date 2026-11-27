@@ -545,6 +545,7 @@ func resolveTemporalCalls(g graph.Store, cands *frameworkPassCandidates) int {
 		}
 	}
 	derefByName := buildConstDerefMap(g, stubNames)
+	deref := func(name string) string { return derefByName[name] }
 
 	for _, s := range stubs {
 		e := s.edge
@@ -554,182 +555,13 @@ func resolveTemporalCalls(g graph.Store, cands *frameworkPassCandidates) int {
 			callerRepo = from.RepoPrefix
 			callerLang = from.Language
 		}
-		handlerID, origin, conf := idx.lookup(s.kind, s.name, callerRepo, callerLang)
-		// When the direct name didn't resolve, try dereferencing it as a
-		// string constant and re-looking-up under the literal value. The
-		// deref value is computed up front so it also feeds the
-		// cross-language join below (a Java const-ref dispatch through
-		// `Constants.X` derefs X to the literal, then matches the Go
-		// workflow of that name across the type-system boundary).
-		constDeref := ""
-		derefVal := ""
-		if v, ok := derefByName[s.name]; ok && v != "" {
-			derefVal = v
-		}
-		if handlerID == "" && derefVal != "" {
-			if hID, o, c := idx.lookup(s.kind, derefVal, callerRepo, callerLang); hID != "" {
-				handlerID, origin, conf = hID, o, c
-				constDeref = derefVal
-			}
-		}
-		// Env-default const reference: the env-helper's default argument was a
-		// constant reference (`GetEnvOrDefault(KEY, config.ACTIVITY_NAME_DEFAULT)`),
-		// recorded as `temporal_default_const`. Substitute the constant's literal
-		// VALUE through the deref map (register-confirmed candidates), then look
-		// it up. The env-default tier override below keeps the edge at the
-		// const_ref tier (inferred, visible) regardless of how it resolved.
-		if handlerID == "" {
-			if cn, _ := e.Meta["temporal_default_const"].(string); cn != "" {
-				if v, ok := derefByName[cn]; ok && v != "" {
-					if id, o, c := idx.lookup(s.kind, v, callerRepo, callerLang); id != "" {
-						handlerID, origin, conf = id, o, c
-						e.Meta["temporal_const_value"] = v
-					}
-				}
-			}
-		}
-
-		// Convention fallback: dispatch to an activity/workflow FUNCTION
-		// by name when the worker registers it elsewhere (unregistered
-		// here) — Pattern 2 / Stage 1.2. Try the dispatch name, then its
-		// const-deref value. Landed at the inferred tier (name convention,
-		// not a register-confirmed binding). Tried before the cross-language
-		// join: a same-language convention match is a stronger signal than a
-		// speculative by-string match across a type-system boundary.
-		convention := false
-		if handlerID == "" {
-			candNames := []string{s.name}
-			if v, ok := derefByName[s.name]; ok && v != "" && v != s.name {
-				candNames = append(candNames, v)
-			}
-			for _, nm := range candNames {
-				if id := idx.lookupConvention(s.kind, nm, callerRepo, callerLang); id != "" {
-					handlerID, origin, conf = id, graph.OriginASTInferred, 0.6
-					convention = true
-					if nm != s.name {
-						constDeref = nm
-					}
-					break
-				}
-			}
-		}
-
-		// Cross-language join: a consumer (typically a temporal.start, e.g.
-		// a Java service starting a Go workflow) with no same-language
-		// handler is matched to a unique other-language candidate by
-		// canonical name, at the speculative tier.
-		crossLang := false
-		if handlerID == "" {
-			matchName := s.name
-			if derefVal != "" {
-				matchName = derefVal
-			}
-			if hID, ok := idx.lookupCrossLang(s.kind, matchName, callerLang); ok {
-				handlerID = hID
-				origin = graph.OriginSpeculative
-				conf = temporalCrossLangConfidence
-				crossLang = true
-				if derefVal != "" {
-					constDeref = derefVal
-				}
-			}
-		}
-
-		// Exact-name signature-gated fallback (Cat 4): a PascalCase dispatch
-		// whose target is a same-named, unregistered, non-suffixed function.
-		// Gated on exact name + a kind-matching Temporal signature + a unique
-		// candidate; landed speculative + hidden. Last resort, so it runs
-		// only after register / const-deref / cross-language all abstained.
-		exactSig := false
-		if handlerID == "" {
-			matchName := s.name
-			if constDeref != "" {
-				matchName = constDeref
-			}
-			if id := idx.lookupExactSig(s.kind, matchName, callerRepo); id != "" {
-				handlerID = id
-				origin = graph.OriginSpeculative
-				conf = temporalExactSigConfidence
-				exactSig = true
-			}
-		}
-
-		// When the dispatch name came from an env-var-with-literal-default
-		// variable (env_default) or from tracing a bare local dispatch
-		// variable to its last assignment (var_trace), the value is a
-		// best-guess. HOW it was recognised decides the tier:
-		//   - "allowlist" / "os_getenv" / "const_ref": confident it IS an
-		//     env-with-default — inferred tier (0.6, visible).
-		//   - "heuristic" / var_trace / unknown: a guess — hidden speculative
-		//     tier (0.4), where the optional LLM cleaning pass can prune it.
-		envDefault := false
-		envSource := ""
-		switch v, _ := e.Meta["temporal_name_origin"].(string); v {
-		case "env_default", "var_trace":
-			envDefault = true
-			envSource, _ = e.Meta["temporal_env_source"].(string)
-		}
-		envSpeculative := envDefault && envSource != "allowlist" && envSource != "os_getenv" && envSource != "const_ref"
-		if handlerID != "" && envDefault {
-			if envSpeculative {
-				origin = graph.OriginSpeculative
-				conf = temporalEnvDefaultConfidence
-			} else {
-				origin = graph.OriginASTInferred
-				conf = temporalEnvDefaultInferredConfidence
-			}
-		}
-
-		want := handlerID
-		if want == "" {
-			want = temporalStubPlaceholder(s.kind, s.name)
-		}
-		if e.To == want {
-			if handlerID != "" {
-				resolved++
-			}
-			continue
-		}
-
 		oldTo := e.To
-		e.To = want
-		if handlerID != "" {
-			e.Origin = origin
-			e.Confidence = conf
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, conf)
-			e.Meta["temporal_resolution"] = origin
-			if envSpeculative || crossLang || exactSig {
-				e.Meta[graph.MetaSpeculative] = true
-			}
-			if crossLang {
-				e.Meta["temporal_cross_lang"] = true
-			} else {
-				delete(e.Meta, "temporal_cross_lang")
-			}
-			if exactSig {
-				e.Meta["temporal_resolution_via"] = "exact_sig"
-			} else if convention {
-				e.Meta["temporal_resolution_via"] = "convention"
-			} else {
-				delete(e.Meta, "temporal_resolution_via")
-			}
-			if constDeref != "" {
-				e.Meta["temporal_const_deref"] = constDeref
-			} else {
-				delete(e.Meta, "temporal_const_deref")
-			}
-			StampSynthesized(e, SynthTemporalStub)
+		bound, moved := rebindTemporalStub(e, s.kind, s.name, callerRepo, callerLang, idx, deref)
+		if bound {
 			resolved++
-		} else {
-			e.Origin = ""
-			e.Confidence = 0
-			e.ConfidenceLabel = ""
-			delete(e.Meta, "temporal_resolution")
-			delete(e.Meta, graph.MetaSpeculative)
-			delete(e.Meta, "temporal_const_deref")
-			delete(e.Meta, "temporal_cross_lang")
-			delete(e.Meta, "temporal_resolution_via")
-			UnstampSynthesized(e)
+		}
+		if !moved {
+			continue
 		}
 		reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 	}
@@ -747,6 +579,190 @@ func resolveTemporalCalls(g graph.Store, cands *frameworkPassCandidates) int {
 		resolveTemporalCrossLanguage(g, nil, false)
 	}
 	return resolved
+}
+
+type temporalRebindLookup interface {
+	lookup(kind, name, callerRepo, callerLang string) (id, origin string, confidence float64)
+	lookupConvention(kind, name, callerRepo, callerLang string) string
+	lookupCrossLang(kind, name, callerLang string) (id string, ok bool)
+	lookupExactSig(kind, name, callerRepo string) string
+}
+
+// rebindTemporalStub computes one native mutation. If the target did not
+// change, SQLite does not persist the decoded payload.
+func rebindTemporalStub(e *graph.Edge, kind, name, callerRepo, callerLang string,
+	idx temporalRebindLookup, deref func(string) string,
+) (resolved, moved bool) {
+	handlerID, origin, conf := idx.lookup(kind, name, callerRepo, callerLang)
+	// When the direct name didn't resolve, try dereferencing it as a
+	// string constant and re-looking-up under the literal value. The
+	// deref value is computed up front so it also feeds the
+	// cross-language join below (a Java const-ref dispatch through
+	// `Constants.X` derefs X to the literal, then matches the Go
+	// workflow of that name across the type-system boundary).
+	constDeref := ""
+	derefVal := deref(name)
+	if handlerID == "" && derefVal != "" {
+		if hID, o, c := idx.lookup(kind, derefVal, callerRepo, callerLang); hID != "" {
+			handlerID, origin, conf = hID, o, c
+			constDeref = derefVal
+		}
+	}
+	// Env-default const reference: the env-helper's default argument was a
+	// constant reference (`GetEnvOrDefault(KEY, config.ACTIVITY_NAME_DEFAULT)`),
+	// recorded as `temporal_default_const`. Substitute the constant's literal
+	// VALUE through the deref map (register-confirmed candidates), then look
+	// it up. The env-default tier override below keeps the edge at the
+	// const_ref tier (inferred, visible) regardless of how it resolved.
+	if handlerID == "" {
+		if cn, _ := e.Meta["temporal_default_const"].(string); cn != "" {
+			if v := deref(cn); v != "" {
+				if id, o, c := idx.lookup(kind, v, callerRepo, callerLang); id != "" {
+					handlerID, origin, conf = id, o, c
+					e.Meta["temporal_const_value"] = v
+				}
+			}
+		}
+	}
+
+	// Convention fallback: dispatch to an activity/workflow FUNCTION
+	// by name when the worker registers it elsewhere (unregistered
+	// here) — Pattern 2 / Stage 1.2. Try the dispatch name, then its
+	// const-deref value. Landed at the inferred tier (name convention,
+	// not a register-confirmed binding). Tried before the cross-language
+	// join: a same-language convention match is a stronger signal than a
+	// speculative by-string match across a type-system boundary.
+	convention := false
+	if handlerID == "" {
+		candNames := []string{name}
+		if v := derefVal; v != "" && v != name {
+			candNames = append(candNames, v)
+		}
+		for _, nm := range candNames {
+			if id := idx.lookupConvention(kind, nm, callerRepo, callerLang); id != "" {
+				handlerID, origin, conf = id, graph.OriginASTInferred, 0.6
+				convention = true
+				if nm != name {
+					constDeref = nm
+				}
+				break
+			}
+		}
+	}
+
+	// Cross-language join: a consumer (typically a temporal.start, e.g.
+	// a Java service starting a Go workflow) with no same-language
+	// handler is matched to a unique other-language candidate by
+	// canonical name, at the speculative tier.
+	crossLang := false
+	if handlerID == "" {
+		matchName := name
+		if derefVal != "" {
+			matchName = derefVal
+		}
+		if hID, ok := idx.lookupCrossLang(kind, matchName, callerLang); ok {
+			handlerID = hID
+			origin = graph.OriginSpeculative
+			conf = temporalCrossLangConfidence
+			crossLang = true
+			if derefVal != "" {
+				constDeref = derefVal
+			}
+		}
+	}
+
+	// Exact-name signature-gated fallback (Cat 4): a PascalCase dispatch
+	// whose target is a same-named, unregistered, non-suffixed function.
+	// Gated on exact name + a kind-matching Temporal signature + a unique
+	// candidate; landed speculative + hidden. Last resort, so it runs
+	// only after register / const-deref / cross-language all abstained.
+	exactSig := false
+	if handlerID == "" {
+		matchName := name
+		if constDeref != "" {
+			matchName = constDeref
+		}
+		if id := idx.lookupExactSig(kind, matchName, callerRepo); id != "" {
+			handlerID = id
+			origin = graph.OriginSpeculative
+			conf = temporalExactSigConfidence
+			exactSig = true
+		}
+	}
+
+	// When the dispatch name came from an env-var-with-literal-default
+	// variable (env_default) or from tracing a bare local dispatch
+	// variable to its last assignment (var_trace), the value is a
+	// best-guess. HOW it was recognised decides the tier:
+	//   - "allowlist" / "os_getenv" / "const_ref": confident it IS an
+	//     env-with-default — inferred tier (0.6, visible).
+	//   - "heuristic" / var_trace / unknown: a guess — hidden speculative
+	//     tier (0.4), where the optional LLM cleaning pass can prune it.
+	envDefault := false
+	envSource := ""
+	switch v, _ := e.Meta["temporal_name_origin"].(string); v {
+	case "env_default", "var_trace":
+		envDefault = true
+		envSource, _ = e.Meta["temporal_env_source"].(string)
+	}
+	envSpeculative := envDefault && envSource != "allowlist" && envSource != "os_getenv" && envSource != "const_ref"
+	if handlerID != "" && envDefault {
+		if envSpeculative {
+			origin = graph.OriginSpeculative
+			conf = temporalEnvDefaultConfidence
+		} else {
+			origin = graph.OriginASTInferred
+			conf = temporalEnvDefaultInferredConfidence
+		}
+	}
+
+	want := handlerID
+	if want == "" {
+		want = temporalStubPlaceholder(kind, name)
+	}
+	if e.To == want {
+		return handlerID != "", false
+	}
+
+	e.To = want
+	if handlerID != "" {
+		e.Origin = origin
+		e.Confidence = conf
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, conf)
+		e.Meta["temporal_resolution"] = origin
+		if envSpeculative || crossLang || exactSig {
+			e.Meta[graph.MetaSpeculative] = true
+		}
+		if crossLang {
+			e.Meta["temporal_cross_lang"] = true
+		} else {
+			delete(e.Meta, "temporal_cross_lang")
+		}
+		if exactSig {
+			e.Meta["temporal_resolution_via"] = "exact_sig"
+		} else if convention {
+			e.Meta["temporal_resolution_via"] = "convention"
+		} else {
+			delete(e.Meta, "temporal_resolution_via")
+		}
+		if constDeref != "" {
+			e.Meta["temporal_const_deref"] = constDeref
+		} else {
+			delete(e.Meta, "temporal_const_deref")
+		}
+		StampSynthesized(e, SynthTemporalStub)
+	} else {
+		e.Origin = ""
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		delete(e.Meta, "temporal_resolution")
+		delete(e.Meta, graph.MetaSpeculative)
+		delete(e.Meta, "temporal_const_deref")
+		delete(e.Meta, "temporal_cross_lang")
+		delete(e.Meta, "temporal_resolution_via")
+		UnstampSynthesized(e)
+	}
+	return handlerID != "", true
 }
 
 // temporalStubPlaceholder is the canonical placeholder target for an
