@@ -71,6 +71,11 @@ func (b *BuildStore) FreezeFnPointerInputs(ctx context.Context, match func(*grap
 	if busy || match == nil {
 		return invalid("function pointer census inputs")
 	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, b.pending.DeleteRange(p.prefix, prefixEnd(p.prefix), pebble.NoSync))
+		}
+	}()
 	if err := b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
 		kind, err := rebuildAttributionEdgeKind(r.key)
 		if err != nil || kind != graph.EdgeCalls && kind != graph.EdgeReferences {
@@ -82,7 +87,7 @@ func (b *BuildStore) FreezeFnPointerInputs(ctx context.Context, match func(*grap
 		}
 		return p.put(append(p.column('i'), r.key...), nil)
 	}); err != nil {
-		return errors.Join(err, b.pending.DeleteRange(p.prefix, prefixEnd(p.prefix), pebble.NoSync))
+		return err
 	}
 	return p.put(p.column('I'), nil)
 }
@@ -172,7 +177,11 @@ func (p *rebuildFnPointerStage) capture(ctx context.Context) error {
 	prefix := p.column('i')
 	return p.visit(ctx, prefix, func(r row) error {
 		old := r.key[len(prefix):]
-		e, err := p.edge(old)
+		var sizeErr error
+		e, err := pendingGet(p.b.pending, old, func(val []byte) (*graph.Edge, error) {
+			sizeErr = p.input(old, val)
+			return p.decodeKeyedEdge(old, val)
+		})
 		if err != nil || e == nil {
 			return err
 		}
@@ -211,6 +220,10 @@ func (p *rebuildFnPointerStage) capture(ctx context.Context) error {
 			if _, _, ok := p.decide.Dispatch(e); !ok {
 				return nil
 			}
+		}
+		// Count skipped claims, but cap only rows admitted for planning.
+		if sizeErr != nil {
+			return sizeErr
 		}
 		return moves.put(append(moves.column(col), old...), raw)
 	})
@@ -369,6 +382,10 @@ func (p *rebuildFnPointerStage) recordInput(e *graph.Edge, file, lang string, or
 	if err != nil || len(claim) <= 1 {
 		return err
 	}
+	admitted, err := moves.present(append(moves.column('h'), claim[1:]...))
+	if err != nil || !admitted {
+		return err
+	}
 	live, err := moves.edge(claim[1:])
 	if err != nil || live == nil {
 		return errors.Join(err, invalid("function pointer receipt has no live row"))
@@ -377,8 +394,22 @@ func (p *rebuildFnPointerStage) recordInput(e *graph.Edge, file, lang string, or
 	if e.Kind == graph.EdgeReferences {
 		a, b, c := p.decide.Registration(e)
 		x, y, z := p.decide.Registration(live)
-		exact = exact && a == x && b == y && c == z &&
-			fnPointerRegistrationCall(e, c) == fnPointerRegistrationCall(live, z)
+		exact = exact && a == x && b == y && c == z
+		if exact && c != "" {
+			rawCall, liveCall := fnPointerRegistrationCall(e, c), fnPointerRegistrationCall(live, z)
+			if rawCall.getter != liveCall.getter {
+				// Use the nonempty binding to ask whether either input can
+				// reach the getter tier. Copies and singletons never do.
+				if rawCall.getter == "" {
+					rawCall = liveCall
+				}
+				pick, err := p.elect(live.From, rawCall, false)
+				if err != nil {
+					return err
+				}
+				exact = !pick.getter
+			}
+		}
 		return moves.noteReceipt(key, claim, exact)
 	}
 	a, b, ok := p.decide.Dispatch(e)
@@ -430,7 +461,7 @@ func (p *rebuildFnPointerStage) registrationProved(e *graph.Edge, name string) (
 }
 
 // Copies use the plan's complete logical edge tuple, not receipt arrival.
-// Claims still prove the input bytes; registration writes use receipt order.
+// Claims prove the input roles; registration writes use receipt order.
 func (p *rebuildFnPointerStage) finishRegistrations(ctx context.Context) error {
 	prefix := p.column('h')
 	return p.visit(ctx, prefix, func(r row) error {
@@ -451,12 +482,14 @@ func (p *rebuildFnPointerStage) finishRegistrations(ctx context.Context) error {
 			}
 		}
 		if !proved {
-			moving, err := p.present(append(p.column('m'), old...))
+			moved, err := pendingGet(p.b.pending, append(p.column('m'), old...), decodeEdge)
 			if err != nil {
 				return err
 			}
-			if moving {
-				p.refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
+			if moved != nil {
+				if err := p.refuseOutput(moved); err != nil {
+					return err
+				}
 			} else if slot != source {
 				if _, err := p.noteDependency(slot, old); err != nil {
 					return err
@@ -558,7 +591,7 @@ func (p *rebuildFnPointerStage) dispatchTargets(ctx context.Context, st, field s
 
 func (p *rebuildFnPointerStage) planDispatch(ctx context.Context) error {
 	prefix := p.calls.column('h')
-	return p.visit(ctx, prefix, func(r row) error {
+	if err := p.visit(ctx, prefix, func(r row) error {
 		old := r.key[len(prefix):]
 		e, err := p.calls.edge(old)
 		if err != nil || e == nil {
@@ -578,25 +611,22 @@ func (p *rebuildFnPointerStage) planDispatch(ctx context.Context) error {
 		if !moving && len(ids) <= 1 {
 			return nil
 		}
-		dependency, err := p.get(p.key('U', st+"\x00"+field))
-		if err != nil {
-			return err
-		}
-		if dependency != nil {
-			id, err := decodeLinkRecorder(dependency)
-			if err != nil {
+		if moving {
+			p.result.CallMoves++
+			if err := p.calls.stage(old, e); err != nil {
 				return err
 			}
-			p.refused.add(id, dependency)
-			return nil
+		}
+		dependency, err := p.present(p.key('U', st+"\x00"+field))
+		if err != nil {
+			return err
 		}
 		proved, err := fnPointerInputProved(&p.calls, old, r.value)
 		if err != nil {
 			return err
 		}
-		if !proved {
-			p.refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
-			return nil
+		if dependency || !proved {
+			return p.calls.put(append(p.calls.column('Q'), old...), nil)
 		}
 		if len(ids) > 1 {
 			if err := p.calls.put(append(p.calls.column('f'), old...), nil); err != nil {
@@ -604,12 +634,70 @@ func (p *rebuildFnPointerStage) planDispatch(ctx context.Context) error {
 			}
 			p.result.Adds += uint64(len(ids) - 1)
 		}
-		if moving {
-			p.result.CallMoves++
-			return p.calls.stage(old, e)
+		return nil
+	}); err != nil {
+		return err
+	}
+	return p.checkDispatchRefusals(ctx)
+}
+
+// Inspect unproved inputs after planning all moves. A stationary primary does
+// not need proof if every secondary has a retained incumbent.
+func (p *rebuildFnPointerStage) checkDispatchRefusals(ctx context.Context) error {
+	prefix := p.calls.column('Q')
+	return p.visit(ctx, prefix, func(r row) error {
+		old := r.key[len(prefix):]
+		moved, err := pendingGet(p.b.pending, append(p.calls.column('m'), old...), decodeEdge)
+		if err != nil {
+			return err
+		}
+		if moved != nil {
+			if err := p.refuseOutput(moved); err != nil {
+				return err
+			}
+		}
+		e, err := p.calls.edge(old)
+		if err != nil || e == nil {
+			return errors.Join(err, invalid("function pointer call missing"))
+		}
+		st, field, _ := p.decide.Dispatch(e)
+		ids, err := p.dispatchTargets(ctx, st, field)
+		if err != nil || len(ids) <= 1 {
+			return err
+		}
+		for _, target := range ids[1:] {
+			e.To = target
+			key := pendingEdgeKey(e)
+			occupied, err := p.calls.present(key)
+			if err != nil {
+				return err
+			}
+			if occupied {
+				vacated, err := p.calls.present(append(p.calls.column('m'), key...))
+				if err != nil {
+					return err
+				}
+				if !vacated {
+					continue
+				}
+			}
+			if err := p.refuseOutput(e); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
+}
+
+func (p *rebuildFnPointerStage) refuseOutput(e *graph.Edge) error {
+	key := pendingEdgeKey(e)
+	refusal := append(p.column('R'), key...)
+	seen, err := p.present(refusal)
+	if err != nil || seen {
+		return err
+	}
+	p.refused.add(graph.EdgeIdentityFor(e), key)
+	return p.put(refusal, nil)
 }
 
 // Fanout follows the native framework batch: first position, last payload

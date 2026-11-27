@@ -211,7 +211,9 @@ func TestRebuildFnPointerStageProofFollowsDispatchSlots(t *testing.T) {
 			if tc.refuse {
 				var refused *store_pebble.RebuildUnknownProvenanceError
 				require.ErrorAs(t, err, &refused)
-				require.Equal(t, graph.EdgeIdentityFor(tc.omit), refused.First)
+				want := graph.EdgeIdentityFor(dispatch)
+				want.To = handler.ID
+				require.Equal(t, want, refused.First)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, b))
 				return
@@ -379,4 +381,78 @@ func TestRebuildFnPointerStageLimits(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, store_pebble.RebuildFnPointerStageStats{CallMoves: 2, Adds: 63, Resolved: 65, Sweeps: 8}, stats)
 	require.Equal(t, want, rebuildEventSavedRows(t, b))
+}
+
+func TestRebuildFnPointerStageSuppressesOccupiedFanout(t *testing.T) {
+	const file, lang = "saved.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	primary := rebuildEventNode(file, "a", lang, "")
+	secondary := rebuildEventNode(file, "b", lang, "")
+	third := rebuildEventNode(file, "c", lang, "")
+	destination := rebuildEventNode(file, "d", lang, "")
+	nodes := []*graph.Node{caller, primary, secondary, third, destination}
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthFnPointerDispatch})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name      string
+		vacate    bool
+		duplicate bool
+		count     uint64
+		first     string
+	}{
+		{name: "stationary secondaries"},
+		{name: "vacated secondary", vacate: true, count: 1, first: secondary.ID},
+		{name: "unproved contenders count each destination once", duplicate: true, count: 3, first: primary.ID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const line = 10
+			edges := []*graph.Edge{
+				rebuildFnPointerReg(caller.ID, primary.ID, 1, "slot", primary.Name),
+				rebuildFnPointerReg(caller.ID, secondary.ID, 2, "slot", secondary.Name),
+				rebuildFnPointerReg(caller.ID, third.ID, 3, "slot", third.Name),
+			}
+			var omitted []*graph.Edge
+			if tc.duplicate {
+				omitted = []*graph.Edge{
+					rebuildFnPointerCall(caller.ID, "unresolved::z", line, "slot"),
+					rebuildFnPointerCall(caller.ID, "unresolved::a", line, "slot"),
+				}
+			} else {
+				omitted = []*graph.Edge{rebuildFnPointerCall(caller.ID, primary.ID, line, "slot")}
+				edges = append(edges, &graph.Edge{Kind: graph.EdgeCalls, From: caller.ID, To: third.ID, FilePath: file, Line: line})
+				if tc.vacate {
+					edges = append(edges,
+						rebuildFnPointerReg(caller.ID, destination.ID, 4, "vacate", destination.Name),
+						rebuildFnPointerCall(caller.ID, secondary.ID, line, "vacate"),
+					)
+				} else {
+					edges = append(edges, &graph.Edge{Kind: graph.EdgeCalls, From: caller.ID, To: secondary.ID, FilePath: file, Line: line})
+				}
+			}
+			receipt := rebuildEventFacts(file, lang, nodes, edges...)
+			facts := rebuildEventFacts(file, lang, nodes, append(slices.Clone(edges), omitted...)...)
+			b, native := openRebuildEventStores(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.NoError(t, FreezeRebuildFnPointerInputs(t.Context(), b, frozen))
+			stats, err := RunRebuildFnPointerStage(t.Context(), b, rebuildGRPCReceipts(receipt), frozen)
+			if tc.count != 0 {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, tc.count, refused.Count)
+				wantFirst := graph.EdgeIdentityFor(omitted[0])
+				wantFirst.To = tc.first
+				require.Equal(t, wantFirst, refused.First)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Zero(t, stats.Adds)
+			report := RunFrameworkSynthesizersWithSelection(native, selected)
+			require.NoError(t, report.Err)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		})
+	}
 }

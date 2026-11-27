@@ -73,7 +73,9 @@ func TestRebuildFnPointerStageMoveProof(t *testing.T) {
 				var refused *RebuildUnknownProvenanceError
 				require.ErrorIs(t, err, ErrRebuildFnPointer)
 				require.ErrorAs(t, err, &refused)
-				require.Equal(t, graph.EdgeIdentityFor(tc.omit), refused.First)
+				want := graph.EdgeIdentityFor(tc.omit)
+				want.To = target.ID
+				require.Equal(t, want, refused.First)
 				require.EqualValues(t, 1, refused.Count)
 				require.Zero(t, stats)
 				require.Equal(t, before, snapshot())
