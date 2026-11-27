@@ -755,6 +755,13 @@ func buildRebuildStages(
 		if godotAutoloadMoves != 0 {
 			logger.Info("rebuild Godot autoload applied to private build", zap.Uint64("moves", godotAutoloadMoves))
 		}
+		godotPreloadMoves, err := resolver.RunRebuildGodotPreloadAlias(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if godotPreloadMoves != 0 {
+			logger.Info("rebuild Godot preload alias applied to private build", zap.Uint64("moves", godotPreloadMoves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

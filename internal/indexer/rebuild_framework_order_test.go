@@ -64,6 +64,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"FastAPI", "moves", 1},
 		{"Rails", "moves", 1},
 		{"Godot autoload", "moves", 1},
+		{"Godot preload alias", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -747,6 +748,13 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	godotScriptFacts := receipt([]*graph.Node{godotScriptFile, godotCaller, godotMember},
 		edge(godotCaller, "unresolved::*."+godotMember.Name, graph.EdgeCalls, 3, map[string]any{"receiver_type": godotAutoloadDecl.Name}))
 
+	const godotPreloadPath = "preload-clock.gd"
+	godotPreloadCaller := node(godotPreloadPath, "gdscript", "start", graph.KindFunction, 1)
+	godotPreloadDecl := node(godotPreloadPath, "gdscript", "LocalClock", graph.KindVariable, 2)
+	godotPreloadDecl.Meta = map[string]any{"gd_preload": "res://" + godotScriptPath}
+	godotPreloadFacts := receipt([]*graph.Node{godotPreloadCaller, godotPreloadDecl},
+		edge(godotPreloadCaller, "unresolved::*."+godotMember.Name, graph.EdgeCalls, 3, map[string]any{"receiver_type": godotPreloadDecl.Name}))
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -758,6 +766,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
 		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts, railsFacts,
-		godotManifestFacts, godotScriptFacts,
+		godotManifestFacts, godotScriptFacts, godotPreloadFacts,
 	}
 }
