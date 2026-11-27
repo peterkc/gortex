@@ -113,7 +113,7 @@ func (p *rebuildReduxThunkPass) collect(ctx context.Context) (bool, error) {
 	haveThunks := false
 	err := p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
 		light, err := checkedRebuildLightNode(r, p.label)
-		if err != nil || !(light.Kind == graph.KindMethod || rebuildStoreFactoryGetterKind(light.Kind)) {
+		if err != nil || (light.Kind != graph.KindMethod && !rebuildStoreFactoryGetterKind(light.Kind)) {
 			return err
 		}
 		n, err := decodeNode(r.value)
