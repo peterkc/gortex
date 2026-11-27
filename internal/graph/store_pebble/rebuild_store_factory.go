@@ -31,9 +31,23 @@ type RebuildStoreFactoryRules struct {
 	Rebind func(*graph.Edge, string, string, bool) bool
 }
 
+// rebuildStoreDispatchCall separates the candidate cohort from the optional
+// getter binding and the name used when resetting a stale target.
+type rebuildStoreDispatchCall struct {
+	group, member, getter, reset string
+}
+
+type rebuildStoreDispatchRules struct {
+	kind   func(graph.NodeKind) bool
+	action func(*graph.Node) (string, string)
+	call   func(*graph.Edge) rebuildStoreDispatchCall
+	getter func(*graph.Node, string) bool
+	rebind func(*graph.Edge, string, string, bool) bool
+}
+
 type rebuildStoreFactoryPass struct {
 	rebuildCallMoves
-	rules       RebuildStoreFactoryRules
+	rules       rebuildStoreDispatchRules
 	needsAnchor bool
 	stats       RebuildStoreFactoryStats
 }
@@ -42,33 +56,47 @@ type rebuildStoreFactoryPass struct {
 // The worker must discard the build if applying the moves fails.
 func (b *BuildStore) RebuildStoreFactory(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	rules RebuildStoreFactoryRules,
-) (stats RebuildStoreFactoryStats, err error) {
-	defer func() {
-		if err != nil {
-			stats = RebuildStoreFactoryStats{}
-			err = fmt.Errorf("%w: %w", ErrRebuildStoreFactory, err)
+) (RebuildStoreFactoryStats, error) {
+	var read func(*graph.Edge) rebuildStoreDispatchCall
+	if rules.Stub != nil {
+		read = func(e *graph.Edge) rebuildStoreDispatchCall {
+			binding, member := rules.Stub(e)
+			return rebuildStoreDispatchCall{group: binding, member: member, getter: binding, reset: member}
 		}
-	}()
-	if receipts == nil || rules.Action == nil || rules.Stub == nil || rules.Getter == nil || rules.Rebind == nil {
-		return stats, fmt.Errorf("%w: invalid Store Factory inputs", ErrRebuildLinkInputSize)
 	}
-	prefix := rebuildStoreFactoryPrefix
-	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, prefix)
-	if err != nil {
-		return stats, err
-	}
-	if occupied {
-		return stats, invalid("Store Factory scratch range occupied")
-	}
-	defer func() {
-		err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
-	}()
 	p := rebuildStoreFactoryPass{
 		rebuildCallMoves: rebuildCallMoves{
 			b: b, prefix: rebuildStoreFactoryPrefix, rowBytes: rebuildStoreFactoryRowBytes, label: "Store Factory", inputRow: "edge row",
 		},
-		rules: rules,
+		rules: rebuildStoreDispatchRules{
+			kind: func(kind graph.NodeKind) bool { return kind == graph.KindFunction },
+			action: rules.Action, call: read, getter: rules.Getter, rebind: rules.Rebind,
+		},
 	}
+	return p.run(ctx, receipts, ErrRebuildStoreFactory)
+}
+
+func (p *rebuildStoreFactoryPass) run(ctx context.Context, receipts iter.Seq2[ParseFacts, error], stageErr error) (stats RebuildStoreFactoryStats, err error) {
+	defer func() {
+		if err != nil {
+			stats = RebuildStoreFactoryStats{}
+			err = fmt.Errorf("%w: %w", stageErr, err)
+		}
+	}()
+	if receipts == nil || p.rules.action == nil || p.rules.call == nil || p.rules.getter == nil || p.rules.rebind == nil {
+		return stats, fmt.Errorf("%w: invalid %s inputs", ErrRebuildLinkInputSize, p.label)
+	}
+	prefix := p.prefix
+	occupied, err := rebuildGuardHasPrefix(ctx, p.b.pending, prefix)
+	if err != nil {
+		return stats, err
+	}
+	if occupied {
+		return stats, invalid(p.label + " scratch range occupied")
+	}
+	defer func() {
+		err = errors.Join(err, p.b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
+	}()
 	haveActions, err := p.collect(ctx)
 	if err != nil || !haveActions {
 		return stats, err
@@ -79,7 +107,7 @@ func (b *BuildStore) RebuildStoreFactory(ctx context.Context, receipts iter.Seq2
 	if err := p.prove(ctx, receipts); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx, p.stats.Moves) })
+	err = p.b.withWrites(func() error { return p.apply(ctx, p.stats.Moves) })
 	return p.stats, err
 }
 
@@ -92,34 +120,38 @@ func rebuildStoreFactoryKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildStoreFactoryPrefix), col), fields...)
 }
 
+func (p *rebuildStoreFactoryPass) key(col byte, fields ...string) []byte {
+	return keyStrings(p.column(col), fields...)
+}
+
 func (p *rebuildStoreFactoryPass) state(key []byte) (byte, error) {
-	return rebuildScratchState(p.b.pending, key, "Store Factory receipt proof")
+	return rebuildScratchState(p.b.pending, key, p.label+" receipt proof")
 }
 
 func (p *rebuildStoreFactoryPass) collect(ctx context.Context) (bool, error) {
 	haveActions := false
 	err := p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
-		light, err := checkedRebuildLightNode(r, "Store Factory")
-		if err != nil || light.Kind != graph.KindFunction {
+		light, err := checkedRebuildLightNode(r, p.label)
+		if err != nil || !p.rules.kind(light.Kind) {
 			return err
 		}
 		n, err := decodeNode(r.value)
 		if err != nil {
 			return err
 		}
-		binding, member := p.rules.Action(n)
+		binding, member := p.rules.action(n)
 		if binding == "" {
 			return nil
 		}
 		if n.ID == "" {
-			return invalid("Store Factory action has no ID")
+			return invalid(p.label + " action has no ID")
 		}
-		if err := rebuildStoreFactoryNodeInput(r.key, r.value); err != nil {
+		if err := p.nodeInput(r.key, r.value); err != nil {
 			return err
 		}
 		haveActions = true
-		cohort := rebuildStoreFactoryKey('u', binding, member)
-		if err := p.put(rebuildStoreFactoryKey('c', n.ID), append([]byte{rebuildCapabilityWanted}, cohort...)); err != nil {
+		cohort := p.key('u', binding, member)
+		if err := p.put(p.key('c', n.ID), append([]byte{rebuildCapabilityWanted}, cohort...)); err != nil {
 			return err
 		}
 		for _, key := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'a', n) {
@@ -138,32 +170,32 @@ func rebuildStoreFactoryGetterKind(kind graph.NodeKind) bool {
 
 func (p *rebuildStoreFactoryPass) collectGetters(ctx context.Context) error {
 	return p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
-		light, err := checkedRebuildLightNode(r, "Store Factory")
+		light, err := checkedRebuildLightNode(r, p.label)
 		if err != nil || !rebuildStoreFactoryGetterKind(light.Kind) || light.Name == "" || light.FilePath == "" {
 			return err
 		}
-		wanted, err := p.present(rebuildStoreFactoryKey('b', light.Name))
+		wanted, err := p.present(p.key('b', light.Name))
 		if err != nil || !wanted {
 			return err
 		}
 		n, err := decodeNode(r.value)
-		if err != nil || !p.rules.Getter(n, light.Name) {
+		if err != nil || !p.rules.getter(n, light.Name) {
 			return err
 		}
-		if err := rebuildStoreFactoryNodeInput(r.key, r.value); err != nil {
+		if err := p.nodeInput(r.key, r.value); err != nil {
 			return err
 		}
-		if err := p.put(rebuildStoreFactoryKey('g', n.ID),
-			append([]byte{rebuildCapabilityWanted}, rebuildStoreFactoryKey('v', n.Name)...)); err != nil {
+		if err := p.put(p.key('g', n.ID),
+			append([]byte{rebuildCapabilityWanted}, p.key('v', n.Name)...)); err != nil {
 			return err
 		}
-		return p.addUnique(rebuildStoreFactoryKey('t', n.Name), n.FilePath)
+		return p.addUnique(p.key('t', n.Name), n.FilePath)
 	})
 }
 
-func rebuildStoreFactoryNodeInput(key, val []byte) error {
-	if len(key)+len(val) > rebuildStoreFactoryRowBytes {
-		return fmt.Errorf("%w: Store Factory node row", ErrRebuildLinkInputSize)
+func (p *rebuildStoreFactoryPass) nodeInput(key, val []byte) error {
+	if len(key)+len(val) > p.rowBytes {
+		return fmt.Errorf("%w: %s node row", ErrRebuildLinkInputSize, p.label)
 	}
 	return nil
 }
@@ -171,10 +203,10 @@ func rebuildStoreFactoryNodeInput(key, val []byte) error {
 func (p *rebuildStoreFactoryPass) node(id string) (*graph.Node, error) {
 	key := pendingNodeKey(id)
 	return pendingGet(p.b.pending, key, func(val []byte) (*graph.Node, error) {
-		if err := rebuildStoreFactoryNodeInput(key, val); err != nil {
+		if err := p.nodeInput(key, val); err != nil {
 			return nil, err
 		}
-		return checkedRebuildLightNode(row{key, val}, "Store Factory")
+		return checkedRebuildLightNode(row{key, val}, p.label)
 	})
 }
 
@@ -186,8 +218,8 @@ type rebuildStoreFactoryElection struct {
 	getterProof bool // the getter file can change the decision
 }
 
-func (p *rebuildStoreFactoryPass) elect(from, binding, member string, resolveGetter bool) (pick rebuildStoreFactoryElection, err error) {
-	scoped := rebuildStoreFactoryKey('a', binding, member)
+func (p *rebuildStoreFactoryPass) elect(from string, call rebuildStoreDispatchCall, resolveGetter bool) (pick rebuildStoreFactoryElection, err error) {
+	scoped := p.key('a', call.group, call.member)
 	id, seen, err := p.unique(scoped)
 	pick.seen = seen
 	if err != nil {
@@ -203,28 +235,31 @@ func (p *rebuildStoreFactoryPass) elect(from, binding, member string, resolveGet
 	}
 	var callerFile string
 	if pick.caller != nil {
-		scoped = rebuildStoreFactoryKey('w', binding, member, pick.caller.WorkspaceID)
+		scoped = p.key('w', call.group, call.member, pick.caller.WorkspaceID)
 		id, seen, err = p.unique(scoped)
 		if err != nil {
 			return pick, err
 		}
 		callerFile = pick.caller.FilePath
 	}
-	if !resolveGetter && seen && id == "" {
+	if !resolveGetter && call.getter != "" && seen && id == "" {
 		pick.getter = true
 		return pick, nil
 	}
 	var getterFile string
 	pick.rebuildStoreCandidatePick, err = pickRebuildStoreCandidate(p.unique, scoped, id, seen, func() (string, error) {
+		if call.getter == "" {
+			return "", nil
+		}
 		pick.getter = true
-		file, _, err := p.unique(rebuildStoreFactoryKey('t', binding))
+		file, _, err := p.unique(p.key('t', call.getter))
 		getterFile = file
 		return file, err
 	}, callerFile, func(file string) []byte {
 		if pick.caller != nil {
-			return rebuildStoreFactoryKey('s', binding, member, pick.caller.WorkspaceID, file)
+			return p.key('s', call.group, call.member, pick.caller.WorkspaceID, file)
 		}
-		return rebuildStoreFactoryKey('f', binding, member, file)
+		return p.key('f', call.group, call.member, file)
 	})
 	pick.getterProof = pick.getter && (getterFile == "" || pick.getterWinner)
 	return pick, err
@@ -241,8 +276,8 @@ func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		binding, member := p.rules.Stub(e)
-		if binding == "" || member == "" {
+		call := p.rules.call(e)
+		if call.group == "" || call.member == "" {
 			return nil
 		}
 		if err := p.input(r.key, r.value); err != nil {
@@ -261,26 +296,26 @@ func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
 				return err
 			}
 		}
-		pick, err := p.elect(e.From, binding, member, false)
+		pick, err := p.elect(e.From, call, false)
 		if err != nil {
 			return err
 		}
 		if !pick.getter {
-			return p.planCall(r.key, e, binding, member, pick)
+			return p.planCall(r.key, e, call, pick)
 		}
 		// Only a many-candidate scoped election consults the getter.
 		deferred = true
-		if err := p.put(rebuildStoreFactoryKey('b', binding), nil); err != nil {
+		if err := p.put(p.key('b', call.getter), nil); err != nil {
 			return err
 		}
-		return p.put(append(rebuildStoreFactoryKey('l'), r.key...), nil)
+		return p.put(append(p.key('l'), r.key...), nil)
 	}); err != nil || !deferred {
 		return err
 	}
 	if err := p.collectGetters(ctx); err != nil {
 		return err
 	}
-	prefix := rebuildStoreFactoryKey('l')
+	prefix := p.key('l')
 	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 		old := r.key[len(prefix):]
 		e, err := p.edge(old)
@@ -288,26 +323,26 @@ func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
 			return err
 		}
 		if e == nil {
-			return invalid("Store Factory deferred Call missing")
+			return invalid(p.label + " deferred Call missing")
 		}
-		binding, member := p.rules.Stub(e)
-		pick, err := p.elect(e.From, binding, member, true)
+		call := p.rules.call(e)
+		pick, err := p.elect(e.From, call, true)
 		if err != nil {
 			return err
 		}
-		return p.planCall(old, e, binding, member, pick)
+		return p.planCall(old, e, call, pick)
 	})
 }
 
-func (p *rebuildStoreFactoryPass) planCall(old []byte, e *graph.Edge, binding, member string, pick rebuildStoreFactoryElection) error {
+func (p *rebuildStoreFactoryPass) planCall(old []byte, e *graph.Edge, call rebuildStoreDispatchCall, pick rebuildStoreFactoryElection) error {
 	if pick.target != "" {
 		p.stats.Resolved++
 	}
-	if !p.rules.Rebind(e, member, pick.target, pick.target != "") {
+	if !p.rules.rebind(e, call.reset, pick.target, pick.target != "") {
 		return nil
 	}
 	if pick.seen {
-		if err := p.want(rebuildStoreFactoryKey('u', binding, member)); err != nil {
+		if err := p.want(p.key('u', call.group, call.member)); err != nil {
 			return err
 		}
 	}
@@ -315,12 +350,12 @@ func (p *rebuildStoreFactoryPass) planCall(old []byte, e *graph.Edge, binding, m
 		p.needsAnchor = true
 	}
 	if pick.getter {
-		if err := p.want(rebuildStoreFactoryKey('v', binding)); err != nil {
+		if err := p.want(p.key('v', call.getter)); err != nil {
 			return err
 		}
 	}
 	if pick.caller != nil {
-		if err := p.want(rebuildStoreFactoryKey('n', pick.caller.ID)); err != nil {
+		if err := p.want(p.key('n', pick.caller.ID)); err != nil {
 			return err
 		}
 	}
@@ -351,7 +386,7 @@ func (p *rebuildStoreFactoryPass) prove(ctx context.Context, receipts iter.Seq2[
 	if err != nil {
 		return err
 	}
-	if err := p.foldGetterFiles(ctx, rebuildStoreFactoryKey('g'), p.node, p.addUnique); err != nil {
+	if err := p.foldGetterFiles(ctx, p.key('g'), p.node, p.addUnique); err != nil {
 		return err
 	}
 	var refused rebuildScratchRefusals
@@ -385,7 +420,7 @@ func (p *rebuildStoreFactoryPass) record(ctx context.Context, facts ParseFacts) 
 		if raw.Kind != graph.EdgeCalls {
 			continue
 		}
-		key := append(rebuildStoreFactoryKey('r'), pendingEdgeKey(raw)...)
+		key := append(p.key('r'), pendingEdgeKey(raw)...)
 		claim, err := p.marked(key)
 		if err != nil {
 			return err
@@ -398,11 +433,10 @@ func (p *rebuildStoreFactoryPass) record(ctx context.Context, facts ParseFacts) 
 			return err
 		}
 		if live == nil {
-			return invalid("Store Factory recorder has no old call")
+			return invalid(p.label + " recorder has no old call")
 		}
-		binding, member := p.rules.Stub(raw)
-		liveBinding, liveMember := p.rules.Stub(live)
-		ok := lang != "" && raw.FilePath == file && binding == liveBinding && member == liveMember
+		call, liveCall := p.rules.call(raw), p.rules.call(live)
+		ok := lang != "" && raw.FilePath == file && call == liveCall
 		if err := p.noteReceipt(key, claim, ok); err != nil {
 			return err
 		}
@@ -411,7 +445,7 @@ func (p *rebuildStoreFactoryPass) record(ctx context.Context, facts ParseFacts) 
 }
 
 func (p *rebuildStoreFactoryPass) recordNode(raw *graph.Node, file, lang string) error {
-	key := rebuildStoreFactoryKey('n', raw.ID)
+	key := p.key('n', raw.ID)
 	state, err := p.state(key)
 	if err != nil {
 		return err
@@ -435,7 +469,7 @@ func (p *rebuildStoreFactoryPass) recordNode(raw *graph.Node, file, lang string)
 }
 
 func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, file, lang string) error {
-	key := rebuildStoreFactoryKey(col, raw.ID)
+	key := p.key(col, raw.ID)
 	claim, err := p.marked(key)
 	if err != nil || len(claim) == 0 {
 		return err
@@ -454,9 +488,9 @@ func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, fil
 	receipt := rebuildStoreNodeReceipt(raw, live, file, lang)
 	var proof byte
 	if col == 'c' {
-		binding, member := p.rules.Action(raw)
-		eligible := raw.Kind == graph.KindFunction && binding != ""
-		cohort := rebuildStoreFactoryKey('u', binding, member)
+		binding, member := p.rules.action(raw)
+		eligible := p.rules.kind(raw.Kind) && binding != ""
+		cohort := p.key('u', binding, member)
 		sameRole := eligible && bytes.Equal(claim[1:], cohort)
 		if receipt && eligible && (!sameRole || raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
 			if err := p.noteCandidateCohortChange(claim[1:], cohort, len(p.prefix), 'a', raw, live); err != nil {
@@ -468,7 +502,7 @@ func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, fil
 			proof |= rebuildStoreAnchorProof(receipt && eligible)
 		}
 	} else {
-		sameGetter := rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], rebuildStoreFactoryKey('v', raw.Name))
+		sameGetter := rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.getter(raw, raw.Name) && bytes.Equal(claim[1:], p.key('v', raw.Name))
 		if sameGetter {
 			if err := p.noteGetterFileChange(claim[1:], state, raw, live, file, lang); err != nil {
 				return err
@@ -480,10 +514,10 @@ func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, fil
 }
 
 func (p *rebuildStoreFactoryPass) proveActions(ctx context.Context) (anchor bool, err error) {
-	prefix := rebuildStoreFactoryKey('c')
+	prefix := p.key('c')
 	err = pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 		if len(r.value) <= len(p.prefix)+1 {
-			return invalid("Store Factory candidate proof")
+			return invalid(p.label + " candidate proof")
 		}
 		anchor = anchor || rebuildStoreAnchorExact(r.value[0])
 		if !rebuildStoreCandidateExact(r.value[0]) {
@@ -506,12 +540,12 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 	if err != nil {
 		return false, err
 	}
-	claim, err := p.marked(append(rebuildStoreFactoryKey('r'), raw...))
+	claim, err := p.marked(append(p.key('r'), raw...))
 	if err != nil || len(claim) <= 1 || claim[0] != rebuildScratchExact || !bytes.Equal(claim[1:], old) {
 		return false, err
 	}
-	binding, member := p.rules.Stub(e)
-	pick, err := p.elect(e.From, binding, member, true)
+	call := p.rules.call(e)
+	pick, err := p.elect(e.From, call, true)
 	if err != nil {
 		return false, err
 	}
@@ -523,10 +557,10 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 		return false, err
 	}
 	if pick.getter {
-		wanted := rebuildStoreFactoryKey('v', binding)
+		wanted := p.key('v', call.getter)
 		var ok bool
 		if pick.getterProof {
-			ok, err = p.getterFilesProved(rebuildStoreFactoryKey('t', binding), wanted, p.unique)
+			ok, err = p.getterFilesProved(p.key('t', call.getter), wanted, p.unique)
 		} else {
 			ok, err = p.getterFileUnchanged(wanted)
 		}
@@ -535,7 +569,7 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 		}
 	}
 	if pick.caller != nil {
-		state, err := p.state(rebuildStoreFactoryKey('n', pick.caller.ID))
+		state, err := p.state(p.key('n', pick.caller.ID))
 		return state == rebuildScratchExact, err
 	}
 	return true, nil
