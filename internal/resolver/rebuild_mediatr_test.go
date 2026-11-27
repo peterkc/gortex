@@ -130,3 +130,29 @@ func runRebuildMediatRSQLiteOracle(t *testing.T, facts ...store_pebble.ParseFact
 	require.Equal(t, want, rebuildEventSavedRows(t, b), "after one MediatR pass")
 	return want
 }
+
+func TestRebuildMediatRRequiresRequestTypeForAnchor(t *testing.T) {
+	const file = "Dispatch.cs"
+	handler := &graph.Node{ID: file + "::Handler", Kind: graph.KindMethod, FilePath: file, Language: "csharp",
+		Meta: map[string]any{"mediatr_kind": "request", "mediatr_request_type": "Other"}}
+	call := &graph.Edge{From: "caller", To: "settled", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
+		Meta: map[string]any{"via": mediatrVia, "mediatr_kind": "request", "mediatr_request_type": "Missing"}}
+	b := openRebuildGRPCBuild(t, rebuildEventFacts(file, "csharp", []*graph.Node{handler}, call))
+	before := rebuildEventSavedRows(t, b)
+	raw := *handler
+	raw.Meta = map[string]any{"mediatr_kind": "request"}
+	receipt := rebuildEventFacts(file, "csharp", []*graph.Node{&raw}, call)
+	_, native := openRebuildEventStores(t, receipt)
+	require.Zero(t, ResolveMediatRCalls(native))
+	require.Contains(t, rebuildEventSQLiteRows(native).edges, call)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMediatR})
+	require.NoError(t, err)
+	stats, err := RunRebuildMediatR(t.Context(), b, rebuildGRPCReceipts(receipt), selection)
+	var refused *store_pebble.RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	want := graph.EdgeIdentityFor(call)
+	want.To = "unresolved::*.Handle"
+	require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
+}

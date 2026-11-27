@@ -78,8 +78,14 @@ func (b *BuildStore) RebuildMediatR(ctx context.Context, receipts iter.Seq2[Pars
 			rebuildCallMoves: rebuildCallMoves{b: b, prefix: prefix, rowBytes: 16 << 20, label: "MediatR", inputRow: "edge row"},
 			needsAnchor:      true,
 			rules: rebuildStoreDispatchRules{
-				kind:   rebuildMediatRHandlerKind,
-				action: rules.Handler,
+				kind: rebuildMediatRHandlerKind,
+				action: func(n *graph.Node) (string, string) {
+					kind, reqType := rules.Handler(n)
+					if reqType == "" {
+						return "", ""
+					}
+					return kind, reqType
+				},
 				call:   read,
 				getter: rules.Getter,
 				rebind: func(e *graph.Edge, _, id string, matched bool) bool { return rules.Rebind(e, id, matched) },
