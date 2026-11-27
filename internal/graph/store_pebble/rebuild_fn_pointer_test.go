@@ -146,7 +146,7 @@ func TestRebuildFnPointerSpillsBeforeAppend(t *testing.T) {
 	require.Len(t, stream.rows, 1)
 	require.Equal(t, fnPointerEdgeKey(fnPointerCallMoves, &second), stream.rows[0].key)
 	var keys []string
-	require.NoError(t, visitFnPointerMoveRun(ctx, p.runPath(fnPointerCallMoves, 0), func(r row) error {
+	require.NoError(t, visitLinkRun(ctx, p.runPath(fnPointerCallMoves, 0), func(r row) error {
 		keys = append(keys, string(r.key))
 		return nil
 	}))
@@ -184,6 +184,10 @@ func TestRebuildFnPointerRefusesUnorderedMoves(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, staged, after)
 			require.Empty(t, p.moves[fnPointerCallMoves-fnPointerRegMoves].rows)
+			runDir := p.runDir
+			require.NoError(t, p.Close())
+			_, err = os.Stat(runDir)
+			require.ErrorIs(t, err, os.ErrNotExist)
 		})
 	}
 }

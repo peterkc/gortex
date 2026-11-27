@@ -12,7 +12,6 @@ import (
 	"slices"
 
 	"github.com/cockroachdb/pebble/v2"
-	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/pathkey"
 )
@@ -380,7 +379,7 @@ func (p *RebuildTemporalPass) spillAdds(ctx context.Context) error {
 		p.addDir = dir
 	}
 	path := p.addRunPath(p.addRuns)
-	if err := writeTemporalAddRun(ctx, path, p.addRows); err != nil {
+	if err := writeLinkRun(ctx, path, p.addRows); err != nil {
 		return err
 	}
 	info, err := os.Stat(path)
@@ -399,28 +398,11 @@ func (p *RebuildTemporalPass) addRunPath(run int) string {
 	return filepath.Join(p.addDir, fmt.Sprintf("%d.sst", run))
 }
 
-func writeTemporalAddRun(ctx context.Context, path string, rows []row) (err error) {
-	w, err := newLinkTable(path)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, w.Close()) }()
-	for _, r := range rows {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := w.Set(r.key, r.value); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (p *RebuildTemporalPass) visitAdds(ctx context.Context, yield func(row) error) error {
 	// Ordinals increase as additions enter the buffer. Each run precedes
 	// both the next run and the tail, even for repeated edge identities.
 	for i := range p.addRuns {
-		if err := visitTemporalAddRun(ctx, p.addRunPath(i), yield); err != nil {
+		if err := visitLinkRun(ctx, p.addRunPath(i), yield); err != nil {
 			return err
 		}
 	}
@@ -433,32 +415,6 @@ func (p *RebuildTemporalPass) visitAdds(ctx context.Context, yield func(row) err
 		}
 	}
 	return ctx.Err()
-}
-
-func visitTemporalAddRun(ctx context.Context, path string, yield func(row) error) (err error) {
-	table, err := openLinkTable(ctx, path)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, table.Close()) }()
-	it, err := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, it.Close()) }()
-	for kv := it.First(); kv != nil; kv = it.Next() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		value, _, err := kv.Value(nil)
-		if err != nil {
-			return err
-		}
-		if err := yield(row{kv.K.UserKey, value}); err != nil {
-			return err
-		}
-	}
-	return errors.Join(ctx.Err(), it.Error())
 }
 
 func (p *RebuildTemporalPass) apply(ctx context.Context) error {

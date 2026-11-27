@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/cockroachdb/pebble/v2"
-	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -280,11 +279,6 @@ func (p *RebuildFnPointerPass) applyMoves(ctx context.Context, column byte) erro
 		if err != nil {
 			return err
 		}
-		old := *e
-		old.To = oldTo
-		if !bytes.Equal(r.key, fnPointerEdgeKey(column, &old)) {
-			return invalid("staged function-pointer identity does not match key")
-		}
 		batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		if len(batch) < nativeChunk {
 			return nil
@@ -317,7 +311,7 @@ func (p *RebuildFnPointerPass) spillMoves(ctx context.Context, column byte, stre
 		p.runDir = dir
 	}
 	path := p.runPath(column, stream.runs)
-	if err := writeFnPointerMoveRun(ctx, path, stream.rows); err != nil {
+	if err := writeLinkRun(ctx, path, stream.rows); err != nil {
 		return err
 	}
 	info, err := os.Stat(path)
@@ -338,28 +332,11 @@ func (p *RebuildFnPointerPass) runPath(column byte, run int) string {
 	return filepath.Join(p.runDir, fmt.Sprintf("%d-%d.sst", column, run))
 }
 
-func writeFnPointerMoveRun(ctx context.Context, path string, rows []row) (err error) {
-	w, err := newLinkTable(path)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, w.Close()) }()
-	for _, r := range rows {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := w.Set(r.key, r.value); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (p *RebuildFnPointerPass) visitMoves(ctx context.Context, column byte, yield func(row) error) error {
 	stream := &p.moves[column-fnPointerRegMoves]
 	// Each run and the tail are consecutive ranges of one ordered input scan.
 	for i := range stream.runs {
-		if err := visitFnPointerMoveRun(ctx, p.runPath(column, i), yield); err != nil {
+		if err := visitLinkRun(ctx, p.runPath(column, i), yield); err != nil {
 			return err
 		}
 	}
@@ -372,32 +349,6 @@ func (p *RebuildFnPointerPass) visitMoves(ctx context.Context, column byte, yiel
 		}
 	}
 	return ctx.Err()
-}
-
-func visitFnPointerMoveRun(ctx context.Context, path string, yield func(row) error) (err error) {
-	table, err := openLinkTable(ctx, path)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, table.Close()) }()
-	it, err := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, it.Close()) }()
-	for kv := it.First(); kv != nil; kv = it.Next() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		value, _, err := kv.Value(nil)
-		if err != nil {
-			return err
-		}
-		if err := yield(row{kv.K.UserKey, value}); err != nil {
-			return err
-		}
-	}
-	return errors.Join(ctx.Err(), it.Error())
 }
 
 func (p *RebuildFnPointerPass) visitMembers(ctx context.Context, slot string, yield func(string) error) error {

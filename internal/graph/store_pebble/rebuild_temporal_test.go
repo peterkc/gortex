@@ -177,7 +177,7 @@ func TestRebuildTemporalSpillsBeforeAppend(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, &second, tail)
 			var added []*graph.Edge
-			require.NoError(t, visitTemporalAddRun(ctx, p.addRunPath(0), func(r row) error {
+			require.NoError(t, visitLinkRun(ctx, p.addRunPath(0), func(r row) error {
 				e, err := decodeEdge(r.value)
 				if err != nil {
 					return err
@@ -189,6 +189,23 @@ func TestRebuildTemporalSpillsBeforeAppend(t *testing.T) {
 			return RebuildTemporalStats{}, nil
 		})
 	require.NoError(t, err)
+}
+
+func TestRebuildTemporalQueueAddRefusesOversizedRow(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	ctx := t.Context()
+	edge := &graph.Edge{From: "caller", To: "target", Kind: graph.EdgeCalls, Via: strings.Repeat("x", rebuildTemporalRowLimit)}
+	stats, err := b.RebuildTemporal(ctx, func(func(ParseFacts, error) bool) {}, 1,
+		func(p *RebuildTemporalPass) (RebuildTemporalStats, error) {
+			err := p.QueueAdd(ctx, edge)
+			require.Empty(t, p.addRows)
+			require.Empty(t, p.addDir)
+			return RebuildTemporalStats{}, err
+		})
+	require.ErrorIs(t, err, ErrRebuildTemporal)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.ErrorContains(t, err, "Temporal row")
+	require.Zero(t, stats)
 }
 
 func TestRebuildTemporalRefusesAffectedOutputRows(t *testing.T) {
