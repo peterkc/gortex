@@ -139,17 +139,27 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 	if err := p.collectBodies(ctx); err != nil {
 		return stats, err
 	}
-	if err := p.collectUses(ctx); err != nil || p.stats.Sites == 0 {
-		return p.stats, err
+	active, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('a'))
+	if err != nil || !active {
+		return stats, err
 	}
-	if err := p.plan(ctx); err != nil || p.stats.Adds == 0 {
-		return p.stats, err
+	if err := p.collectUses(ctx); err != nil {
+		return stats, err
+	}
+	if err := p.plan(ctx); err != nil {
+		return stats, err
+	}
+	if p.stats.Adds == 0 {
+		callers, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('h'))
+		if err != nil || !callers {
+			return p.stats, err
+		}
 	}
 	if err := p.record(ctx, receipts); err != nil {
 		return stats, err
 	}
-	if err := p.prove(ctx); err != nil {
-		return stats, err
+	if err := p.prove(ctx); err != nil || p.stats.Adds == 0 {
+		return p.stats, err
 	}
 	if !p.cProved {
 		return stats, fmt.Errorf("%w: macro expansion lacks a C-family receipt", ErrRebuildUnknownProvenance)
@@ -229,11 +239,20 @@ func (p *rebuildMacroExpansion) collectUses(ctx context.Context) error {
 	return p.visit(ctx, prefix, func(r row) error {
 		old := r.key[len(prefix):]
 		e, err := p.edge(old)
-		if err != nil || e == nil || e.From == "" || e.To == "" {
+		if err != nil || e == nil {
+			return err
+		}
+		if err := p.claimInput(old); err != nil || e.From == "" || e.To == "" {
 			return err
 		}
 		id := e.To
 		if graph.IsUnresolvedTarget(id) {
+			if err := p.put(p.key('h', e.From), []byte{rebuildCapabilityWanted}); err != nil {
+				return err
+			}
+			if err := p.put(append(p.key('j', e.From), old...), nil); err != nil {
+				return err
+			}
 			caller, err := p.storeReceiptNode(e.From)
 			if err != nil || caller == nil {
 				return err
@@ -251,9 +270,6 @@ func (p *rebuildMacroExpansion) collectUses(ctx context.Context) error {
 			if err != nil || only != id {
 				return err
 			}
-		}
-		if err := p.claimInput(old); err != nil {
-			return err
 		}
 		p.stats.Sites++
 		key := appendKeyLine(p.key('s', e.From, e.FilePath), e.Line)
@@ -304,7 +320,7 @@ func (p *rebuildMacroExpansion) plan(ctx context.Context) error {
 			if existing != nil {
 				return nil // native AddBatch preserves an occupied macro key too
 			}
-			if err := p.wantOutputProof(e, n, callee, old); err != nil {
+			if err := p.wantOutputProof(n, callee, old); err != nil {
 				return err
 			}
 			return p.offer(add, key)
@@ -312,12 +328,7 @@ func (p *rebuildMacroExpansion) plan(ctx context.Context) error {
 	})
 }
 
-func (p *rebuildMacroExpansion) wantOutputProof(e *graph.Edge, n *graph.Node, callee string, old []byte) error {
-	if graph.IsUnresolvedTarget(e.To) {
-		if err := p.put(p.key('h', e.From), []byte{rebuildCapabilityWanted}); err != nil {
-			return err
-		}
-	}
+func (p *rebuildMacroExpansion) wantOutputProof(n *graph.Node, callee string, old []byte) error {
 	if err := p.put(p.key('m', n.ID), []byte{rebuildCapabilityWanted}); err != nil {
 		return err
 	}
@@ -416,7 +427,13 @@ func (p *rebuildMacroExpansion) recordNode(ctx context.Context, n *graph.Node, f
 		if err != nil {
 			return err
 		}
-		exact := language != "" && language == n.Language && sameRebuildLanguageMarker(n, live, file) && n.RepoPrefix == live.RepoPrefix
+		admitted := language != "" && n.FilePath == file
+		exact := admitted && live != nil && live.FilePath == file && n.RepoPrefix == live.RepoPrefix
+		if admitted && (live == nil || n.RepoPrefix != live.RepoPrefix) {
+			if err := p.noteRawCallerOutputs(ctx, n); err != nil {
+				return err
+			}
+		}
 		if err := noteRebuildScratchState(p.put, callerKey, caller, rebuildScratchProofBit(exact)); err != nil {
 			return err
 		}
@@ -434,8 +451,8 @@ func (p *rebuildMacroExpansion) recordNode(ctx context.Context, n *graph.Node, f
 	if err != nil {
 		return err
 	}
-	admitted := language != "" && language == n.Language && n.FilePath == file
-	exact := rawRole && admitted && sameRebuildLanguageMarker(n, frozen, file) && n.RepoPrefix == frozen.RepoPrefix && n.Name == frozen.Name
+	admitted := language != "" && n.FilePath == file
+	exact := rawRole && admitted && frozen != nil && frozen.FilePath == file && n.RepoPrefix == frozen.RepoPrefix && n.Name == frozen.Name
 	if claim != 0 {
 		if err := noteRebuildScratchState(p.put, macroKey, claim, rebuildScratchProofBit(exact)); err != nil {
 			return err
@@ -450,12 +467,42 @@ func (p *rebuildMacroExpansion) recordNode(ctx context.Context, n *graph.Node, f
 	if err != nil || !wanted {
 		return err
 	}
-	live, err := p.storeReceiptNode(n.ID)
-	if err != nil || !sameRebuildLanguageMarker(n, live, file) {
-		return err
-	}
 	return p.body(ctx, n.ID, func(_ row, _ string) error {
 		return p.put(p.key('x', n.RepoPrefix, n.Name), nil)
+	})
+}
+
+// A caller receipt in another repo can select a macro the live use missed.
+// Check only its missing outputs; existing rows suppress native writes.
+func (p *rebuildMacroExpansion) noteRawCallerOutputs(ctx context.Context, n *graph.Node) error {
+	uses := p.key('j', n.ID)
+	return p.visit(ctx, uses, func(r row) error {
+		e, err := p.edge(r.key[len(uses):])
+		if err != nil || e == nil {
+			return errors.Join(err, invalid("macro expansion use missing"))
+		}
+		name := graph.UnresolvedName(e.To)
+		id, _, err := p.unique(p.key('a', n.RepoPrefix, name))
+		if err != nil || id == "" {
+			return err
+		}
+		prefix := p.key('b', id)
+		return p.visit(ctx, prefix, func(r row) error {
+			callee, rest, err := readKeyString(r.key[len(prefix):])
+			if err != nil || callee == "" || len(rest) != 0 {
+				return invalid("macro expansion callee key")
+			}
+			if callee == e.From {
+				return nil
+			}
+			add := p.rules.Add(e.From, callee, e.FilePath, e.Line, name)
+			key := pendingEdgeKey(add)
+			exists, err := p.present(key)
+			if err != nil || exists {
+				return err
+			}
+			return p.put(append(p.column('y'), key...), nil)
+		})
 	})
 }
 
@@ -473,6 +520,17 @@ func (p *rebuildMacroExpansion) inputProved(old []byte) (bool, error) {
 
 func (p *rebuildMacroExpansion) prove(ctx context.Context) error {
 	var refused rebuildScratchRefusals
+	rawOnly := p.column('y')
+	if err := p.visit(ctx, rawOnly, func(r row) error {
+		key := r.key[len(rawOnly):]
+		id, err := decodeLinkRecorder(key)
+		if err == nil {
+			refused.add(id, bytes.Clone(key))
+		}
+		return err
+	}); err != nil {
+		return err
+	}
 	prefix := p.column('p')
 	if err := p.visit(ctx, prefix, func(r row) error {
 		old, rest, err := readKeyString(r.key[len(prefix):])
@@ -498,7 +556,12 @@ func (p *rebuildMacroExpansion) prove(ctx context.Context) error {
 		ok, err := p.outputProved(e, n, callee, []byte(old))
 		if err == nil && !ok {
 			add := p.rules.Add(e.From, callee, e.FilePath, e.Line, n.Name)
-			refused.add(graph.EdgeIdentityFor(add), pendingEdgeKey(add))
+			key := pendingEdgeKey(add)
+			alreadyRefused, err := p.present(append(rawOnly, key...))
+			if err != nil || alreadyRefused {
+				return err
+			}
+			refused.add(graph.EdgeIdentityFor(add), key)
 		}
 		return err
 	}); err != nil {

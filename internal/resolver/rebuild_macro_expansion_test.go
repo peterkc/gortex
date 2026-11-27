@@ -123,3 +123,92 @@ func rebuildMacroExpansionFacts(t *testing.T, file, source string) store_pebble.
 	t.Cleanup(parsed.ReleaseTree)
 	return roundTripRebuildRNBridgeFacts(t, rebuildEventFacts(file, "c", parsed.Nodes, parsed.Edges...))
 }
+
+func TestRebuildMacroExpansionReceiptEntrant(t *testing.T) {
+	const file, lang = "use.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	callee := rebuildEventNode(file, "work", lang, "")
+	first := &graph.Node{ID: file + "::APPLY", Name: "APPLY", Kind: graph.KindMacro, FilePath: file, Language: lang,
+		Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
+	other := &graph.Node{ID: file + "::other", Name: first.Name, Kind: graph.KindMacro, FilePath: file, Language: lang,
+		Meta: map[string]any{"macro_kind": "object"}}
+	body := &graph.Edge{From: first.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+	otherBody := &graph.Edge{From: other.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 2}
+	use := &graph.Edge{From: caller.ID, To: "unresolved::APPLY", Kind: graph.EdgeCalls, FilePath: file, Line: 3}
+	facts := rebuildEventFacts(file, lang, []*graph.Node{caller, callee, first, other}, body, otherBody, use)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	for _, active := range []bool{false, true} {
+		b, native := openRebuildEventStores(t, facts)
+		before := rebuildEventSavedRows(t, b)
+		frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+		require.NoError(t, err)
+		require.NoError(t, FreezeRebuildMacroExpansionInputs(t.Context(), b, frozen))
+		raw := facts
+		raw.Nodes = slices.Clone(facts.Nodes)
+		if active {
+			entrant := *other
+			entrant.Language = "cpp"
+			entrant.Meta = map[string]any{"macro_kind": macroFunctionKindMeta}
+			raw.Nodes[3] = &entrant
+		}
+		stats, err := RunRebuildMacroExpansion(t.Context(), b, rebuildGRPCReceipts(raw), frozen)
+		if active {
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.EqualValues(t, 1, refused.Count)
+			want := graph.EdgeIdentityFor(use)
+			want.To = callee.ID
+			require.Equal(t, want, refused.First)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+			continue
+		}
+		require.NoError(t, err)
+		require.EqualValues(t, 1, stats.Adds)
+		report := RunFrameworkSynthesizersWithSelection(native, selection)
+		require.NoError(t, report.Err)
+		require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+	}
+}
+
+func TestRebuildMacroExpansionCountsSkippedUseClaim(t *testing.T) {
+	const file, lang = "use.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	caller.RepoPrefix = "other"
+	callee := rebuildEventNode(file, "work", lang, "")
+	macro := &graph.Node{ID: file + "::APPLY", Name: "APPLY", Kind: graph.KindMacro, FilePath: file, Language: lang,
+		Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
+	body := &graph.Edge{From: macro.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+	use := &graph.Edge{From: caller.ID, To: "unresolved::APPLY", Kind: graph.EdgeCalls, FilePath: file, Line: 2}
+	facts := rebuildEventFacts(file, lang, []*graph.Node{caller, callee, macro}, body, use)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	for _, duplicate := range []bool{false, true} {
+		ctx := t.Context()
+		b := openRebuildGRPCBuild(t, facts)
+		derived := *use
+		derived.To = macro.ID
+		require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &derived, OldTo: use.To}}))
+		if duplicate {
+			// The old key cannot bind in the caller's repo, but it still
+			// claims the raw receipt used by the directly bound key.
+			b.AddEdge(use)
+		}
+		before := rebuildEventSavedRows(t, b)
+		frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
+		require.NoError(t, err)
+		require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+		stats, err := RunRebuildMacroExpansion(ctx, b, rebuildGRPCReceipts(facts), frozen)
+		if duplicate {
+			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+			continue
+		}
+		require.NoError(t, err)
+		require.EqualValues(t, 1, stats.Adds)
+		rows := rebuildEventSavedRows(t, b)
+		require.Contains(t, rows.edges, macroExpansionEdge(caller.ID, callee.ID, file, 2, macro.Name))
+	}
+}
