@@ -222,11 +222,11 @@ func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*grap
 		if err := pendingVisit(ctx, p.b.pending, prefix, func(row) error {
 			count++
 			return nil
-		}); err != nil {
+		}); err != nil || count == 0 {
 			return err
 		}
 		var badRegistrar bool
-		if reporting && count > 0 && count <= maxCallbacks {
+		if reporting && count <= maxCallbacks {
 			var err error
 			badRegistrar, err = p.attributeCallbacks(ctx, field)
 			if err != nil {
@@ -241,7 +241,7 @@ func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*grap
 					return err
 				}
 			}
-			if count == 0 || count > maxCallbacks {
+			if count > maxCallbacks {
 				return nil
 			}
 			disp, err := p.node(ctx, access.From)

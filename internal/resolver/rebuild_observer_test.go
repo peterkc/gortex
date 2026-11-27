@@ -174,6 +174,25 @@ func TestRebuildObserverInlineScriptProof(t *testing.T) {
 	}
 }
 
+func TestRebuildObserverSkipsUnprovedDispatcherWithoutCallbacks(t *testing.T) {
+	channel := newRebuildObserverChannel("bus.go", "go")
+	proof, b, native := openRebuildObserverStores(t, nil, channel.facts)
+	selection := rebuildObserverSelection(t)
+	report := RunFrameworkSynthesizersWithSelection(native, selection)
+	require.NoError(t, report.Err)
+	require.Zero(t, report.Total)
+	// Both accesses remain live, but the registrar's incoming call has no
+	// same-site read or reference. Only the dispatcher receipt is missing.
+	proof[0].Edges = slices.DeleteFunc(proof[0].Edges, func(e *graph.Edge) bool {
+		return e.Kind == graph.EdgeAccessesField && e.From == channel.dispatch.ID
+	})
+	require.Len(t, proof[0].Edges, len(channel.facts.Edges)-1)
+	stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
+	require.NoError(t, err)
+	require.Zero(t, stats.Edges)
+	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+}
+
 func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
