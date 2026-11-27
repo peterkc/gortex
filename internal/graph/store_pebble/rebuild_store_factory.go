@@ -69,7 +69,7 @@ func (b *BuildStore) RebuildStoreFactory(ctx context.Context, receipts iter.Seq2
 			b: b, prefix: rebuildStoreFactoryPrefix, rowBytes: rebuildStoreFactoryRowBytes, label: "Store Factory", inputRow: "edge row",
 		},
 		rules: rebuildStoreDispatchRules{
-			kind: func(kind graph.NodeKind) bool { return kind == graph.KindFunction },
+			kind:   func(kind graph.NodeKind) bool { return kind == graph.KindFunction },
 			action: rules.Action, call: read, getter: rules.Getter, rebind: rules.Rebind,
 		},
 	}

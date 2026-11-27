@@ -40,7 +40,7 @@ func (b *BuildStore) RebuildVuexDispatch(ctx context.Context, receipts iter.Seq2
 			b: b, prefix: rebuildVuexDispatchPrefix, rowBytes: 16 << 20, label: "Vuex Dispatch", inputRow: "edge row",
 		},
 		rules: rebuildStoreDispatchRules{
-			kind: func(kind graph.NodeKind) bool { return kind == graph.KindFunction || kind == graph.KindMethod },
+			kind:   func(kind graph.NodeKind) bool { return kind == graph.KindFunction || kind == graph.KindMethod },
 			action: rules.Action, call: read, getter: rules.Getter, rebind: rules.Rebind,
 		},
 	}
