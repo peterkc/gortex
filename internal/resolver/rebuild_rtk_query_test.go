@@ -181,3 +181,92 @@ func TestRebuildRTKQuerySQLiteWindow(t *testing.T) {
 	require.Equal(t, uint64(graph.SQLiteReindexChunkSize+1), stats.Moves)
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
 }
+
+func TestRebuildRTKQueryCallerFileProof(t *testing.T) {
+	const file, other = "app.ts", "peer.ts"
+	caller := &graph.Node{ID: file + "::render", Name: "render", Kind: graph.KindFunction, FilePath: file, Language: "typescript"}
+	local := rtkQueryTestHook(file, "local")
+	remote := rtkQueryTestHook(other, "remote")
+	endpoint := rtkQueryTestEndpoint(file, "query", "query")
+	call := &graph.Edge{From: caller.ID, To: "unresolved::useQuery", Kind: graph.EdgeCalls, FilePath: file, Line: 5}
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(file, "typescript", []*graph.Node{caller, local, endpoint}, call),
+		rebuildEventFacts(other, "typescript", []*graph.Node{remote}),
+	}
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthRTKQuery})
+	require.NoError(t, err)
+	for _, mismatch := range []string{"none", "file", "workspace"} {
+		t.Run(mismatch, func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, facts...)
+			before := rebuildEventSavedRows(t, b)
+			raw := *caller
+			if mismatch == "file" {
+				raw.FilePath = other
+			}
+			if mismatch == "workspace" {
+				raw.WorkspaceID = "other"
+			}
+			proof := []store_pebble.ParseFacts{
+				rebuildEventFacts(file, "typescript", []*graph.Node{local, endpoint}, call),
+				rebuildEventFacts(other, "typescript", []*graph.Node{remote}),
+				rebuildEventFacts(raw.FilePath, "typescript", []*graph.Node{&raw}),
+			}
+			stats, err := RunRebuildRTKQuery(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
+			if mismatch == "none" {
+				require.NoError(t, err)
+				require.Equal(t, store_pebble.RebuildRTKQueryStats{Resolved: 1, Moves: 1}, stats)
+				native := openRebuildTemporalOracle(t, facts...)
+				require.Equal(t, 1, ResolveRTKQueryCalls(native))
+				require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+				return
+			}
+			requireRTKQueryRefusal(t, err, stats, call, local.ID)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildRTKQueryGetterEntrant(t *testing.T) {
+	const file, other, binding = "app.ts", "store.ts", "useStore"
+	caller := &graph.Node{ID: file + "::render", Name: "render", Kind: graph.KindFunction, FilePath: file, Language: "typescript"}
+	local, remote := rtkQueryTestHook(file, "local"), rtkQueryTestHook(other, "remote")
+	endpoint := rtkQueryTestEndpoint(other, "query", "query")
+	getter := &graph.Node{ID: other + "::getter", Name: binding, Kind: graph.KindVariable, FilePath: other, Language: "typescript"}
+	entrant := &graph.Node{ID: file + "::entrant", Name: binding, Kind: graph.KindVariable, FilePath: file, Language: "typescript",
+		Meta: map[string]any{"store_factory": binding}}
+	call := &graph.Edge{From: caller.ID, To: "unresolved::useQuery", Kind: graph.EdgeCalls, FilePath: file, Line: 5,
+		Meta: map[string]any{"store_binding": binding}}
+	left := rebuildEventFacts(file, "typescript", []*graph.Node{caller, local, entrant}, call)
+	right := rebuildEventFacts(other, "typescript", []*graph.Node{remote, endpoint, getter})
+	b := openRebuildGRPCBuild(t, left, right)
+	before := rebuildEventSavedRows(t, b)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthRTKQuery})
+	require.NoError(t, err)
+	raw := *entrant
+	raw.Meta = nil
+	proof := rebuildEventFacts(file, "typescript", []*graph.Node{caller, local, &raw}, call)
+	stats, err := RunRebuildRTKQuery(t.Context(), b, rebuildGRPCReceipts(proof, right), selection)
+	requireRTKQueryRefusal(t, err, stats, call, remote.ID)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
+	native := openRebuildTemporalOracle(t, proof, right)
+	require.Equal(t, 1, ResolveRTKQueryCalls(native))
+	rows := rebuildEventSQLiteRows(native)
+	require.Len(t, rows.edges, 1)
+	require.Equal(t, local.ID, rows.edges[0].To)
+}
+
+func rtkQueryTestHook(file, suffix string) *graph.Node {
+	return &graph.Node{ID: file + "::" + suffix, Name: "useQuery", Kind: graph.KindFunction, FilePath: file, Language: "typescript",
+		Meta: map[string]any{"rtk_generated_hook": true}}
+}
+
+func requireRTKQueryRefusal(t *testing.T, err error, stats store_pebble.RebuildRTKQueryStats, call *graph.Edge, target string) {
+	t.Helper()
+	require.ErrorIs(t, err, store_pebble.ErrRebuildRTKQuery)
+	var refused *store_pebble.RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	want := graph.EdgeIdentityFor(call)
+	want.To = target
+	require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
+	require.Zero(t, stats)
+}

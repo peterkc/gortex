@@ -162,11 +162,12 @@ func (p *rebuildRTKQueryPass) collect(ctx context.Context) (bool, error) {
 }
 
 type rebuildRTKQueryPick struct {
-	target  string
-	caller  *graph.Node
-	buckets []rebuildStoreCandidateWitness
-	getter  []byte // nonempty only when ambiguity consulted the binding getter
-	file    string // file for a tagged endpoint lookup
+	target     string
+	caller     *graph.Node
+	buckets    []rebuildStoreCandidateWitness
+	getter     []byte // nonempty only when ambiguity consulted the binding getter
+	callerFile bool   // caller file can decide an untagged election
+	file       string // file for a tagged endpoint lookup
 }
 
 func (p *rebuildRTKQueryPass) elect(e *graph.Edge, name string, tagged bool) (pick rebuildRTKQueryPick, err error) {
@@ -205,6 +206,7 @@ func (p *rebuildRTKQueryPass) elect(e *graph.Edge, name string, tagged bool) (pi
 		return p.key('f', name, file)
 	})
 	pick.target, pick.buckets = decision.target, decision.buckets
+	pick.callerFile = seen && id == "" && !decision.getterWinner
 	return pick, err
 }
 
@@ -213,23 +215,6 @@ func (p *rebuildRTKQueryPass) plan(ctx context.Context) error {
 	if err := p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
 		kind, err := rebuildAttributionEdgeKind(r.key)
 		if err != nil || kind != graph.EdgeCalls {
-			return err
-		}
-		e, err := p.decodeKeyedEdge(r.key, r.value)
-		if err != nil {
-			return err
-		}
-		name, tagged := p.rules.Call(e)
-		if !tagged {
-			if !graph.IsUnresolvedTarget(e.To) {
-				return nil
-			}
-			seen, err := p.present(p.key('i', name))
-			if err != nil || !seen {
-				return err
-			}
-		}
-		if err := p.input(r.key, r.value); err != nil {
 			return err
 		}
 		// A stationary live row can also claim a raw identity. It must not
@@ -251,6 +236,23 @@ func (p *rebuildRTKQueryPass) plan(ctx context.Context) error {
 			if err := p.put(key, value); err != nil {
 				return err
 			}
+		}
+		e, err := p.decodeKeyedEdge(r.key, r.value)
+		if err != nil {
+			return err
+		}
+		name, tagged := p.rules.Call(e)
+		if !tagged {
+			if !graph.IsUnresolvedTarget(e.To) {
+				return nil
+			}
+			seen, err := p.present(p.key('i', name))
+			if err != nil || !seen {
+				return err
+			}
+		}
+		if err := p.input(r.key, r.value); err != nil {
+			return err
 		}
 		if !tagged {
 			if binding, _ := e.Meta["store_binding"].(string); binding != "" {
@@ -364,7 +366,17 @@ func (p *rebuildRTKQueryPass) recordNode(raw *graph.Node, file, lang string) err
 	if raw.Kind == graph.KindFunction {
 		ep, generated = p.rules.Node(raw)
 	}
-	if caller == nil && endpoint == nil && hook == nil && getter == nil && ep == "" && !generated {
+	rawGetter := raw.Name != "" && rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name)
+	var getterWanted []byte
+	var getterState byte
+	if rawGetter {
+		getterWanted = p.key('v', raw.Name)
+		getterState, err = p.state(getterWanted)
+		if err != nil {
+			return err
+		}
+	}
+	if caller == nil && endpoint == nil && hook == nil && getter == nil && ep == "" && !generated && getterState == 0 {
 		return nil
 	}
 	live, err := p.node(raw.ID)
@@ -423,6 +435,18 @@ func (p *rebuildRTKQueryPass) recordNode(raw *graph.Node, file, lang string) err
 			}
 		}
 	}
+	// A receipt can enter the binding even when its live node was not a getter.
+	if admitted && getterState != 0 && (getter == nil || !bytes.Equal(getter[1:], getterWanted)) {
+		getterFile, seen, err := p.unique(p.key('t', raw.Name))
+		if err != nil {
+			return err
+		}
+		if !seen || getterFile != "" && getterFile != raw.FilePath {
+			if err := noteRebuildScratchState(p.put, getterWanted, getterState, rebuildCapabilityUnproved); err != nil {
+				return err
+			}
+		}
+	}
 	if getter == nil {
 		return nil
 	}
@@ -430,7 +454,7 @@ func (p *rebuildRTKQueryPass) recordNode(raw *graph.Node, file, lang string) err
 	if err != nil || state == 0 {
 		return err
 	}
-	role := rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name) && bytes.Equal(getter[1:], p.key('v', raw.Name))
+	role := rawGetter && bytes.Equal(getter[1:], getterWanted)
 	if role {
 		if err := p.noteGetterFileChange(getter[1:], state, raw, live, file, lang); err != nil {
 			return err
@@ -444,6 +468,10 @@ func (p *rebuildRTKQueryPass) recordCall(raw *graph.Edge, file, lang string) err
 	key := append(p.column('r'), pendingEdgeKey(raw)...)
 	claim, err := p.get(key)
 	if err != nil || len(claim) <= 1 {
+		return err
+	}
+	moving, err := p.present(append(p.column('m'), claim[1:]...))
+	if err != nil || !moving {
 		return err
 	}
 	live, err := p.edge(claim[1:])
@@ -558,7 +586,7 @@ func (p *rebuildRTKQueryPass) proved(old []byte, anchor bool) (bool, error) {
 		if tagged && state&rebuildStoreOtherFile != 0 || !tagged && state&rebuildStoreOtherWorkspace != 0 {
 			return false, nil
 		}
-		if !tagged && state&rebuildStoreOtherFile != 0 && len(pick.buckets) > 1 {
+		if !tagged && state&rebuildStoreOtherFile != 0 && pick.callerFile {
 			return false, nil
 		}
 	}
