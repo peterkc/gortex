@@ -402,9 +402,13 @@ func (p *rebuildExpress) recordEdge(e *graph.Edge, admitted bool, order uint64) 
 	if err != nil || !bytes.Equal(owned, raw) {
 		return err
 	}
-	live, err := p.edge(old)
-	if err != nil || live == nil {
+	val, err := p.get(old)
+	if err != nil || val == nil {
 		return errors.Join(err, invalid("express receipt live edge missing"))
+	}
+	live, err := p.decodeKeyedEdge(old, val)
+	if err != nil {
+		return err
 	}
 	a, matched := p.query(e)
 	b, ok := p.query(live)

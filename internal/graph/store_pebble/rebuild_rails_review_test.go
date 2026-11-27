@@ -50,7 +50,7 @@ func TestRebuildRailsNonFrozenRawClaim(t *testing.T) {
 		return b.addEdgeWithCustody(&settled, rebuildEdgeCustody{raw: pendingEdgeKey(call)})
 	}))
 	before := rebuildFrameworkCustodyRows(t, b)
-	require.NoError(t, b.FreezeRailsInputs(t.Context(), func(*graph.Edge) bool { return true }))
+	require.NoError(t, b.FreezeRailsInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
 	stats, err := b.RebuildRails(t.Context(), receipts, rebuildRailsReviewRules())
 	var refused *RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refused)
@@ -73,7 +73,7 @@ func TestRebuildRailsComparesEmptyLiveElection(t *testing.T) {
 	before := rebuildFrameworkCustodyRows(t, b)
 	facts.Nodes = []*graph.Node{caller, first}
 	receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
-	require.NoError(t, b.FreezeRailsInputs(t.Context(), func(*graph.Edge) bool { return true }))
+	require.NoError(t, b.FreezeRailsInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
 	stats, err := b.RebuildRails(t.Context(), receipts, rebuildRailsReviewRules())
 	var refused *RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refused)
@@ -100,11 +100,53 @@ func TestRebuildRailsReceiptCallerEntersSource(t *testing.T) {
 			yield(producerProofFacts(&rawCaller), nil)
 		}
 	}
-	require.NoError(t, b.FreezeRailsInputs(t.Context(), func(*graph.Edge) bool { return true }))
+	require.NoError(t, b.FreezeRailsInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
 	stats, err := b.RebuildRails(t.Context(), receipts, rebuildRailsReviewRules())
 	var refused *RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refused)
 	require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refused)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func TestRebuildRailsFirstMemberIgnoresLaterUncertainOwner(t *testing.T) {
+	const file = "routes.rb"
+	caller := &graph.Node{ID: "caller", Kind: graph.KindFunction, FilePath: file, Language: "ruby"}
+	class := &graph.Node{ID: "service", Name: "MailService", Kind: graph.KindType, FilePath: file, Language: "ruby"}
+	certain := &graph.Node{ID: "m", Name: "send", Kind: graph.KindMethod, FilePath: file, Language: "ruby"}
+	call := &graph.Edge{From: caller.ID, To: "unresolved::send", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
+		Meta: map[string]any{"recv_const": class.Name}}
+	member := func(id, owner string, line int) *graph.Edge {
+		return &graph.Edge{From: id, To: owner, Kind: graph.EdgeMemberOf, FilePath: file, Line: line}
+	}
+	for _, id := range []string{"a", "z"} {
+		rival := *certain
+		rival.ID = id
+		winnerOwn := member(certain.ID, class.ID, 2)
+		rivalOwn := member(rival.ID, class.ID, 3)
+		unknown := member(rival.ID, "other-owner", 4)
+		facts := ParseFacts{EffectiveLanguage: "ruby", File: graph.FileMetaRow{FilePath: file},
+			Nodes: []*graph.Node{caller, class, certain, &rival}, Edges: []*graph.Edge{call, winnerOwn, rivalOwn, unknown}}
+		b, _ := seedSyntheticCustody(t, facts)
+		before := rebuildFrameworkCustodyRows(t, b)
+		facts.Edges = []*graph.Edge{call, winnerOwn, rivalOwn}
+		receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
+		require.NoError(t, b.FreezeRailsInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
+		stats, err := b.RebuildRails(t.Context(), receipts, rebuildRailsReviewRules())
+		if id < certain.ID {
+			var refused *RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refused)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			continue
+		}
+		require.NoError(t, err)
+		require.Equal(t, RebuildRailsStats{Stubs: 1, Moves: 1}, stats)
+		want := *call
+		want.To = certain.ID
+		got, err := b.pendingEdge(pendingEdgeKey(&want))
+		require.NoError(t, err)
+		require.NotNil(t, got)
+	}
 }

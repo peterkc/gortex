@@ -41,39 +41,8 @@ func rebuildRailsScratch(b *BuildStore) rebuildCallMoves {
 }
 
 // FreezeRailsInputs retains pre-loop Call identities, not their payloads.
-func (b *BuildStore) FreezeRailsInputs(ctx context.Context, match func(*graph.Edge) bool) (err error) {
-	defer func() {
-		if err != nil {
-			err = fmt.Errorf("%w: %w", ErrRebuildRails, err)
-		}
-	}()
-	p := rebuildRailsScratch(b)
-	busy, err := rebuildGuardHasPrefix(ctx, b.pending, p.prefix)
-	if err != nil {
-		return err
-	}
-	if busy || match == nil {
-		return invalid("rails census inputs")
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, b.pending.DeleteRange(p.prefix, prefixEnd(p.prefix), pebble.NoSync))
-		}
-	}()
-	if err := b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
-		kind, err := rebuildAttributionEdgeKind(r.key)
-		if err != nil || kind != graph.EdgeCalls {
-			return err
-		}
-		e, err := p.decodeKeyedEdge(r.key, r.value)
-		if err != nil || !match(e) {
-			return err
-		}
-		return p.put(append(p.column('i'), r.key...), nil)
-	}); err != nil {
-		return err
-	}
-	return p.put(p.column('I'), nil)
+func (b *BuildStore) FreezeRailsInputs(ctx context.Context, match func(graph.FrameworkCensusEdge) bool) error {
+	return b.freezeConventionInputs(ctx, rebuildRailsScratch(b), ErrRebuildRails, match)
 }
 
 // RebuildRails rereads the surviving Calls, MemberOf and ModelsTable at its
@@ -156,7 +125,7 @@ func (p *rebuildRails) capture(ctx context.Context) error {
 	prefix := p.column('i')
 	return p.visit(ctx, prefix, func(r row) error {
 		old := r.key[len(prefix):]
-		e, err := p.edge(old)
+		e, val, err := p.callRow(old)
 		if err != nil || e == nil {
 			return err
 		}
@@ -169,6 +138,9 @@ func (p *rebuildRails) capture(ctx context.Context) error {
 			return err
 		}
 		if caller != nil && p.rails.Source(caller.FilePath) {
+			if err := p.input(old, val); err != nil {
+				return err
+			}
 			p.stats.Stubs++
 		}
 		raw, err := p.inputKey(old)
@@ -247,7 +219,7 @@ func (p *rebuildRails) captureModels(ctx context.Context) error {
 			}
 			switch custody.proof {
 			case rebuildProofEFCoreModel:
-				return p.put(p.key('m', id), nil)
+				return p.put(p.key('Z', id), nil)
 			case 0:
 				raw, err := p.inputKey(r.key)
 				if err != nil || raw == nil {
@@ -306,7 +278,7 @@ func (p *rebuildRails) recordRailsFacts(ctx context.Context, facts ParseFacts) e
 			return err
 		}
 		if id != nil {
-			if err := p.put(p.key('m', string(id)), nil); err != nil {
+			if err := p.put(p.key('Z', string(id)), nil); err != nil {
 				return err
 			}
 		}
@@ -314,41 +286,66 @@ func (p *rebuildRails) recordRailsFacts(ctx context.Context, facts ParseFacts) e
 	return nil
 }
 
-func (p *rebuildRails) elect(ctx context.Context, q rebuildExpressQuery, fromDir string, proved bool) (target string, uncertain bool, err error) {
-	nameCol, methodCol, modelCol := byte('a'), byte('b'), byte('M')
+type rebuildRailsDecision struct {
+	target, class string
+	local         bool
+}
+
+func (p *rebuildRails) elect(ctx context.Context, q rebuildExpressQuery, fromDir string, proved bool) (rebuildRailsDecision, bool, error) {
+	nameCol, methodCol, modelCol, possibleCol := byte('a'), byte('b'), byte('M'), byte('x')
 	if proved {
-		nameCol, methodCol, modelCol = 'A', 'B', 'm'
+		nameCol, methodCol, modelCol, possibleCol = 'A', 'B', 'Z', 'X'
 	}
-	id, _, _, err := p.convention(ctx, q, fromDir, nameCol)
+	id, _, local, err := p.convention(ctx, q, fromDir, nameCol)
 	if err != nil || id == "" {
-		return "", false, err
+		return rebuildRailsDecision{}, false, err
 	}
 	if p.rails.Model(q.class) {
 		model, err := p.present(p.key(modelCol, id))
 		if err != nil || !model {
-			return "", false, err
+			return rebuildRailsDecision{}, false, err
 		}
 	}
-	uncertain, err = p.present(p.key('x', id, q.method))
-	if err != nil || uncertain {
-		return "", uncertain, err
+	certain, err := p.firstMember(ctx, p.key(methodCol, id, q.method))
+	if err != nil {
+		return rebuildRailsDecision{}, false, err
 	}
-	target = id
-	prefix := p.key(methodCol, id, q.method)
-	// Native uses the first matching member in the combined-kind ID order.
-	found := false
+	possible, err := p.firstMember(ctx, p.key(possibleCol, id, q.method))
+	if err != nil {
+		return rebuildRailsDecision{}, false, err
+	}
+	if possible != "" && (certain == "" || possible < certain) {
+		return rebuildRailsDecision{}, true, nil
+	}
+	if certain == "" {
+		certain = id
+	}
+	return rebuildRailsDecision{target: certain, class: id, local: local}, false, nil
+}
+
+// Native takes the first matching member in the combined-kind ID order.
+func (p *rebuildRails) firstMember(ctx context.Context, prefix []byte) (first string, err error) {
 	err = p.visit(ctx, prefix, func(r row) error {
-		if found {
+		if first != "" {
 			return nil
 		}
-		method, rest, err := readKeyString(r.key[len(prefix):])
-		if err != nil || method == "" || len(rest) != 0 {
+		id, rest, err := readKeyString(r.key[len(prefix):])
+		if err != nil || id == "" || len(rest) != 0 {
 			return invalid("rails method key")
 		}
-		target, found = method, true
+		first = id
 		return nil
 	})
-	return target, false, err
+	return first, err
+}
+
+func (p *rebuildRails) callRow(key []byte) (*graph.Edge, []byte, error) {
+	val, err := p.get(key)
+	if err != nil || val == nil {
+		return nil, nil, err
+	}
+	e, err := p.decodeKeyedEdge(key, val)
+	return e, val, err
 }
 
 func (p *rebuildRails) plan(ctx context.Context) error {
@@ -356,7 +353,7 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 	prefix := p.column('h')
 	if err := p.visit(ctx, prefix, func(r row) error {
 		old := r.key[len(prefix):]
-		e, err := p.edge(old)
+		e, val, err := p.callRow(old)
 		if err != nil || e == nil {
 			return errors.Join(err, invalid("rails owned Call missing"))
 		}
@@ -365,10 +362,10 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 			return err
 		}
 		q, _ := p.query(e)
-		var target string
+		var live rebuildRailsDecision
 		var uncertain bool
 		if caller != nil && p.rails.Source(caller.FilePath) {
-			target, uncertain, err = p.elect(ctx, q, p.rails.Directory(caller.FilePath), false)
+			live, uncertain, err = p.elect(ctx, q, p.rails.Directory(caller.FilePath), false)
 			if err != nil {
 				return err
 			}
@@ -381,15 +378,18 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 				return err
 			}
 			sourceSeen = true
-			var proved string
+			var proved rebuildRailsDecision
 			var rawUncertain bool
 			if p.rails.Source(file) {
+				if err := p.input(old, val); err != nil {
+					return err
+				}
 				proved, rawUncertain, err = p.elect(ctx, q, p.rails.Directory(file), true)
 				if err != nil {
 					return err
 				}
 			}
-			changed = changed || target != proved || rawUncertain
+			changed = changed || live != proved || rawUncertain
 			return nil
 		}); err != nil {
 			return err
@@ -398,12 +398,16 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil
 		}
-		if target == "" {
+		if live.target == "" {
 			return nil
 		}
-		conflict, err := p.present(p.key('D', target))
-		if err != nil {
-			return err
+		var conflict bool
+		for _, id := range [...]string{live.class, live.target} {
+			changed, err := p.present(p.key('D', id))
+			if err != nil {
+				return err
+			}
+			conflict = conflict || changed
 		}
 		var claim []byte
 		if len(r.value) != 0 {
@@ -417,7 +421,7 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil
 		}
-		move := p.rails.Rebind(e, target)
+		move := p.rails.Rebind(e, live.target)
 		p.stats.Moves++
 		return p.stage(old, move.Edge)
 	}); err != nil {

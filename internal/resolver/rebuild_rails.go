@@ -4,7 +4,6 @@ import (
 	"context"
 	"iter"
 
-	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
@@ -13,10 +12,7 @@ func FreezeRebuildRailsInputs(ctx context.Context, b *store_pebble.BuildStore, s
 	if !selection.allows(SynthRailsResolve) {
 		return nil
 	}
-	return b.FreezeRailsInputs(ctx, func(e *graph.Edge) bool {
-		recv, _ := e.Meta["recv_const"].(string)
-		return railsCandidateEdge(graph.FrameworkCensusEdge{EdgeIdentity: graph.EdgeIdentityFor(e), RecvConst: recv})
-	})
+	return b.FreezeRailsInputs(ctx, railsCandidateEdge)
 }
 
 // RunRebuildRails runs the native Rails turn after FastAPI.

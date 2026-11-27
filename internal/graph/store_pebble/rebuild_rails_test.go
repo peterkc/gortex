@@ -51,7 +51,7 @@ func TestRebuildRailsUsesEFCoreModelProof(t *testing.T) {
 			}))
 			before := rebuildFrameworkCustodyRows(t, b)
 			ctx := t.Context()
-			require.NoError(t, b.FreezeRailsInputs(ctx, func(*graph.Edge) bool { return true }))
+			require.NoError(t, b.FreezeRailsInputs(ctx, func(graph.FrameworkCensusEdge) bool { return true }))
 			stats, err := b.RebuildRails(ctx, receipts, rules)
 			if tc.proof == rebuildProofUntrackedMove {
 				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
