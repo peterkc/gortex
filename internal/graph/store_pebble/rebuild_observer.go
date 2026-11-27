@@ -193,10 +193,14 @@ func (p *rebuildObserverPass) fields(ctx context.Context, yield func(string) err
 
 func (p *rebuildObserverPass) prepare(ctx context.Context, field string) error {
 	return p.access(ctx, 'r', field, func(access *graph.Edge) error {
-		if err := p.wantWitness(access, access.From); err != nil {
-			return err
-		}
+		wanted := false
 		return p.callbackWitnesses(ctx, access.From, func(in, ref *graph.Edge) error {
+			if !wanted {
+				if err := p.wantWitness(access, access.From); err != nil {
+					return err
+				}
+				wanted = true
+			}
 			if err := p.wantEdge(in); err != nil {
 				return err
 			}
@@ -222,11 +226,11 @@ func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*grap
 		if err := pendingVisit(ctx, p.b.pending, prefix, func(row) error {
 			count++
 			return nil
-		}); err != nil || count == 0 {
+		}); err != nil || count == 0 || count > maxCallbacks {
 			return err
 		}
 		var badRegistrar bool
-		if reporting && count <= maxCallbacks {
+		if reporting {
 			var err error
 			badRegistrar, err = p.attributeCallbacks(ctx, field)
 			if err != nil {
@@ -235,14 +239,9 @@ func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*grap
 		}
 		return p.access(ctx, 'd', field, func(access *graph.Edge) error {
 			if !reporting {
-				// The dispatcher still admits the field when the cap
-				// prevents it from writing calls.
 				if err := p.wantWitness(access, access.From); err != nil {
 					return err
 				}
-			}
-			if count > maxCallbacks {
-				return nil
 			}
 			disp, err := p.node(ctx, access.From)
 			if err != nil {
@@ -520,12 +519,16 @@ func (p *rebuildObserverPass) witnessUnproved(e *graph.Edge, id string) (bool, e
 func (p *rebuildObserverPass) attributeCallbacks(ctx context.Context, field string) (bool, error) {
 	badRegistrar := false
 	err := p.access(ctx, 'r', field, func(access *graph.Edge) error {
-		bad, err := p.witnessUnproved(access, access.From)
-		if err != nil {
-			return err
-		}
-		badRegistrar = badRegistrar || bad
+		checked := false
 		return p.callbackWitnesses(ctx, access.From, func(in, ref *graph.Edge) error {
+			if !checked {
+				bad, err := p.witnessUnproved(access, access.From)
+				if err != nil {
+					return err
+				}
+				badRegistrar = badRegistrar || bad
+				checked = true
+			}
 			bad, err := p.edgeUnproved(in)
 			if err != nil {
 				return err

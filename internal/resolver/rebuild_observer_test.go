@@ -174,23 +174,68 @@ func TestRebuildObserverInlineScriptProof(t *testing.T) {
 	}
 }
 
-func TestRebuildObserverSkipsUnprovedDispatcherWithoutCallbacks(t *testing.T) {
-	channel := newRebuildObserverChannel("bus.go", "go")
-	proof, b, native := openRebuildObserverStores(t, nil, channel.facts)
-	selection := rebuildObserverSelection(t)
-	report := RunFrameworkSynthesizersWithSelection(native, selection)
-	require.NoError(t, report.Err)
-	require.Zero(t, report.Total)
-	// Both accesses remain live, but the registrar's incoming call has no
-	// same-site read or reference. Only the dispatcher receipt is missing.
-	proof[0].Edges = slices.DeleteFunc(proof[0].Edges, func(e *graph.Edge) bool {
-		return e.Kind == graph.EdgeAccessesField && e.From == channel.dispatch.ID
-	})
-	require.Len(t, proof[0].Edges, len(channel.facts.Edges)-1)
-	stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
-	require.NoError(t, err)
-	require.Zero(t, stats.Edges)
-	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+func TestRebuildObserverProofScopeWithAndWithoutCallbacks(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		wantCalls int
+	}{
+		{name: "no callbacks"},
+		{name: "eligible callback", wantCalls: 1},
+	} {
+		for _, fault := range []string{
+			"missing registrar access", "missing registrar declaration", "changed registrar declaration", "missing dispatcher access",
+		} {
+			t.Run(tc.name+"/"+fault, func(t *testing.T) {
+				const file, lang = "bus.go", "go"
+				channel := newRebuildObserverChannel(file, lang)
+				if tc.wantCalls != 0 {
+					cb := rebuildEventNode(file, "callback", lang, "")
+					channel.facts.Nodes = append(channel.facts.Nodes, cb)
+					channel.facts.Edges = append(channel.facts.Edges, rebuildObserverEdge(channel.caller, cb, graph.EdgeReads, 20))
+				}
+				proof, b, native := openRebuildObserverStores(t, nil, channel.facts)
+				before := rebuildEventSavedRows(t, b)
+				selection := rebuildObserverSelection(t)
+				report := RunFrameworkSynthesizersWithSelection(native, selection)
+				require.NoError(t, report.Err)
+				want := rebuildObserverNativeDispatchCalls(native, channel.dispatch.ID)
+				require.Len(t, want, tc.wantCalls)
+				// Change only the receipt. The live access and declaration
+				// still participate in the native join.
+				switch fault {
+				case "missing registrar access", "missing dispatcher access":
+					from := channel.registrar.ID
+					if fault == "missing dispatcher access" {
+						from = channel.dispatch.ID
+					}
+					proof[0].Edges = slices.DeleteFunc(proof[0].Edges, func(e *graph.Edge) bool {
+						return e.Kind == graph.EdgeAccessesField && e.From == from
+					})
+					require.Len(t, proof[0].Edges, len(channel.facts.Edges)-1)
+				case "missing registrar declaration", "changed registrar declaration":
+					i := slices.IndexFunc(proof[0].Nodes, func(n *graph.Node) bool { return n.ID == channel.registrar.ID })
+					require.GreaterOrEqual(t, i, 0)
+					if fault == "missing registrar declaration" {
+						proof[0].Nodes = slices.Delete(proof[0].Nodes, i, i+1)
+					} else {
+						proof[0].Nodes[i].StartLine++
+					}
+				}
+				stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
+				require.Zero(t, stats)
+				if tc.wantCalls == 0 {
+					require.NoError(t, err)
+					require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+					return
+				}
+				require.ErrorIs(t, err, store_pebble.ErrRebuildObserver)
+				var refusal *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(want[0])}, refusal)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+			})
+		}
+	}
 }
 
 func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
@@ -241,31 +286,19 @@ func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
 			require.NoError(t, report.Err)
 			require.Len(t, rebuildObserverNativeDispatchCalls(native, channel.dispatch.ID), tc.want)
 
+			if tc.want == 0 {
+				// The dispatcher access is still live. The cap makes its
+				// proof irrelevant, even before self and workspace filters.
+				receipts[0].Edges = slices.DeleteFunc(receipts[0].Edges, func(e *graph.Edge) bool {
+					return e.Kind == graph.EdgeAccessesField && e.From == channel.dispatch.ID
+				})
+				require.Len(t, receipts[0].Edges, len(inputs[0].Edges)-1)
+			}
 			stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1<<20)
 			require.NoError(t, err)
 			require.Equal(t, uint64(tc.want), stats.Edges)
 			require.Zero(t, stats.SpillBytes)
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
-			if tc.want == 0 {
-				before := rebuildEventSavedRows(t, b)
-				// Only the dispatcher access loses its proof. It is still
-				// live and admits the field, even though the cap blocks it.
-				var dispatcherAccess *graph.Edge
-				receipts[0].Edges = slices.DeleteFunc(receipts[0].Edges, func(e *graph.Edge) bool {
-					if e.Kind == graph.EdgeAccessesField && e.From == channel.dispatch.ID {
-						dispatcherAccess = e
-						return true
-					}
-					return false
-				})
-				require.NotNil(t, dispatcherAccess)
-				stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1<<20)
-				var refusal *store_pebble.RebuildUnknownProvenanceError
-				require.ErrorAs(t, err, &refusal)
-				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(dispatcherAccess)}, refusal)
-				require.Zero(t, stats)
-				require.Equal(t, before, rebuildEventSavedRows(t, b))
-			}
 		})
 	}
 }
