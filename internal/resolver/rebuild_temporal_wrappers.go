@@ -51,18 +51,12 @@ func (p *rebuildTemporal) indexWrappers(ordinal *uint64) error {
 		if !ok {
 			return nil
 		}
-		if err := p.s.CheckNodeInput(p.ctx, pn.ID); err != nil {
-			return err
-		}
 		wn, err := p.s.Node(p.ctx, e.From)
 		if err != nil {
 			return err
 		}
 		name := ""
 		if wn != nil {
-			if err := p.s.CheckNodeInput(p.ctx, wn.ID); err != nil {
-				return err
-			}
 			name = wn.Name
 		}
 		if err := p.s.Put(p.ctx, 'W', kind, e.From); err != nil {
@@ -72,6 +66,9 @@ func (p *rebuildTemporal) indexWrappers(ordinal *uint64) error {
 			return err
 		}
 		if err := p.s.Put(p.ctx, 'W', name, e.From, "name"); err != nil {
+			return err
+		}
+		if err := p.s.Put(p.ctx, 'W', param, e.From, "param"); err != nil {
 			return err
 		}
 		*ordinal = *ordinal + 1
@@ -117,8 +114,8 @@ func (p *rebuildTemporal) wrapperSweep(round string) (bool, error) {
 	// Q preserves caller order, then posting order, without collapsing any
 	// proposals. Only after the scan ends does live dedup see each addition.
 	added := false
-	err = p.s.Visit(p.ctx, 'Q', []string{round}, func(fields []string, _ string) error {
-		accepted, err := p.acceptWrapperCall(fields)
+	err = p.s.Visit(p.ctx, 'Q', []string{round}, func(fields []string, wrapperID string) error {
+		accepted, err := p.acceptWrapperCall(fields, wrapperID)
 		added = added || accepted
 		return err
 	})
@@ -155,11 +152,11 @@ func (p *rebuildTemporal) stageWrapperCall(call *graph.Edge, id, kind, wrapperNa
 		}
 	}
 	*pending = *pending + 1
-	return p.s.Put(p.ctx, 'Q', "", round, temporalOrdinal(*pending),
+	return p.s.Put(p.ctx, 'Q', id, round, temporalOrdinal(*pending),
 		call.From, call.To, call.FilePath, strconv.Itoa(call.Line), kind, name, wrapperName, fwd)
 }
 
-func (p *rebuildTemporal) acceptWrapperCall(fields []string) (bool, error) {
+func (p *rebuildTemporal) acceptWrapperCall(fields []string, wrapperID string) (bool, error) {
 	line, err := strconv.Atoi(fields[5])
 	if err != nil {
 		return false, fmt.Errorf("temporal wrapper call line: %w", err)
@@ -186,7 +183,7 @@ func (p *rebuildTemporal) acceptWrapperCall(fields []string) (bool, error) {
 		From: key.From, To: temporalStubPlaceholder(kind, name),
 		Kind: graph.EdgeCalls, FilePath: key.FilePath, Line: key.Line, Meta: meta,
 	}
-	return p.queueWrapper(trigger, stub)
+	return p.queueWrapper(trigger, stub, wrapperID)
 }
 
 func temporalWrapperKey(e *graph.Edge) []string {
@@ -252,7 +249,7 @@ func (p *rebuildTemporal) visitNewWrappers(yield func(*graph.Edge) error) error 
 	})
 }
 
-func (p *rebuildTemporal) queueWrapper(trigger, stub *graph.Edge) (bool, error) {
+func (p *rebuildTemporal) queueWrapper(trigger, stub *graph.Edge, wrapperID string) (bool, error) {
 	kind, _ := stub.Meta["temporal_kind"].(string)
 	name, _ := stub.Meta["temporal_name"].(string)
 	var duplicate bool
@@ -284,6 +281,17 @@ func (p *rebuildTemporal) queueWrapper(trigger, stub *graph.Edge) (bool, error) 
 		check(e)
 		return nil
 	}); err != nil || duplicate {
+		return false, err
+	}
+	// The seed's parameter and declaration matter only for a new stub.
+	param, _, err := p.s.Get(p.ctx, 'W', wrapperID, "param")
+	if err != nil {
+		return false, err
+	}
+	if err := p.s.CheckNodeInput(p.ctx, wrapperID+"#param:"+param); err != nil {
+		return false, err
+	}
+	if err := p.s.CheckNodeInput(p.ctx, wrapperID); err != nil {
 		return false, err
 	}
 	proof := p.s.WrapperProof(stub)

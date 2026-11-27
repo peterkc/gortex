@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -110,6 +111,82 @@ func TestRebuildTemporalSQLiteOracleWrapperLookup(t *testing.T) {
 	require.ElementsMatch(t, beforeSelf, native.GetOutEdges(byName))
 	stats := assertRebuildTemporalOracle(t, native, selection, 4<<10, facts)
 	require.Zero(t, stats.SpillBytes, "the final add tail does not count as spill")
+}
+
+func TestRebuildTemporalWrapperNodeCapNeedsNewStub(t *testing.T) {
+	const file = "wf/wrapper.go"
+	const wrapper, caller = file + "::Wrap", file + "::Caller"
+	const choice = "Choice"
+	seed := rebuildTemporalOracleStub(file, wrapper, "activityName")
+	seed.Meta["temporal_name_param"] = "activityName"
+	declaration := &graph.Node{ID: wrapper, Name: "Wrap", Kind: graph.KindFunction, Language: "go", FilePath: file}
+	param := rebuildTemporalOracleWrapperParam(file, wrapper, 0)
+	nodes := []*graph.Node{
+		declaration, param,
+		{ID: caller, Name: "Caller", Kind: graph.KindFunction, Language: "go", FilePath: file},
+	}
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthTemporalStub})
+	require.NoError(t, err)
+	padding := strings.Repeat("x", 16<<20)
+	for _, tc := range []struct {
+		name      string
+		oversized *graph.Node
+		mode      string
+		wantStub  bool
+	}{
+		{name: "uncalled declaration", oversized: declaration, mode: "uncalled"},
+		{name: "uncalled parameter", oversized: param, mode: "uncalled"},
+		{name: "existing stub", oversized: declaration, mode: "duplicate"},
+		{name: "exact call needs parameter", oversized: param, mode: "exact", wantStub: true},
+		{name: "fallback call needs declaration", oversized: declaration, mode: "fallback", wantStub: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := &graph.Edge{From: caller, To: wrapper, Kind: graph.EdgeCalls, FilePath: file, Line: 20,
+				Meta: map[string]any{"arg_names": []string{choice}}}
+			edges := []*graph.Edge{seed}
+			if tc.mode != "uncalled" {
+				edges = append(edges, call)
+			}
+			if tc.mode == "fallback" {
+				call.To = "unresolved::Wrap"
+				call.Meta["callee"] = "Wrap"
+			}
+			if tc.mode == "duplicate" {
+				edges = append(edges, rebuildTemporalOracleStub(file, caller, choice))
+			}
+			facts := rebuildEventFacts(file, "go", nodes, edges...)
+			b, native := openRebuildEventStores(t, facts)
+			large := *tc.oversized
+			large.Meta = map[string]any{"padding": padding}
+			if tc.oversized == param {
+				large.Meta["position"] = 0
+			}
+			b.AddNode(&large)
+			ctx := t.Context()
+			selection, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.True(t, selection.allows(SynthTemporalStub))
+			before := rebuildEventSavedRows(t, b)
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selected).Err)
+			want := rebuildEventSQLiteRows(native).edges
+			require.Equal(t, tc.wantStub, native.EdgeExists(caller, temporalStubPlaceholder("activity", choice), graph.EdgeCalls, file, call.Line))
+			stats, err := RunRebuildTemporal(ctx, b, rebuildGRPCReceipts(facts), selection, 1)
+			got := rebuildEventSavedRows(t, b)
+			if tc.wantStub {
+				require.Len(t, want, len(before.edges)+1)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildTemporal)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "temporal node row")
+				require.Zero(t, stats)
+				require.Equal(t, before, got)
+				return
+			}
+			require.NoError(t, err)
+			require.Zero(t, stats.Wrappers)
+			require.Equal(t, want, got.edges)
+			require.Equal(t, before.nodes, got.nodes)
+		})
+	}
 }
 
 func TestRebuildTemporalSQLiteOracleWrapperReceiptOrder(t *testing.T) {
