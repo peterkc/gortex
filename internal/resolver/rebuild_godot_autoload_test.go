@@ -1,6 +1,10 @@
 package resolver
 
 import (
+	"context"
+	"iter"
+	"maps"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -148,6 +152,76 @@ func TestRebuildGodotAutoloadExactProof(t *testing.T) {
 			require.EqualValues(t, 1, refused.Count)
 			require.Equal(t, graph.EdgeIdentityFor(call), refused.First)
 			require.Equal(t, before, rebuildEventSavedRows(t, build))
+		})
+	}
+}
+
+func TestRebuildGodotScriptNodeRowCaps(t *testing.T) {
+	autoloadFacts, autoloadCall, target := rebuildGodotAutoloadFacts()
+	const source = "game/start.gd"
+	alias := &graph.Node{ID: source + "::Clock", Name: "Clock", Kind: graph.KindVariable, FilePath: source, Language: "gdscript",
+		Meta: map[string]any{"gd_preload": "res://src/Clock.gd"}}
+	caller := &graph.Node{ID: source + "::probe", Kind: graph.KindFunction, FilePath: source, Language: "gdscript"}
+	preloadCall := *autoloadCall
+	preloadCall.From, preloadCall.FilePath = caller.ID, source
+	preloadFacts := []store_pebble.ParseFacts{
+		rebuildEventFacts(source, "gdscript", []*graph.Node{alias, caller}, &preloadCall),
+		autoloadFacts[1],
+	}
+	padding := strings.Repeat("x", 16<<20)
+	for _, stage := range []struct {
+		name  string
+		err   error
+		facts []store_pebble.ParseFacts
+		run   func(context.Context, *store_pebble.BuildStore, iter.Seq2[store_pebble.ParseFacts, error], FrameworkSynthesizerSelection) (uint64, error)
+	}{
+		{SynthGodotAutoload, store_pebble.ErrRebuildGodotAutoload, autoloadFacts, RunRebuildGodotAutoload},
+		{SynthGodotPreloadAlias, store_pebble.ErrRebuildGodotPreloadAlias, preloadFacts, RunRebuildGodotPreloadAlias},
+	} {
+		t.Run(stage.name, func(t *testing.T) {
+			selected, err := NewFrameworkSynthesizerSelection([]string{stage.name})
+			require.NoError(t, err)
+			unrelated := *stage.facts[0].Nodes[0]
+			unrelated.ID += "-unused"
+			unrelated.Meta = nil // Same candidate kind, but no valid declaration.
+			for _, fixture := range []struct {
+				name  string
+				node  *graph.Node
+				fails bool
+			}{
+				{"unrelated", &unrelated, false},
+				{"declaration", stage.facts[0].Nodes[0], true},
+				{"script file", stage.facts[1].Nodes[0], true},
+				{"member", target, true},
+			} {
+				t.Run(fixture.name, func(t *testing.T) {
+					build := openRebuildGRPCBuild(t, stage.facts...)
+					frozen, err := FreezeRebuildFrameworkSelection(t.Context(), build.RebuildView(), selected)
+					require.NoError(t, err)
+					require.True(t, frozen.allows(stage.name))
+					large := *fixture.node
+					large.Meta = maps.Clone(large.Meta)
+					if large.Meta == nil {
+						large.Meta = make(map[string]any)
+					}
+					large.Meta["unrelated"] = padding
+					build.AddNode(&large)
+					before := rebuildEventSavedRows(t, build).edges
+					moves, err := stage.run(t.Context(), build, rebuildGRPCReceipts(stage.facts...), frozen)
+					after := rebuildEventSavedRows(t, build).edges
+					if fixture.fails {
+						require.ErrorIs(t, err, stage.err)
+						require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+						require.Zero(t, moves)
+						require.Equal(t, before, after)
+						return
+					}
+					require.NoError(t, err)
+					require.EqualValues(t, 1, moves)
+					require.Len(t, after, 1)
+					require.Equal(t, target.ID, after[0].To)
+				})
+			}
 		})
 	}
 }
