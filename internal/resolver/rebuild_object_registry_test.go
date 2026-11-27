@@ -270,3 +270,74 @@ func TestRebuildObjectRegistrySQLiteMoveWindow(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildObjectRegistryUnpositionedCandidateReceipt(t *testing.T) {
+	const file, otherFile = "registry.js", "other.js"
+	local, member := objectRegistryTestMethod(file, file+"::Cmd.run", "run", "Cmd")
+	rival, other := objectRegistryTestMethod(otherFile, otherFile+"::Cmd.run", "run", "Cmd")
+	caller := &graph.Node{ID: file + "::dispatch", Name: "dispatch", Kind: graph.KindFunction, FilePath: file, Language: "javascript"}
+	call := objectRegistryTestCall(caller.ID, "unresolved::*.Cmd", file, "Cmd", "run", 3)
+	facts := rebuildEventFacts(file, "javascript", []*graph.Node{caller, local}, member, call)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
+	require.NoError(t, err)
+	for _, change := range []string{"file", "name", "workspace"} {
+		t.Run(change, func(t *testing.T) {
+			live := *rival
+			raw := live
+			switch change {
+			case "file":
+				raw.FilePath = file
+			case "name":
+				live.Name = "other"
+			case "workspace":
+				live.WorkspaceID = "foreign"
+			}
+			remote := rebuildEventFacts(live.FilePath, "javascript", []*graph.Node{&live})
+			otherMember := *other
+			otherMember.FilePath = live.FilePath
+			remote.Edges = []*graph.Edge{&otherMember}
+			private := openRebuildGRPCBuild(t, facts, remote)
+			before := rebuildEventSavedRows(t, private)
+			// The rival has a declaration receipt, but no membership position.
+			proof := rebuildEventFacts(raw.FilePath, "javascript", []*graph.Node{&raw})
+			stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(facts, proof), selection)
+			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
+func TestRebuildObjectRegistryStationaryMembershipOrder(t *testing.T) {
+	const file = "registry.js"
+	method, member := objectRegistryTestMethod(file, file+"::Cmd.run", "run", "Cmd")
+	caller := &graph.Node{ID: file + "::dispatch", Kind: graph.KindFunction, FilePath: file, Language: "javascript"}
+	call := objectRegistryTestCall(caller.ID, method.ID, file, "Cmd", "run", 3)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
+	require.NoError(t, err)
+	for _, class := range []string{"Cmd", "Other"} {
+		t.Run(class, func(t *testing.T) {
+			other := *member
+			other.To = "other.js::" + class
+			facts := rebuildEventFacts(file, "javascript", []*graph.Node{method, caller}, member, &other, call)
+			private := openRebuildGRPCBuild(t, facts)
+			before := rebuildEventSavedRows(t, private)
+			proof := facts
+			proof.Edges = []*graph.Edge{member, call}
+			stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(proof), selection)
+			if class == "Other" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				native := openRebuildTemporalOracle(t, facts)
+				require.Zero(t, ResolveObjectRegistryCalls(native))
+				want := *call
+				want.To, want.Origin = "unresolved::*.Cmd", graph.OriginASTInferred
+				require.Contains(t, rebuildEventSQLiteRows(native).edges, &want)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, store_pebble.RebuildObjectRegistryStats{Stubs: 1, Resolved: 1}, stats)
+			}
+			require.Equal(t, before, rebuildEventSavedRows(t, private))
+		})
+	}
+}

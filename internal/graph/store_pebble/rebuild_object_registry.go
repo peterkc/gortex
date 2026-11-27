@@ -277,19 +277,25 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 		// Without a receipt position, a different class could supersede
 		// this one. Extra buckets cannot certify a unique or empty pool.
 		certain := last != 0
+		hasClass := class != ""
+		anchorPossible := hasClass
 		if unpositioned {
 			if err := p.memberships(ctx, n.ID, func(other string, order uint64) error {
 				if order != 0 || other == class {
 					return nil
 				}
 				certain = false
-				if other == "" {
-					return nil
-				}
-				cohort := p.key('u', other, n.Name)
-				for _, bucket := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'i', n) {
-					if err := p.put(p.key('e', string(bucket)), nil); err != nil {
-						return err
+				anchorPossible = anchorPossible && other != ""
+				hasClass = hasClass || other != ""
+				for _, possible := range [...]string{class, other} {
+					if possible == "" {
+						continue
+					}
+					cohort := p.key('u', possible, n.Name)
+					for _, bucket := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'i', n) {
+						if err := p.put(p.key('e', string(bucket)), nil); err != nil {
+							return err
+						}
 					}
 				}
 				return nil
@@ -297,15 +303,23 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 				return err
 			}
 		}
-		if class == "" {
+		if !hasClass {
 			return nil
 		}
 		haveMethods = true
 		cohort := p.key('u', class, n.Name)
-		if certain {
-			if err := p.put(p.key('c', n.ID), append([]byte{rebuildCapabilityWanted}, cohort...)); err != nil {
-				return err
-			}
+		state := byte(rebuildCapabilityWanted)
+		if !certain {
+			state |= rebuildCapabilityUnproved
+		}
+		if !anchorPossible {
+			state |= rebuildStoreAnchorIneligible
+		}
+		if err := p.put(p.key('c', n.ID), append([]byte{state}, cohort...)); err != nil {
+			return err
+		}
+		if class == "" {
+			return nil
 		}
 		for _, key := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'i', n) {
 			if err := p.addUnique(key, n.ID); err != nil {
@@ -371,7 +385,8 @@ func (p *rebuildObjectRegistryPass) elect(e *graph.Edge) (pick rebuildObjectRegi
 
 func (p *rebuildObjectRegistryPass) plan(ctx context.Context) error {
 	prefix := p.column('l')
-	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+	var refused rebuildScratchRefusals
+	err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 		old := r.key[len(prefix):]
 		e, err := p.edge(old)
 		if err != nil {
@@ -389,6 +404,17 @@ func (p *rebuildObjectRegistryPass) plan(ctx context.Context) error {
 		}
 		class, _ := p.rules.Call(e)
 		if !p.rules.Rebind(e, class, pick.target, pick.target != "") {
+			// A no-op still needs a stable class membership election.
+			for _, witness := range pick.buckets {
+				uncertain, err := p.present(p.key('e', string(witness.bucket)))
+				if err != nil {
+					return err
+				}
+				if uncertain {
+					refused.add(graph.EdgeIdentityFor(e), old)
+					break
+				}
+			}
 			return nil
 		}
 		if pick.caller != nil {
@@ -422,9 +448,13 @@ func (p *rebuildObjectRegistryPass) plan(ctx context.Context) error {
 		p.stats.Moves++
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	return refused.err()
 }
 
-func (p *rebuildObjectRegistryPass) recordNode(raw *graph.Node, file, lang string) error {
+func (p *rebuildObjectRegistryPass) recordNode(ctx context.Context, raw *graph.Node, file, lang string) error {
 	callerKey, candidateKey, getterKey := p.key('n', raw.ID), p.key('c', raw.ID), p.key('g', raw.ID)
 	caller, err := p.state(callerKey)
 	if err != nil {
@@ -454,6 +484,18 @@ func (p *rebuildObjectRegistryPass) recordNode(raw *graph.Node, file, lang strin
 		if eligible {
 			if err := p.noteCandidateChange(candidate[1:], raw, live); err != nil {
 				return err
+			}
+			if candidate[0]&rebuildCapabilityUnproved != 0 &&
+				(raw.Name != live.Name || raw.FilePath != live.FilePath || raw.WorkspaceID != live.WorkspaceID) {
+				// Every unpositioned class may receive the changed declaration.
+				if err := p.memberships(ctx, raw.ID, func(class string, order uint64) error {
+					if order != 0 || class == "" {
+						return nil
+					}
+					return p.noteCandidateChange(p.key('u', class, live.Name), raw, live)
+				}); err != nil {
+					return err
+				}
 			}
 		}
 		ok := eligible && raw.Name == live.Name
@@ -520,7 +562,7 @@ func (p *rebuildObjectRegistryPass) prove(ctx context.Context, receipts iter.Seq
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if err := p.recordNode(n, file, lang); err != nil {
+			if err := p.recordNode(ctx, n, file, lang); err != nil {
 				return err
 			}
 		}
