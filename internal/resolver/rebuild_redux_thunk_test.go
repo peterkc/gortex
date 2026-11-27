@@ -75,12 +75,15 @@ const begin = createAsyncThunk('begin', async () => {});
 		graph.EdgeIdentityFor(wantMarkers[1]): "store.js::userSlice.set@7",
 		graph.EdgeIdentityFor(wantMarkers[2]): "t.ts::begin",
 	}
+	for i, f := range facts {
+		facts[i] = roundTripRebuildRNBridgeFacts(t, f)
+	}
 	requireRebuildReduxThunkOracle(t, facts, moves, 3, 3)
 }
 
 func TestRebuildReduxThunkSQLiteElection(t *testing.T) {
-	// Surgical facts: a tagged Call can carry store_binding even though the
-	// extractor's Redux thunk markers above do not emit it.
+	// Use already qualified facts so the workspace check sees the foreign
+	// thunk. Extracted Redux thunk Calls do not carry store_binding.
 	const callerFile, getterFile, lang = "caller.ts", "getter.ts", "typescript"
 	caller := rebuildReduxThunkNode(callerFile, "outer")
 	localThunk := rebuildReduxThunkNode(callerFile, "begin")
@@ -294,10 +297,6 @@ func requireRebuildReduxThunkOracle(t *testing.T, facts []store_pebble.ParseFact
 	moves map[graph.EdgeIdentity]string, stubs, resolved uint64,
 ) {
 	t.Helper()
-	facts = slices.Clone(facts)
-	for i, f := range facts {
-		facts[i] = roundTripRebuildRNBridgeFacts(t, f)
-	}
 	b, native := openRebuildEventStores(t, facts...)
 	before := rebuildEventSQLiteRows(native)
 	require.Equal(t, before, rebuildEventSavedRows(t, b))
