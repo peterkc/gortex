@@ -247,12 +247,7 @@ func synthesizeExternalCalls(g graph.Store, collect externalCallCandidateSeq) in
 			if caller == nil {
 				caller = knownNodes[e.From]
 			}
-			callerLang := ""
-			if caller != nil && caller.Language != "" {
-				callerLang = caller.Language
-			} else {
-				callerLang = langFamilyFromExt(e.FilePath)
-			}
+			callerLang := externalCallCallerLanguage(caller, e.FilePath)
 			if isLanguageStdlib(callerLang, c.importPath) {
 				// Language built-in / standard library — noise. Leave the
 				// edge on its bookkeeping-string terminal.
@@ -273,29 +268,7 @@ func synthesizeExternalCalls(g graph.Store, collect externalCallCandidateSeq) in
 				}
 			}
 
-			oldTo := e.To
-			e.To = c.nodeID
-			// The edge now lands on a real (synthetic) node. It is an
-			// inferred, name-only-grade binding — the import path tells us
-			// which package, never the specific callee symbol, and the
-			// synthetic node is per-package — so it rides at the weakest
-			// tier.
-			e.Origin = graph.OriginTextMatched
-			e.Confidence = 0.5
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, e.Confidence)
-			if e.Meta == nil {
-				e.Meta = map[string]any{}
-			}
-			e.Meta["external_call"] = true
-			// Keep Go's symbol-bearing identity for a module tracked later.
-			// Older package-only synthetic targets still need re-extraction.
-			if callerLang == "go" && strings.HasPrefix(oldTo, "dep::") {
-				e.Meta["go_extern_target"] = oldTo
-			}
-			graph.RestoreRestubProvenance(e)
-			delete(e.Meta, "go_import")
-			delete(e.Meta, "npm_import")
-			reindexes = append(reindexes, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+			reindexes = append(reindexes, rebindExternalCallEdge(e, c.nodeID, callerLang))
 		}
 		if len(nodes) > 0 {
 			g.AddBatch(nodes, nil)
@@ -350,6 +323,41 @@ func synthesizeExternalCalls(g graph.Store, collect externalCallCandidateSeq) in
 		start = end
 	}
 	return synthesized
+}
+
+func externalCallCallerLanguage(caller *graph.Node, filePath string) string {
+	if caller != nil && caller.Language != "" {
+		return caller.Language
+	}
+	return langFamilyFromExt(filePath)
+}
+
+// rebindExternalCallEdge mutates the candidate and retains its exact old
+// terminal for reindexing.
+func rebindExternalCallEdge(e *graph.Edge, nodeID, callerLang string) graph.EdgeReindex {
+	oldTo := e.To
+	e.To = nodeID
+	// The edge now lands on a real (synthetic) node. It is an
+	// inferred, name-only-grade binding — the import path tells us
+	// which package, never the specific callee symbol, and the
+	// synthetic node is per-package — so it rides at the weakest
+	// tier.
+	e.Origin = graph.OriginTextMatched
+	e.Confidence = 0.5
+	e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, e.Confidence)
+	if e.Meta == nil {
+		e.Meta = map[string]any{}
+	}
+	e.Meta["external_call"] = true
+	// Keep Go's symbol-bearing identity for a module tracked later.
+	// Older package-only synthetic targets still need re-extraction.
+	if callerLang == "go" && strings.HasPrefix(oldTo, "dep::") {
+		e.Meta["go_extern_target"] = oldTo
+	}
+	graph.RestoreRestubProvenance(e)
+	delete(e.Meta, "go_import")
+	delete(e.Meta, "npm_import")
+	return graph.EdgeReindex{Edge: e, OldTo: oldTo}
 }
 
 // externalCallParsedCandidate is one candidate with its synthetic target.
