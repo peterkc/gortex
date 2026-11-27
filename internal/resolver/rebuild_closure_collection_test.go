@@ -364,3 +364,40 @@ func TestRebuildClosureCollectionProvesFrozenAppleAdmission(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildClosureCollectionAppleMarkerNodeCap(t *testing.T) {
+	const file, lang, field = "plugin.go", "go", "handlers"
+	dispatch := rebuildClosureCollectionNode(file, "dispatch", lang, rebuildCCDispatch, field)
+	register := rebuildClosureCollectionNode(file, "register", lang, rebuildCCAppend, field)
+	marker := &graph.Node{ID: "a.swift", Kind: graph.KindFile, Language: "swift", FilePath: "a.swift"}
+	spare := &graph.Node{ID: "b.swift", Kind: graph.KindFile, Language: "swift", FilePath: "b.swift"}
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(file, lang, []*graph.Node{dispatch, register}),
+		rebuildEventFacts(marker.FilePath, marker.Language, []*graph.Node{marker}),
+		rebuildEventFacts(spare.FilePath, spare.Language, []*graph.Node{spare}),
+	}
+	for _, count := range []int{2, 3} {
+		t.Run(fmt.Sprintf("%d receipts", count), func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, facts...)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), rebuildClosureCollectionSelection(t))
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthClosureCollection))
+			large := *marker
+			large.Meta = map[string]any{"padding": strings.Repeat("x", 16<<20)}
+			b.AddNode(&large)
+			stats, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(facts[:count]...), frozen)
+			edges := rebuildEventSavedRows(t, b).edges
+			if count == 2 {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildClosureCollection)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "Apple marker node")
+				require.Zero(t, stats)
+				require.Empty(t, edges)
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, stats.Edges)
+			require.Equal(t, []*graph.Edge{closureCollectionEdge(dispatch, register, field)}, edges)
+		})
+	}
+}

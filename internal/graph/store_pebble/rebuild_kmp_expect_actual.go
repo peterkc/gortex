@@ -229,14 +229,8 @@ func (p *rebuildKMPPass) prove(ctx context.Context, receipts iter.Seq2[ParseFact
 			}
 		}
 	}
-	var kotlinProved bool
-	if err := pendingVisit(ctx, p.b.pending, rebuildKMPKey('k'), func(r row) error {
-		if len(r.value) != 1 {
-			return invalid("KMP Kotlin marker proof state")
-		}
-		kotlinProved = kotlinProved || r.value[0] == rebuildScratchExact
-		return nil
-	}); err != nil {
+	kotlinProved, err := p.b.proveRebuildLanguageMarker(ctx, rebuildKMPKey('k'), rebuildKMPRowLimit, "kmp Kotlin")
+	if err != nil {
 		return err
 	}
 	return proveRebuildScratchEndpoints(ctx, p.visitProposals, func(id string) (bool, error) {
@@ -258,11 +252,16 @@ func (p *rebuildKMPPass) noteReceipt(raw *graph.Node, file, language string) err
 	if err != nil || (state == 0 && markerState == 0) {
 		return err
 	}
-	decode := decodeNodeLight
-	if state != 0 {
-		decode = decodeNode
-	}
-	live, err := pendingGet(p.b.pending, pendingNodeKey(raw.ID), decode)
+	nodeKey := pendingNodeKey(raw.ID)
+	live, err := pendingGet(p.b.pending, nodeKey, func(value []byte) (*graph.Node, error) {
+		if state != 0 {
+			if len(nodeKey)+len(value) > rebuildKMPRowLimit {
+				return nil, fmt.Errorf("%w: kmp expect/actual node row", ErrRebuildLinkInputSize)
+			}
+			return decodeNode(value)
+		}
+		return decodeNodeLight(value)
+	})
 	if err != nil {
 		return err
 	}

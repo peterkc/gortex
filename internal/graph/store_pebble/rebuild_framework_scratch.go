@@ -31,6 +31,41 @@ func (b *BuildStore) rebuildReceiptLanguageMarker(raw *graph.Node, file string) 
 	return sameRebuildLanguageMarker(raw, live, file), err
 }
 
+// One exact, bounded language marker proves admission. An oversized spare
+// marker cannot defeat an in-bound witness.
+func (b *BuildStore) proveRebuildLanguageMarker(ctx context.Context, prefix []byte, limit int, label string) (bool, error) {
+	var proved, oversized bool
+	err := pendingVisit(ctx, b.pending, prefix, func(r row) error {
+		if len(r.value) != 1 {
+			return invalid(label + " marker proof state")
+		}
+		if proved || r.value[0] != rebuildScratchExact {
+			return nil
+		}
+		id, rest, err := readKeyString(r.key[len(prefix):])
+		if err != nil || id == "" || len(rest) != 0 {
+			return invalid(label + " marker proof key")
+		}
+		key := pendingNodeKey(id)
+		size, err := pendingGet(b.pending, key, func(value []byte) (int, error) {
+			return len(key) + len(value), nil
+		})
+		if err != nil {
+			return err
+		}
+		if size == 0 {
+			return invalid(label + " exact marker missing")
+		}
+		proved = size <= limit
+		oversized = oversized || !proved
+		return nil
+	})
+	if err == nil && !proved && oversized {
+		return false, fmt.Errorf("%w: %s marker node", ErrRebuildLinkInputSize, label)
+	}
+	return proved, err
+}
+
 func rebuildScratchState(db pebble.Reader, key []byte, malformed string) (byte, error) {
 	return pendingGet(db, key, func(raw []byte) (byte, error) {
 		if len(raw) != 1 {

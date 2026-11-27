@@ -375,3 +375,45 @@ func rebuildKMPExpectedEdge(from, to *graph.Node, kind graph.EdgeKind) *graph.Ed
 		},
 	}
 }
+
+func TestRebuildKMPExpectActualKotlinMarkerNodeCap(t *testing.T) {
+	expect := rebuildKMPNode("common.go", "go", "clock", "expect", graph.KindFunction, 3)
+	actual := rebuildKMPNode("platform.ts", "typescript", "clock", "actual", graph.KindFunction, 7)
+	marker := rebuildKMPNode("a.kt", "kotlin", "Support", "", graph.KindType, 1)
+	spare := rebuildKMPNode("b.kt", "kotlin", "Support", "", graph.KindType, 1)
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(expect.FilePath, expect.Language, []*graph.Node{expect}),
+		rebuildEventFacts(actual.FilePath, actual.Language, []*graph.Node{actual}),
+		rebuildEventFacts(marker.FilePath, marker.Language, []*graph.Node{marker}),
+		rebuildEventFacts(spare.FilePath, spare.Language, []*graph.Node{spare}),
+	}
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthKMPExpectActual})
+	require.NoError(t, err)
+	for _, count := range []int{3, 4} {
+		t.Run(fmt.Sprintf("%d receipts", count), func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, facts...)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthKMPExpectActual))
+			large := *marker
+			large.Meta = map[string]any{"padding": strings.Repeat("x", 16<<20)}
+			b.AddNode(&large)
+			stats, err := RunRebuildKMPExpectActual(t.Context(), b, rebuildGRPCReceipts(facts[:count]...), frozen)
+			edges := rebuildEventSavedRows(t, b).edges
+			if count == 3 {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildKMPExpectActual)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "Kotlin marker node")
+				require.Zero(t, stats)
+				require.Empty(t, edges)
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 2, stats.Edges)
+			require.ElementsMatch(t, []*graph.Edge{
+				rebuildKMPExpectedEdge(expect, actual, graph.EdgeReferences),
+				rebuildKMPExpectedEdge(actual, expect, graph.EdgeImplements),
+			}, edges)
+		})
+	}
+}

@@ -208,9 +208,10 @@ func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[Parse
 	// Turns before Closure may stamp node metadata but keep identity,
 	// language and file ownership. Reuse the frozen gate's family rule
 	// on those rows, including non-callables.
-	if err := p.b.RebuildView().VisitFrameworkGateNodes(ctx, func(n *graph.Node) error {
-		if !appleLanguage(n.Language) {
-			return nil
+	if err := p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
+		n, err := checkedRebuildLightNode(r, "closure collection")
+		if err != nil || !appleLanguage(n.Language) {
+			return err
 		}
 		return p.put(rebuildClosureKey('a', n.ID), []byte{rebuildCapabilityWanted})
 	}); err != nil {
@@ -246,14 +247,8 @@ func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[Parse
 			}
 		}
 	}
-	appleProved := false
-	if err := pendingVisit(ctx, p.b.pending, rebuildClosureKey('a'), func(r row) error {
-		if len(r.value) != 1 {
-			return invalid("closure collection Apple proof state")
-		}
-		appleProved = appleProved || r.value[0] == rebuildScratchExact
-		return nil
-	}); err != nil {
+	appleProved, err := p.b.proveRebuildLanguageMarker(ctx, rebuildClosureKey('a'), 16<<20, "closure collection Apple")
+	if err != nil {
 		return err
 	}
 	return proveRebuildScratchEndpoints(ctx, p.visit, func(id string) (bool, error) {
@@ -271,11 +266,10 @@ func (p *rebuildClosurePass) noteApple(raw *graph.Node, file string) error {
 	if err != nil || state == 0 {
 		return err
 	}
-	live, err := pendingGet(p.b.pending, pendingNodeKey(raw.ID), rebuildFrameworkGateNode)
+	proved, err := p.b.rebuildReceiptLanguageMarker(raw, file)
 	if err != nil {
 		return err
 	}
-	proved := sameRebuildLanguageMarker(raw, live, file)
 	return noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(proved))
 }
 
