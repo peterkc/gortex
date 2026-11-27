@@ -30,9 +30,25 @@ func TestRebuildKMPExpectActualMuxAndCustody(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, stats)
 
-	// The native gate admits the pass based on the live census. The Kotlin
-	// marker isn't itself a participating declaration or a proof endpoint.
-	b.AddNode(&graph.Node{ID: "marker.kt", Kind: graph.KindFile, FilePath: "marker.kt", Language: " Kotlin "})
+	// A live Kotlin marker with no receipt opens the census but cannot
+	// authorize new rows: the pass refuses and writes nothing.
+	marker := &graph.Node{ID: "marker.kt", Kind: graph.KindFile, FilePath: "marker.kt", Language: " Kotlin "}
+	b.AddNode(marker)
+	stats, err = b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+	require.Zero(t, stats)
+	unproved, err := b.pendingEdge(pendingEdgeKey(makeEdge(actual, expect.ID, graph.EdgeImplements)))
+	require.NoError(t, err)
+	require.Nil(t, unproved)
+
+	// With the marker proved by its receipt, the pass installs both rows.
+	// The marker isn't itself a participating declaration or a proof endpoint.
+	marker = &graph.Node{ID: "marker.kt", Kind: graph.KindFile, FilePath: "marker.kt", Language: "kotlin"}
+	b, receipts = seedSyntheticCustody(t,
+		ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: expect.FilePath}, Nodes: []*graph.Node{expect, protected},
+			Edges: []*graph.Edge{stationary}},
+		ParseFacts{EffectiveLanguage: "java", File: graph.FileMetaRow{FilePath: actual.FilePath}, Nodes: []*graph.Node{actual}},
+		ParseFacts{EffectiveLanguage: "kotlin", File: graph.FileMetaRow{FilePath: marker.FilePath}, Nodes: []*graph.Node{marker}})
 	stats, err = b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, stats.Edges)
