@@ -7,42 +7,71 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
 func TestRebuildGRPCWireRefusals(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		cause error
-		want  error
-		code  uint8
-		count uint64
+	const first = `first=("caller","calls","target","flow.go",42)`
+	for _, stage := range []struct {
+		name string
+		err  error
+		code uint8
 	}{
-		{"stage", store_pebble.ErrRebuildGRPC, store_pebble.ErrRebuildGRPC, 42, 0},
-		{"provenance", &store_pebble.RebuildUnknownProvenanceError{Count: 2}, store_pebble.ErrRebuildUnknownProvenance, 36, 2},
-		{"input size", store_pebble.ErrRebuildLinkInputSize, store_pebble.ErrRebuildLinkInputSize, 17, 0},
+		{"grpc", store_pebble.ErrRebuildGRPC, 42},
+		{"temporal", store_pebble.ErrRebuildTemporal, 43},
+		{"event channel", store_pebble.ErrRebuildEventChannel, 44},
+		{"swift objc", store_pebble.ErrRebuildSwiftObjC, 45},
+		{"react native bridge", store_pebble.ErrRebuildReactNativeBridge, 46},
+		{"react native pairing", store_pebble.ErrRebuildReactNativeNativePairing, 47},
+		{"observer", store_pebble.ErrRebuildObserver, 48},
+		{"closure collection", store_pebble.ErrRebuildClosureCollection, 49},
+		{"react setState", store_pebble.ErrRebuildReactSetState, 50},
+		{"flutter setState", store_pebble.ErrRebuildFlutterSetState, 51},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cause := fmt.Errorf("%w: %w", store_pebble.ErrRebuildGRPC, tc.cause)
-			r := buildRefusal(cause)
-			require.Equal(t, tc.code, r.Refusal)
-			require.Equal(t, tc.count, r.UnknownProvenance)
-			if tc.count > 0 {
-				require.Contains(t, r.Detail, "count=2")
-			}
-			var reply, acks bytes.Buffer
-			require.NoError(t, writeRebuildBuildReply(&reply, r))
-			err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
-				func(context.Context, store_pebble.StageTables) error {
-					t.Fatal("a refusal must not publish")
-					return nil
+		t.Run(stage.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name  string
+				cause error
+				want  error
+				code  uint8
+				count uint64
+			}{
+				{"stage", stage.err, stage.err, stage.code, 0},
+				{"provenance", &store_pebble.RebuildUnknownProvenanceError{
+					Count: 2,
+					First: graph.EdgeIdentity{From: "caller", To: "target", Kind: graph.EdgeCalls, FilePath: "flow.go", Line: 42},
+				}, store_pebble.ErrRebuildUnknownProvenance, 36, 2},
+				{"input size", store_pebble.ErrRebuildLinkInputSize, store_pebble.ErrRebuildLinkInputSize, 17, 0},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					cause := fmt.Errorf("%w: %w", stage.err, tc.cause)
+					r := buildRefusal(cause)
+					require.Equal(t, tc.code, r.Refusal)
+					require.Equal(t, tc.count, r.UnknownProvenance)
+					if tc.count > 0 {
+						require.Contains(t, r.Detail, "count=2")
+						require.Contains(t, r.Detail, first)
+					}
+					var reply, acks bytes.Buffer
+					require.NoError(t, writeRebuildBuildReply(&reply, r))
+					err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
+						func(context.Context, store_pebble.StageTables) error {
+							t.Fatal("a refusal must not publish")
+							return nil
+						})
+					require.ErrorIs(t, err, ErrRebuildWorker)
+					require.ErrorIs(t, err, tc.want)
+					if tc.count > 0 {
+						require.ErrorContains(t, err, "unknown_provenance=2")
+						require.ErrorContains(t, err, first)
+					}
+					if tc.code != stage.code {
+						require.NotErrorIs(t, err, stage.err)
+					}
+					require.Empty(t, acks.Bytes())
 				})
-			require.ErrorIs(t, err, ErrRebuildWorker)
-			require.ErrorIs(t, err, tc.want)
-			if tc.count > 0 {
-				require.ErrorContains(t, err, "unknown_provenance=2")
 			}
-			require.Empty(t, acks.Bytes())
 		})
 	}
 }
