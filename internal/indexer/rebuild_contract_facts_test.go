@@ -410,3 +410,89 @@ func TestRebuildContractFactsNoHiddenFallback(t *testing.T) {
 	_, err := idx.captureRebuildContractFacts(t.Context(), "x.go", "go", src, src, result, false)
 	require.ErrorIs(t, err, contracts.ErrContractFactTree)
 }
+
+func TestRebuildEarlyRouterSelectedFacts(t *testing.T) {
+	const routeSource = `from fastapi import APIRouter
+router = APIRouter(prefix="/users")
+
+@router.get("/{id}")
+def get_user(id: int):
+    return id
+`
+	const mountPrefix = `from fastapi import FastAPI
+from users import router
+app = FastAPI()
+app.include_router(router, prefix="`
+	for _, tc := range []struct {
+		name, skipPath, skipLang, prefix, nativeID string
+		refuse                                     bool
+	}{
+		{name: "selected api", skipPath: "main.py", skipLang: "python", prefix: "/api", nativeID: "http::GET::/api/users/{p1}", refuse: true},
+		{name: "selected alt", skipPath: "main.py", skipLang: "python", prefix: "/alt", nativeID: "http::GET::/alt/users/{p1}", refuse: true},
+		{name: "no skip", nativeID: "http::GET::/users/{p1}"},
+		{name: "unselected skip", skipPath: "big.go", skipLang: "go", prefix: "/api", nativeID: "http::GET::/users/{p1}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			const capBytes = 512
+			mount := mountPrefix + tc.prefix + "\")\n#" + strings.Repeat("x", capBytes) + "\n"
+			require.Less(t, len(routeSource), capBytes)
+			require.Greater(t, len(mount), capBytes)
+			nativeGraph := graph.New()
+			idx := newTestIndexer(nativeGraph)
+			idx.SetRootPath(t.TempDir())
+			idx.registry.Register(languages.NewPythonExtractor())
+			t.Cleanup(idx.Close)
+			build, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, build.Close()) })
+			ext, ok := idx.registry.GetByLanguage("python")
+			require.True(t, ok)
+			src := []byte(routeSource)
+			parsed, facts, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, "users.py", ext, src, src)
+			require.NoError(t, err)
+			require.NotNil(t, facts.Router)
+			nativeGraph.AddBatch(parsed.Nodes, nil)
+			for _, n := range parsed.Nodes {
+				build.AddNode(n)
+			}
+			if tc.skipPath != "" {
+				skip := skippedFile{relPath: tc.skipPath, lang: tc.skipLang, size: int64(len(mount))}
+				nativeGraph.AddNode(sizeSkipNode(skip, capBytes))
+				build.AddNode(rebuildCheckedSkipNode(tc.skipPath, rebuildClassificationFact{
+					Size: int64(len(mount)), MaxFileSize: capBytes, Language: tc.skipLang,
+				}))
+			}
+			native, replay := contracts.NewRegistry(), contracts.NewRegistry()
+			native.AddAllScoped(facts.Records, "", "", "")
+			replay.AddAllScoped(facts.Records, "", "", "")
+			contracts.JoinRouterPrefixes(native, idx.routerPrefixScanFiles(native), func(path string) []byte {
+				switch path {
+				case "users.py":
+					return src
+				case tc.skipPath:
+					return []byte(mount)
+				default:
+					t.Fatalf("unexpected native input %q", path)
+					return nil
+				}
+			})
+			require.Len(t, native.All(), 1)
+			require.Equal(t, tc.nativeID, native.All()[0].ID)
+			err = joinRebuildRouterPrefixes(ctx, build.RebuildView(), replay, "", "", map[string]contracts.RouterFacts{
+				"users.py": *facts.Router,
+			})
+			if tc.refuse {
+				require.ErrorIs(t, err, errRebuildRouterFactsMissing)
+				reply := buildRefusal(err)
+				require.Contains(t, reply.Detail, `"main.py"`)
+				require.Equal(t, errRebuildRouterFactsMissing, rebuildFailureKinds[reply.Refusal-1])
+				require.Equal(t, "http::GET::/{p1}", replay.All()[0].ID)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, replay.All(), 1)
+			require.Equal(t, tc.nativeID, replay.All()[0].ID)
+		})
+	}
+}

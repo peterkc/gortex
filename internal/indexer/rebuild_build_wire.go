@@ -226,6 +226,7 @@ var rebuildFailureKinds = [...]error{
 	nil, // 97: deferred C# receiver demotion
 	store_pebble.ErrRebuildGDScriptReceiverGate,
 	store_pebble.ErrRebuildExternalCallSynthesis,
+	errRebuildRouterFactsMissing,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

@@ -80,6 +80,28 @@ func (v RebuildView) VisitNodes(ctx context.Context, yield func(*graph.Node) err
 	})
 }
 
+// VisitFileIdentities streams the live file census without decoding metadata.
+// It includes skip nodes; callers decide which of them can affect a result.
+func (v RebuildView) VisitFileIdentities(ctx context.Context, yield func(path, language, repo, workspace string) error) error {
+	return v.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
+		n, err := decodeNodeLight(r.value)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(r.key, pendingNodeKey(n.ID)) {
+			return invalid("working node ID does not match key")
+		}
+		if n.Kind != graph.KindFile {
+			return nil
+		}
+		path := n.FilePath
+		if path == "" {
+			path = n.ID
+		}
+		return yield(path, n.Language, n.RepoPrefix, n.WorkspaceID)
+	})
+}
+
 const (
 	rebuildDirectImportReadRows  = 16 << 10
 	rebuildDirectImportReadBytes = 16 << 20
