@@ -3,37 +3,55 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"fmt"
 
 	"github.com/zzet/gortex/internal/graph"
 )
 
-func (p *rebuildMyBatisPass) present(key []byte) (bool, error) {
+// rebuildCallMoves plans noninteracting Call rebinds under one stage's scratch
+// prefix. The caller owns scratch cleanup, receipt proof, and error wrapping.
+type rebuildCallMoves struct {
+	b        *BuildStore
+	prefix   []byte
+	rowBytes int
+	label    string
+	edgeRow  string
+}
+
+func (p *rebuildCallMoves) column(col byte) []byte {
+	return append(bytes.Clone(p.prefix), col)
+}
+
+func (p *rebuildCallMoves) put(key, value []byte) error {
+	return p.b.putRebuildScratch(key, value, p.rowBytes, p.label)
+}
+
+func (p *rebuildCallMoves) present(key []byte) (bool, error) {
 	return pendingGet(p.b.pending, key, func([]byte) (bool, error) { return true, nil })
 }
 
-func (p *rebuildMyBatisPass) stage(old []byte, e *graph.Edge) error {
+func (p *rebuildCallMoves) stage(old []byte, e *graph.Edge) error {
 	val, err := encodeEdge(e)
 	if err != nil {
 		return err
 	}
 	dest := pendingEdgeKey(e)
-	key := append(rebuildMyBatisKey('d'), dest...)
+	key := append(p.column('d'), dest...)
 	seen, err := p.present(key)
 	if err != nil {
 		return err
 	}
 	if seen {
-		key = append(rebuildMyBatisKey('x'), dest...)
+		key = append(p.column('x'), dest...)
 	}
 	if err := p.put(key, nil); err != nil {
 		return err
 	}
-	p.stats.Moves++
-	return p.put(append(rebuildMyBatisKey('m'), old...), val)
+	return p.put(append(p.column('m'), old...), val)
 }
 
-func (p *rebuildMyBatisPass) moves(ctx context.Context, yield func([]byte, *graph.Edge) error) error {
-	prefix := rebuildMyBatisKey('m')
+func (p *rebuildCallMoves) moves(ctx context.Context, yield func([]byte, *graph.Edge) error) error {
+	prefix := p.column('m')
 	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 		e, err := decodeEdge(r.value)
 		if err != nil {
@@ -43,64 +61,82 @@ func (p *rebuildMyBatisPass) moves(ctx context.Context, yield func([]byte, *grap
 	})
 }
 
-func (p *rebuildMyBatisPass) checkOrder(ctx context.Context) error {
+func (p *rebuildCallMoves) checkOrder(ctx context.Context, refuse func(uint64, graph.EdgeIdentity) error) error {
 	// With unique destinations and no destination among the moving old keys,
 	// every incumbent stays put. No mover can affect another's SQLite result,
 	// even across a 5,000-move window boundary.
 	if err := p.moves(ctx, func(_ []byte, e *graph.Edge) error {
 		dest := pendingEdgeKey(e)
-		occupiedByMover, err := p.present(append(rebuildMyBatisKey('m'), dest...))
+		occupiedByMover, err := p.present(append(p.column('m'), dest...))
 		if err != nil || !occupiedByMover {
 			return err
 		}
-		return p.put(append(rebuildMyBatisKey('x'), dest...), nil)
+		return p.put(append(p.column('x'), dest...), nil)
 	}); err != nil {
 		return err
 	}
-	prefix := rebuildMyBatisKey('x')
-	var order RebuildMyBatisOrderError
+	prefix := p.column('x')
+	var count uint64
+	var first graph.EdgeIdentity
 	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		if order.Count == 0 {
+		if count == 0 {
 			var err error
-			order.First, err = decodeLinkRecorder(r.key[len(prefix):])
+			first, err = decodeLinkRecorder(r.key[len(prefix):])
 			if err != nil {
 				return err
 			}
 		}
-		order.Count++
+		count++
 		return nil
 	}); err != nil {
 		return err
 	}
-	if order.Count != 0 {
-		return &order
+	if count != 0 {
+		return refuse(count, first)
 	}
 	return nil
 }
 
-func (p *rebuildMyBatisPass) edge(key []byte) (*graph.Edge, error) {
+func (p *rebuildCallMoves) edgeInput(key, val []byte) error {
+	if len(key)+len(val) > p.rowBytes {
+		return fmt.Errorf("%w: %s %s", ErrRebuildLinkInputSize, p.label, p.edgeRow)
+	}
+	return nil
+}
+
+func (p *rebuildCallMoves) decodeEdge(key, val []byte) (*graph.Edge, error) {
+	e, err := decodeEdge(val)
+	if err == nil && !bytes.Equal(key, pendingEdgeKey(e)) {
+		return nil, invalid(p.label + " edge does not match key")
+	}
+	return e, err
+}
+
+func (p *rebuildCallMoves) edge(key []byte) (*graph.Edge, error) {
 	return pendingGet(p.b.pending, key, func(val []byte) (*graph.Edge, error) {
-		if err := rebuildMyBatisInput(key, val); err != nil {
+		if err := p.edgeInput(key, val); err != nil {
 			return nil, err
 		}
-		e, err := decodeEdge(val)
-		if err == nil && !bytes.Equal(key, pendingEdgeKey(e)) {
-			return nil, invalid("MyBatis edge does not match key")
-		}
-		return e, err
+		return p.decodeEdge(key, val)
 	})
 }
 
-func (p *rebuildMyBatisPass) apply(ctx context.Context) error {
+func (p *rebuildCallMoves) validatedPresent(key []byte) (bool, error) {
+	e, err := p.edge(key)
+	return e != nil, err
+}
+
+// apply must run inside the caller's write scope after order and custody checks.
+func (p *rebuildCallMoves) apply(ctx context.Context, hasIncumbent func([]byte) (bool, error)) error {
 	return p.moves(ctx, func(old []byte, e *graph.Edge) error {
 		prior, err := p.edge(old)
 		if err != nil {
 			return err
 		}
 		if prior == nil {
-			return invalid("MyBatis move has no old edge")
+			return invalid(p.label + " move has no old edge")
 		}
-		incumbent, err := p.edge(pendingEdgeKey(e))
+		incumbent, err := hasIncumbent(pendingEdgeKey(e))
 		if err != nil {
 			return err
 		}
@@ -108,7 +144,7 @@ func (p *rebuildMyBatisPass) apply(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := p.b.deleteEdge(old, prior); err != nil || incumbent != nil {
+		if err := p.b.deleteEdge(old, prior); err != nil || incumbent {
 			return err
 		}
 		return p.b.addEdgeWithCustody(e, rebuildEdgeCustody{raw: raw})

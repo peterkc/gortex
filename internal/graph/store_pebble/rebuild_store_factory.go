@@ -48,7 +48,7 @@ type RebuildStoreFactoryRules struct {
 }
 
 type rebuildStoreFactoryPass struct {
-	b           *BuildStore
+	rebuildCallMoves
 	rules       RebuildStoreFactoryRules
 	needsAnchor bool
 	stats       RebuildStoreFactoryStats
@@ -79,7 +79,12 @@ func (b *BuildStore) RebuildStoreFactory(ctx context.Context, receipts iter.Seq2
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
 	}()
-	p := rebuildStoreFactoryPass{b: b, rules: rules}
+	p := rebuildStoreFactoryPass{
+		rebuildCallMoves: rebuildCallMoves{
+			b: b, prefix: rebuildStoreFactoryPrefix, rowBytes: rebuildStoreFactoryRowBytes, label: "Store Factory", edgeRow: "edge row",
+		},
+		rules: rules,
+	}
 	haveActions, err := p.collect(ctx)
 	if err != nil || !haveActions {
 		return stats, err
@@ -90,13 +95,15 @@ func (b *BuildStore) RebuildStoreFactory(ctx context.Context, receipts iter.Seq2
 	if err := p.plan(ctx); err != nil || p.stats.Moves == 0 {
 		return p.stats, err
 	}
-	if err := p.checkOrder(ctx); err != nil {
+	if err := p.checkOrder(ctx, func(count uint64, first graph.EdgeIdentity) error {
+		return &RebuildStoreFactoryOrderError{Count: count, First: first}
+	}); err != nil {
 		return stats, err
 	}
 	if err := p.prove(ctx, receipts); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx) })
+	err = b.withWrites(func() error { return p.apply(ctx, p.validatedPresent) })
 	return p.stats, err
 }
 
@@ -106,10 +113,6 @@ func (b *BuildStore) RebuildStoreFactory(ctx context.Context, receipts iter.Seq2
 // n: affected caller proof; r: raw-key claims; m/d/x: staged moves and order.
 func rebuildStoreFactoryKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildStoreFactoryPrefix), col), fields...)
-}
-
-func (p *rebuildStoreFactoryPass) put(key, val []byte) error {
-	return p.b.putRebuildScratch(key, val, rebuildStoreFactoryRowBytes, "Store Factory")
 }
 
 func (p *rebuildStoreFactoryPass) state(key []byte) (byte, error) {
@@ -296,7 +299,7 @@ func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
 		if err != nil || kind != graph.EdgeCalls {
 			return err
 		}
-		e, err := decodeRebuildStoreFactoryEdge(r.key, r.value)
+		e, err := p.decodeEdge(r.key, r.value)
 		if err != nil {
 			return err
 		}
@@ -304,7 +307,7 @@ func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
 		if binding == "" || member == "" {
 			return nil
 		}
-		if err := rebuildStoreFactoryEdgeInput(r.key, r.value); err != nil {
+		if err := p.edgeInput(r.key, r.value); err != nil {
 			return err
 		}
 		p.stats.Stubs++
@@ -372,30 +375,6 @@ func (p *rebuildStoreFactoryPass) claim(raw, old []byte) error {
 		return p.put(key, []byte{rebuildCapabilityWanted | rebuildCapabilityUnproved})
 	}
 	return p.put(key, append([]byte{rebuildCapabilityWanted}, old...))
-}
-
-func decodeRebuildStoreFactoryEdge(key, val []byte) (*graph.Edge, error) {
-	e, err := decodeEdge(val)
-	if err == nil && !bytes.Equal(key, pendingEdgeKey(e)) {
-		return nil, invalid("Store Factory edge does not match key")
-	}
-	return e, err
-}
-
-func rebuildStoreFactoryEdgeInput(key, val []byte) error {
-	if len(key)+len(val) > rebuildStoreFactoryRowBytes {
-		return fmt.Errorf("%w: Store Factory edge row", ErrRebuildLinkInputSize)
-	}
-	return nil
-}
-
-func (p *rebuildStoreFactoryPass) edge(key []byte) (*graph.Edge, error) {
-	return pendingGet(p.b.pending, key, func(val []byte) (*graph.Edge, error) {
-		if err := rebuildStoreFactoryEdgeInput(key, val); err != nil {
-			return nil, err
-		}
-		return decodeRebuildStoreFactoryEdge(key, val)
-	})
 }
 
 func (p *rebuildStoreFactoryPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
@@ -582,98 +561,4 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 		return state == rebuildScratchExact, err
 	}
 	return true, nil
-}
-
-func (p *rebuildStoreFactoryPass) present(key []byte) (bool, error) {
-	return pendingGet(p.b.pending, key, func([]byte) (bool, error) { return true, nil })
-}
-
-func (p *rebuildStoreFactoryPass) stage(old []byte, e *graph.Edge) error {
-	val, err := encodeEdge(e)
-	if err != nil {
-		return err
-	}
-	dest := pendingEdgeKey(e)
-	key := append(rebuildStoreFactoryKey('d'), dest...)
-	seen, err := p.present(key)
-	if err != nil {
-		return err
-	}
-	if seen {
-		key = append(rebuildStoreFactoryKey('x'), dest...)
-	}
-	if err := p.put(key, nil); err != nil {
-		return err
-	}
-	return p.put(append(rebuildStoreFactoryKey('m'), old...), val)
-}
-
-func (p *rebuildStoreFactoryPass) moves(ctx context.Context, yield func([]byte, *graph.Edge) error) error {
-	prefix := rebuildStoreFactoryKey('m')
-	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		e, err := decodeEdge(r.value)
-		if err != nil {
-			return err
-		}
-		return yield(r.key[len(prefix):], e)
-	})
-}
-
-func (p *rebuildStoreFactoryPass) checkOrder(ctx context.Context) error {
-	// With unique destinations and no destination among the moving old keys,
-	// every incumbent stays put. No mover can affect another's SQLite result,
-	// even across a 5,000-move window boundary.
-	if err := p.moves(ctx, func(_ []byte, e *graph.Edge) error {
-		dest := pendingEdgeKey(e)
-		occupiedByMover, err := p.present(append(rebuildStoreFactoryKey('m'), dest...))
-		if err != nil || !occupiedByMover {
-			return err
-		}
-		return p.put(append(rebuildStoreFactoryKey('x'), dest...), nil)
-	}); err != nil {
-		return err
-	}
-	prefix := rebuildStoreFactoryKey('x')
-	var order RebuildStoreFactoryOrderError
-	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		if order.Count == 0 {
-			var err error
-			order.First, err = decodeLinkRecorder(r.key[len(prefix):])
-			if err != nil {
-				return err
-			}
-		}
-		order.Count++
-		return nil
-	}); err != nil {
-		return err
-	}
-	if order.Count != 0 {
-		return &order
-	}
-	return nil
-}
-
-func (p *rebuildStoreFactoryPass) apply(ctx context.Context) error {
-	return p.moves(ctx, func(old []byte, e *graph.Edge) error {
-		prior, err := p.edge(old)
-		if err != nil {
-			return err
-		}
-		if prior == nil {
-			return invalid("Store Factory move has no old edge")
-		}
-		incumbent, err := p.edge(pendingEdgeKey(e))
-		if err != nil {
-			return err
-		}
-		raw, err := rebuildReceiptKey(p.b.pending, old)
-		if err != nil {
-			return err
-		}
-		if err := p.b.deleteEdge(old, prior); err != nil || incumbent != nil {
-			return err
-		}
-		return p.b.addEdgeWithCustody(e, rebuildEdgeCustody{raw: raw})
-	})
 }

@@ -40,11 +40,20 @@ type RebuildSQLCallsiteStats struct {
 }
 
 type rebuildSQLCallsitePass struct {
-	b           *BuildStore
+	rebuildCallMoves
 	fn          func(*graph.Edge) string
 	rebind      func(*graph.Edge, string, string, bool) bool
 	needsAnchor bool
 	stats       RebuildSQLCallsiteStats
+}
+
+func newRebuildSQLCallsitePass(b *BuildStore, fn func(*graph.Edge) string, rebind func(*graph.Edge, string, string, bool) bool) rebuildSQLCallsitePass {
+	return rebuildSQLCallsitePass{
+		rebuildCallMoves: rebuildCallMoves{
+			b: b, prefix: rebuildSQLCallsitePrefix, rowBytes: rebuildSQLCallsiteRowBytes, label: "SQL callsite", edgeRow: "edge row",
+		},
+		fn: fn, rebind: rebind,
+	}
 }
 
 // RebuildSQLCallsites runs on the quiet private graph after MyBatis.
@@ -71,7 +80,7 @@ func (b *BuildStore) RebuildSQLCallsites(ctx context.Context, receipts iter.Seq2
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
 	}()
-	p := rebuildSQLCallsitePass{b: b, fn: fn, rebind: rebind}
+	p := newRebuildSQLCallsitePass(b, fn, rebind)
 	haveFunctions, err := p.collect(ctx)
 	if err != nil || !haveFunctions {
 		return stats, err
@@ -79,13 +88,15 @@ func (b *BuildStore) RebuildSQLCallsites(ctx context.Context, receipts iter.Seq2
 	if err := p.plan(ctx); err != nil || p.stats.Moves == 0 {
 		return p.stats, err
 	}
-	if err := p.checkOrder(ctx); err != nil {
+	if err := p.checkOrder(ctx, func(count uint64, first graph.EdgeIdentity) error {
+		return &RebuildSQLCallsiteOrderError{Count: count, First: first}
+	}); err != nil {
 		return stats, err
 	}
 	if err := p.prove(ctx, receipts); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx) })
+	err = b.withWrites(func() error { return p.apply(ctx, p.validatedPresent) })
 	return p.stats, err
 }
 
@@ -94,10 +105,6 @@ func (b *BuildStore) RebuildSQLCallsites(ctx context.Context, receipts iter.Seq2
 // m: new payload by old key; d: seen destinations; x: interacting destinations.
 func rebuildSQLCallsiteKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildSQLCallsitePrefix), col), fields...)
-}
-
-func (p *rebuildSQLCallsitePass) put(key, val []byte) error {
-	return p.b.putRebuildScratch(key, val, rebuildSQLCallsiteRowBytes, "SQL callsite")
 }
 
 func (p *rebuildSQLCallsitePass) state(key []byte) (byte, error) {
@@ -165,7 +172,7 @@ func (p *rebuildSQLCallsitePass) plan(ctx context.Context) error {
 		if err != nil || kind != graph.EdgeCalls {
 			return err
 		}
-		e, err := decodeRebuildSQLCallsiteEdge(r.key, r.value)
+		e, err := p.decodeEdge(r.key, r.value)
 		if err != nil {
 			return err
 		}
@@ -173,7 +180,7 @@ func (p *rebuildSQLCallsitePass) plan(ctx context.Context) error {
 		if name == "" {
 			return nil
 		}
-		if err := rebuildSQLCallsiteEdgeInput(r.key, r.value); err != nil {
+		if err := p.edgeInput(r.key, r.value); err != nil {
 			return err
 		}
 		p.stats.Stubs++
@@ -228,30 +235,6 @@ func (p *rebuildSQLCallsitePass) claim(raw, old []byte) error {
 		return p.put(key, []byte{rebuildCapabilityWanted | rebuildCapabilityUnproved})
 	}
 	return p.put(key, append([]byte{rebuildCapabilityWanted}, old...))
-}
-
-func decodeRebuildSQLCallsiteEdge(key, val []byte) (*graph.Edge, error) {
-	e, err := decodeEdge(val)
-	if err == nil && !bytes.Equal(key, pendingEdgeKey(e)) {
-		return nil, invalid("SQL callsite edge does not match key")
-	}
-	return e, err
-}
-
-func rebuildSQLCallsiteEdgeInput(key, val []byte) error {
-	if len(key)+len(val) > rebuildSQLCallsiteRowBytes {
-		return fmt.Errorf("%w: SQL callsite edge row", ErrRebuildLinkInputSize)
-	}
-	return nil
-}
-
-func (p *rebuildSQLCallsitePass) edge(key []byte) (*graph.Edge, error) {
-	return pendingGet(p.b.pending, key, func(val []byte) (*graph.Edge, error) {
-		if err := rebuildSQLCallsiteEdgeInput(key, val); err != nil {
-			return nil, err
-		}
-		return decodeRebuildSQLCallsiteEdge(key, val)
-	})
 }
 
 func (p *rebuildSQLCallsitePass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
@@ -385,98 +368,4 @@ func (p *rebuildSQLCallsitePass) proved(old []byte, e *graph.Edge, anchor bool) 
 	// An empty cohort may reset a stale Call only if some other exact SQL
 	// Function proves that native does not take its early return.
 	return cohort == rebuildCapabilityWanted || (cohort == 0 && anchor), err
-}
-
-func (p *rebuildSQLCallsitePass) present(key []byte) (bool, error) {
-	return pendingGet(p.b.pending, key, func([]byte) (bool, error) { return true, nil })
-}
-
-func (p *rebuildSQLCallsitePass) stage(old []byte, e *graph.Edge) error {
-	val, err := encodeEdge(e)
-	if err != nil {
-		return err
-	}
-	dest := pendingEdgeKey(e)
-	key := append(rebuildSQLCallsiteKey('d'), dest...)
-	seen, err := p.present(key)
-	if err != nil {
-		return err
-	}
-	if seen {
-		key = append(rebuildSQLCallsiteKey('x'), dest...)
-	}
-	if err := p.put(key, nil); err != nil {
-		return err
-	}
-	return p.put(append(rebuildSQLCallsiteKey('m'), old...), val)
-}
-
-func (p *rebuildSQLCallsitePass) moves(ctx context.Context, yield func([]byte, *graph.Edge) error) error {
-	prefix := rebuildSQLCallsiteKey('m')
-	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		e, err := decodeEdge(r.value)
-		if err != nil {
-			return err
-		}
-		return yield(r.key[len(prefix):], e)
-	})
-}
-
-func (p *rebuildSQLCallsitePass) checkOrder(ctx context.Context) error {
-	// With unique destinations and no destination among the moving old keys,
-	// every incumbent stays put. No mover can affect another's SQLite result,
-	// even across a 5,000-move window boundary.
-	if err := p.moves(ctx, func(_ []byte, e *graph.Edge) error {
-		dest := pendingEdgeKey(e)
-		occupiedByMover, err := p.present(append(rebuildSQLCallsiteKey('m'), dest...))
-		if err != nil || !occupiedByMover {
-			return err
-		}
-		return p.put(append(rebuildSQLCallsiteKey('x'), dest...), nil)
-	}); err != nil {
-		return err
-	}
-	prefix := rebuildSQLCallsiteKey('x')
-	var order RebuildSQLCallsiteOrderError
-	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		if order.Count == 0 {
-			var err error
-			order.First, err = decodeLinkRecorder(r.key[len(prefix):])
-			if err != nil {
-				return err
-			}
-		}
-		order.Count++
-		return nil
-	}); err != nil {
-		return err
-	}
-	if order.Count != 0 {
-		return &order
-	}
-	return nil
-}
-
-func (p *rebuildSQLCallsitePass) apply(ctx context.Context) error {
-	return p.moves(ctx, func(old []byte, e *graph.Edge) error {
-		prior, err := p.edge(old)
-		if err != nil {
-			return err
-		}
-		if prior == nil {
-			return invalid("SQL callsite move has no old edge")
-		}
-		incumbent, err := p.edge(pendingEdgeKey(e))
-		if err != nil {
-			return err
-		}
-		raw, err := rebuildReceiptKey(p.b.pending, old)
-		if err != nil {
-			return err
-		}
-		if err := p.b.deleteEdge(old, prior); err != nil || incumbent != nil {
-			return err
-		}
-		return p.b.addEdgeWithCustody(e, rebuildEdgeCustody{raw: raw})
-	})
 }

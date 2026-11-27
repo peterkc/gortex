@@ -40,8 +40,16 @@ type RebuildMyBatisStats struct {
 }
 
 type rebuildMyBatisPass struct {
-	b     *BuildStore
+	rebuildCallMoves
 	stats RebuildMyBatisStats
+}
+
+func newRebuildMyBatisPass(b *BuildStore) rebuildMyBatisPass {
+	return rebuildMyBatisPass{
+		rebuildCallMoves: rebuildCallMoves{
+			b: b, prefix: rebuildMyBatisPrefix, rowBytes: rebuildMyBatisRowBytes, label: "MyBatis", edgeRow: "input row",
+		},
+	}
 }
 
 // RebuildMyBatisRules supplies the mapper and Java matching rules for RebuildMyBatis.
@@ -77,7 +85,7 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildMyBatisPrefix, prefixEnd(rebuildMyBatisPrefix), pebble.NoSync))
 	}()
-	p := rebuildMyBatisPass{b: b}
+	p := newRebuildMyBatisPass(b)
 	if err := p.capture(ctx, rules); err != nil || p.stats.Stubs == 0 {
 		return p.stats, err
 	}
@@ -90,13 +98,15 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 	if err := p.plan(ctx, rules); err != nil || p.stats.Moves == 0 {
 		return p.stats, err
 	}
-	if err := p.checkOrder(ctx); err != nil {
+	if err := p.checkOrder(ctx, func(count uint64, first graph.EdgeIdentity) error {
+		return &RebuildMyBatisOrderError{Count: count, First: first}
+	}); err != nil {
 		return stats, err
 	}
 	if err := p.prove(ctx, receipts, rules); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx) })
+	err = b.withWrites(func() error { return p.apply(ctx, p.validatedPresent) })
 	return p.stats, err
 }
 
@@ -108,10 +118,6 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 // r: raw recorder proof and claiming old key.
 func rebuildMyBatisKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildMyBatisPrefix), col), fields...)
-}
-
-func (p *rebuildMyBatisPass) put(key, val []byte) error {
-	return p.b.putRebuildScratch(key, val, rebuildMyBatisRowBytes, "MyBatis")
 }
 
 func rebuildMyBatisInput(key, val []byte) error {
@@ -302,7 +308,11 @@ func (p *rebuildMyBatisPass) plan(ctx context.Context, rules RebuildMyBatisRules
 				return err
 			}
 		}
-		return p.stage(old, e)
+		if err := p.stage(old, e); err != nil {
+			return err
+		}
+		p.stats.Moves++
+		return nil
 	})
 }
 

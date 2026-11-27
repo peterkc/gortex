@@ -25,8 +25,7 @@ func TestRebuildSQLCallsitePlanCapsOnlyOwnedCalls(t *testing.T) {
 		require.Greater(t, len(key)+len(raw), rebuildSQLCallsiteRowBytes)
 		require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
 		before := rebuildFrameworkCustodyRows(t, b)
-		p := rebuildSQLCallsitePass{b: b, fn: sqlCallsiteStoreMarker,
-			rebind: func(*graph.Edge, string, string, bool) bool { return false }}
+		p := newRebuildSQLCallsitePass(b, sqlCallsiteStoreMarker, func(*graph.Edge, string, string, bool) bool { return false })
 		err = p.plan(t.Context())
 		if owned {
 			require.ErrorIs(t, err, ErrRebuildLinkInputSize)

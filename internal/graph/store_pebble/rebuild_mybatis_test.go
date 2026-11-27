@@ -493,7 +493,7 @@ func TestRebuildMyBatisCollectsOnlyLiveJoins(t *testing.T) {
 	require.NoError(t, b.AddParsedFile("local", myBatisTestQualifiedFacts(t, "local", unused)))
 
 	ctx := t.Context()
-	p := rebuildMyBatisPass{b: b}
+	p := newRebuildMyBatisPass(b)
 	rules := RebuildMyBatisRules{
 		Stub: func(e *graph.Edge) (string, string) {
 			ns, _ := e.Meta["mybatis_namespace"].(string)
@@ -583,7 +583,7 @@ func TestRebuildMyBatisCaptureCapsOnlyMapperCalls(t *testing.T) {
 		require.Greater(t, len(key)+len(raw), rebuildMyBatisRowBytes)
 		require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
 		before := rebuildFrameworkCustodyRows(t, b)
-		p := rebuildMyBatisPass{b: b}
+		p := newRebuildMyBatisPass(b)
 		err = p.capture(t.Context(), RebuildMyBatisRules{
 			Stub: func(e *graph.Edge) (string, string) {
 				if e.Meta["via"] != "mybatis.mapper" {
