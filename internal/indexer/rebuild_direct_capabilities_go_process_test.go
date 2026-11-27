@@ -3,6 +3,7 @@ package indexer
 import (
 	"fmt"
 	"io/fs"
+	"iter"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -112,7 +113,39 @@ func TestRebuildDirectCapabilitiesGoProcess(t *testing.T) {
 					require.Equal(t, &graph.Node{ID: process, Kind: graph.KindString, Name: mechanism,
 						Meta: map[string]any{"context": "process", "mechanism": mechanism}}, native.GetNode(process))
 
-					err = runRebuildDirectCapabilities(ctx, build, receipts)
+					// A deferred receipt at the same site can veto only the full
+					// structured extern that it actually records.
+					checkedReceipts := receipts
+					if tc.role == "stdlib" {
+						withDeferred := func(symbol string) iter.Seq2[store_pebble.ParseFacts, error] {
+							return func(yield func(store_pebble.ParseFacts, error) bool) {
+								for facts, err := range receipts {
+									if !yield(facts, err) || err != nil {
+										return
+									}
+								}
+								decoy := &graph.Edge{
+									From: caller, To: "unresolved::extern::os/exec::" + symbol,
+									Kind: graph.EdgeCalls, FilePath: path, Line: line,
+								}
+								yield(store_pebble.ParseFacts{
+									EffectiveLanguage: "python",
+									File:              graph.FileMetaRow{FilePath: "decoy.py"},
+									Edges:             []*graph.Edge{decoy},
+								}, nil)
+							}
+						}
+						err := runRebuildDirectCapabilities(ctx, build, withDeferred("Command"))
+						var refusal *store_pebble.RebuildUnknownProvenanceError
+						require.ErrorAs(t, err, &refusal)
+						require.Equal(t, uint64(1), refusal.Count)
+						reply := buildRefusal(err)
+						require.Equal(t, uint8(36), reply.Refusal)
+						require.Equal(t, uint64(1), reply.UnknownProvenance)
+						requireRebuildTestFileRows(t, build, nodes, edges)
+						checkedReceipts = withDeferred("CommandContext")
+					}
+					err = runRebuildDirectCapabilities(ctx, build, checkedReceipts)
 					if tc.role != "stdlib" {
 						var refusal *store_pebble.RebuildUnknownProvenanceError
 						require.ErrorAs(t, err, &refusal)
