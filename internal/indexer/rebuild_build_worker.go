@@ -471,6 +471,15 @@ func buildRebuildStages(
 				zap.Uint64("edges", reactNative.Edges),
 				zap.Uint64("spill_bytes", reactNative.SpillBytes))
 		}
+		nativePairing, err := resolver.RunRebuildReactNativeNativePairing(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		if err != nil {
+			return err
+		}
+		if nativePairing.Edges != 0 || nativePairing.SpillBytes != 0 {
+			logger.Info("rebuild React Native native pairing applied to private build",
+				zap.Uint64("edges", nativePairing.Edges),
+				zap.Uint64("spill_bytes", nativePairing.SpillBytes))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
