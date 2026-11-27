@@ -136,10 +136,7 @@ func ResolveCSharpInterfaceDispatchScoped(g graph.Store, scope map[string]bool) 
 	hierarchyByName := g.FindNodesByNames(hierarchyNames)
 	children := map[string][]string{}
 	for _, e := range hierarchyEdges {
-		if e == nil || e.From == "" || e.To == "" {
-			continue
-		}
-		if e.Meta != nil && e.Meta["via"] == MetaViaMethodSetInference {
+		if !csharpIfaceDeclaredArc(e) {
 			continue
 		}
 		toID := e.To
@@ -207,7 +204,7 @@ func ResolveCSharpInterfaceDispatchScoped(g graph.Store, scope map[string]bool) 
 			continue
 		}
 		m := anchorNodes[e.From]
-		if m == nil || m.Kind != graph.KindMethod || m.Language != "csharp" || !csharpIsIfaceMember(m) {
+		if !csharpIfaceDispatchAnchor(m) {
 			continue
 		}
 		key := e.To + "\x00" + m.Name
@@ -318,7 +315,7 @@ func ResolveCSharpInterfaceDispatchScoped(g graph.Store, scope map[string]bool) 
 	// the member directly, or a prior run of this pass).
 	existing := map[string]bool{}
 	for _, e := range callEdges {
-		if e == nil || e.IsSpeculative() || graph.IsUnresolvedTarget(e.To) {
+		if !csharpIfaceDispatchResolved(e) {
 			continue
 		}
 		existing[csharpCallSiteKey(e.From, e.To, e.FilePath, e.Line)] = true
@@ -327,11 +324,7 @@ func ResolveCSharpInterfaceDispatchScoped(g graph.Store, scope map[string]bool) 
 	var batch []*graph.Edge
 	seen := map[string]bool{}
 	for _, e := range callEdges {
-		if e == nil || e.IsSpeculative() || graph.IsUnresolvedTarget(e.To) {
-			continue
-		}
-		// Never re-fan from this pass's own output — real call sites only.
-		if e.Meta != nil && e.Meta[MetaSynthesizedBy] == SynthCSharpIfaceDispatch {
+		if !csharpIfaceDispatchSource(e) {
 			continue
 		}
 		fams := famsOfMember[e.To]
@@ -468,6 +461,27 @@ func csharpScopedMemberProjection(
 	return memberEdges, memberNodes, anchorNodes, true
 }
 
+func csharpIfaceDeclaredArc(e *graph.Edge) bool {
+	return e != nil && e.From != "" && e.To != "" && e.Meta["via"] != MetaViaMethodSetInference
+}
+
+func csharpIfaceDispatchAnchor(n *graph.Node) bool {
+	return n != nil && n.Kind == graph.KindMethod && n.Language == "csharp" && csharpIsIfaceMember(n)
+}
+
+func csharpIfaceDispatchResolved(e *graph.Edge) bool {
+	return e != nil && !e.IsSpeculative() && !graph.IsUnresolvedTarget(e.To)
+}
+
+// Never re-fan from this pass's own output — real call sites only.
+func csharpIfaceDispatchSource(e *graph.Edge) bool {
+	return csharpIfaceDispatchResolved(e) && e.Meta[MetaSynthesizedBy] != SynthCSharpIfaceDispatch
+}
+
+func csharpIfaceHierarchyCandidate(n *graph.Node, repo string) bool {
+	return n != nil && (n.Kind == graph.KindType || n.Kind == graph.KindInterface) && n.Language == "csharp" && n.RepoPrefix == repo
+}
+
 // csharpIsIfaceMember reports whether n is a bodyless (or default) interface
 // member declaration emitted by the C# extractor.
 func csharpIsIfaceMember(n *graph.Node) bool {
@@ -582,10 +596,7 @@ func csharpResolveHierarchyTargetPrefetched(from *graph.Node, unresolvedTo strin
 	}
 	var cand *graph.Node
 	for _, n := range byName[name] {
-		if n == nil || (n.Kind != graph.KindType && n.Kind != graph.KindInterface) {
-			continue
-		}
-		if n.Language != "csharp" || n.RepoPrefix != from.RepoPrefix {
+		if !csharpIfaceHierarchyCandidate(n, from.RepoPrefix) {
 			continue
 		}
 		if cand != nil {
