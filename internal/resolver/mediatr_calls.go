@@ -25,12 +25,8 @@ func ResolveMediatRCalls(g graph.Store) int {
 	// index: kind → request type → handler Handle methods.
 	index := map[string]map[string][]*graph.Node{"request": {}, "notification": {}}
 	for _, n := range nodesByKindsOrAll(g, graph.KindMethod, graph.KindFunction) {
-		if n == nil || n.Meta == nil {
-			continue
-		}
-		reqType, _ := n.Meta["mediatr_request_type"].(string)
-		kind, _ := n.Meta["mediatr_kind"].(string)
-		if reqType == "" || index[kind] == nil {
+		kind, reqType := mediatrHandlerKey(n)
+		if reqType == "" {
 			continue
 		}
 		index[kind][reqType] = append(index[kind][reqType], n)
@@ -43,15 +39,8 @@ func ResolveMediatRCalls(g graph.Store) int {
 	var reindex []graph.EdgeReindex
 	var batch []*graph.Edge
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if v, _ := e.Meta["via"].(string); v != mediatrVia {
-			continue
-		}
-		reqType, _ := e.Meta["mediatr_request_type"].(string)
-		kind, _ := e.Meta["mediatr_kind"].(string)
-		if reqType == "" || index[kind] == nil {
+		kind, reqType := mediatrCallKey(e)
+		if reqType == "" {
 			continue
 		}
 		cands := index[kind][reqType]
@@ -72,7 +61,7 @@ func ResolveMediatRCalls(g graph.Store) int {
 		}
 		resolved += mediatrRebind(e, handlers[0], &reindex)
 		for _, h := range handlers[1:] {
-			batch = append(batch, mediatrFanoutEdge(e, h, reqType))
+			batch = append(batch, mediatrFanoutEdge(e, h.ID, reqType))
 			resolved++
 		}
 	}
@@ -85,41 +74,70 @@ func ResolveMediatRCalls(g graph.Store) int {
 	return resolved
 }
 
-// mediatrRebind points the placeholder e at target (typed tier) or
-// re-orphans it. Returns 1 when it lands on a real handler, else 0.
+func mediatrRouteKey(meta map[string]any) (kind, reqType string) {
+	kind, _ = meta["mediatr_kind"].(string)
+	if kind != "request" && kind != "notification" {
+		return "", ""
+	}
+	reqType, _ = meta["mediatr_request_type"].(string)
+	return kind, reqType
+}
+
+func mediatrHandlerKey(n *graph.Node) (kind, reqType string) {
+	if n == nil {
+		return "", ""
+	}
+	return mediatrRouteKey(n.Meta)
+}
+
+func mediatrCallKey(e *graph.Edge) (kind, reqType string) {
+	if e == nil {
+		return "", ""
+	}
+	if v, _ := e.Meta["via"].(string); v != mediatrVia {
+		return "", ""
+	}
+	return mediatrRouteKey(e.Meta)
+}
+
+// mediatrRebind returns one for a hit, even if the Call already targets it.
 func mediatrRebind(e *graph.Edge, target *graph.Node, reindex *[]graph.EdgeReindex) int {
-	want := "unresolved::*.Handle"
-	if target != nil {
-		want = target.ID
-	}
-	if e.To == want {
-		if target != nil {
-			return 1
-		}
-		return 0
-	}
-	oldTo := e.To
-	e.To = want
+	var id string
 	hit := 0
 	if target != nil {
-		e.Origin = graph.OriginASTInferred
+		id, hit = target.ID, 1
+	}
+	oldTo := e.To
+	if rebindMediatRCall(e, id, target != nil) {
+		*reindex = append(*reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+	}
+	return hit
+}
+
+func rebindMediatRCall(e *graph.Edge, target string, matched bool) bool {
+	if !matched {
+		target = "unresolved::*.Handle"
+	}
+	if e.To == target {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	if matched {
 		e.Confidence = ConfidenceTyped
 		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceTyped)
 		StampSynthesizedTyped(e, SynthMediatR)
-		hit = 1
 	} else {
-		e.Origin = graph.OriginASTInferred
 		e.Confidence = 0
 		e.ConfidenceLabel = ""
 		UnstampSynthesized(e)
 	}
-	*reindex = append(*reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
-	return hit
+	return true
 }
 
-func mediatrFanoutEdge(e *graph.Edge, handler *graph.Node, reqType string) *graph.Edge {
+func mediatrFanoutEdge(e *graph.Edge, handler, reqType string) *graph.Edge {
 	return &graph.Edge{
-		From: e.From, To: handler.ID, Kind: graph.EdgeCalls,
+		From: e.From, To: handler, Kind: graph.EdgeCalls,
 		FilePath: e.FilePath, Line: e.Line,
 		Origin:          graph.OriginASTInferred,
 		Confidence:      ConfidenceTyped,
