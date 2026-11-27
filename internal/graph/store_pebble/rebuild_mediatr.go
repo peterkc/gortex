@@ -3,15 +3,13 @@ package store_pebble
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"iter"
-	"os"
-	"path/filepath"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/pathkey"
 )
 
 var ErrRebuildMediatR = errors.New("pebble rebuild MediatR stage failed")
@@ -36,9 +34,8 @@ type RebuildMediatRRules struct {
 
 type rebuildMediatRPass struct {
 	rebuildStoreFactoryPass
-	fanout         func(*graph.Edge, string, string) *graph.Edge
-	adds           uint64
-	orderedSources uint64
+	fanout func(*graph.Edge, string, string) *graph.Edge
+	adds   uint64
 }
 
 // RebuildMediatR runs once on a fresh private graph, after Spring events.
@@ -107,15 +104,8 @@ func (b *BuildStore) RebuildMediatR(ctx context.Context, receipts iter.Seq2[Pars
 	if err := p.proveCalls(ctx, receipts); err != nil {
 		return stats, err
 	}
-	var run string
 	if stats.Adds != 0 {
-		dir, mkdirErr := os.MkdirTemp(filepath.Join(b.scratchParent, "pending"), "mediatr-fanout-")
-		if mkdirErr != nil {
-			return stats, mkdirErr
-		}
-		defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
-		run = filepath.Join(dir, "fanout.sst")
-		if err := p.prepareFanout(ctx, run); err != nil {
+		if err := p.prepareFanout(ctx); err != nil {
 			return stats, err
 		}
 	}
@@ -123,10 +113,7 @@ func (b *BuildStore) RebuildMediatR(ctx context.Context, receipts iter.Seq2[Pars
 		if err := p.apply(ctx, stats.Moves); err != nil {
 			return err
 		}
-		if run == "" {
-			return nil
-		}
-		return p.applyFanout(ctx, run)
+		return p.applyFanout(ctx)
 	})
 	return stats, err
 }
@@ -305,7 +292,7 @@ func (p *rebuildMediatRPass) planNotification(ctx context.Context, r row, e *gra
 		return err
 	}
 	if caller != nil {
-		if err := p.want(p.key('n', caller.ID)); err != nil {
+		if err := p.want(p.key('N', caller.ID)); err != nil {
 			return err
 		}
 	}
@@ -320,8 +307,12 @@ func (p *rebuildMediatRPass) proveCalls(ctx context.Context, receipts iter.Seq2[
 		if err := p.record(ctx, facts); err != nil {
 			return err
 		}
-		if p.adds != 0 {
-			if err := p.orderNotifications(ctx, facts); err != nil {
+		file := pathkey.Normalize(facts.File.FilePath)
+		for _, raw := range facts.Nodes {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := p.recordNotificationCaller(raw, file, facts.EffectiveLanguage); err != nil {
 				return err
 			}
 		}
@@ -372,8 +363,22 @@ func (p *rebuildMediatRPass) proveCalls(ctx context.Context, receipts iter.Seq2[
 	return refused.err()
 }
 
-// A producer proof certifies the installed payload, not the raw source
-// ordinal. Repeating this stage on its own output must not invent that order.
+func (p *rebuildMediatRPass) recordNotificationCaller(raw *graph.Node, file, lang string) error {
+	key := p.key('N', raw.ID)
+	state, err := p.state(key)
+	if err != nil || state == 0 {
+		return err
+	}
+	live, err := p.node(raw.ID)
+	if err != nil {
+		return err
+	}
+	exact := lang != "" && raw.FilePath == file && live != nil && live.ID == raw.ID && live.WorkspaceID == raw.WorkspaceID
+	return noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(exact))
+}
+
+// A producer proof certifies the installed payload, not an original source.
+// Repeating this stage on its own output still needs the raw source proof.
 func (p *rebuildMediatRPass) notificationProved(ctx context.Context, old []byte, e *graph.Edge, anchor bool) (bool, error) {
 	raw, err := rebuildReceiptKey(p.b.pending, old)
 	if errors.Is(err, ErrRebuildUnknownProvenance) {
@@ -396,7 +401,7 @@ func (p *rebuildMediatRPass) notificationProved(ctx context.Context, old []byte,
 		return false, err
 	}
 	if caller != nil {
-		state, err := p.state(p.key('n', caller.ID))
+		state, err := p.state(p.key('N', caller.ID))
 		if err != nil || state != rebuildScratchExact {
 			return false, err
 		}
@@ -414,80 +419,22 @@ func (p *rebuildMediatRPass) notificationProved(ctx context.Context, old []byte,
 	return ok, err
 }
 
-// A and z track the first exact raw receipt for each notification source.
-// Only those receipts can schedule fanout. Like reindexes, this witnesses
-// native order when the original SQLite insertion order is retained.
-func (p *rebuildMediatRPass) orderNotifications(ctx context.Context, facts ParseFacts) error {
-	for _, raw := range facts.Edges {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if raw.Kind != graph.EdgeCalls || p.rules.call(raw).group != rebuildMediatRNotification {
-			continue
-		}
-		claim, err := p.marked(append(p.column('r'), pendingEdgeKey(raw)...))
-		if err != nil {
-			return err
-		}
-		if len(claim) <= 1 || claim[0] != rebuildScratchExact {
-			continue
-		}
-		old := claim[1:]
-		key := append(p.key('A'), old...)
-		seen, err := p.present(key)
-		if err != nil {
-			return err
-		}
-		if seen {
-			continue
-		}
-		val, err := pendingGet(p.b.pending, append(p.key('h'), old...), copyValue)
-		if err != nil {
-			return err
-		}
-		if val == nil {
-			continue
-		}
-		if err := p.put(key, nil); err != nil {
-			return err
-		}
-		if err := p.put(binary.BigEndian.AppendUint64(p.key('z'), p.orderedSources), old); err != nil {
-			return err
-		}
-		p.orderedSources++
-	}
-	return nil
-}
-
-// The fanout run is sorted by receipt, then handler ID. Prepare it before
-// graph writes so an invalid proposal cannot follow an installed move.
-func (p *rebuildMediatRPass) prepareFanout(ctx context.Context, path string) (err error) {
-	w, err := newLinkTable(path)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, w.Close()) }()
-	var adds uint64
-	if err := pendingVisit(ctx, p.b.pending, p.key('z'), func(r row) error {
-		old := r.value
-		val, err := pendingGet(p.b.pending, append(p.key('h'), old...), copyValue)
-		if err != nil {
-			return err
-		}
-		if val == nil {
-			return invalid("MediatR fanout source missing")
-		}
-		e, err := p.decodeKeyedEdge(old, val)
+// Encode all proposals before moves. A handler belongs to one message type,
+// so offers sharing a complete edge key have identical fanout payloads.
+func (p *rebuildMediatRPass) prepareFanout(ctx context.Context) error {
+	prefix := p.key('h')
+	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		e, err := p.decodeKeyedEdge(r.key[len(prefix):], r.value)
 		if err != nil {
 			return err
 		}
 		call := p.rules.call(e)
-		prefix, _, _, err := p.notification(e.From, call.member)
+		posting, _, _, err := p.notification(e.From, call.member)
 		if err != nil {
 			return err
 		}
 		first := true
-		return p.handlers(ctx, prefix, func(id string) error {
+		return p.handlers(ctx, posting, func(id string) error {
 			if first {
 				first = false
 				return nil
@@ -497,28 +444,17 @@ func (p *rebuildMediatRPass) prepareFanout(ctx context.Context, path string) (er
 			if err != nil {
 				return err
 			}
-			if err := p.input(pendingEdgeKey(add), val); err != nil {
+			key := pendingEdgeKey(add)
+			if err := p.input(key, val); err != nil {
 				return err
 			}
-			key := binary.BigEndian.AppendUint64(nil, adds)
-			adds++
-			return w.Set(key, val)
+			return p.b.pending.Set(append(p.key('z'), key...), val, pebble.NoSync)
 		})
-	}); err != nil {
-		return err
-	}
-	if adds != p.adds {
-		return invalid("MediatR ordered fanout count does not match plan")
-	}
-	return nil
+	})
 }
 
-func (p *rebuildMediatRPass) applyFanout(ctx context.Context, path string) error {
-	return visitLinkRun(ctx, path, nil, func(r row) error {
-		e, err := decodeEdge(r.value)
-		if err != nil {
-			return err
-		}
+func (p *rebuildMediatRPass) applyFanout(ctx context.Context) error {
+	return visitRebuildScratchKeyedEdges(ctx, p.b.pending, p.key('z'), 0, "MediatR fanout key", func(e *graph.Edge) error {
 		occupied, err := p.present(pendingEdgeKey(e))
 		if err != nil || occupied {
 			return err

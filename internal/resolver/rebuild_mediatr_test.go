@@ -223,3 +223,31 @@ func TestRebuildMediatRNotificationProofTerms(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildMediatRNotificationCallerWorkspace(t *testing.T) {
+	const file = "Notifications.cs"
+	caller := &graph.Node{ID: "caller", Kind: graph.KindMethod, FilePath: file, Language: "csharp"}
+	handler := &graph.Node{ID: "handler", Kind: graph.KindMethod, FilePath: file, Language: "csharp",
+		Meta: map[string]any{"mediatr_kind": "notification", "mediatr_request_type": "Message"}}
+	call := &graph.Edge{From: caller.ID, To: "unresolved::old", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
+		Meta: map[string]any{"via": mediatrVia, "mediatr_kind": "notification", "mediatr_request_type": "Message"}}
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMediatR})
+	require.NoError(t, err)
+	for _, workspace := range []string{"", "other"} {
+		b := openRebuildGRPCBuild(t, rebuildEventFacts(file, "csharp", []*graph.Node{caller, handler}, call))
+		before := rebuildEventSavedRows(t, b)
+		raw := *caller
+		raw.FilePath, raw.WorkspaceID = "Other.cs", workspace
+		receipts := rebuildGRPCReceipts(rebuildEventFacts(file, "csharp", []*graph.Node{handler}, call),
+			rebuildEventFacts(raw.FilePath, "csharp", []*graph.Node{&raw}))
+		stats, err := RunRebuildMediatR(t.Context(), b, receipts, selection)
+		if workspace == "" {
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildMediatRStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+			continue
+		}
+		require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+		require.Zero(t, stats)
+		require.Equal(t, before, rebuildEventSavedRows(t, b))
+	}
+}
