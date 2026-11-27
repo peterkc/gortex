@@ -195,7 +195,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildSpringEvents,
 	store_pebble.ErrRebuildMediatR,
 	nil, // 69: reserved
-	nil, // 70: reserved
+	store_pebble.ErrRebuildCSharpPartial,
 	store_pebble.ErrRebuildSidekiq,
 }
 

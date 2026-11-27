@@ -56,8 +56,8 @@ func (b *BuildStore) RebuildOverrides(ctx context.Context, receipts iter.Seq2[Pa
 	parentKind := func(k graph.EdgeKind) bool {
 		return k == graph.EdgeExtends || k == graph.EdgeImplements || k == graph.EdgeComposes
 	}
-	edgeProof := func(e *graph.Edge) []byte {
-		return appendKeyLine(key('e', string(e.Kind), e.From, e.FilePath), e.Line)
+	edgeProof := func(e *graph.Edge, from string) []byte {
+		return appendKeyLine(key('e', string(e.Kind), from, e.FilePath), e.Line)
 	}
 	for facts, err := range receipts {
 		if err != nil {
@@ -90,7 +90,7 @@ func (b *BuildStore) RebuildOverrides(ctx context.Context, receipts iter.Seq2[Pa
 				return err
 			}
 			if e.Kind == graph.EdgeMemberOf || e.Kind == graph.EdgeOverrides || parentKind(e.Kind) {
-				if err := mark(edgeProof(e), proof(e.FilePath)); err != nil {
+				if err := mark(edgeProof(e, e.From), proof(e.FilePath)); err != nil {
 					return err
 				}
 			}
@@ -118,7 +118,7 @@ func (b *BuildStore) RebuildOverrides(ctx context.Context, receipts iter.Seq2[Pa
 		if err != nil {
 			return err
 		}
-		ep, err := get(edgeProof(e))
+		ep, err := get(edgeProof(e, e.From))
 		if err != nil {
 			return err
 		}
@@ -191,7 +191,11 @@ func (b *BuildStore) RebuildOverrides(ctx context.Context, receipts iter.Seq2[Pa
 		if err != nil || bytes.Equal(pp, []byte{deferred}) {
 			return err
 		}
-		ep, err := get(edgeProof(e))
+		from, err := b.csharpPartialReceiptSource(e)
+		if err != nil {
+			return err
+		}
+		ep, err := get(edgeProof(e, from))
 		if err != nil {
 			return err
 		}
@@ -289,7 +293,7 @@ func (b *BuildStore) RebuildOverrides(ctx context.Context, receipts iter.Seq2[Pa
 		}
 		good := true
 		if existing != nil {
-			p, err := get(edgeProof(existing))
+			p, err := get(edgeProof(existing, existing.From))
 			if err != nil {
 				return err
 			}
