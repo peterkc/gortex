@@ -91,3 +91,77 @@ func TestRebuildLaravelScriptHostReceipt(t *testing.T) {
 	require.Equal(t, 1, ResolveLaravelEventCalls(native))
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 }
+
+func TestRebuildLaravelListenMapScope(t *testing.T) {
+	const file, lang = "app.php", "php"
+	publisher := rebuildEventNode(file, "publish", lang, "")
+	provider := rebuildEventNode(file, "Provider", lang, "")
+	provider.Kind = graph.KindType
+	provider.Meta = map[string]any{"laravel_listen_map": "Notice=>Listener;Other=>Unrelated"}
+	handle := rebuildEventNode(file, "Listener.handle", lang, "")
+	handle.Kind, handle.Name = graph.KindMethod, "handle"
+	member := &graph.Edge{From: handle.ID, To: file + "::Listener", Kind: graph.EdgeMemberOf, FilePath: file, Line: 3}
+	for _, tc := range []struct {
+		name, event, rawMap string
+		want               string
+		refuse             bool
+	}{
+		{"unrelated entry changed", "Notice", "Notice=>Listener;Other=>Another", handle.ID, false},
+		{"empty elected event with another activation", "Missing", "Else=>Another", "unresolved::*.handle", false},
+		{"no activation witness", "Missing", "", "", true},
+		{"deciding map pair lost", "Notice", "Notice=>Unrelated", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := &graph.Edge{
+				From: publisher.ID, To: publisher.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 4,
+				Meta: map[string]any{"via": laravelEventVia, "laravel_event_type": tc.event},
+			}
+			facts := rebuildEventFacts(file, lang, []*graph.Node{publisher, provider, handle}, member, call)
+			b, native := openRebuildEventStores(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			raw := *provider
+			raw.Meta = map[string]any{"laravel_listen_map": tc.rawMap}
+			facts.Nodes = []*graph.Node{publisher, &raw, handle}
+			stats, err := RunRebuildLaravelEvent(t.Context(), b, rebuildGRPCReceipts(facts), rebuildLaravelTestSelection(t))
+			if tc.refuse {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			ResolveLaravelEventCalls(native)
+			saved := rebuildEventSavedRows(t, b)
+			require.Equal(t, rebuildEventSQLiteRows(native), saved)
+			for _, e := range saved.edges {
+				if e.Kind == graph.EdgeCalls {
+					require.Equal(t, tc.want, e.To)
+				}
+			}
+		})
+	}
+}
+
+func TestRebuildLaravelUncertainOwnerScope(t *testing.T) {
+	const file, lang = "app.php", "php"
+	publisher := rebuildEventNode(file, "publish", lang, "")
+	provider := rebuildEventNode(file, "Provider", lang, "")
+	provider.Kind = graph.KindType
+	provider.Meta = map[string]any{"laravel_listen_map": "Notice=>Listener"}
+	handle := rebuildEventNode(file, "Listener.handle", lang, "")
+	handle.Kind, handle.Name = graph.KindMethod, "handle"
+	handle.Meta = map[string]any{"laravel_listener_type": "Notice"}
+	other := &graph.Edge{From: handle.ID, To: file + "::Other", Kind: graph.EdgeMemberOf, FilePath: file, Line: 2}
+	member := &graph.Edge{From: handle.ID, To: file + "::Listener", Kind: graph.EdgeMemberOf, FilePath: file, Line: 3}
+	call := &graph.Edge{
+		From: publisher.ID, To: publisher.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 4,
+		Meta: map[string]any{"via": laravelEventVia, "laravel_event_type": "Notice"},
+	}
+	facts := rebuildEventFacts(file, lang, []*graph.Node{publisher, provider, handle}, other, member, call)
+	b, native := openRebuildEventStores(t, facts)
+	facts.Edges = facts.Edges[1:] // uncertainty cannot add another listener ID
+	_, err := RunRebuildLaravelEvent(t.Context(), b, rebuildGRPCReceipts(facts), rebuildLaravelTestSelection(t))
+	require.NoError(t, err)
+	require.Equal(t, 1, ResolveLaravelEventCalls(native))
+	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+}

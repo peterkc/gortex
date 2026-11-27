@@ -290,21 +290,11 @@ func (p *rebuildLaravelEventPass) recordNode(n *graph.Node) error {
 	if err != nil || live == nil {
 		return err
 	}
-	if n.Kind == graph.KindType && (live.Kind != graph.KindType || p.rules.ListenMap(n) != p.rules.ListenMap(live)) {
-		// A changed provider cannot prove a live route from another provider.
-		p.rules.Entries(p.rules.ListenMap(n), func(event, _ string) {
-			if err == nil {
-				err = p.put(p.key('x', event), nil)
-			}
-		})
-		return err
-	}
 	active, err := p.roles(n, 'T', 'Q')
 	if err != nil {
 		return err
 	}
-	if active && (n.Kind == graph.KindType || laravelCallable(live.Kind) && p.rules.ListenerType(live) != "" &&
-		p.rules.SimpleName(p.rules.ListenerType(n)) == p.rules.SimpleName(p.rules.ListenerType(live))) {
+	if active {
 		if err := p.put(p.column('a'), nil); err != nil {
 			return err
 		}
@@ -372,9 +362,12 @@ func (p *rebuildLaravelEventPass) joinHandles(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		class, proved, err := p.owner(ctx, id)
+		class, proved, uncertain, err := p.owner(ctx, id)
 		if err != nil {
 			return err
+		}
+		if uncertain {
+			return p.possibleOwners(ctx, id)
 		}
 		exact, err := p.present(p.key('H', id))
 		if err != nil {
@@ -402,11 +395,24 @@ func (p *rebuildLaravelEventPass) joinHandles(ctx context.Context) error {
 		if err != nil || live {
 			return err
 		}
-		class, _, err := p.owner(ctx, id)
+		class, exact, uncertain, err := p.owner(ctx, id)
 		if err != nil {
 			return err
 		}
+		if uncertain || !exact {
+			return p.possibleOwners(ctx, id)
+		}
 		return p.join(ctx, 'Q', 'T', class, id)
+	})
+}
+
+func (p *rebuildLaravelEventPass) possibleOwners(ctx context.Context, id string) error {
+	return p.members(ctx, id, func(_ row, e *graph.Edge) error {
+		class := p.rules.SimpleName(e.To)
+		if err := p.join(ctx, 'q', 'x', class, id); err != nil {
+			return err
+		}
+		return p.join(ctx, 'Q', 'x', class, id)
 	})
 }
 
@@ -443,10 +449,9 @@ func (p *rebuildLaravelEventPass) classUsed(ctx context.Context, class string) (
 	return false, nil
 }
 
-func (p *rebuildLaravelEventPass) owner(ctx context.Context, id string) (string, bool, error) {
+func (p *rebuildLaravelEventPass) owner(ctx context.Context, id string) (string, bool, bool, error) {
 	var owners rebuildMemberOwners
 	var mapped bool
-	var relevant graph.EdgeIdentity
 	err := p.members(ctx, id, func(r row, e *graph.Edge) error {
 		name := p.rules.SimpleName(e.To)
 		owners.observe(name)
@@ -455,9 +460,6 @@ func (p *rebuildLaravelEventPass) owner(ctx context.Context, id string) (string,
 			mapped, err = p.classUsed(ctx, name)
 			if err != nil {
 				return err
-			}
-			if mapped {
-				relevant = graph.EdgeIdentityFor(e)
 			}
 		}
 		raw, err := rebuildReceiptKey(p.b.pending, r.key)
@@ -470,16 +472,12 @@ func (p *rebuildLaravelEventPass) owner(ctx context.Context, id string) (string,
 		return owners.prove(&p.rebuildCallMoves, raw, r.key, name)
 	})
 	if err != nil || !owners.seen {
-		return "", !owners.seen, err
+		return "", !owners.seen, false, err
 	}
 	if !mapped {
-		return owners.class, owners.exact, nil
+		return owners.class, owners.exact, false, nil
 	}
-	name, exact, uncertain, err := owners.elect(&p.rebuildCallMoves, id, 'w', nil)
-	if uncertain {
-		return "", false, &RebuildUnknownProvenanceError{Count: 1, First: relevant}
-	}
-	return name, exact, err
+	return owners.elect(&p.rebuildCallMoves, id, 'w', nil)
 }
 
 func (p *rebuildLaravelEventPass) listeners(ctx context.Context, event string, visit func(string, bool) error) error {
@@ -497,11 +495,9 @@ func (p *rebuildLaravelEventPass) listeners(ctx context.Context, event string, v
 }
 
 func (p *rebuildLaravelEventPass) listenersProved(ctx context.Context, event string) (bool, error) {
-	changed, err := p.present(p.key('x', event))
-	if err != nil || changed {
-		return false, err
-	}
-	for _, pair := range [...][2]byte{{'t', 'T'}, {'T', 't'}} {
+	// A possible owner adds no new output if the same listener is proved
+	// independently, for example by its typed listener declaration.
+	for _, pair := range [...][2]byte{{'t', 'T'}, {'T', 't'}, {'x', 'T'}} {
 		prefix := p.key(pair[0], event)
 		other := p.key(pair[1], event)
 		var missing bool
@@ -514,6 +510,20 @@ func (p *rebuildLaravelEventPass) listenersProved(ctx context.Context, event str
 		}
 	}
 	return true, nil
+}
+
+func (p *rebuildLaravelEventPass) hasPossibleListener(ctx context.Context, event string) (bool, error) {
+	prefix, proved := p.key('x', event), p.key('T', event)
+	var possible bool
+	err := p.visit(ctx, prefix, func(r row) error {
+		if possible {
+			return nil
+		}
+		known, err := p.present(append(proved[:len(proved):len(proved)], r.key[len(prefix):]...))
+		possible = !known
+		return err
+	})
+	return possible, err
 }
 
 func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
@@ -569,7 +579,11 @@ func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
 			}); err != nil {
 				return err
 			}
-			if p.rules.Rebind(&before, first, matched != 0) || matched > 1 {
+			possible, err := p.hasPossibleListener(ctx, p.rules.SimpleName(typ))
+			if err != nil {
+				return err
+			}
+			if possible || p.rules.Rebind(&before, first, matched != 0) || matched > 1 {
 				refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			}
 			return nil

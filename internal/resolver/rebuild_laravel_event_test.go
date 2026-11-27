@@ -126,7 +126,7 @@ class OrderController {
 	require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 	var missing *store_pebble.RebuildUnknownProvenanceError
 	require.True(t, errors.As(err, &missing))
-	require.Equal(t, foreign.ID, missing.First.From)
+	require.Equal(t, file+"::OrderController.ship", missing.First.From)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildEventSavedRows(t, b), "incomplete owner proof must leave rows unchanged")
 
