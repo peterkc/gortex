@@ -448,7 +448,7 @@ func (p *rebuildObserverPass) apply(ctx context.Context) error {
 		if !bytes.Equal(r.key[len(prefix):], pendingEdgeKey(e)) {
 			return invalid("Observer staged call key")
 		}
-		if err := p.b.putEdge(e); err != nil {
+		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofObserver}); err != nil {
 			return err
 		}
 		p.stats.Edges++

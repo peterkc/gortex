@@ -179,6 +179,9 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 				require.NoError(t, err)
 				want[string(key)] = string(raw)
 				want[string(pendingReverseKey(e, key))] = string(key)
+				custody, err := readRebuildEdgeCustody(b.pending, key)
+				require.NoError(t, err)
+				require.Equal(t, rebuildEdgeCustody{proof: rebuildProofObserver}, custody)
 			}
 			require.Equal(t, want, actualRows())
 		})

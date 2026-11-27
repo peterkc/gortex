@@ -489,6 +489,15 @@ func buildRebuildStages(
 				zap.Uint64("edges", observer.Edges),
 				zap.Uint64("spill_bytes", observer.SpillBytes))
 		}
+		closureCollection, err := resolver.RunRebuildClosureCollection(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		if err != nil {
+			return err
+		}
+		if closureCollection.Edges != 0 || closureCollection.SpillBytes != 0 {
+			logger.Info("rebuild closure collection applied to private build",
+				zap.Uint64("edges", closureCollection.Edges),
+				zap.Uint64("spill_bytes", closureCollection.SpillBytes))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
