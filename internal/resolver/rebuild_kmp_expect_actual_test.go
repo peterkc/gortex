@@ -257,7 +257,14 @@ func TestRebuildKMPExpectActualNeedsProvedKotlinMarker(t *testing.T) {
 	wrongLanguage, wrongFile := *marker, *marker
 	wrongLanguage.Language = "java"
 	wrongFile.FilePath = "other.kt"
-	proofs := [][]store_pebble.ParseFacts{facts[:2]}
+	// Keep the receipt file and the live node path correct. Only the
+	// frozen node path disagrees, and the codec preserves that path.
+	wrongNodeFile := *facts[2].Nodes[0]
+	wrongNodeFile.FilePath = "other.kt"
+	wrongNodeClaim := facts[2]
+	wrongNodeClaim.Nodes = []*graph.Node{&wrongNodeFile}
+	wrongNodeClaim = roundTripRebuildRNBridgeFacts(t, wrongNodeClaim)
+	proofs := [][]store_pebble.ParseFacts{facts[:2], {facts[0], facts[1], wrongNodeClaim}}
 	for _, decoy := range []*graph.Node{&wrongLanguage, &wrongFile} {
 		claim := rebuildEventFacts(decoy.FilePath, decoy.Language, []*graph.Node{decoy})
 		claim = roundTripRebuildRNBridgeFacts(t, claim)

@@ -272,8 +272,7 @@ func (p *rebuildKMPPass) noteReceipt(raw *graph.Node, file, language string) err
 		}
 	}
 	if markerState != 0 {
-		// The native gate reads the node language, not the receipt's extractor ID.
-		proved := live != nil && live.ID == raw.ID && live.Language == raw.Language && raw.FilePath == file && live.FilePath == file
+		proved := sameRebuildLanguageMarker(raw, live, file)
 		return noteRebuildScratchState(p.put, marker, markerState, rebuildScratchProofBit(proved))
 	}
 	return nil

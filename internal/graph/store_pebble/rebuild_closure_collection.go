@@ -275,8 +275,7 @@ func (p *rebuildClosurePass) noteApple(raw *graph.Node, file string) error {
 	if err != nil {
 		return err
 	}
-	// The gate reads Language, not the marker's role, Kind, or Name.
-	proved := live != nil && live.ID == raw.ID && raw.FilePath == file && live.FilePath == file && live.Language == raw.Language
+	proved := sameRebuildLanguageMarker(raw, live, file)
 	return noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(proved))
 }
 

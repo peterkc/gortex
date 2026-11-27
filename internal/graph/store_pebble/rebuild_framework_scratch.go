@@ -20,6 +20,11 @@ func (b *BuildStore) putRebuildScratch(key, value []byte, limit int, label strin
 
 const rebuildScratchExact = rebuildCapabilityWanted | rebuildCapabilityProved
 
+// The admission witness uses the node language, not the extractor ID or role.
+func sameRebuildLanguageMarker(raw, live *graph.Node, file string) bool {
+	return live != nil && live.ID == raw.ID && raw.FilePath == file && live.FilePath == file && live.Language == raw.Language
+}
+
 func rebuildScratchState(db pebble.Reader, key []byte, malformed string) (byte, error) {
 	return pendingGet(db, key, func(raw []byte) (byte, error) {
 		if len(raw) != 1 {
