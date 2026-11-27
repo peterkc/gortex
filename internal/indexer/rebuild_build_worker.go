@@ -788,6 +788,13 @@ func buildRebuildStages(
 		if vaporMoves != 0 {
 			logger.Info("rebuild Vapor applied to private build", zap.Uint64("moves", vaporMoves))
 		}
+		goFrameMoves, err := resolver.RunRebuildGoFrame(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if goFrameMoves != 0 {
+			logger.Info("rebuild GoFrame applied to private build", zap.Uint64("moves", goFrameMoves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

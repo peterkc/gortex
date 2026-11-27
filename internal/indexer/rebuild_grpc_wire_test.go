@@ -60,6 +60,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"SwiftUI", store_pebble.ErrRebuildSwiftUI, 85},
 		{"UIKit", store_pebble.ErrRebuildUIKit, 86},
 		{"Vapor", store_pebble.ErrRebuildVapor, 87},
+		{"GoFrame", store_pebble.ErrRebuildGoFrame, 88},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {

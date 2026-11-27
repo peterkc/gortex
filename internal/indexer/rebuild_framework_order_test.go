@@ -68,6 +68,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"SwiftUI", "moves", 1},
 		{"UIKit", "moves", 1},
 		{"Vapor", "moves", 1},
+		{"GoFrame", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name        string
@@ -798,6 +799,14 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	vaporFacts := receipt([]*graph.Node{vaporCaller, vaporTarget},
 		edge(vaporCaller, "unresolved::"+vaporTarget.Name, graph.EdgeInstantiates, 2, nil))
 
+	const goFramePath = "goframe_harness.go"
+	goFrameRoute := node(goFramePath, "go", "route::goframe::GET::/harness", graph.KindContract, 2)
+	goFrameHandler := node(goFramePath, "go", "ServeHarness", graph.KindMethod, 4)
+	goFrameHandler.Meta = map[string]any{"goframe_request_type": "HarnessRequest", "goframe_request_pkg": "harness"}
+	goFrameFacts := receipt([]*graph.Node{goFrameRoute, goFrameHandler},
+		edge(goFrameRoute, "unresolved::*.HarnessRequest", graph.EdgeCalls, 2,
+			map[string]any{"via": "goframe-route", "goframe_request_type": "HarnessRequest", "goframe_request_pkg": "harness"}))
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -809,6 +818,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
 		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts, railsFacts,
-		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, uikitFacts, vaporFacts,
+		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, uikitFacts, vaporFacts, goFrameFacts,
 	}
 }

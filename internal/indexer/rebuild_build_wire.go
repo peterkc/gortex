@@ -213,6 +213,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildSwiftUI,
 	store_pebble.ErrRebuildUIKit,
 	store_pebble.ErrRebuildVapor,
+	store_pebble.ErrRebuildGoFrame,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
