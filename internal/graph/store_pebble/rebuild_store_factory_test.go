@@ -1,0 +1,355 @@
+package store_pebble
+
+import (
+	"iter"
+	"strings"
+	"testing"
+
+	"github.com/cockroachdb/pebble/v2"
+	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/graph"
+)
+
+const (
+	storeFactoryTestBinding = "useStore"
+	storeFactoryTestMember  = "reset"
+	storeFactoryTestStub    = "unresolved::*.reset"
+)
+
+func TestRebuildStoreFactoryRejectsInvalidInputs(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	before := rebuildFrameworkCustodyRows(t, b)
+	for _, input := range []string{"receipts", "action", "stub", "getter", "rebind"} {
+		t.Run(input, func(t *testing.T) {
+			receipts := unreadStoreFactoryReceipts(t)
+			rules := storeFactoryTestRules()
+			switch input {
+			case "receipts":
+				receipts = nil
+			case "action":
+				rules.Action = nil
+			case "stub":
+				rules.Stub = nil
+			case "getter":
+				rules.Getter = nil
+			case "rebind":
+				rules.Rebind = nil
+			}
+			stats, err := b.RebuildStoreFactory(t.Context(), receipts, rules)
+			require.ErrorIs(t, err, ErrRebuildStoreFactory)
+			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+			require.ErrorContains(t, err, "invalid Store Factory inputs")
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildStoreFactoryRejectsOccupiedScratch(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	require.NoError(t, b.pending.Set(rebuildStoreFactoryKey('z'), []byte("sentinel"), pebble.NoSync))
+	before := rebuildFrameworkCustodyRows(t, b)
+	stats, err := b.RebuildStoreFactory(t.Context(), unreadStoreFactoryReceipts(t), storeFactoryTestRules())
+	require.ErrorIs(t, err, ErrRebuildStoreFactory)
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "Store Factory scratch range occupied")
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func TestRebuildStoreFactoryRowCaps(t *testing.T) {
+	large := strings.Repeat("x", rebuildStoreFactoryRowBytes)
+	for _, tc := range []struct{ name, row string }{
+		{"action", "node row"},
+		{"getter", "node row"},
+		{"caller", "node row"},
+		{"unrelated node", ""},
+		{"owned Call", "edge row"},
+		{"foreign Call", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := storeFactoryTestCall(storeFactoryTestStub, 2)
+			action := storeFactoryTestAction("store.ts::reset", "store.ts", "workspace")
+			b, _ := seedSyntheticCustody(t, producerProofFacts(action))
+			var key, raw []byte
+			var err error
+			switch tc.name {
+			case "owned Call", "foreign Call":
+				call.Context = large
+				if tc.name == "foreign Call" {
+					delete(call.Meta, "via")
+				}
+				key = pendingEdgeKey(call)
+				raw, err = encodeEdge(call)
+			default:
+				node := action
+				switch tc.name {
+				case "getter", "unrelated node":
+					node = storeFactoryTestGetter("getter", "store.ts")
+					if tc.name == "unrelated node" {
+						node.Name = "unrelated"
+					}
+				case "caller":
+					node = storeFactoryTestCaller()
+					b.AddEdge(call)
+				}
+				node.Meta["large"] = large
+				key = pendingNodeKey(node.ID)
+				raw, err = encodeNode(node)
+			}
+			require.NoError(t, err)
+			require.Greater(t, len(key)+len(raw), rebuildStoreFactoryRowBytes)
+			require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildStoreFactory(t.Context(), unreadStoreFactoryReceipts(t), storeFactoryTestRules())
+			if tc.row == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, ErrRebuildStoreFactory)
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "Store Factory "+tc.row)
+			}
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildStoreFactoryStaleCustody(t *testing.T) {
+	for _, name := range []string{"stationary", "moving", "malformed"} {
+		t.Run(name, func(t *testing.T) {
+			action := storeFactoryTestAction("store.ts::reset", "store.ts", "")
+			raw := storeFactoryTestCall(action.ID, 2)
+			b, receipts := seedSyntheticCustody(t, storeFactoryTestSource(raw), producerProofFacts(action))
+			mover := *raw
+			mover.To = "alias"
+			require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: &mover, OldTo: raw.To}}))
+			b.AddEdge(raw)
+
+			// A producer stamp binds the payload digest. Raw lineage alone
+			// does not. Only the alias may claim the raw key when the
+			// stationary incumbent has a stale producer stamp.
+			suspect := raw
+			if name == "moving" {
+				suspect = &mover
+			}
+			require.NoError(t, b.withWrites(func() error {
+				return b.addEdgeWithCustody(suspect, rebuildEdgeCustody{proof: rebuildProofReceiver})
+			}))
+			key := pendingEdgeKey(suspect)
+			recorder := rebuildLinkRecorderKey(key)
+			switch name {
+			case "malformed":
+				require.NoError(t, b.pending.Set(recorder, []byte{rebuildEdgeProofFormat}, pebble.NoSync))
+			default:
+				changed := *suspect
+				changed.Context = "new payload without new custody digest"
+				val, err := encodeEdge(&changed)
+				require.NoError(t, err)
+				require.NoError(t, b.pending.Set(key, val, pebble.NoSync))
+				_, err = readRebuildEdgeCustody(b.pending, key)
+				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildStoreFactory(t.Context(), receipts, storeFactoryTestRules())
+			switch name {
+			case "stationary":
+				require.NoError(t, err)
+				require.Equal(t, RebuildStoreFactoryStats{Stubs: 2, Resolved: 2, Moves: 1}, stats)
+				old := pendingEdgeKey(&mover)
+				delete(before, string(old))
+				delete(before, string(pendingReverseKey(&mover, old)))
+				delete(before, string(rebuildLinkRecorderKey(old)))
+			case "moving":
+				requireStoreFactoryProofRefusal(t, err, stats, 1, raw)
+			case "malformed":
+				require.ErrorIs(t, err, ErrRebuildStoreFactory)
+				require.ErrorIs(t, err, errInvalidRecord)
+				require.ErrorContains(t, err, "edge custody format")
+				require.Zero(t, stats)
+			}
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildStoreFactoryRejectsStationaryRawClaimCollision(t *testing.T) {
+	// The stationary key sorts between the aliases in the Call scan.
+	for _, alias := range []string{"a-mover", "z-mover"} {
+		t.Run(alias, func(t *testing.T) {
+			action := storeFactoryTestAction("middle", "store.ts", "")
+			raw := storeFactoryTestCall(action.ID, 2)
+			b, receipts := seedSyntheticCustody(t, storeFactoryTestSource(raw), producerProofFacts(action))
+			mover := *raw
+			mover.To = alias
+			require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: &mover, OldTo: raw.To}}))
+			b.AddEdge(raw)
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildStoreFactory(t.Context(), receipts, storeFactoryTestRules())
+			requireStoreFactoryProofRefusal(t, err, stats, 1, raw)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildStoreFactoryElection(t *testing.T) {
+	local := storeFactoryTestAction("app.ts::reset", "app.ts", "workspace")
+	remote := storeFactoryTestAction("store.ts::reset", "store.ts", "workspace")
+	foreign := storeFactoryTestAction("peer.ts::reset", "peer.ts", "other")
+	getter := storeFactoryTestGetter("store.ts::getter", remote.FilePath)
+	for _, tc := range []struct {
+		name   string
+		caller bool
+		inputs []*graph.Node
+		want   *graph.Node
+	}{
+		{"global singleton without caller", false, []*graph.Node{remote}, remote},
+		{"workspace singleton", true, []*graph.Node{remote, foreign}, remote},
+		{"global ambiguity without caller", false, []*graph.Node{remote, foreign}, nil},
+		{"getter wins with two declarations in one file", true, []*graph.Node{local, remote, getter,
+			storeFactoryTestGetter("store.ts::secondGetter", remote.FilePath)}, remote},
+		{"two getter files fall back to caller", true, []*graph.Node{local, remote, getter,
+			storeFactoryTestGetter("peer.ts::getter", foreign.FilePath)}, local},
+		{"two actions in getter file fall back to caller", true, []*graph.Node{local, remote, getter,
+			storeFactoryTestAction("store.ts::secondReset", remote.FilePath, remote.WorkspaceID)}, local},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := storeFactoryTestCall("retired", 2)
+			facts := []ParseFacts{storeFactoryTestSource(call)}
+			if tc.caller {
+				facts[0].Nodes = []*graph.Node{storeFactoryTestCaller()}
+			}
+			for _, n := range tc.inputs {
+				facts = append(facts, producerProofFacts(n))
+			}
+			b, receipts := seedSyntheticCustody(t, facts...)
+			stats, err := b.RebuildStoreFactory(t.Context(), receipts, storeFactoryTestRules())
+			require.NoError(t, err)
+			want := *call
+			want.To = storeFactoryTestStub
+			wantStats := RebuildStoreFactoryStats{Stubs: 1, Moves: 1}
+			if tc.want != nil {
+				want.To = tc.want.ID
+				wantStats.Resolved = 1
+			}
+			require.Equal(t, wantStats, stats)
+			old, next := pendingEdgeKey(call), pendingEdgeKey(&want)
+			gone, err := b.pendingEdge(old)
+			require.NoError(t, err)
+			require.Nil(t, gone)
+			saved, err := b.pendingEdge(next)
+			require.NoError(t, err)
+			require.Equal(t, &want, saved)
+			custody, err := readRebuildEdgeCustody(b.pending, next)
+			require.NoError(t, err)
+			require.Equal(t, rebuildEdgeCustody{raw: old}, custody)
+		})
+	}
+}
+
+func TestRebuildStoreFactoryProofRefusalCountsOutputs(t *testing.T) {
+	// The first old key has the last output key; scan order isn't First.
+	first := storeFactoryTestCall("a-old", 2)
+	second := storeFactoryTestCall("z-old", 3)
+	second.Meta["store_action"] = "save"
+	peer := storeFactoryTestCall("m-old", 4)
+	peer.Meta["store_action"] = "reload"
+	reset := storeFactoryTestAction("z-target", "store.ts", "")
+	save := storeFactoryTestAction("a-target", "store.ts", "")
+	save.Meta["store_member"] = "save"
+	reload := storeFactoryTestAction("peer-target", "store.ts", "")
+	reload.Meta["store_member"] = "reload"
+	source := storeFactoryTestSource(first, second, peer)
+	decls := ParseFacts{EffectiveLanguage: "typescript", File: graph.FileMetaRow{FilePath: "store.ts"},
+		Nodes: []*graph.Node{reset, save, reload}}
+	b, _ := seedSyntheticCustody(t, source, decls)
+	before := rebuildFrameworkCustodyRows(t, b)
+	// Only the peer action has receipt proof; no move may be applied.
+	stats, err := b.RebuildStoreFactory(t.Context(), sqlCallsiteTestReceipts(source, producerProofFacts(reload)), storeFactoryTestRules())
+	want := *second
+	want.To = save.ID
+	requireStoreFactoryProofRefusal(t, err, stats, 2, &want)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func TestRebuildStoreFactoryStationarySkipsReceipts(t *testing.T) {
+	action := storeFactoryTestAction("store.ts::reset", "store.ts", "")
+	stationary := storeFactoryTestCall(action.ID, 2)
+	b, _ := seedSyntheticCustody(t, storeFactoryTestSource(stationary), producerProofFacts(action))
+	before := rebuildFrameworkCustodyRows(t, b)
+	stats, err := b.RebuildStoreFactory(t.Context(), unreadStoreFactoryReceipts(t), storeFactoryTestRules())
+	require.NoError(t, err)
+	require.Equal(t, RebuildStoreFactoryStats{Stubs: 1, Resolved: 1}, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func requireStoreFactoryProofRefusal(t *testing.T, err error, stats RebuildStoreFactoryStats, count uint64, first *graph.Edge) {
+	t.Helper()
+	require.ErrorIs(t, err, ErrRebuildStoreFactory)
+	var refused *RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, &RebuildUnknownProvenanceError{Count: count, First: graph.EdgeIdentityFor(first)}, refused)
+	require.Zero(t, stats)
+}
+
+func unreadStoreFactoryReceipts(t *testing.T) iter.Seq2[ParseFacts, error] {
+	return func(func(ParseFacts, error) bool) { t.Fatal("Store Factory unexpectedly read receipts") }
+}
+
+func storeFactoryTestCall(to string, line int) *graph.Edge {
+	return &graph.Edge{From: "app.ts::caller", To: to, Kind: graph.EdgeCalls, FilePath: "app.ts", Line: line,
+		Meta: map[string]any{"via": "store-factory", "store_binding": storeFactoryTestBinding, "store_action": storeFactoryTestMember}}
+}
+
+func storeFactoryTestSource(edges ...*graph.Edge) ParseFacts {
+	return ParseFacts{EffectiveLanguage: "typescript", File: graph.FileMetaRow{FilePath: "app.ts"}, Edges: edges}
+}
+
+func storeFactoryTestAction(id, file, workspace string) *graph.Node {
+	return &graph.Node{ID: id, Name: storeFactoryTestMember, Kind: graph.KindFunction, FilePath: file, Language: "typescript",
+		WorkspaceID: workspace, Meta: map[string]any{"store_factory": storeFactoryTestBinding, "store_member": storeFactoryTestMember}}
+}
+
+func storeFactoryTestGetter(id, file string) *graph.Node {
+	return &graph.Node{ID: id, Name: storeFactoryTestBinding, Kind: graph.KindVariable, FilePath: file, Language: "typescript",
+		Meta: map[string]any{}}
+}
+
+func storeFactoryTestCaller() *graph.Node {
+	return &graph.Node{ID: "app.ts::caller", Name: "caller", Kind: graph.KindMethod, FilePath: "app.ts", Language: "typescript",
+		WorkspaceID: "workspace", Meta: map[string]any{}}
+}
+
+func storeFactoryTestRules() RebuildStoreFactoryRules {
+	// The resolver tests cover real marker and payload rules. Keep these
+	// callbacks small so this suite isolates the private store's behavior.
+	return RebuildStoreFactoryRules{
+		Action: func(n *graph.Node) (string, string) {
+			binding, _ := n.Meta["store_factory"].(string)
+			member, _ := n.Meta["store_member"].(string)
+			return binding, member
+		},
+		Stub: func(e *graph.Edge) (string, string) {
+			if e.Meta["via"] != "store-factory" {
+				return "", ""
+			}
+			binding, _ := e.Meta["store_binding"].(string)
+			member, _ := e.Meta["store_action"].(string)
+			return binding, member
+		},
+		Getter: func(n *graph.Node, binding string) bool {
+			_, action := n.Meta["store_factory"]
+			return n.Name == binding && n.FilePath != "" && !action
+		},
+		Rebind: func(e *graph.Edge, member, target string, matched bool) bool {
+			if !matched {
+				target = "unresolved::*." + member
+			}
+			if target == e.To {
+				return false
+			}
+			e.To = target
+			return true
+		},
+	}
+}
