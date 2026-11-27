@@ -168,17 +168,45 @@ func TestRebuildGodotPreloadAliasDeclarationOrder(t *testing.T) {
 		rebuildEventFacts(source, "gdscript", []*graph.Node{caller, first, last}, call),
 		script("game/Early.gd"), script("game/Late.gd"),
 	}
-	build, native := openRebuildEventStores(t, facts...)
 	sel, err := NewFrameworkSynthesizerSelection([]string{SynthGodotPreloadAlias})
 	require.NoError(t, err)
-	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), build.RebuildView(), sel)
-	require.NoError(t, err)
-	changed, err := RunRebuildGodotPreloadAlias(t.Context(), build, rebuildGRPCReceipts(facts...), frozen)
-	require.NoError(t, err)
-	require.EqualValues(t, 1, changed)
-	require.Equal(t, 1, ResolveGDScriptPreloadAliases(native))
-	saved := rebuildEventSavedRows(t, build)
-	require.Equal(t, rebuildEventSQLiteRows(native), saved)
-	require.Len(t, saved.edges, 1)
-	require.Equal(t, "game/Late.gd::tick", saved.edges[0].To)
+	for _, tc := range []struct {
+		name string
+		omit *graph.Node
+	}{
+		{name: "complete"},
+		{name: "missing lower ID", omit: last},
+		{name: "missing greatest ID", omit: first},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			build, native := openRebuildEventStores(t, facts...)
+			before := rebuildEventSavedRows(t, build)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), build.RebuildView(), sel)
+			require.NoError(t, err)
+			receipts := slices.Clone(facts)
+			if tc.omit != nil {
+				nodes := slices.DeleteFunc(slices.Clone(facts[0].Nodes), func(n *graph.Node) bool {
+					return n.ID == tc.omit.ID
+				})
+				receipts[0] = rebuildEventFacts(source, "gdscript", nodes, call)
+			}
+			changed, err := RunRebuildGodotPreloadAlias(t.Context(), build, rebuildGRPCReceipts(receipts...), frozen)
+			saved := rebuildEventSavedRows(t, build)
+			if tc.omit == first {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, changed)
+				require.Equal(t, before, saved)
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, changed)
+			require.Equal(t, 1, ResolveGDScriptPreloadAliases(native))
+			want := rebuildEventSQLiteRows(native)
+			require.Len(t, want.edges, 1)
+			// KindVariable scans in ID order. The z-alias wins even
+			// though its receipt appears before the a-alias receipt.
+			require.Equal(t, "game/Early.gd::tick", want.edges[0].To)
+			require.Equal(t, want, saved)
+		})
+	}
 }

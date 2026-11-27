@@ -104,8 +104,11 @@ func (p *rebuildGodotPreloadAlias) visitDecl(n *graph.Node, r row, visit func(*g
 func (p *rebuildGodotPreloadAlias) captureDecls(ctx context.Context) (bool, error) {
 	active := false
 	err := p.visitNodes(ctx, func(n *graph.Node, r row) error {
-		return p.visitDecl(n, r, func(_ *graph.Node, _, path string) error {
+		return p.visitDecl(n, r, func(n *graph.Node, file, path string) error {
 			active = true
+			if err := p.noteDecl('a', file, n.Name, n.ID, path); err != nil {
+				return err
+			}
 			return p.put(p.key('s', path), nil)
 		})
 	})
@@ -158,30 +161,35 @@ func (p *rebuildGodotPreloadAlias) recordDecl(raw, live *graph.Node) error {
 	if file != liveFile || path != livePath || raw.Name != live.Name {
 		return nil
 	}
-	key := p.key('d', raw.ID)
-	seen, err := p.present(key)
-	if err != nil || seen {
+	return p.noteDecl('A', file, raw.Name, raw.ID, path)
+}
+
+// SQLite's KindVariable scan uses the node index's ID tiebreaker, not
+// receipt arrival. The native alias map retains the last declaration.
+func (p *rebuildGodotPreloadAlias) noteDecl(col byte, file, name, id, path string) error {
+	key := p.key(col, file, name)
+	prior, _, err := p.decl(key)
+	if err != nil || id <= prior {
 		return err
 	}
-	if err := p.put(key, nil); err != nil {
-		return err
+	return p.put(key, append(appendKeyString(nil, id), path...))
+}
+
+func (p *rebuildGodotPreloadAlias) decl(key []byte) (id, path string, err error) {
+	val, err := p.get(key)
+	if err != nil || val == nil {
+		return "", "", err
 	}
-	// Later distinct declarations overwrite earlier ones in native order.
-	return p.put(p.key('A', file, raw.Name), []byte(path))
+	id, rest, err := readKeyString(val)
+	if err != nil || id == "" || len(rest) == 0 {
+		return "", "", invalid("godot preload alias declaration")
+	}
+	return id, string(rest), nil
 }
 
 func (p *rebuildGodotPreloadAlias) markUnproved(ctx context.Context) error {
-	return p.visitNodes(ctx, func(n *graph.Node, r row) error {
-		if n.Kind != graph.KindVariable {
-			return p.markUnprovedMember(n)
-		}
-		return p.visitDecl(n, r, func(n *graph.Node, file, path string) error {
-			proved, err := p.present(p.key('d', n.ID))
-			if err != nil || proved {
-				return err
-			}
-			return p.put(p.key('x', file, n.Name, path), nil)
-		})
+	return p.visitNodes(ctx, func(n *graph.Node, _ row) error {
+		return p.markUnprovedMember(n)
 	})
 }
 
@@ -200,26 +208,6 @@ func (p *rebuildGodotPreloadAlias) target(source, path, member string, proved bo
 	return p.targetMember(file, member, proved)
 }
 
-// An unproved declaration can be last in its exact alias bucket. Its
-// missing order cannot matter if it produces the same result for this Call.
-func (p *rebuildGodotPreloadAlias) unprovedAliasChanges(ctx context.Context, source, recv, member, live string) (bool, error) {
-	changed := false
-	prefix := p.key('x', source, recv)
-	err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		if changed {
-			return nil
-		}
-		path, rest, err := readKeyString(r.key[len(prefix):])
-		if err != nil || path == "" || len(rest) != 0 {
-			return invalid("godot preload alias path key")
-		}
-		alt, missing, err := p.target(source, path, member, false)
-		changed = missing || alt != live
-		return err
-	})
-	return changed, err
-}
-
 func (p *rebuildGodotPreloadAlias) plan(ctx context.Context) error {
 	var refused rebuildScratchRefusals
 	if err := p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
@@ -236,23 +224,23 @@ func (p *rebuildGodotPreloadAlias) plan(ctx context.Context) error {
 			return nil
 		}
 		source := p.rules.SourceFile(e)
-		path, err := p.get(p.key('A', source, recv))
+		_, path, err := p.decl(p.key('a', source, recv))
+		if err != nil || path == "" {
+			return err
+		}
+		live, missing, err := p.target(source, path, member, false)
 		if err != nil {
 			return err
 		}
-		live, missing, err := p.target(source, string(path), member, false)
+		_, provedPath, err := p.decl(p.key('A', source, recv))
 		if err != nil {
 			return err
 		}
-		uncertain, err := p.unprovedAliasChanges(ctx, source, recv, member, live)
+		proof, _, err := p.target(source, provedPath, member, true)
 		if err != nil {
 			return err
 		}
-		proof, _, err := p.target(source, string(path), member, true)
-		if err != nil {
-			return err
-		}
-		if missing || uncertain || live != proof {
+		if missing || live != proof {
 			refused.add(id, nil)
 			return nil
 		}
