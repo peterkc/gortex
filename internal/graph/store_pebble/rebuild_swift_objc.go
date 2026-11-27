@@ -21,9 +21,10 @@ type RebuildSwiftObjCStats struct {
 	Edges, SpillBytes uint64
 }
 
-// RebuildSwiftObjC stages the bounded selector and protocol joins from the
-// resolver. Existing SQLite keys are stationary; prove every new edge before
-// applying any of them. All language declarations remain available.
+// RebuildSwiftObjC stages selector and protocol join results from the
+// resolver in spillable scratch. Preserve existing durable keys for SQLite
+// parity and prove every new edge before applying any of them. All language
+// declarations remain available.
 func (b *BuildStore) RebuildSwiftObjC(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
 	reduce func(RebuildView, func(*graph.Edge) error) error,
 ) (stats RebuildSwiftObjCStats, err error) {

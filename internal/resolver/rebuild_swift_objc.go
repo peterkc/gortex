@@ -24,26 +24,34 @@ func RunRebuildSwiftObjC(ctx context.Context, b *store_pebble.BuildStore, receip
 }
 
 func reduceRebuildSwiftObjC(ctx context.Context, view store_pebble.RebuildView, propose func(*graph.Edge) error) error {
-	var hasSwift, hasObjC bool
+	var namedSwift, objcSelector, swiftProtocol, objcConformer bool
 	var unnamedProtocol *graph.Node
 	if err := view.VisitNodes(ctx, func(n *graph.Node) error {
-		switch n.Language {
-		case "swift":
-			hasSwift = true
-			if n.Name == "" && rebuildSwiftObjCProtocol(n) {
-				unnamedProtocol = n // ID-ascending, like the SQLite census.
-			}
-		case "objc":
-			hasObjC = true
-		}
-		return nil
-	}); err != nil || !hasSwift || !hasObjC {
-		return err
-	}
-	link := func(swift, objc *graph.Node, selector string) error {
-		if swift.ID == objc.ID {
+		if !rebuildSwiftObjCNodeKind(n.Kind) {
 			return nil
 		}
+		switch n.Language {
+		case "swift":
+			namedSwift = namedSwift || n.Name != ""
+			if rebuildSwiftObjCProtocol(n) {
+				swiftProtocol = true
+				if n.Name == "" {
+					unnamedProtocol = n // Greatest ID, for SQLite parity.
+				}
+			}
+		case "objc":
+			objcSelector = objcSelector || n.Kind == graph.KindMethod && n.Name != ""
+			protocols, _ := n.Meta["objc_protocols"].(string)
+			objcConformer = objcConformer || n.Kind == graph.KindType && protocols != ""
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if !(namedSwift && objcSelector) && !(swiftProtocol && objcConformer) {
+		return nil
+	}
+	link := func(swift, objc *graph.Node, selector string) error {
 		if err := propose(swiftObjCBridgeEdge(swift, objc, selector)); err != nil {
 			return err
 		}
@@ -88,7 +96,7 @@ func reduceRebuildSwiftObjC(ctx context.Context, view store_pebble.RebuildView, 
 					if err != nil {
 						return err
 					}
-					if winner != nil && winner.ID != n.ID {
+					if winner != nil && !graph.StructuralEdgeTargetInvalid(graph.EdgeImplements, winner.ID) {
 						if err := propose(swiftObjCImplementsEdge(n, winner)); err != nil {
 							return err
 						}
@@ -119,8 +127,8 @@ func rebuildSwiftObjCProtocolWinner(ctx context.Context, view store_pebble.Rebui
 		return unnamed, nil
 	}
 	var winner *graph.Node
-	// The private index orders repo before ID. Native assigns the map slot
-	// in SQLite node-ID order, so explicitly keep its last qualifying ID.
+	// The private index orders repo before ID. For SQLite parity, keep
+	// the greatest qualifying ID: native assigns the map slot in ID order.
 	err := view.VisitNameCandidates(ctx, name, []string{"swift"}, func(n *graph.Node) error {
 		if rebuildSwiftObjCProtocol(n) && (winner == nil || winner.ID < n.ID) {
 			winner = n
