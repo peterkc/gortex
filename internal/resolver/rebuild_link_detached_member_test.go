@@ -15,11 +15,27 @@ import (
 // Given native Go dataflow edges whose source is a placeholder, compare each
 // original position, including competing moves to the same destination key.
 func TestRebuildMainDetachedMemberNative(t *testing.T) {
+	for _, tc := range []struct{ name, dep string }{
+		{"nested-import-hit", "internal/zdep/dep.go"},
+		{"top-level-import-miss", "zdep/dep.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkRebuildMainDetachedMemberNative(t, tc.dep)
+		})
+	}
+}
+
+func checkRebuildMainDetachedMemberNative(t *testing.T, dep string) {
+	t.Helper()
 	const (
 		client = "client/main.go"
-		dep    = "zdep/dep.go"
 		remote = "aother/remote.go"
 	)
+	// Native only puts nested directories in the last-component index.
+	// The unresolved example.test/zdep import reaches internal/zdep but
+	// not the top-level zdep directory (which can only match exactly).
+	importedDir := "internal/zdep"
+	reachable := dep == importedDir+"/dep.go"
 	var nodes []*graph.Node
 	var pending, imports []*graph.Edge
 	for _, file := range []struct{ path, source string }{
@@ -98,6 +114,11 @@ func (Second) Ambiguous(int) {}
 	defer native.clearLookupCache()
 	require.True(t, native.buildReachabilityIndexForPending(pending, native.nodeByID))
 	defer native.clearReachabilityIndex()
+	wantDirs := map[string]struct{}{"client": {}}
+	if reachable {
+		wantDirs[importedDir] = struct{}{}
+	}
+	require.Equal(t, wantDirs, native.reachableDirsByFile[client])
 	var want []graph.EdgeReindex
 	for _, original := range pending {
 		require.Nil(t, g.GetNode(original.From))
@@ -105,7 +126,20 @@ func (Second) Ambiguous(int) {}
 		oldTo, moved := native.resolveEdge(edge, &ResolveStats{})
 		switch graph.UnresolvedName(oldTo) {
 		case "*.Receive":
-			require.Equal(t, dep+"::Imported.Receive", edge.To)
+			scope, langs := native.resolverNameScopeForEdge(original, native.callerRepoPrefix(original))
+			require.Equal(t, "", scope.repo)
+			require.Empty(t, langs)
+			candidates := native.cachedFindNodesByNameInRepoForEdge("Receive", scope.repo, original)
+			require.Len(t, candidates, 2)
+			require.Equal(t, remote+"::Other.Receive", candidates[0].ID)
+			require.Equal(t, dep+"::Imported.Receive", candidates[1].ID)
+			if reachable {
+				require.True(t, moved)
+				require.Equal(t, dep+"::Imported.Receive", edge.To)
+			} else {
+				require.False(t, moved)
+				require.Equal(t, original, edge)
+			}
 		case "*.Ambiguous":
 			require.False(t, moved)
 			require.Equal(t, original, edge)
@@ -122,7 +156,11 @@ func (Second) Ambiguous(int) {}
 			want = append(want, graph.EdgeReindex{Edge: edge, OldTo: oldTo, OldKind: original.Kind})
 		}
 	}
-	require.Len(t, want, 5)
+	if reachable {
+		require.Len(t, want, 5)
+	} else {
+		require.Len(t, want, 2)
+	}
 	g.ReindexEdges(want)
 	wantSaved := g.AllEdges()
 	rebuildFnPointerSortRows(wantSaved)
