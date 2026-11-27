@@ -123,7 +123,7 @@ func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []s
 	}
 	byRow := make(map[int]*sitter.Node)
 	byName := make(map[string]*sitter.Node)
-	goTree := lang == "go" && tree != nil && tree.Tree() != nil && tree.Lang() == "go"
+	goTree := tree != nil && tree.Tree() != nil && tree.Lang() == "go"
 	if goTree {
 		var visit func(*sitter.Node) error
 		visit = func(n *sitter.Node) error {

@@ -98,7 +98,7 @@ func checkContractParseFacts(base ParseFacts, f *contracts.FileFacts) error {
 			return invalid("contract record identity")
 		}
 		if key, _ := contracts.LaravelHandlerClassKey(c); key != "" {
-			if _, ok := f.LaravelHandlerClasses[key]; !ok || base.EffectiveLanguage != "php" {
+			if _, ok := f.LaravelHandlerClasses[key]; !ok {
 				return invalid("missing or invalid Laravel handler class answer")
 			}
 			if classKeys == nil {
@@ -147,7 +147,7 @@ func checkContractParseFacts(base ParseFacts, f *contracts.FileFacts) error {
 			}
 			// A nil Go AST is an explicit native no-tree answer. A present
 			// tree answer has a bindings map even when no bindings were found.
-			if goPath && base.EffectiveLanguage == "go" && (h.AST == nil) != (h.Bindings == nil) {
+			if goPath && (h.AST == nil) != (h.Bindings == nil) {
 				return invalid("incomplete Go contract handler tree answer")
 			}
 			if raw, ok := h.AST["status_codes"]; ok {

@@ -7875,18 +7875,28 @@ func (idx *Indexer) collectContractRecordsForFile(
 	// dereference is then disabled and store-aware extractors degrade to their
 	// tree-aware behaviour).
 	capture, _ := endpointStore.(*contracts.EndpointFactCapture)
+	repoPrefix := idx.repoPrefix
+	if capture != nil {
+		// Rebuild receipts are portable; C3 stamps scope at replay.
+		repoPrefix = ""
+	}
 	stamp := func(record *contracts.Contract) {
-		record.RepoPrefix = idx.repoPrefix
+		record.RepoPrefix = repoPrefix
 		// Stamp the workspace / project slugs alongside the repo
 		// prefix so the matcher's boundary check has the data it
 		// needs without a second registry walk. Empty slugs
 		// default to RepoPrefix at Match time via
 		// Contract.EffectiveWorkspace / EffectiveProject.
-		if idx.workspaceID != "" {
-			record.WorkspaceID = idx.workspaceID
-		}
-		if idx.projectID != "" {
-			record.ProjectID = idx.projectID
+		if capture != nil {
+			record.WorkspaceID = ""
+			record.ProjectID = ""
+		} else {
+			if idx.workspaceID != "" {
+				record.WorkspaceID = idx.workspaceID
+			}
+			if idx.projectID != "" {
+				record.ProjectID = idx.projectID
+			}
 		}
 		if testSource != "" {
 			if record.Meta == nil {
@@ -7903,7 +7913,7 @@ func (idx *Indexer) collectContractRecordsForFile(
 			questionStart = len(capture.Questions)
 		}
 		if sae, ok := ex.(contracts.StoreAwareExtractor); ok {
-			found = sae.ExtractWithStore(graphPath, src, fileNodes, fileEdges, tree, endpointStore, idx.repoPrefix)
+			found = sae.ExtractWithStore(graphPath, src, fileNodes, fileEdges, tree, endpointStore, repoPrefix)
 		} else if tae, ok := ex.(contracts.TreeAwareExtractor); ok && (tree != nil || capture != nil) {
 			found = tae.ExtractWithTree(graphPath, src, fileNodes, fileEdges, tree)
 		} else {

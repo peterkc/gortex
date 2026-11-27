@@ -379,7 +379,7 @@ func TestContractParseFactsHandlerTreeAnswers(t *testing.T) {
 		{"Go tree with empty bindings", "file.go", "go", true, true},
 		{"Go without tree", "file.go", "go", false, false},
 		{"Go extractor on a non-Go path", "file.txt", "go", true, false},
-		{"non-Go extractor on a Go path", "file.go", "php", false, false},
+		{"non-Go extractor on a Go path", "file.go", "php", true, true},
 		{"PHP without Go tree", "file.php", "php", true, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -404,6 +404,11 @@ func TestContractParseFactsHandlerTreeAnswers(t *testing.T) {
 			_, got, _, err := DecodeContractParseFacts(wire)
 			require.NoError(t, err)
 			require.Equal(t, facts, got)
+			if tt.hasTree {
+				h.Bindings = nil
+				facts.Handlers[id] = h
+				requireContractFactsRefusal(t, base, facts, "incomplete Go contract handler tree answer")
+			}
 		})
 	}
 }
@@ -432,9 +437,16 @@ func TestContractParseFactsPHPClassAnswerScope(t *testing.T) {
 	require.Equal(t, facts, got)
 
 	t.Run("PHP path with non-PHP effective language", func(t *testing.T) {
-		mismatch := base
-		mismatch.EffectiveLanguage = "go"
-		requireContractFactsRefusal(t, mismatch, facts, reason)
+		refined := base
+		refined.EffectiveLanguage = "go"
+		wire, err := EncodeContractParseFacts(refined, facts)
+		require.NoError(t, err)
+		_, got, _, err := DecodeContractParseFacts(wire)
+		require.NoError(t, err)
+		require.Equal(t, facts, got)
+		missing := *facts
+		missing.LaravelHandlerClasses = nil
+		requireContractFactsRefusal(t, refined, &missing, reason)
 	})
 	for _, tt := range []struct {
 		name   string

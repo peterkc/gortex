@@ -209,12 +209,16 @@ func (idx *Indexer) extractPreparedRebuildFileInto(ctx context.Context, rel stri
 	// derives every constant's FilePath from it on decode. Their node IDs,
 	// like other graph facts, were minted with the NFC key by the extractor.
 	meta, _ := idx.prepareFileMeta(rel, prepared, result)
+	meta.FilePath = rel
 	constants, _ := idx.prepareConstValues(result)
-	if graphPath != rel {
-		for i := range constants {
-			if constants[i].FilePath == graphPath {
-				constants[i].FilePath = rel
-			}
+	for i := range constants {
+		if idx.repoPrefix != "" {
+			prefix := idx.repoPrefix + "/"
+			constants[i].NodeID = strings.TrimPrefix(constants[i].NodeID, prefix)
+			constants[i].FilePath = strings.TrimPrefix(constants[i].FilePath, prefix)
+		}
+		if constants[i].FilePath == graphPath {
+			constants[i].FilePath = rel
 		}
 	}
 	facts := store_pebble.ParseFacts{
@@ -306,40 +310,39 @@ func (idx *Indexer) captureRebuildContractBodies(ctx context.Context, path, lang
 	handlerLang := detectLangFromPath(path)
 	var grammar *sitter.Language
 	var tree *parser.ParseTree
-	switch lang {
-	case "go":
-		if callables && handlerLang == "go" && len(raw) != 0 {
-			grammar, tree = golang.GetLanguage(), result.Tree
-		}
-	case "php":
+	treeLang := ""
+	switch {
+	case callables && handlerLang == "go" && len(raw) != 0:
+		grammar, tree, treeLang = golang.GetLanguage(), result.Tree, "go"
+	case strings.HasSuffix(path, ".php"):
 		for _, c := range facts.Records {
 			if key, _ := contracts.LaravelHandlerClassKey(c); key != "" {
-				grammar, tree = php.GetLanguage(), result.ContractTree
+				grammar, tree, treeLang = php.GetLanguage(), result.ContractTree, "php"
 				break
 			}
 		}
 	}
 	rawTreeDeclined := false
-	if grammar != nil && !bytes.Equal(raw, prepared) {
+	if grammar != nil && (lang != treeLang || !bytes.Equal(raw, prepared)) {
 		start := time.Now()
 		t, err := parser.ParseFileContext(ctx, raw, grammar)
-		idx.logger.Debug("build contract raw parse", zap.String("language", lang), zap.Int("bytes", len(raw)), zap.Duration("elapsed", time.Since(start)), zap.Error(err))
+		idx.logger.Debug("build contract raw parse", zap.String("language", treeLang), zap.Int("bytes", len(raw)), zap.Duration("elapsed", time.Since(start)), zap.Error(err))
 		switch {
 		case err == nil:
-			tree = parser.NewParseTree(t, raw, lang)
+			tree = parser.NewParseTree(t, raw, treeLang)
 			defer tree.Release()
 		case errors.Is(err, parser.ErrUTF16Source), errors.Is(err, parser.ErrBinarySource):
 			// Native treats these deterministic input refusals as a nil tree.
 			rawTreeDeclined = true
 			tree = nil
 		default:
-			return fmt.Errorf("%w: %s: raw %s: %w", contracts.ErrContractFactTree, path, lang, err)
+			return fmt.Errorf("%w: %s: raw %s: %w", contracts.ErrContractFactTree, path, treeLang, err)
 		}
 	}
-	if grammar != nil && !rawTreeDeclined && (tree == nil || tree.Tree() == nil || tree.Lang() != lang || !bytes.Equal(tree.Source(), raw)) {
-		return fmt.Errorf("%w: %s: %s handler facts", contracts.ErrContractFactTree, path, lang)
+	if grammar != nil && !rawTreeDeclined && (tree == nil || tree.Tree() == nil || tree.Lang() != treeLang || !bytes.Equal(tree.Source(), raw)) {
+		return fmt.Errorf("%w: %s: %s handler facts", contracts.ErrContractFactTree, path, treeLang)
 	}
-	if lang == "php" && grammar != nil {
+	if treeLang == "php" {
 		resolve := languages.PHPClassNameResolverWithTree(tree)
 		facts.LaravelHandlerClasses = make(map[string]string)
 		for _, c := range facts.Records {
@@ -353,10 +356,6 @@ func (idx *Indexer) captureRebuildContractBodies(ctx context.Context, path, lang
 	}
 	if !callables {
 		return nil
-	}
-	// PHP uses its tree only for class qualification, not provider facts.
-	if lang != "go" {
-		tree = nil
 	}
 	var err error
 	facts.Handlers, err = contracts.CaptureFileHandlerFacts(ctx, result.Nodes, splitLines(raw), handlerLang, tree)

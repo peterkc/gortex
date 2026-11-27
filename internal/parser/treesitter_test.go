@@ -3,6 +3,7 @@ package parser
 import (
 	"bytes"
 	"context"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -211,4 +212,35 @@ func TestParseCtx_DeadlineAbortsPathologicalParse(t *testing.T) {
 		"the pathological parse must exceed the budget and abort, not finish in %v", elapsed)
 	assert.Less(t, elapsed, 5*time.Second,
 		"the deadline must abort the parse, not merely be recorded")
+}
+
+func TestParseFileContextCancelsRunningParse(t *testing.T) {
+	// The source is large enough to keep the parser running after the
+	// invocation crosses the parser admission counter.
+	src := append([]byte("package p\nfunc f() {\n"), bytes.Repeat([]byte("println(123456789)\n"), 200000)...)
+	src = append(src, '}')
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	before := ParseCount()
+	done := make(chan error, 1)
+	go func() {
+		tree, err := ParseFileContext(ctx, src, golang.GetLanguage())
+		if tree != nil {
+			tree.Close()
+		}
+		done <- err
+	}()
+	limit := time.Now().Add(parseTimeout)
+	for ParseCount() == before && time.Now().Before(limit) {
+		runtime.Gosched()
+	}
+	started := ParseCount() != before
+	cancel()
+	select {
+	case err := <-done:
+		require.True(t, started, "the parse must start before cancellation")
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(parseTimeout):
+		t.Fatal("the parser did not return after cancellation")
+	}
 }

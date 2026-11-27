@@ -418,3 +418,99 @@ func TestRebuildContractRawTreeRefusal(t *testing.T) {
 	idx.resolveProviderHandlers(reg)
 	require.Equal(t, before, parser.ParseCount(), "native also skips class qualification")
 }
+
+func TestRebuildContractRawGrammarFollowsPath(t *testing.T) {
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	ctx := t.Context()
+	t.Run("Go path", func(t *testing.T) {
+		const path = "handler.go"
+		raw := []byte("package p\nfunc handler() { value := \"ok\"; WriteJSON (w, 200, value) }\n")
+		handler := &graph.Node{ID: path + "::handler", Kind: graph.KindFunction, Name: "handler",
+			FilePath: path, StartLine: 2, EndLine: 2, Language: "php"}
+		nodes := []*graph.Node{handler}
+		f := &contracts.FileFacts{Shapes: map[string]*contracts.Shape{}}
+		before := parser.ParseCount()
+		require.NoError(t, idx.captureRebuildContractBodies(ctx, path, "php", raw, raw,
+			&parser.ExtractionResult{Nodes: nodes}, true, f))
+		require.Equal(t, before+1, parser.ParseCount(), "the prepared extractor is not Go")
+		base := store_pebble.ParseFacts{
+			Nodes:             nodes,
+			File:              graph.FileMetaRow{FilePath: path, NodeCount: 1},
+			EffectiveLanguage: "php",
+		}
+		wire, err := store_pebble.EncodeContractParseFacts(base, f)
+		require.NoError(t, err)
+		_, saved, _, err := store_pebble.DecodeContractParseFacts(wire)
+		require.NoError(t, err)
+		want := contracts.Contract{SymbolID: handler.ID, FilePath: path, Role: contracts.RoleProvider}
+		got := want
+		tree := contracts.ParseTreeForLang(detectLangFromPath(handler.FilePath), raw)
+		require.NotNil(t, tree)
+		defer tree.Release()
+		contracts.EnrichHTTPContractWithTree(&want, splitLines(raw), nodes, "go", tree)
+		require.Equal(t, "string", want.Meta["response_type"])
+		saved.Handlers[handler.ID].EnrichProvider(&got)
+		require.Equal(t, want, got)
+		require.Equal(t, contracts.MakeBodyFacts(tree, handler).VarBinding("value"), saved.Handlers[handler.ID].VarBinding("value"))
+	})
+	t.Run("PHP path", func(t *testing.T) {
+		const path = "routes.php"
+		raw := []byte("<?php\nnamespace Routes;\nuse Acme\\OrderController as Orders;\n")
+		route := contracts.Contract{
+			ID:       "http::GET::/orders",
+			Role:     contracts.RoleProvider,
+			Type:     contracts.ContractHTTP,
+			FilePath: path,
+			Line:     4,
+			Meta:     map[string]any{"handler_ident": "index", "handler_class": "Orders"},
+		}
+		f := &contracts.FileFacts{
+			Records:  []contracts.Contract{route},
+			Shapes:   map[string]*contracts.Shape{},
+			Handlers: map[string]contracts.HandlerFacts{},
+		}
+		before := parser.ParseCount()
+		require.NoError(t, idx.captureRebuildContractBodies(ctx, path, "go", raw, raw, &parser.ExtractionResult{}, false, f))
+		require.Equal(t, before+1, parser.ParseCount(), "the prepared extractor is not PHP")
+		base := store_pebble.ParseFacts{File: graph.FileMetaRow{FilePath: path}, EffectiveLanguage: "go"}
+		wire, err := store_pebble.EncodeContractParseFacts(base, f)
+		require.NoError(t, err)
+		_, saved, _, err := store_pebble.DecodeContractParseFacts(wire)
+		require.NoError(t, err)
+		resolve := languages.PHPClassNameResolver(raw)
+		require.NotNil(t, resolve)
+		key, class := contracts.LaravelHandlerClassKey(route)
+		require.Equal(t, `Acme\OrderController`, saved.LaravelHandlerClasses[key])
+		require.Equal(t, resolve(class, route.Line), saved.LaravelHandlerClasses[key])
+	})
+}
+
+func TestRebuildContractReceiptIgnoresOwnerScope(t *testing.T) {
+	const path = "routes.go"
+	src := []byte(`package p
+const VALUE = "value"
+func routes(r Router) {
+	r.GET("/literal", handler)
+	r.GET(EXTERNAL, handler)
+}
+func handler() {}
+`)
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	encode := func() []byte {
+		base, facts, err := idx.extractPreparedRebuildFileWithContractFacts(t.Context(), path, languages.NewGoExtractor(), src, src)
+		require.NoError(t, err)
+		require.NotEmpty(t, base.Constants)
+		require.NotEmpty(t, facts.Records)
+		require.NotEmpty(t, facts.Questions)
+		wire, err := store_pebble.EncodeContractParseFacts(base, facts)
+		require.NoError(t, err)
+		return wire
+	}
+	want := encode()
+	idx.SetRepoPrefix("repo")
+	idx.SetWorkspaceID("work")
+	idx.SetProjectID("project")
+	require.Equal(t, want, encode())
+}
