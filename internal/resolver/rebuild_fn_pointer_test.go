@@ -25,9 +25,10 @@ func TestRebuildFnPointerCopyOrder(t *testing.T) {
 		threshold                int
 		wantTail                 string
 		wantResolved, wantSweeps int
+		wantFlushes              int
 	}{
-		{"forward-1B", false, 1, "handler", 2, 2},
-		{"reverse-1MiB", true, 1 << 20, "unresolved::*.fn", 1, 8},
+		{"forward-1B", false, 1, "handler", 2, 2, 3},
+		{"reverse-1MiB", true, 1 << 20, "unresolved::*.fn", 1, 8, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			nodes, edges := rebuildFnPointerChain(tc.reverseKey)
@@ -38,8 +39,8 @@ func TestRebuildFnPointerCopyOrder(t *testing.T) {
 			require.Equal(t, "handler", rebuildFnPointerSavedAt(t, rawForward, graph.EdgeCalls, "caller", 9).To)
 			require.Equal(t, "unresolved::*.fn", rebuildFnPointerSavedAt(t, rawReverse, graph.EdgeCalls, "caller", 9).To)
 
-			// For the 1 MiB witness, use real wide slot keys on no-hit
-			// copies; the working store still sees only one copy at a time.
+			// The no-hit copies exceed 1 MiB together. The small moves
+			// stay in memory and the copies do not count as spill.
 			if tc.threshold > 1 {
 				wide := strings.Repeat("x", 128<<10)
 				for i := range 10 {
@@ -63,10 +64,47 @@ func TestRebuildFnPointerCopyOrder(t *testing.T) {
 			require.Equal(t, tc.wantResolved, stats.Resolved)
 			require.Equal(t, tc.wantSweeps, stats.Sweeps)
 			require.Equal(t, tc.reverseKey, stats.Capped)
-			require.Positive(t, stats.Spill.Flushes)
-			require.GreaterOrEqual(t, stats.Spill.InputBytes, int64(tc.threshold))
+			if tc.wantFlushes == 0 {
+				require.Equal(t, store_pebble.FnPointerSpill{}, stats.Spill)
+			} else {
+				// At 1 B each of the three moves (one registration and
+				// two calls) closes a one-row run.
+				require.Equal(t, tc.wantFlushes, stats.Spill.Flushes)
+				require.Positive(t, stats.Spill.InputBytes)
+				require.Positive(t, stats.Spill.TableBytes)
+			}
 		})
 	}
+}
+
+func TestRebuildFnPointerOverlayDoesNotSpill(t *testing.T) {
+	nodes := []*graph.Node{
+		rebuildFnPointerNode("caller", "run", "saved.c"),
+		rebuildFnPointerNode("a", "A", "saved.c"),
+		rebuildFnPointerNode("b", "B", "saved.c"),
+	}
+	copyReg := rebuildFnPointerReg("caller", "unresolved::*.fn", 3, "dispatch", "")
+	copyReg.Meta["fnptr_copy_struct"], copyReg.Meta["fnptr_copy_field"] = "slot", "fn"
+	// Both registrations and the primary call already point at their
+	// targets. The copy yields a fanout edge without staging a move.
+	edges := []*graph.Edge{
+		rebuildFnPointerReg("caller", "a", 1, "slot", "A"),
+		rebuildFnPointerReg("caller", "b", 2, "slot", "B"),
+		copyReg,
+		rebuildFnPointerCall("caller", "a", 4, "dispatch"),
+	}
+	want := rebuildFnPointerNative(t, nodes, edges, true, nil)
+	b := rebuildFnPointerBuild(t)
+	b.AddBatch(nodes, edges)
+	p, err := CaptureRebuildFnPointer(t.Context(), b, 1)
+	require.NoError(t, err)
+	stats, err := RunRebuildFnPointer(t.Context(), p)
+	require.NoError(t, err)
+	got := rebuildFnPointerSaved(t, b)
+	require.Len(t, got, len(edges)+1)
+	require.Equal(t, want, got)
+	require.Equal(t, 2, stats.Resolved)
+	require.Equal(t, store_pebble.FnPointerSpill{}, stats.Spill)
 }
 
 func TestRebuildFnPointerCensusAndSelection(t *testing.T) {
@@ -180,7 +218,7 @@ func TestRebuildFnPointerReindexWindow(t *testing.T) {
 			want := rebuildFnPointerNative(t, nodes, edges, true, nil)
 			b := rebuildFnPointerBuild(t)
 			b.AddBatch(nodes, edges)
-			p, err := CaptureRebuildFnPointer(t.Context(), b, 1<<20)
+			p, err := CaptureRebuildFnPointer(t.Context(), b, 32<<10)
 			require.NoError(t, err)
 			stats, err := RunRebuildFnPointer(t.Context(), p)
 			require.NoError(t, err)
@@ -189,6 +227,7 @@ func TestRebuildFnPointerReindexWindow(t *testing.T) {
 			wantRows := first + 1
 			if first == 5000 {
 				wantRows-- // b is stationary for the first native chunk.
+				require.Greater(t, stats.Spill.Flushes, 1) // The native window spans runs.
 			}
 			require.Len(t, got, wantRows)
 			require.Equal(t, 1, stats.Sweeps)

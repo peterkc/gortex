@@ -66,7 +66,7 @@ func RunRebuildFnPointer(ctx context.Context, p *store_pebble.RebuildFnPointerPa
 		}
 		oldTo := e.To
 		e.To, e.Origin = target.ID, graph.OriginASTInferred
-		return p.StageMove(graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		return p.StageMove(ctx, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 	})
 	if err != nil {
 		return stats, err
@@ -100,7 +100,7 @@ func RunRebuildFnPointer(ctx context.Context, p *store_pebble.RebuildFnPointerPa
 			var moves []graph.EdgeReindex
 			stats.Resolved += fnPtrRebind(e, first, &moves)
 			for _, move := range moves {
-				if err := p.StageMove(move); err != nil {
+				if err := p.StageMove(ctx, move); err != nil {
 					return err
 				}
 			}

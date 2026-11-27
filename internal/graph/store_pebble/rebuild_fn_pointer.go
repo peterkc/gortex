@@ -5,8 +5,12 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -23,22 +27,22 @@ const (
 	fnPointerFanoutID
 )
 
-// RebuildFnPointerPass owns one scratch range in the build's pending DB. The
+// RebuildFnPointerPass owns a scratch range and deferred move runs. The
 // coordinator serializes census, earlier passes, this pass, and Close. No
 // graph mutations may interleave with this pass's input reads or application.
 type RebuildFnPointerPass struct {
 	build     *BuildStore
 	threshold int
-	unflushed int
+	runDir    string
+	moves     [2]fnPointerMoveStream
 	fanout    uint64
 	spill     FnPointerSpill
 	closed    bool
 }
 
-// FnPointerSpill counts threshold-triggered flushes and the serialized
-// scratch input they cover. TableBytes counts actual L0 bytes written during
-// those flush calls, not every table flushed by the build. The final partial
-// interval is excluded.
+// FnPointerSpill counts closed threshold SST runs consumed by Apply, their
+// logical move input bytes, and their physical file bytes. It excludes the
+// pending overlay and final in-memory tails.
 type FnPointerSpill struct {
 	Flushes    int
 	InputBytes int64
@@ -85,11 +89,15 @@ func (p *RebuildFnPointerPass) Close() error {
 	if p.closed {
 		return nil
 	}
-	if err := p.build.pending.DeleteRange(fnPointerPrefix, prefixEnd(fnPointerPrefix), pebble.NoSync); err != nil {
-		return err
+	err := p.build.pending.DeleteRange(fnPointerPrefix, prefixEnd(fnPointerPrefix), pebble.NoSync)
+	if p.runDir != "" {
+		err = errors.Join(err, os.RemoveAll(p.runDir))
 	}
-	p.closed = true
-	return nil
+	if err == nil {
+		p.closed = true
+		p.moves = [2]fnPointerMoveStream{}
+	}
+	return err
 }
 
 func (p *RebuildFnPointerPass) View() RebuildView { return p.build.RebuildView() }
@@ -167,9 +175,10 @@ func (p *RebuildFnPointerPass) Targets(ctx context.Context, slot string, limit i
 	return ids, err
 }
 
-// StageMove uses the old complete key, so registration and dispatch moves
-// keep their independent stream orders across staging and application.
-func (p *RebuildFnPointerPass) StageMove(move graph.EdgeReindex) error {
+// StageMove accepts strictly ascending, unique old complete keys in each
+// stream. VisitInputs provides this order. Registration and dispatch use
+// separate streams. A duplicate or descending key is refused before staging.
+func (p *RebuildFnPointerPass) StageMove(ctx context.Context, move graph.EdgeReindex) error {
 	e := move.Edge
 	column := fnPointerRegMoves
 	if e.Kind == graph.EdgeCalls {
@@ -177,11 +186,32 @@ func (p *RebuildFnPointerPass) StageMove(move graph.EdgeReindex) error {
 	}
 	old := *e
 	old.To = move.OldTo
+	key := fnPointerEdgeKey(column, &old)
+	stream := &p.moves[column-fnPointerRegMoves]
+	if stream.lastKey != nil && bytes.Compare(key, stream.lastKey) <= 0 {
+		return invalid("function-pointer move keys must be strictly ascending")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	value, err := encodeEdge(e)
 	if err != nil {
 		return err
 	}
-	return p.put(fnPointerEdgeKey(column, &old), append(appendKeyString(nil, move.OldTo), value...))
+	value = append(appendKeyString(nil, move.OldTo), value...)
+	size := len(key) + len(value)
+	if len(stream.rows) != 0 && size > p.threshold-stream.bytes {
+		if err := p.spillMoves(ctx, column, stream); err != nil {
+			return err
+		}
+	}
+	stream.rows = append(stream.rows, row{key, value})
+	stream.lastKey = key
+	stream.bytes += size
+	if stream.bytes >= p.threshold {
+		return p.spillMoves(ctx, column, stream)
+	}
+	return nil
 }
 
 // StageFanout retains the first position but the last payload for duplicates,
@@ -241,7 +271,7 @@ func (p *RebuildFnPointerPass) applyMoves(ctx context.Context, column byte) erro
 	// 5,000-move window. BuildStore's public method re-chunks at 256.
 	const nativeChunk = 5000
 	var batch []graph.EdgeReindex
-	if err := pendingVisit(ctx, p.build.pending, fnPointerColumn(column), func(r row) error {
+	if err := p.visitMoves(ctx, column, func(r row) error {
 		oldTo, rest, err := readKeyString(r.value)
 		if err != nil {
 			return err
@@ -249,6 +279,11 @@ func (p *RebuildFnPointerPass) applyMoves(ctx context.Context, column byte) erro
 		e, err := decodeEdge(rest)
 		if err != nil {
 			return err
+		}
+		old := *e
+		old.To = oldTo
+		if !bytes.Equal(r.key, fnPointerEdgeKey(column, &old)) {
+			return invalid("staged function-pointer identity does not match key")
 		}
 		batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		if len(batch) < nativeChunk {
@@ -264,6 +299,105 @@ func (p *RebuildFnPointerPass) applyMoves(ctx context.Context, column byte) erro
 		return err
 	}
 	return p.build.reindexChunk(batch)
+}
+
+type fnPointerMoveStream struct {
+	rows    []row
+	lastKey []byte
+	bytes   int
+	runs    int
+}
+
+func (p *RebuildFnPointerPass) spillMoves(ctx context.Context, column byte, stream *fnPointerMoveStream) error {
+	if p.runDir == "" {
+		dir, err := os.MkdirTemp(filepath.Join(p.build.scratchParent, "pending"), "fn-pointer-moves-")
+		if err != nil {
+			return err
+		}
+		p.runDir = dir
+	}
+	path := p.runPath(column, stream.runs)
+	if err := writeFnPointerMoveRun(ctx, path, stream.rows); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	stream.runs++
+	p.spill.Flushes++
+	p.spill.InputBytes += int64(stream.bytes)
+	p.spill.TableBytes += uint64(info.Size())
+	clear(stream.rows)
+	stream.rows = stream.rows[:0]
+	stream.bytes = 0
+	return nil
+}
+
+func (p *RebuildFnPointerPass) runPath(column byte, run int) string {
+	return filepath.Join(p.runDir, fmt.Sprintf("%d-%d.sst", column, run))
+}
+
+func writeFnPointerMoveRun(ctx context.Context, path string, rows []row) (err error) {
+	w, err := newLinkTable(path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, w.Close()) }()
+	for _, r := range rows {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := w.Set(r.key, r.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *RebuildFnPointerPass) visitMoves(ctx context.Context, column byte, yield func(row) error) error {
+	stream := &p.moves[column-fnPointerRegMoves]
+	// Each run and the tail are consecutive ranges of one ordered input scan.
+	for i := range stream.runs {
+		if err := visitFnPointerMoveRun(ctx, p.runPath(column, i), yield); err != nil {
+			return err
+		}
+	}
+	for _, r := range stream.rows {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := yield(r); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+func visitFnPointerMoveRun(ctx context.Context, path string, yield func(row) error) (err error) {
+	table, err := openLinkTable(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, table.Close()) }()
+	it, err := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, it.Close()) }()
+	for kv := it.First(); kv != nil; kv = it.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		value, _, err := kv.Value(nil)
+		if err != nil {
+			return err
+		}
+		if err := yield(row{kv.K.UserKey, value}); err != nil {
+			return err
+		}
+	}
+	return errors.Join(ctx.Err(), it.Error())
 }
 
 func (p *RebuildFnPointerPass) visitMembers(ctx context.Context, slot string, yield func(string) error) error {
@@ -282,22 +416,7 @@ func (p *RebuildFnPointerPass) addMember(slot, id string) (bool, error) {
 }
 
 func (p *RebuildFnPointerPass) put(key, value []byte) error {
-	if err := p.build.pending.Set(key, value, pebble.NoSync); err != nil {
-		return err
-	}
-	p.unflushed += len(key) + len(value)
-	if p.unflushed < p.threshold {
-		return nil
-	}
-	before := p.build.pending.Metrics().Levels[0].TableBytesFlushed
-	if err := p.build.pending.Flush(); err != nil {
-		return err
-	}
-	p.spill.TableBytes += p.build.pending.Metrics().Levels[0].TableBytesFlushed - before
-	p.spill.Flushes++
-	p.spill.InputBytes += int64(p.unflushed)
-	p.unflushed = 0
-	return nil
+	return p.build.pending.Set(key, value, pebble.NoSync)
 }
 
 func fnPointerPresent([]byte) (bool, error) { return true, nil }
