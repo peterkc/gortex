@@ -157,11 +157,16 @@ func (p *rebuildConventionPass) pick(ctx context.Context, names, dirs []string, 
 			if !prove {
 				return nil
 			}
-			exact, err := p.present(p.key('p', n.ID))
-			if exact {
+			raw, err := p.get(p.key('P', name, n.ID))
+			if err != nil || raw == nil {
+				return err
+			}
+			rawFile := string(raw)
+			rawAllowed := p.rules.AllowWinner == nil || p.rules.AllowWinner(name, rawFile)
+			if rank == p.rules.Rank(rawFile, file, dirs) && allowed == rawAllowed {
 				proved.add(n.ID, rank, allowed)
 			}
-			return err
+			return nil
 		}); err != nil {
 			return live, proved, err
 		}
@@ -348,13 +353,6 @@ func (p *rebuildConventionPass) recordNode(raw *graph.Node) error {
 			return err
 		}
 	}
-	live, err := p.source(raw.ID)
-	if err != nil || live == nil || raw.FilePath != live.FilePath {
-		return err
-	}
-	if named && raw.Name == live.Name && p.rules.Eligible(raw) && p.rules.Eligible(live) {
-		return p.put(p.key('p', raw.ID), nil)
-	}
 	return nil
 }
 
@@ -370,9 +368,9 @@ func (p *rebuildConventionPass) recordEdge(raw *graph.Edge, file string) error {
 	}
 	rawVia, _ := raw.Meta["via"].(string)
 	liveVia, _ := live.Meta["via"].(string)
-	rawNames, _ := p.rules.Shape(raw.To, rawVia)
-	liveNames, _ := p.rules.Shape(live.To, liveVia)
-	exact := raw.FilePath == file && raw.Kind == live.Kind && rawVia == liveVia && slices.Equal(rawNames, liveNames)
+	rawNames, rawDirs := p.rules.Shape(raw.To, rawVia)
+	liveNames, liveDirs := p.rules.Shape(live.To, liveVia)
+	exact := raw.FilePath == file && raw.Kind == live.Kind && slices.Equal(rawNames, liveNames) && slices.Equal(rawDirs, liveDirs)
 	return p.noteReceipt(key, claim, exact)
 }
 
