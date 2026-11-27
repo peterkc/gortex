@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -148,5 +149,128 @@ func TestRebuildRailsFirstMemberIgnoresLaterUncertainOwner(t *testing.T) {
 		got, err := b.pendingEdge(pendingEdgeKey(&want))
 		require.NoError(t, err)
 		require.NotNil(t, got)
+	}
+}
+
+func TestRebuildRailsDirectModelCustody(t *testing.T) {
+	const routeFile, modelFile = "routes.rb", "Invoice.cs"
+	caller := &graph.Node{ID: "caller", Kind: graph.KindFunction, FilePath: routeFile, Language: "ruby"}
+	model := &graph.Node{ID: "model", Name: "Invoice", Kind: graph.KindType, FilePath: modelFile, Language: "csharp"}
+	call := &graph.Edge{From: caller.ID, To: "unresolved::find", Kind: graph.EdgeCalls, FilePath: routeFile, Line: 1,
+		Meta: map[string]any{"recv_const": model.Name}}
+	modelEdge := &graph.Edge{From: model.ID, To: "table::invoices", Kind: graph.EdgeModelsTable, FilePath: modelFile, Line: 2}
+	rules := rebuildRailsReviewRules()
+	rules.Model = func(string) bool { return true }
+	for _, tc := range []string{"direct C# receipt", "missing receipt", "wrong owner file", "empty language", "stale custody", "malformed custody"} {
+		t.Run(tc, func(t *testing.T) {
+			route := producerProofFacts(caller)
+			route.Edges = []*graph.Edge{call}
+			modelFacts := producerProofFacts(model)
+			modelFacts.Edges = []*graph.Edge{modelEdge}
+			b, _ := seedSyntheticCustody(t, route, modelFacts)
+			receipt := modelFacts
+			switch tc {
+			case "missing receipt", "wrong owner file", "empty language":
+				receipt.Edges = nil
+			case "stale custody", "malformed custody":
+				val, err := encodeEdge(modelEdge)
+				require.NoError(t, err)
+				custody, err := (rebuildEdgeCustody{proof: rebuildProofEFCoreModel}).encode(val)
+				require.NoError(t, err)
+				if tc == "stale custody" {
+					custody[len(custody)-1] ^= 1
+				} else {
+					custody = custody[:1]
+				}
+				require.NoError(t, b.pending.Set(rebuildLinkRecorderKey(pendingEdgeKey(modelEdge)), custody, pebble.NoSync))
+			}
+			facts := []ParseFacts{route, receipt}
+			switch tc {
+			case "wrong owner file":
+				facts = append(facts, ParseFacts{EffectiveLanguage: "csharp", File: graph.FileMetaRow{FilePath: "Other.cs"}, Edges: []*graph.Edge{modelEdge}})
+			case "empty language":
+				facts = append(facts, ParseFacts{File: graph.FileMetaRow{FilePath: modelFile}, Edges: []*graph.Edge{modelEdge}})
+			}
+			receipts := func(yield func(ParseFacts, error) bool) {
+				for _, f := range facts {
+					if !yield(f, nil) {
+						return
+					}
+				}
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			match := func(e graph.FrameworkCensusEdge) bool { return e.RecvConst != "" }
+			require.NoError(t, b.FreezeRailsInputs(t.Context(), match))
+			stats, err := b.RebuildRails(t.Context(), receipts, rules)
+			switch tc {
+			case "direct C# receipt":
+				require.NoError(t, err)
+				require.Equal(t, RebuildRailsStats{Stubs: 1, Moves: 1}, stats)
+				want := *call
+				want.To = model.ID
+				got, err := b.pendingEdge(pendingEdgeKey(&want))
+				require.NoError(t, err)
+				require.NotNil(t, got)
+			case "malformed custody":
+				require.ErrorIs(t, err, ErrRebuildRails)
+				require.NotErrorIs(t, err, ErrRebuildUnknownProvenance)
+				require.ErrorContains(t, err, "edge custody format")
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			default:
+				var refused *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refused)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			}
+			busy, err := rebuildGuardHasPrefix(t.Context(), b.pending, rebuildRailsPrefix)
+			require.NoError(t, err)
+			require.False(t, busy)
+		})
+	}
+}
+
+func TestRebuildRailsFreezeGuardsAndRoleCap(t *testing.T) {
+	padding := strings.Repeat("x", 16<<20)
+	for _, tc := range []struct {
+		name, file, receiver string
+		wantErr              bool
+	}{
+		{"Ruby role", "routes.rb", "MailService", true},
+		{"not a Ruby source", "routes.txt", "MailService", false},
+		{"no receiver role", "routes.rb", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := &graph.Node{ID: "caller", Kind: graph.KindFunction, FilePath: tc.file, Language: "ruby"}
+			call := &graph.Edge{From: caller.ID, To: "unresolved::send", Kind: graph.EdgeCalls, FilePath: tc.file, Line: 1,
+				Context: padding, Meta: map[string]any{"recv_const": tc.receiver}}
+			facts := producerProofFacts(caller)
+			facts.Edges = []*graph.Edge{call}
+			b, receipts := seedSyntheticCustody(t, facts)
+			rules := rebuildRailsReviewRules()
+			ctx := t.Context()
+			stats, err := b.RebuildRails(ctx, receipts, rules)
+			require.ErrorContains(t, err, "rails census missing")
+			require.Zero(t, stats)
+			require.ErrorIs(t, b.FreezeRailsInputs(ctx, nil), ErrRebuildRails)
+			match := func(e graph.FrameworkCensusEdge) bool { return e.RecvConst != "" }
+			require.NoError(t, b.FreezeRailsInputs(ctx, match))
+			require.ErrorIs(t, b.FreezeRailsInputs(ctx, match), ErrRebuildRails)
+			stats, err = b.RebuildRails(ctx, receipts, rules)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, stats)
+			require.NoError(t, b.FreezeRailsInputs(ctx, match))
+			stats, err = b.RebuildRails(ctx, nil, rules)
+			require.ErrorContains(t, err, "rails stage inputs")
+			require.Zero(t, stats)
+			busy, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildRailsPrefix)
+			require.NoError(t, err)
+			require.False(t, busy)
+		})
 	}
 }
