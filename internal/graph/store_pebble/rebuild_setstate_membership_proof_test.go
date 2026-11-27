@@ -146,6 +146,68 @@ func TestRebuildReactSetStateProvesOnlyGatedMemberships(t *testing.T) {
 	}
 }
 
+func TestRebuildReactSetStateSkipsNonEmittingCallerClass(t *testing.T) {
+	const selected, selfOnly = "Selected", "SelfOnly"
+	caller := setStateProofMethod("b-render", "render", 5)
+	target := setStateProofMethod("c-render", "render", 10)
+	skipped := setStateProofMethod("a-render", "render", 15)
+	bad := setStateProofMember(skipped, selfOnly)
+	b, receipts := seedSyntheticCustody(t, setStateProofFacts([]*graph.Node{caller, target, skipped},
+		setStateProofMember(caller, selected), setStateProofMember(caller, selfOnly),
+		setStateProofMember(target, selected), bad, setStateProofCall(caller, "unresolved::setState"),
+	))
+	// The caller is the final render in SelfOnly. If that class enters the
+	// target census, the lower render's malformed custody fails capture.
+	key := rebuildLinkRecorderKey(pendingEdgeKey(bad))
+	require.NoError(t, b.pending.Set(key, []byte{rebuildEdgeProofFormat}, pebble.NoSync))
+	stats, err := b.RebuildReactSetState(t.Context(), receipts, setStateProofTarget, setStateProofOutput)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, stats.Edges)
+	checkSetStateProofOutput(t, b, setStateProofOutput(caller, target, selected), rebuildProofReactSetState)
+}
+
+func TestRebuildSetStateFiltersUntrackedTargetMembership(t *testing.T) {
+	const exactClass, otherClass = "Exact", "Other"
+	for _, chosen := range []string{exactClass, otherClass} {
+		t.Run(chosen, func(t *testing.T) {
+			caller := setStateProofMethod("refresh", "refresh", 5)
+			exact := setStateProofMethod("exact-render", "render", 10)
+			other := setStateProofMethod("other-render", "render", 15)
+			old := setStateProofMember(other, "Old")
+			live := setStateProofMember(other, otherClass)
+			alternate := exactClass
+			if chosen == exactClass {
+				alternate = otherClass
+			}
+			facts := setStateProofFacts([]*graph.Node{caller, exact, other},
+				setStateProofMember(caller, chosen), setStateProofMember(caller, alternate),
+				setStateProofMember(exact, exactClass), setStateProofCall(caller, "unresolved::setState"),
+			)
+			b, _ := seedSyntheticCustody(t, facts)
+			b.AddEdge(old)
+			b.ReindexEdges([]graph.EdgeReindex{{Edge: live, OldTo: old.To}})
+			requireRebuildLinkCustody(t, b, live, rebuildEdgeCustody{proof: rebuildProofUntrackedMove})
+			// A receipt at the new key cannot establish the untracked move.
+			facts.Edges = append(facts.Edges, live)
+			receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildReactSetState(t.Context(), receipts, setStateProofTarget, setStateProofOutput)
+			if chosen == exactClass {
+				require.NoError(t, err)
+				require.EqualValues(t, 1, stats.Edges)
+				checkSetStateProofOutput(t, b, setStateProofOutput(caller, exact, exactClass), rebuildProofReactSetState)
+				return
+			}
+			require.ErrorIs(t, err, ErrRebuildReactSetState)
+			var refusal *RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(live)}, refusal)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
 func TestRebuildSetStateCountsMissingMembershipsByLiveKey(t *testing.T) {
 	for _, tc := range []struct {
 		name, lifecycle string

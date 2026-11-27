@@ -86,9 +86,12 @@ func TestRebuildGoExternalMembershipHasNoReceiptCustody(t *testing.T) {
 	require.Equal(t, payload, after[string(key)])
 	require.Equal(t, key, after[string(pendingReverseKey(want, key))])
 
-	stats, err := b.RebuildReactSetState(ctx, func(func(ParseFacts, error) bool) {
-		t.Fatal("setState must reject the untracked membership before raw receipt replay")
+	replays := 0
+	stats, err := b.RebuildReactSetState(ctx, func(yield func(ParseFacts, error) bool) {
+		replays++
+		yield(setStateProofFacts([]*graph.Node{caller, render}, setStateCall, setStateProofMember(render, module.ID)), nil)
 	}, setStateProofTarget, setStateProofOutput)
+	require.Equal(t, 1, replays)
 	require.ErrorIs(t, err, ErrRebuildReactSetState)
 	var refusal *RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refusal)

@@ -100,7 +100,8 @@ type rebuildSetStatePass struct {
 
 // c: highest live lifecycle candidate ID by class; m: candidate methods;
 // q: possible caller classes; s: first caller owner classes that can emit;
-// r: membership receipt key -> live key; o: first owner by method;
+// r: membership claim -> live key (untracked claims have a 0 byte before
+// their live key instead of a receipt key); o: first owner by method;
 // t: qualifying call receipt key -> caller; g: live call gate;
 // p: proved call gate; n: declaration proof;
 // l: lifecycle winner by class; w: staged output by exact key;
@@ -164,7 +165,7 @@ func (p *rebuildSetStatePass) capture(ctx context.Context, lifecycle string, isS
 			return err
 		}
 		n, err := p.node(ctx, e.From)
-		if err != nil || n == nil || n.Kind != graph.KindMethod || n.Name != lifecycle || n.ID == "" {
+		if err != nil || n == nil || n.Kind != graph.KindMethod || n.Name != lifecycle {
 			return err
 		}
 		active = true
@@ -305,6 +306,12 @@ func (p *rebuildSetStatePass) wantMembership(e *graph.Edge, live []byte) error {
 	if err != nil {
 		return err
 	}
+	if custody.proof == rebuildProofUntrackedMove {
+		// Use a non-receipt key so replay cannot prove this membership or
+		// collide with the raw key claimed by another live membership.
+		key := append(append(setStateScratch('r'), 0), live...)
+		return p.put(key, append([]byte{rebuildCapabilityWanted | rebuildCapabilityUnproved}, live...))
+	}
 	if custody.proof != 0 {
 		return &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(e)}
 	}
@@ -412,23 +419,16 @@ func (p *rebuildSetStatePass) record(ctx context.Context, receipts iter.Seq2[Par
 }
 
 func (p *rebuildSetStatePass) proveMemberships(ctx context.Context, lifecycle string) error {
-	// Class capture was provisional until replay picked each caller's first
-	// owner. Require target membership receipts only in those classes.
-	if err := pendingVisit(ctx, p.b.pending, setStateScratch('g'), func(r row) error {
-		id, _, err := readKeyString(r.key[3:])
-		if err != nil {
+	// Replay picks the first owner of each gated caller. A lifecycle target
+	// with any membership in a selected class needs all its memberships proved.
+	if err := p.methods(ctx, func(n *graph.Node) error {
+		gated, err := p.marked('g', n.ID)
+		if err != nil || !gated {
 			return err
 		}
-		class, err := p.owner(id)
+		class, err := p.owner(n.ID)
 		if err != nil || class == "" {
 			return err
-		}
-		n, err := p.node(ctx, id)
-		if err != nil {
-			return err
-		}
-		if n == nil {
-			return invalid("setState lost gated method")
 		}
 		canEmit, err := p.classCanEmit(n, class, lifecycle)
 		if err != nil || !canEmit {
@@ -438,8 +438,8 @@ func (p *rebuildSetStatePass) proveMemberships(ctx context.Context, lifecycle st
 	}); err != nil {
 		return err
 	}
-	// Capture rejects receipt-key collisions, so each row represents one
-	// distinct live membership. Receipt-key order can differ from live order.
+	// Capture rejects receipt-key collisions. Scratch order can differ from
+	// live-key order, so count and name refusals by live key.
 	var refused rebuildScratchRefusals
 	if err := pendingVisit(ctx, p.b.pending, setStateScratch('r'), func(r row) error {
 		if len(r.value) < 2 {
