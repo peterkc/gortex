@@ -2,7 +2,6 @@ package resolver
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -83,9 +82,6 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 				grpcStub := grpc && e.Via == "grpc.stub" && e.GRPCService != "" && e.GRPCMethod != ""
 				temporalVia := temporal && strings.HasPrefix(e.Via, "temporal.")
 				objectRegistry := registry && e.Via == objectRegistryVia && e.RegistryValue != ""
-				if e.Oversized && (via || setState || grpcStub || temporalVia || objectRegistry) {
-					return fmt.Errorf("%w: framework census edge", store_pebble.ErrRebuildLinkInputSize)
-				}
 				if via || (spring && e.Via == springEventVia) {
 					edges.via[e.Via] = true
 				}
@@ -96,9 +92,6 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 			} else {
 				role, member := temporalRoleForJavaAnnotation(e.To)
 				annotation := role != "" || member != ""
-				if e.Oversized && annotation {
-					return fmt.Errorf("%w: framework census edge", store_pebble.ErrRebuildLinkInputSize)
-				}
 				edges.temporalAnnotation = edges.temporalAnnotation || annotation
 			}
 			return nil

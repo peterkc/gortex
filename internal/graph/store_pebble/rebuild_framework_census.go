@@ -62,7 +62,6 @@ func (v RebuildView) VisitFrameworkGateEdges(ctx context.Context, annotations bo
 		row.GRPCService, _ = e.Meta["grpc_service"].(string)
 		row.GRPCMethod, _ = e.Meta["grpc_method"].(string)
 		row.RegistryValue, _ = e.Meta["registry_value"].(string)
-		row.Oversized = len(r.key)+len(r.value) > rebuildFrameworkGateRowBytes
 		return yield(row)
 	})
 }

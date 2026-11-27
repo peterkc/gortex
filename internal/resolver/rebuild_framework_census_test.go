@@ -21,7 +21,7 @@ func TestRebuildFrameworkCensusOversizedEdge(t *testing.T) {
 	for _, tc := range []struct {
 		name, stage, to, via string
 		kind                 graph.EdgeKind
-		refuse               bool
+		allowed              bool
 	}{
 		{"ordinary Call", SynthGRPCStub, "unresolved::read", "", graph.EdgeCalls, false},
 		{"unselected stage", SynthGRPCStub, "unresolved::read", rtkQueryVia, graph.EdgeCalls, false},
@@ -44,17 +44,12 @@ func TestRebuildFrameworkCensusOversizedEdge(t *testing.T) {
 			b.AddEdge(&e)
 			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 			require.NoError(t, err)
-			require.Equal(t, tc.refuse, frozen.allows(tc.stage), "small-row control")
+			require.Equal(t, tc.allowed, frozen.allows(tc.stage), "small-row control")
 			e.Context = large
 			b.AddEdge(&e)
 			frozen, err = FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
-			if tc.refuse {
-				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
-				require.ErrorContains(t, err, "framework census edge")
-				return
-			}
 			require.NoError(t, err)
-			require.False(t, frozen.allows(tc.stage))
+			require.Equal(t, tc.allowed, frozen.allows(tc.stage), "oversized row must not change admission")
 		})
 	}
 }

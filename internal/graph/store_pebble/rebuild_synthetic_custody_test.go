@@ -185,7 +185,7 @@ func TestRebuildSyntheticCustodyReactNative(t *testing.T) {
 	})
 }
 
-func TestRebuildFrameworkGateEdgesProjectRegistryAndSize(t *testing.T) {
+func TestRebuildFrameworkGateEdgesProjectRegistry(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	e := &graph.Edge{From: "caller", To: "unresolved::register", Kind: graph.EdgeCalls, FilePath: "gate.ts", Line: 2,
 		Meta: map[string]any{"via": "object-registry", "registry_value": "AddCommand"}}
@@ -201,7 +201,7 @@ func TestRebuildFrameworkGateEdgesProjectRegistryAndSize(t *testing.T) {
 	}))
 	require.ElementsMatch(t, []graph.FrameworkCensusEdge{
 		{EdgeIdentity: graph.EdgeIdentityFor(e), Via: "object-registry", RegistryValue: "AddCommand"},
-		{EdgeIdentity: graph.EdgeIdentityFor(&large), Via: "object-registry", RegistryValue: "AddCommand", Oversized: true},
+		{EdgeIdentity: graph.EdgeIdentityFor(&large), Via: "object-registry", RegistryValue: "AddCommand"},
 	}, got)
 }
 
