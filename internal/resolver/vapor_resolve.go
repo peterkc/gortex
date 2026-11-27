@@ -12,7 +12,8 @@ import (
 // PascalCase (`final class User: Model`) and resolve to /Models/; that case is
 // gated on the resolved definition actually living under a /Models/ directory
 // so a built-in or unrelated same-named type is never mis-bound. The
-// `*ViewController` shape is left to the UIKit pass.
+// `*ViewController` shape is left to UIKit by the controller branch. A
+// residual uppercase name can still qualify as a Fluent model.
 
 var (
 	vaporControllerDirs = []string{"/Controllers/", "/Controller/"}
@@ -30,14 +31,10 @@ func ResolveVaporRefs(g graph.Store) int {
 	var reindex []graph.EdgeReindex
 	for _, kind := range []graph.EdgeKind{graph.EdgeInstantiates, graph.EdgeReferences, graph.EdgeTypedAs, graph.EdgeCalls} {
 		for e := range g.EdgesByKind(kind) {
-			if e == nil || !graph.IsUnresolvedTarget(e.To) {
+			if e == nil {
 				continue
 			}
-			name := graph.UnresolvedName(e.To)
-			if name == "" || strings.ContainsRune(name, '.') {
-				continue
-			}
-			dirs, modelOnly, ok := vaporDirsFor(name)
+			name, dirs, modelOnly, ok := vaporRefShape(e.To)
 			if !ok {
 				continue
 			}
@@ -45,7 +42,7 @@ func ResolveVaporRefs(g graph.Store) int {
 			if n := g.GetNode(e.From); n != nil {
 				fromFile = n.FilePath
 			}
-			if !strings.HasSuffix(fromFile, ".swift") {
+			if !vaporRefSource(fromFile) {
 				continue
 			}
 			targetID, conf := ResolveByConvention(g, name, "", dirs, fromFile)
@@ -57,17 +54,11 @@ func ResolveVaporRefs(g graph.Store) int {
 				// actually lives under a /Models/ directory, so a built-in
 				// or unrelated same-named type is never mis-bound.
 				tn := g.GetNode(targetID)
-				if tn == nil || !swiftUIPathHasDir(tn.FilePath, vaporModelDirs) {
+				if tn == nil || !vaporModelPath(tn.FilePath) {
 					continue
 				}
 			}
-			oldTo := e.To
-			e.To = targetID
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = conf
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, conf)
-			StampSynthesized(e, SynthVaporResolve)
-			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+			reindex = append(reindex, vaporRefRebind(e, targetID, conf))
 			resolved++
 		}
 	}
@@ -77,10 +68,38 @@ func ResolveVaporRefs(g graph.Store) int {
 	return resolved
 }
 
-// vaporDirsFor classifies a Vapor reference name into its convention dirs;
-// modelOnly marks the bare-PascalCase Fluent-model fallback, which is
-// additionally gated on the resolved definition living under a /Models/
-// directory. A `*ViewController` is excluded — that is the UIKit pass's shape.
+func vaporRefShape(target string) (name string, dirs []string, modelOnly, ok bool) {
+	if !graph.IsUnresolvedTarget(target) {
+		return "", nil, false, false
+	}
+	name = graph.UnresolvedName(target)
+	if name == "" || strings.ContainsRune(name, '.') {
+		return "", nil, false, false
+	}
+	dirs, modelOnly, ok = vaporDirsFor(name)
+	return name, dirs, modelOnly, ok
+}
+
+func vaporRefSource(path string) bool {
+	return strings.HasSuffix(path, ".swift")
+}
+
+func vaporModelPath(path string) bool {
+	return swiftUIPathHasDir(path, vaporModelDirs)
+}
+
+func vaporRefRebind(e *graph.Edge, target string, conf float64) graph.EdgeReindex {
+	oldTo := e.To
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	e.Confidence = conf
+	e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, conf)
+	StampSynthesized(e, SynthVaporResolve)
+	return graph.EdgeReindex{Edge: e, OldTo: oldTo}
+}
+
+// vaporDirsFor classifies a Vapor reference name into its convention dirs.
+// A *ViewController skips the controller branch, not the model fallback.
 func vaporDirsFor(name string) (dirs []string, modelOnly bool, ok bool) {
 	switch {
 	case strings.HasSuffix(name, "Controller") && !strings.HasSuffix(name, "ViewController"):
