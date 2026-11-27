@@ -25,10 +25,7 @@ func ResolveSpringEventCalls(g graph.Store) int {
 	}
 	listenersByType := map[string][]*graph.Node{}
 	for _, n := range nodesByKindsOrAll(g, graph.KindMethod, graph.KindFunction) {
-		if n == nil || n.Meta == nil {
-			continue
-		}
-		if t, _ := n.Meta["spring_listener_type"].(string); t != "" {
+		if t := springListenerType(n); t != "" {
 			listenersByType[springSimpleType(t)] = append(listenersByType[springSimpleType(t)], n)
 		}
 	}
@@ -41,57 +38,27 @@ func ResolveSpringEventCalls(g graph.Store) int {
 	var reindex []graph.EdgeReindex
 	var batch []*graph.Edge
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if v, _ := e.Meta["via"].(string); v != springEventVia {
-			continue
-		}
-		evType, _ := e.Meta["spring_event_type"].(string)
+		evType := springEventType(e)
 		if evType == "" {
 			continue
 		}
 		listeners := springListenersFor(springSimpleType(evType), listenersByType, parents)
 
+		oldTo := e.To
 		if len(listeners) == 0 {
-			if !graph.IsUnresolvedTarget(e.To) {
-				oldTo := e.To
-				e.To = "unresolved::*." + evType
-				e.Confidence = 0
-				e.ConfidenceLabel = ""
-				UnstampSynthesized(e)
+			if rebindSpringEvent(e, evType, "", false) {
 				reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 			}
 			continue
 		}
 
 		// First listener reuses the placeholder edge; the rest fan out.
-		first := listeners[0]
-		if e.To != first.ID {
-			oldTo := e.To
-			e.To = first.ID
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = ConfidenceTyped
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceTyped)
-			StampSynthesizedTyped(e, SynthSpringEvent)
+		if rebindSpringEvent(e, evType, listeners[0].ID, true) {
 			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
 		resolved++
 		for _, l := range listeners[1:] {
-			ne := &graph.Edge{
-				From: e.From, To: l.ID, Kind: graph.EdgeCalls,
-				FilePath: e.FilePath, Line: e.Line,
-				Origin:          graph.OriginASTInferred,
-				Confidence:      ConfidenceTyped,
-				ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceTyped),
-				Meta: map[string]any{
-					"via":               springEventVia,
-					"spring_event_type": evType,
-					MetaSynthesizedBy:   SynthSpringEvent,
-					MetaProvenance:      ProvenanceFramework,
-				},
-			}
-			batch = append(batch, ne)
+			batch = append(batch, springEventFanout(e, evType, l.ID))
 			resolved++
 		}
 	}
@@ -102,6 +69,63 @@ func ResolveSpringEventCalls(g graph.Store) int {
 		g.AddEdge(ne)
 	}
 	return resolved
+}
+
+func springListenerType(n *graph.Node) string {
+	if n == nil {
+		return ""
+	}
+	t, _ := n.Meta["spring_listener_type"].(string)
+	return t
+}
+
+func springEventType(e *graph.Edge) string {
+	if e == nil {
+		return ""
+	}
+	if via, _ := e.Meta["via"].(string); via != springEventVia {
+		return ""
+	}
+	t, _ := e.Meta["spring_event_type"].(string)
+	return t
+}
+
+func rebindSpringEvent(e *graph.Edge, evType, listener string, matched bool) bool {
+	if !matched {
+		if graph.IsUnresolvedTarget(e.To) {
+			return false
+		}
+		e.To = "unresolved::*." + evType
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		UnstampSynthesized(e)
+		return true
+	}
+	if e.To == listener {
+		return false
+	}
+	e.To = listener
+	e.Origin = graph.OriginASTInferred
+	e.Confidence = ConfidenceTyped
+	e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceTyped)
+	StampSynthesizedTyped(e, SynthSpringEvent)
+	return true
+}
+
+func springEventFanout(e *graph.Edge, evType, listener string) *graph.Edge {
+	return &graph.Edge{
+		From: e.From, To: listener, Kind: graph.EdgeCalls,
+		FilePath: e.FilePath, Line: e.Line,
+		Origin:          graph.OriginASTInferred,
+		Confidence:      ConfidenceTyped,
+		ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceTyped),
+		Meta: map[string]any{
+			"via":               springEventVia,
+			"spring_event_type": evType,
+			MetaSynthesizedBy:   SynthSpringEvent,
+			MetaProvenance:      ProvenanceFramework,
+		},
+	}
 }
 
 // springListenersFor returns the listener methods for an event type and its
