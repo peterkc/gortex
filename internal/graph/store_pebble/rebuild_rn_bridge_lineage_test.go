@@ -104,7 +104,8 @@ func TestRebuildReactNativeBridgeGuardLineage(t *testing.T) {
 				require.ErrorIs(t, err, ErrRebuildReactNativeBridge)
 				require.ErrorAs(t, err, &refusal)
 				require.Equal(t, uint64(1), refusal.Count)
-				require.Equal(t, inputID, refusal.First)
+				want := graph.EdgeIdentity{From: caller.ID, To: native.ID, Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: raw.Line}
+				require.Equal(t, want, refusal.First)
 				require.Zero(t, stats)
 				require.Zero(t, receiptReads)
 				require.Zero(t, offers)

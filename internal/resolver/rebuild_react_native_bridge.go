@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"iter"
+	"slices"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
@@ -10,6 +11,9 @@ import (
 
 // RunRebuildReactNativeBridge executes framework position five after the
 // private Swift/ObjC bridge and before native-implementation pairing.
+// It consumes live rn.native markers. Main currently refuses the ordinary
+// JS/TS unresolved::rn::<module>::<method> target as a non-bare call,
+// so direct bridge fixtures do not prove that extractor-to-main path.
 func RunRebuildReactNativeBridge(ctx context.Context, b *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error],
 	selection FrameworkSynthesizerSelection, spillAt int,
 ) (store_pebble.RebuildReactNativeBridgeStats, error) {
@@ -17,12 +21,7 @@ func RunRebuildReactNativeBridge(ctx context.Context, b *store_pebble.BuildStore
 		return store_pebble.RebuildReactNativeBridgeStats{}, nil
 	}
 	return b.RebuildReactNativeBridge(ctx, receipts, spillAt, func(language string) bool {
-		switch frameworkLanguageFamily(language) {
-		case "web", "apple", "jvm":
-			return true
-		default:
-			return false
-		}
+		return slices.Contains(frameworkSynthLanguageFamilies[SynthReactNative], frameworkLanguageFamily(language))
 	}, func(e *graph.Edge) bool {
 		return e.Kind == graph.EdgeCalls && e.From != "" && e.Meta["via"] == rnNativeVia
 	}, func(e *graph.Edge, native *graph.Node) *graph.Edge {

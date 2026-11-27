@@ -72,6 +72,15 @@ type rebuildReactNativeBridge struct {
 	stats     RebuildReactNativeBridgeStats
 }
 
+// Scratch columns (all under g/K):
+// b: module,method -> 1+sole ID, or 2 for several candidates.
+// n: module,method,native ID -> empty candidate membership.
+// r: raw edge key -> proof-state byte + live edge key.
+// o: big-endian receipt ordinal -> live edge key.
+// g: caller,module,method -> 1 (first site already elected).
+// w: caller,native ID -> 0 for a stationary key, 1+encoded edge for a
+// proposal; before an order refusal this column holds affected output keys.
+// d: declaration ID -> proof-state byte.
 func rebuildRNKey(col byte, fields ...string) []byte {
 	return keyStrings([]byte{'g', 'K', col}, fields...)
 }
@@ -105,10 +114,6 @@ func (p *rebuildReactNativeBridge) get(key []byte) ([]byte, error) {
 	return pendingGet(p.b.pending, key, func(value []byte) ([]byte, error) {
 		return bytes.Clone(value), nil
 	})
-}
-
-func rebuildRNRecorder(raw []byte, module, method string) []byte {
-	return rebuildRNKey('r', string(raw), module, method)
 }
 
 func (p *rebuildReactNativeBridge) capture(ctx context.Context, inFamily func(string) bool, isCall func(*graph.Edge) bool) (bool, error) {
@@ -156,23 +161,45 @@ func (p *rebuildReactNativeBridge) capture(ctx context.Context, inFamily func(st
 		live := pendingEdgeKey(e)
 		custody, err := readRebuildEdgeCustody(p.b.pending, live)
 		if err != nil {
+			if errors.Is(err, ErrRebuildUnknownProvenance) {
+				if err := p.affected(ctx, e); err != nil {
+					return err
+				}
+				return p.refusedOutputs(ctx)
+			}
 			return err
 		}
 		raw := custody.raw
 		if raw == nil {
 			// Synthetic and untracked moves have no raw receipt ordinal.
 			if custody.proof != 0 {
-				return &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(e)}
+				if err := p.affected(ctx, e); err != nil {
+					return err
+				}
+				return p.refusedOutputs(ctx)
 			}
 			raw = live
 		}
-		key := rebuildRNRecorder(raw, mod, method)
+		key := rebuildRNKey('r', string(raw))
 		prior, err := p.get(key)
 		if err != nil {
 			return err
 		}
 		if prior != nil {
-			return &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(e)}
+			previous, err := p.b.pendingEdge(prior[1:])
+			if err != nil {
+				return err
+			}
+			if previous == nil {
+				return invalid("React Native bridge census lost a call")
+			}
+			if err := p.affected(ctx, previous); err != nil {
+				return err
+			}
+			if err := p.affected(ctx, e); err != nil {
+				return err
+			}
+			return p.refusedOutputs(ctx)
 		}
 		active = true
 		return p.put(key, append([]byte{rebuildCapabilityWanted}, live...))
@@ -191,11 +218,7 @@ func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if !isCall(e) {
-				continue
-			}
-			mod, method := rebuildRNNames(e.Meta)
-			key := rebuildRNRecorder(pendingEdgeKey(e), mod, method)
+			key := rebuildRNKey('r', string(pendingEdgeKey(e)))
 			state, err := p.get(key)
 			if err != nil {
 				return err
@@ -203,7 +226,24 @@ func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2
 			if len(state) == 0 {
 				continue
 			}
-			if facts.EffectiveLanguage == "" || e.FilePath != file {
+			live, err := p.b.pendingEdge(state[1:])
+			if err != nil {
+				return err
+			}
+			if live == nil {
+				return invalid("React Native bridge census lost a call")
+			}
+			mod, method := rebuildRNNames(e.Meta)
+			liveMod, liveMethod := rebuildRNNames(live.Meta)
+			bridgeCall := isCall(e)
+			if !bridgeCall || mod != liveMod || method != liveMethod || facts.EffectiveLanguage == "" || e.FilePath != file {
+				// A raw key may be repeated with different metadata. Even a
+				// row that fails the bridge predicate must participate in proof.
+				if bridgeCall && mod != "" && method != "" && (mod != liveMod || method != liveMethod) {
+					if err := p.affected(ctx, e); err != nil {
+						return err
+					}
+				}
 				if err := p.put(key, append([]byte{state[0] | rebuildCapabilityUnproved}, state[1:]...)); err != nil {
 					return err
 				}
@@ -221,7 +261,6 @@ func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2
 			}
 		}
 	}
-	var refused RebuildUnknownProvenanceError
 	if err := pendingVisit(ctx, p.b.pending, rebuildRNKey('r'), func(r row) error {
 		if len(r.value) < 2 {
 			return invalid("React Native bridge recorder key")
@@ -229,22 +268,60 @@ func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2
 		if r.value[0] == rebuildCapabilityWanted|rebuildCapabilityProved {
 			return nil
 		}
-		if refused.Count == 0 {
-			e, err := p.b.pendingEdge(r.value[1:])
-			if err != nil {
-				return err
-			}
-			refused.First = graph.EdgeIdentityFor(e)
+		e, err := p.b.pendingEdge(r.value[1:])
+		if err != nil {
+			return err
 		}
-		refused.Count++
-		return nil
+		if e == nil {
+			return invalid("React Native bridge census lost a call")
+		}
+		return p.affected(ctx, e)
 	}); err != nil {
 		return err
 	}
-	if refused.Count != 0 {
-		return &refused
+	return p.refusedOutputs(ctx)
+}
+
+// Before election, an unproved order can change the representative site for
+// every distinct candidate pair, even when one site hits a stationary key.
+// Reuse the still-empty winner column to count pairs, not recorder claims.
+// No caller can proceed to election with these diagnostic rows present.
+func (p *rebuildReactNativeBridge) affected(ctx context.Context, e *graph.Edge) error {
+	mod, method := rebuildRNNames(e.Meta)
+	prefix := rebuildRNKey('n', mod, method)
+	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		id, _, err := readKeyString(r.key[len(prefix):])
+		if err != nil || id == e.From {
+			return err
+		}
+		output := pendingEdgeKey(&graph.Edge{From: e.From, To: id, Kind: graph.EdgeCalls, FilePath: e.FilePath, Line: e.Line})
+		key := rebuildRNKey('w', e.From, id)
+		prior, err := p.get(key)
+		if err != nil || prior != nil && bytes.Compare(prior, output) <= 0 {
+			return err
+		}
+		return p.put(key, output)
+	})
+}
+
+func (p *rebuildReactNativeBridge) refusedOutputs(ctx context.Context) error {
+	var refused RebuildUnknownProvenanceError
+	var first []byte
+	if err := pendingVisit(ctx, p.b.pending, rebuildRNKey('w'), func(r row) error {
+		if first == nil || bytes.Compare(r.value, first) < 0 {
+			first = bytes.Clone(r.value)
+		}
+		refused.Count++
+		return nil
+	}); err != nil || refused.Count == 0 {
+		return err
 	}
-	return nil
+	id, err := decodeLinkRecorder(first)
+	if err != nil {
+		return err
+	}
+	refused.First = id
+	return &refused
 }
 
 func (p *rebuildReactNativeBridge) elect(ctx context.Context, buildCall func(*graph.Edge, *graph.Node) *graph.Edge) error {
@@ -275,10 +352,6 @@ func (p *rebuildReactNativeBridge) elect(ctx context.Context, buildCall func(*gr
 				return err
 			}
 			key := rebuildRNKey('w', e.From, id)
-			prior, err := p.get(key)
-			if err != nil || prior != nil {
-				return err
-			}
 			native, err := view.Node(ctx, id)
 			if err != nil {
 				return err

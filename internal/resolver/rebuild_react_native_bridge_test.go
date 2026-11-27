@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -95,9 +96,234 @@ func TestRebuildReactNativeBridgeRejectsMissingFirstSite(t *testing.T) {
 	stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
 	var refused *store_pebble.RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refused)
-	require.Equal(t, graph.EdgeIdentityFor(facts[0].Edges[0]), refused.First)
+	// Missing order affects all three pairs before election. The existing
+	// Android row still consumes its pair but would not be rewritten.
+	require.Equal(t, uint64(3), refused.Count)
+	require.Equal(t, graph.EdgeIdentityFor(facts[0].Edges[2]), refused.First)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildEventSavedRows(t, private))
+}
+
+func TestRebuildReactNativeBridgeDuplicateRecorder(t *testing.T) {
+	for _, tc := range []struct {
+		name, field, value string
+	}{
+		{name: "matching"},
+		{"conflicting via", "via", "not-rn"},
+		{"missing via", "via", ""},
+		{"conflicting module", "rn_module", "Contacts"},
+		{"missing module", "rn_module", ""},
+		{"conflicting method", "rn_method", "close"},
+		{"missing method", "rn_method", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := rebuildRNBridgeFacts(t, "Calendar")
+			private := openRebuildRNBridgePrivate(t, facts)
+			before := rebuildEventSavedRows(t, private)
+			// Change only the portable receipt: the live row has the first payload.
+			proof := slices.Clone(facts)
+			duplicate := *facts[0].Edges[0]
+			duplicate.Meta = maps.Clone(duplicate.Meta)
+			if tc.field != "" {
+				if tc.value == "" {
+					delete(duplicate.Meta, tc.field)
+				} else {
+					duplicate.Meta[tc.field] = tc.value
+				}
+			}
+			proof[0].Edges = slices.Insert(slices.Clone(proof[0].Edges), 1, &duplicate)
+			proof[0] = roundTripRebuildRNBridgeFacts(t, proof[0])
+
+			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
+			require.NoError(t, err)
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
+			if tc.field != "" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, private))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, uint64(2), stats.Edges)
+			native := openRebuildTemporalOracle(t, facts...)
+			report := RunFrameworkSynthesizersWithSelection(native, selection)
+			require.NoError(t, report.Err)
+			require.Equal(t, 3, report.Total)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
+func TestRebuildReactNativeBridgeRejectsUnprovedEndpoints(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		file  int
+		alter func(*store_pebble.ParseFacts)
+		count uint64
+	}{
+		{"missing caller", 0, func(f *store_pebble.ParseFacts) {
+			f.Nodes, f.File.NodeCount = nil, 0
+		}, 2},
+		{"wrong caller name", 0, func(f *store_pebble.ParseFacts) { f.Nodes[0].Name = "other" }, 2},
+		{"wrong iOS file", 2, func(f *store_pebble.ParseFacts) { f.File.FilePath = "Other.m" }, 1},
+		{"missing iOS declaration", 2, func(f *store_pebble.ParseFacts) {
+			f.Nodes, f.File.NodeCount = f.Nodes[1:], 1
+		}, 1},
+		{"wrong iOS receipt language", 2, func(f *store_pebble.ParseFacts) { f.EffectiveLanguage = "swift" }, 1},
+		{"wrong iOS node language", 2, func(f *store_pebble.ParseFacts) { f.Nodes[0].Language = "swift" }, 1},
+		{"wrong iOS kind", 2, func(f *store_pebble.ParseFacts) { f.Nodes[0].Kind = graph.KindFunction }, 1},
+		{"wrong iOS module", 2, func(f *store_pebble.ParseFacts) { f.Nodes[0].Meta["rn_module"] = "Contacts" }, 1},
+		{"wrong iOS method", 2, func(f *store_pebble.ParseFacts) { f.Nodes[0].Meta["rn_method"] = "close" }, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := rebuildRNBridgeFacts(t, "Calendar")
+			private := openRebuildRNBridgePrivate(t, facts)
+			before := rebuildEventSavedRows(t, private)
+			wantFirst := graph.EdgeIdentityFor(facts[0].Edges[0])
+			wantFirst.To = facts[2].Nodes[0].ID
+			// All marker proofs remain valid. Only the endpoint receipt differs.
+			proof := roundTripRebuildRNBridgeFacts(t, facts[tc.file])
+			tc.alter(&proof)
+			facts[tc.file] = roundTripRebuildRNBridgeFacts(t, proof)
+
+			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
+			require.NoError(t, err)
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, tc.count, refused.Count)
+			require.Equal(t, wantFirst, refused.First)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
+func TestRebuildReactNativeBridgeRejectsConflictingLinks(t *testing.T) {
+	facts := rebuildRNBridgeFacts(t, "Calendar")
+	private := openRebuildRNBridgePrivate(t, facts)
+	ctx := t.Context()
+	raw := facts[0].Edges[0]
+	rawID := graph.EdgeIdentityFor(raw)
+	var liveIDs []graph.EdgeIdentity
+	for _, to := range []string{"unresolved::alias1", "unresolved::alias2"} {
+		// Reuse the exact raw key, leaving two live moves that claim its ordinal.
+		private.AddEdge(raw)
+		live := *raw
+		live.To = to
+		require.NoError(t, private.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &live, OldTo: raw.To}}))
+		liveIDs = append(liveIDs, graph.EdgeIdentityFor(&live))
+	}
+	before := rebuildEventSavedRows(t, private)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
+	require.NoError(t, err)
+	stats, err := RunRebuildReactNativeBridge(ctx, private, rebuildGRPCReceipts(facts...), selection, 1)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildEventSavedRows(t, private))
+	for _, id := range liveIDs {
+		got, found, err := private.RebuildView().OriginalLinkRecorder(ctx, id)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, rawID, got)
+	}
+}
+
+func TestRebuildReactNativeBridgeEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name, language, module string
+		kind                   graph.EdgeKind
+		disabled               bool
+		want                   int
+	}{
+		{"RN unselected", "typescript", "Calendar", graph.EdgeCalls, true, 0},
+		{"no admitted family", "go", "Calendar", graph.EdgeCalls, false, 0},
+		{"web only", "typescript", "Calendar", graph.EdgeCalls, false, 1},
+		{"Apple only", "objc", "Calendar", graph.EdgeCalls, false, 1},
+		{"JVM only", "java", "Calendar", graph.EdgeCalls, false, 1},
+		{"non-Calls", "typescript", "Calendar", graph.EdgeReferences, false, 0},
+		{"unmatched module", "typescript", "Contacts", graph.EdgeCalls, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := rebuildRNBridgeFacts(t, "Calendar")
+			app := facts[0]
+			app.Nodes[0].Language = tc.language
+			app.EffectiveLanguage = tc.language
+			call := app.Edges[0]
+			call.Kind = tc.kind
+			call.Meta["rn_module"] = tc.module
+			app.Edges = app.Edges[:1]
+			// Keep only the caller's family and an otherwise eligible Go Method.
+			facts = []store_pebble.ParseFacts{roundTripRebuildRNBridgeFacts(t, app), facts[3]}
+			private, native := openRebuildEventStores(t, facts...)
+			before := rebuildEventSavedRows(t, private)
+			require.Equal(t, before, rebuildEventSQLiteRows(native))
+			names := []string{SynthReactNative}
+			if tc.disabled {
+				names = nil
+			}
+			selection, err := NewFrameworkSynthesizerSelection(names)
+			require.NoError(t, err)
+			report := RunFrameworkSynthesizersWithSelection(native, selection)
+			require.NoError(t, report.Err)
+			require.Equal(t, tc.want, report.Total)
+			want := rebuildEventSQLiteRows(native)
+			require.Len(t, want.edges, len(before.edges)+tc.want)
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+			require.NoError(t, err)
+			require.Equal(t, uint64(tc.want), stats.Edges)
+			require.Equal(t, want, rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
+func TestRebuildReactNativeBridgeSkipsSelfCall(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		wantPeer bool
+	}{
+		{name: "sole candidate needs no recorder"},
+		{name: "distinct candidate still links", wantPeer: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := rebuildRNBridgeFacts(t, "Calendar")
+			app, ios := facts[0], facts[2]
+			app.Nodes[0].Kind = graph.KindMethod
+			app.Nodes[0].Meta = maps.Clone(ios.Nodes[0].Meta)
+			app.Edges = app.Edges[:1]
+			facts = []store_pebble.ParseFacts{roundTripRebuildRNBridgeFacts(t, app)}
+			if tc.wantPeer {
+				facts = append(facts, ios)
+			}
+			private, native := openRebuildEventStores(t, facts...)
+			before := rebuildEventSavedRows(t, private)
+			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
+			require.NoError(t, err)
+			report := RunFrameworkSynthesizersWithSelection(native, selection)
+			require.NoError(t, report.Err)
+			want := rebuildEventSQLiteRows(native)
+			var wantEdges uint64
+			if tc.wantPeer {
+				require.Equal(t, 1, report.Total)
+				linked := graph.EdgeIdentityFor(app.Edges[0])
+				linked.To = ios.Nodes[0].ID
+				require.Len(t, want.edges, len(before.edges)+1)
+				require.True(t, slices.ContainsFunc(want.edges, func(e *graph.Edge) bool {
+					return graph.EdgeIdentityFor(e) == linked
+				}))
+				wantEdges = 1
+			} else {
+				require.Zero(t, report.Total)
+				// The marker is live but lacks any ordinal in the submitted proof.
+				facts[0].Edges = nil
+				require.Equal(t, before, want)
+			}
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+			require.NoError(t, err)
+			require.Equal(t, wantEdges, stats.Edges)
+			require.Equal(t, want, rebuildEventSavedRows(t, private))
+		})
+	}
 }
 
 func rebuildRNBridgeFacts(t *testing.T, module string) []store_pebble.ParseFacts {
