@@ -94,9 +94,9 @@ app.include_router(router, prefix="/api")
 		want[n.ID] = n.FilePath
 	}
 	require.Equal(t, rebuildEarlyContractIDs{
-		"dep::example.com/lib"      : "go.mod",
-		"di::Token"                 : "routes.go",
-		"http::GET::/items"         : "routes.go",
+		"dep::example.com/lib":       "go.mod",
+		"di::Token":                  "routes.go",
+		"http::GET::/items":          "routes.go",
 		"http::GET::/api/users/{p1}": "users.py",
 	}, want)
 	got, err := f.finish(ctx, build.RebuildView(), "", "", "")
