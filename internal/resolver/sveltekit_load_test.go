@@ -67,3 +67,27 @@ func TestSvelteKitLoadPairing(t *testing.T) {
 		t.Errorf("origin=%v, want OriginASTInferred (tier-tagged)", paired.Origin)
 	}
 }
+
+func TestSvelteKitLoadDoesNotFallBackFromElectedLoad(t *testing.T) {
+	const route = "src/routes/blog/"
+	page := &graph.Node{ID: route + "+page.svelte::+page", Kind: graph.KindType, FilePath: route + "+page.svelte",
+		WorkspaceID: "blog", Meta: map[string]any{"component": true}}
+	server := &graph.Node{ID: route + "+layout.server.js", Kind: graph.KindFile, FilePath: route + "+layout.server.js", WorkspaceID: "blog"}
+	load := &graph.Node{ID: server.ID + "::load", Kind: graph.KindFunction, Name: "load", FilePath: server.FilePath, WorkspaceID: "other"}
+	g := graph.New()
+	g.AddNode(page)
+	g.AddNode(server)
+	g.AddNode(load)
+	if got := ResolveSvelteKitLoad(g); got != 0 {
+		t.Fatalf("mismatched explicit load produced %d pairs, want 0", got)
+	}
+	g = graph.New()
+	g.AddNode(page)
+	g.AddNode(server)
+	if got := ResolveSvelteKitLoad(g); got != 1 {
+		t.Fatalf("server file with no explicit load produced %d pairs, want 1", got)
+	}
+	if edges := g.AllEdges(); len(edges) != 1 || edges[0].To != server.ID {
+		t.Fatalf("unexpected file fallback: %v", edges)
+	}
+}

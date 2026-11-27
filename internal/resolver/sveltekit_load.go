@@ -25,10 +25,9 @@ func ResolveSvelteKitLoad(g graph.Store) int {
 	// Per route dir: the page node and the server module file, plus the load
 	// function declared in the server module.
 	type routeDir struct {
-		pageNode      *graph.Node
-		serverFile    graph.FileNodeIdentity
-		hasServerFile bool
-		serverLoadID  string
+		pageNode     *graph.Node
+		serverFile   graph.FileNodeIdentity
+		serverLoadID string
 	}
 	dirs := map[string]*routeDir{}
 	get := func(dir string) *routeDir {
@@ -40,26 +39,19 @@ func ResolveSvelteKitLoad(g graph.Store) int {
 
 	// First pass over file + component nodes to populate the page / server file.
 	for file := range graph.FileNodeIdentitiesSeq(g, nil) {
-		base, dir := pathBaseDir(file.FilePath)
-		if isSvelteKitServerFile(base) {
-			route := get(dir)
-			route.serverFile = file
-			route.hasServerFile = true
+		if dir, ok := svelteKitServerDir(file.FilePath); ok {
+			get(dir).serverFile = file
 		}
 	}
 	for _, kind := range []graph.NodeKind{graph.KindType, graph.KindFunction} {
 		for n := range g.NodesByKind(kind) {
-			if n == nil {
+			dir, ok := svelteKitRouteNode(kind, n)
+			if !ok {
 				continue
 			}
-			base, dir := pathBaseDir(n.FilePath)
-			switch {
-			case kind == graph.KindType && isSvelteKitPageFile(base):
-				// The component node (Meta component=true) is the page.
-				if c, _ := n.Meta["component"].(bool); c {
-					get(dir).pageNode = n
-				}
-			case kind == graph.KindFunction && isSvelteKitServerFile(base) && n.Name == "load":
+			if kind == graph.KindType {
+				get(dir).pageNode = n
+			} else {
 				get(dir).serverLoadID = n.ID
 			}
 		}
@@ -77,39 +69,70 @@ func ResolveSvelteKitLoad(g graph.Store) int {
 		if rd.pageNode == nil {
 			continue
 		}
-		// Prefer the explicit load function; fall back to the server module file.
-		to := rd.serverLoadID
-		sameBoundary := false
-		if to != "" {
-			toNode := g.GetNode(to)
-			sameBoundary = sameDispatchBoundary(rd.pageNode, toNode)
-		} else if rd.hasServerFile {
-			to = rd.serverFile.ID
-			sameBoundary = rd.pageNode.WorkspaceID == rd.serverFile.WorkspaceID
+		var load *graph.Node
+		if rd.serverLoadID != "" {
+			load = g.GetNode(rd.serverLoadID)
 		}
-		if to == "" || !sameBoundary {
-			continue
+		if to := svelteKitLoadTarget(rd.pageNode, rd.serverLoadID, load, rd.serverFile); to != "" {
+			batch = append(batch, svelteKitLoadReference(rd.pageNode, to))
 		}
-		batch = append(batch, &graph.Edge{
-			From:            rd.pageNode.ID,
-			To:              to,
-			Kind:            graph.EdgeReferences,
-			FilePath:        rd.pageNode.FilePath,
-			Line:            rd.pageNode.StartLine,
-			Confidence:      0.6,
-			ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeReferences, 0.6),
-			Origin:          graph.OriginASTInferred,
-			Meta: map[string]any{
-				"via":             sveltekitLoadVia,
-				MetaSynthesizedBy: SynthSvelteKitLoad,
-				MetaProvenance:    ProvenanceHeuristic,
-			},
-		})
 	}
 	for _, e := range batch {
 		g.AddEdge(e)
 	}
 	return len(batch)
+}
+
+func svelteKitRouteNode(kind graph.NodeKind, n *graph.Node) (string, bool) {
+	if n == nil {
+		return "", false
+	}
+	base, dir := pathBaseDir(n.FilePath)
+	switch kind {
+	case graph.KindType:
+		component, _ := n.Meta["component"].(bool)
+		return dir, component && isSvelteKitPageFile(base)
+	case graph.KindFunction:
+		return dir, n.Name == "load" && isSvelteKitServerFile(base)
+	default:
+		return "", false
+	}
+}
+
+func svelteKitServerDir(path string) (string, bool) {
+	base, dir := pathBaseDir(path)
+	return dir, isSvelteKitServerFile(base)
+}
+
+func svelteKitLoadTarget(page *graph.Node, loadID string, load *graph.Node, file graph.FileNodeIdentity) string {
+	if loadID != "" {
+		if sameDispatchBoundary(page, load) {
+			return loadID
+		}
+		return "" // an elected load never falls back to the server file
+	}
+	if page.WorkspaceID == file.WorkspaceID {
+		return file.ID
+	}
+	return ""
+}
+
+func svelteKitLoadReference(page *graph.Node, to string) *graph.Edge {
+	return &graph.Edge{
+		From:            page.ID,
+		To:              to,
+		Kind:            graph.EdgeReferences,
+		FilePath:        page.FilePath,
+		Line:            page.StartLine,
+		Confidence:      0.6,
+		ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeReferences, 0.6),
+		Origin:          graph.OriginASTInferred,
+		Meta: map[string]any{
+			"via":             sveltekitLoadVia,
+			MetaSynthesizedBy: SynthSvelteKitLoad,
+			MetaProvenance:    ProvenanceHeuristic,
+		},
+	}
 }
 
 // pathBaseDir splits a slash path into its basename and directory.
