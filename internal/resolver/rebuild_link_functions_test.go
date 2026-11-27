@@ -5,6 +5,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -459,35 +460,70 @@ func Run(ctx workflow.Context) {
 `))
 	require.NoError(t, err)
 	defer facts.ReleaseTree()
-	const target = "temporal::activity::Charge"
-	var selected []*graph.Edge
+	const target = "unresolved::temporal::activity::Charge"
+	var goCall, goSpawn *graph.Edge
 	for _, e := range facts.Edges {
-		if e.To == "unresolved::"+target {
-			selected = append(selected, cloneFrameworkEdge(e))
+		if e.To != target {
+			continue
+		}
+		switch e.Kind {
+		case graph.EdgeCalls:
+			require.Nil(t, goCall)
+			goCall = e
+		case graph.EdgeSpawns:
+			require.Nil(t, goSpawn)
+			goSpawn = e
 		}
 	}
-	require.Len(t, selected, 2)
-	require.ElementsMatch(t, []graph.EdgeKind{graph.EdgeCalls, graph.EdgeSpawns}, []graph.EdgeKind{selected[0].Kind, selected[1].Kind})
+	require.NotNil(t, goCall)
+	require.NotNil(t, goSpawn)
+
+	java := languages.NewJavaExtractor()
+	java.SetTemporalInvokers([]string{"Invoker"}, nil)
+	javaFacts := rebuildRNSourceFacts(t, java, "src/Tasks.java", `public class Tasks {
+    private final Invoker invoker;
+
+    void run(WorkflowClient client) {
+        invoker.invokeAsync("charge.task", options, input);
+        client.newUntypedWorkflowStub("charge.task");
+    }
+}
+`)
+	var javaStub, javaStart *graph.Edge
+	for _, e := range javaFacts.Edges {
+		if e.Kind != graph.EdgeCalls || e.To != "unresolved::temporal::workflow::charge.task" {
+			continue
+		}
+		switch e.Meta["via"] {
+		case "temporal.stub":
+			require.Nil(t, javaStub)
+			javaStub = e
+		case "temporal.start":
+			require.Nil(t, javaStart)
+			javaStart = e
+		}
+	}
+	require.NotNil(t, javaStub)
+	require.NotNil(t, javaStart)
 	for _, tc := range []struct {
 		name string
 		edge *graph.Edge
 		lang string
 	}{
-		{name: "Go call or spawn", edge: selected[0], lang: "go"},
-		{name: "Go companion", edge: selected[1], lang: "go"},
-		{name: "Java stub", lang: "java", edge: &graph.Edge{From: "java-caller", To: "unresolved::temporal::workflow::charge.task", Kind: graph.EdgeCalls, FilePath: "src/Tasks.java", Line: 4,
-			Meta: map[string]any{"via": "temporal.stub", "temporal_kind": "workflow", "temporal_name": "charge.task", "cross_language": true}}},
-		{name: "Java start", lang: "java", edge: &graph.Edge{From: "java-caller", To: "unresolved::temporal::workflow::charge.task", Kind: graph.EdgeCalls, FilePath: "src/Tasks.java", Line: 5,
-			Meta: map[string]any{"via": "temporal.start", "temporal_kind": "workflow", "temporal_name": "charge.task"}}},
+		{"Go call", goCall, "go"},
+		{"Go spawn", goSpawn, "go"},
+		{"Java stub", javaStub, "java"},
+		{"Java start", javaStart, "java"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			row := tc.edge
 			name := graph.UnresolvedName(row.To)
+			suffix := name[strings.LastIndex(name, "::")+2:]
 			for _, hit := range []bool{false, true} {
 				t.Run(fmt.Sprintf("hit=%v", hit), func(t *testing.T) {
 					caller := &graph.Node{ID: row.From, Name: "Run", FilePath: row.FilePath, Language: tc.lang, Kind: graph.KindFunction, RepoPrefix: "repo"}
 					nodes := []*graph.Node{caller,
-						{ID: "suffix", Name: "Charge", Language: tc.lang, FilePath: row.FilePath, RepoPrefix: "repo", Kind: graph.KindFunction},
+						{ID: "suffix", Name: suffix, Language: tc.lang, FilePath: row.FilePath, RepoPrefix: "repo", Kind: graph.KindFunction},
 						{ID: "other-repo", Name: name, Language: tc.lang, FilePath: row.FilePath, RepoPrefix: "other", Kind: graph.KindFunction},
 					}
 					if hit {
@@ -530,19 +566,43 @@ func Run(ctx workflow.Context) {
 }
 
 func TestRebuildFunctionFrameworkMarkersRefuseOtherRows(t *testing.T) {
-	call := &graph.Edge{From: "caller", To: "unresolved::temporal::activity::Charge", FilePath: "caller.go", Kind: graph.EdgeCalls,
+	activity := &graph.Edge{From: "caller", To: "unresolved::temporal::activity::Charge", FilePath: "caller.go", Kind: graph.EdgeCalls,
 		Meta: map[string]any{"via": "temporal.stub", "temporal_kind": "activity", "temporal_name": "Charge"}}
-	for _, mutate := range []func(*graph.Edge){
-		func(e *graph.Edge) { e.Kind = graph.EdgeReads },
-		func(e *graph.Edge) { e.FilePath = "caller.ts" },
-		func(e *graph.Edge) { e.To += "::other" },
-		func(e *graph.Edge) { delete(e.Meta, "via") },
-		func(e *graph.Edge) { e.Meta["temporal_kind"] = "register_activity" },
+	start := &graph.Edge{From: "caller", To: "unresolved::temporal::workflow::Charge", FilePath: "caller.java", Kind: graph.EdgeCalls,
+		Meta: map[string]any{"via": "temporal.start", "temporal_kind": "workflow", "temporal_name": "Charge"}}
+	spawn := &graph.Edge{From: "caller", To: activity.To, FilePath: activity.FilePath, Kind: graph.EdgeSpawns,
+		Origin: graph.OriginASTResolved, Meta: map[string]any{"mode": "goroutine"}}
+	rn := &graph.Edge{From: "caller", To: "unresolved::rn::Calendar::open", FilePath: "caller.ts", Kind: graph.EdgeCalls,
+		Meta: map[string]any{"via": rnNativeVia, "rn_module": "Calendar", "rn_method": "open"}}
+	for _, tc := range []struct {
+		name   string
+		edge   *graph.Edge
+		mutate func(*graph.Edge)
+	}{
+		{"activity stub not a call", activity, func(e *graph.Edge) { e.Kind = graph.EdgeReads }},
+		{"activity stub outside Go and Java", activity, func(e *graph.Edge) { e.FilePath = "caller.ts" }},
+		{"activity stub in Java", activity, func(e *graph.Edge) { e.FilePath = "caller.java" }},
+		{"activity stub wrong target", activity, func(e *graph.Edge) { e.To += "::other" }},
+		{"activity stub missing via", activity, func(e *graph.Edge) { delete(e.Meta, "via") }},
+		{"activity stub wrong temporal kind", activity, func(e *graph.Edge) { e.Meta["temporal_kind"] = "register_activity" }},
+		{"workflow start in Go", start, func(e *graph.Edge) { e.FilePath = "caller.go" }},
+		{"spawn wrong mode", spawn, func(e *graph.Edge) { e.Meta["mode"] = "thread" }},
+		{"spawn wrong origin", spawn, func(e *graph.Edge) { e.Origin = graph.OriginASTInferred }},
+		{"spawn outside Go", spawn, func(e *graph.Edge) { e.FilePath = "caller.java" }},
+		{"spawn wrong prefix", spawn, func(e *graph.Edge) { e.To = "unresolved::temporal::other::Charge" }},
+		{"RN marker not a call", rn, func(e *graph.Edge) { e.Kind = graph.EdgeReads }},
+		{"RN marker outside JS and TS", rn, func(e *graph.Edge) { e.FilePath = "caller.go" }},
+		{"RN marker empty module", rn, func(e *graph.Edge) {
+			e.Meta["rn_module"] = ""
+			e.To = "unresolved::rn::::open" // Keep the placeholder consistent with the empty module.
+		}},
 	} {
-		e := cloneFrameworkEdge(call)
-		mutate(e)
-		before := cloneFrameworkEdge(e)
-		require.ErrorIs(t, resolveRebuildFunction(t.Context(), nil, e, graph.UnresolvedName(e.To)), errRebuildMainRule)
-		require.Equal(t, before, e)
+		t.Run(tc.name, func(t *testing.T) {
+			e := cloneFrameworkEdge(tc.edge)
+			tc.mutate(e)
+			before := cloneFrameworkEdge(e)
+			require.ErrorIs(t, resolveRebuildFunction(t.Context(), nil, e, graph.UnresolvedName(e.To)), errRebuildMainRule)
+			require.Equal(t, before, e)
+		})
 	}
 }

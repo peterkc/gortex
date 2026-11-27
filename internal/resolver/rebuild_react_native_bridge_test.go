@@ -14,11 +14,14 @@ import (
 
 func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		spillAt int
+		name       string
+		spillAt    int
+		firstLine  int
+		firstWrite uint64
 	}{
-		{"one byte", 1},
-		{"one MiB", 1 << 20},
+		{"line 30 first, one byte", 1, 30, 2},
+		{"line 30 first, one MiB", 1 << 20, 30, 2},
+		{"line 4 first, one byte", 1, 4, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			module := "Calendar"
@@ -27,13 +30,22 @@ func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
 				module += strings.Repeat("x", tc.spillAt)
 			}
 			facts := rebuildRNBridgeFacts(t, module)
+			if tc.firstLine == 4 {
+				edges := facts[0].Edges
+				edges[0], edges[1] = edges[1], edges[0]
+			}
 			native := openRebuildTemporalOracle(t, facts...)
 			private := openRebuildRNBridgePrivate(t, facts)
 			before := rebuildEventSQLiteRows(native)
 			require.Equal(t, before, rebuildEventSavedRows(t, private))
 
-			app, ios, other := facts[0], facts[2], facts[3]
+			app, android, ios, other := facts[0], facts[1], facts[2], facts[3]
 			first, second, existing := app.Edges[0], app.Edges[1], app.Edges[2]
+			require.Equal(t, tc.firstLine, first.Line)
+			targets := []*graph.Node{ios.Nodes[0], other.Nodes[0]}
+			if first.Line != existing.Line {
+				targets = append(targets, android.Nodes[0])
+			}
 			var sites []int
 			for e := range native.EdgesByKind(graph.EdgeCalls) {
 				if e.From == first.From && e.To == first.To {
@@ -43,7 +55,7 @@ func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
 			require.Equal(t, []int{first.Line, second.Line}, sites)
 			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
 			require.NoError(t, err)
-			for _, wantNew := range []uint64{2, 0} {
+			for _, wantNew := range []uint64{tc.firstWrite, 0} {
 				report := RunFrameworkSynthesizersWithSelection(native, selection)
 				require.NoError(t, report.Err)
 				require.Equal(t, 3, report.Total) // Native counts the attempt on the existing key too.
@@ -54,9 +66,9 @@ func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
 
 				want := rebuildEventSQLiteRows(native)
 				require.Equal(t, before.nodes, want.nodes)
-				require.Len(t, want.edges, len(before.edges)+2)
+				require.Len(t, want.edges, len(before.edges)+int(tc.firstWrite))
 				require.Contains(t, want.edges, existing)
-				for _, n := range []*graph.Node{ios.Nodes[0], other.Nodes[0]} {
+				for _, n := range targets {
 					require.Contains(t, want.edges, &graph.Edge{
 						From:            first.From,
 						To:              n.ID,
@@ -139,7 +151,10 @@ func TestRebuildReactNativeBridgeDuplicateRecorder(t *testing.T) {
 			require.NoError(t, err)
 			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
 			if tc.field != "" {
-				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, uint64(3), refused.Count)
+				require.Equal(t, graph.EdgeIdentityFor(facts[0].Edges[2]), refused.First)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, private))
 				return
@@ -330,6 +345,41 @@ func TestRebuildReactNativeBridgeRejectsUnprovedEndpoints(t *testing.T) {
 	}
 }
 
+func TestRebuildReactNativeBridgeRejectsChangedLiveCaller(t *testing.T) {
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name  string
+		alter func(*graph.Node)
+	}{
+		{"FilePath", func(n *graph.Node) { n.FilePath = "other/app.ts" }},
+		{"Language", func(n *graph.Node) { n.Language = "javascript" }},
+		{"RepoPrefix", func(n *graph.Node) { n.RepoPrefix = "other" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := rebuildRNBridgeFacts(t, "Calendar")
+			private := openRebuildRNBridgePrivate(t, facts)
+			live := *facts[0].Nodes[0]
+			tc.alter(&live)
+			private.AddNode(&live)
+			stored, err := private.RebuildView().Node(t.Context(), live.ID)
+			require.NoError(t, err)
+			require.Equal(t, &live, stored)
+			before := rebuildEventSavedRows(t, private)
+
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, uint64(2), refused.Count)
+			first := graph.EdgeIdentityFor(facts[0].Edges[0])
+			first.To = facts[2].Nodes[0].ID
+			require.Equal(t, first, refused.First)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
 func TestRebuildReactNativeBridgeRejectsConflictingLinks(t *testing.T) {
 	facts := rebuildRNBridgeFacts(t, "Calendar")
 	private := openRebuildRNBridgePrivate(t, facts)
@@ -349,7 +399,10 @@ func TestRebuildReactNativeBridgeRejectsConflictingLinks(t *testing.T) {
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
 	require.NoError(t, err)
 	stats, err := RunRebuildReactNativeBridge(ctx, private, rebuildGRPCReceipts(facts...), selection, 1)
-	require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+	var refused *store_pebble.RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, uint64(3), refused.Count)
+	require.Equal(t, graph.EdgeIdentityFor(facts[0].Edges[2]), refused.First)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildEventSavedRows(t, private))
 	for _, id := range liveIDs {
@@ -410,11 +463,12 @@ func TestRebuildReactNativeBridgeEligibility(t *testing.T) {
 
 func TestRebuildReactNativeBridgeSkipsSelfCall(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		wantPeer bool
+		name      string
+		wantPeer  bool
+		wantReads int
 	}{
-		{name: "sole candidate needs no recorder"},
-		{name: "distinct candidate still links", wantPeer: true},
+		{name: "sole candidate needs no recorder", wantReads: 1},
+		{name: "distinct candidate still links", wantPeer: true, wantReads: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := rebuildRNBridgeFacts(t, "Calendar")
@@ -449,8 +503,15 @@ func TestRebuildReactNativeBridgeSkipsSelfCall(t *testing.T) {
 				facts[0].Edges = nil
 				require.Equal(t, before, want)
 			}
-			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+			reads := 0
+			receipts := func(yield func(store_pebble.ParseFacts, error) bool) {
+				reads++
+				rebuildGRPCReceipts(facts...)(yield)
+			}
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, receipts, selection, 1)
 			require.NoError(t, err)
+			// Order still scans for hidden markers; only a new edge needs endpoint proof.
+			require.Equal(t, tc.wantReads, reads)
 			require.Equal(t, wantEdges, stats.Edges)
 			require.Equal(t, want, rebuildEventSavedRows(t, private))
 		})
@@ -502,9 +563,9 @@ func rebuildRNBridgeFacts(t *testing.T, module string) []store_pebble.ParseFacts
 
 func openRebuildRNBridgePrivate(t *testing.T, receipts []store_pebble.ParseFacts) *store_pebble.BuildStore {
 	t.Helper()
-	// Keep the frozen receipt order and SQLite insertion late-then-early.
-	// Reverse private insertion as a separate control; complete keys also sort
-	// the lower line first. Neither private order may select the bridge site.
+	// SQLite consumes the frozen receipt order. Reverse private insertion
+	// as a control; complete keys also sort the lower line first. Neither
+	// private order may select the bridge site.
 	pending := slices.Clone(receipts)
 	pending[0].Edges = slices.Clone(pending[0].Edges)
 	slices.Reverse(pending[0].Edges)

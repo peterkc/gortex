@@ -213,11 +213,14 @@ func TestRebuildSwiftObjCUnnamedDeclarations(t *testing.T) {
 	const swiftPath, objcPath = "p/Unnamed.swift", "p/Unnamed.m"
 	const winner = swiftPath + "::z-protocol"
 	for _, tc := range []struct {
-		name      string
-		protocols bool
+		name        string
+		conformer   graph.NodeKind
+		objc, joins bool
 	}{
-		{"selector alone", false},
-		{"protocol populations present", true},
+		{name: "selector alone"},
+		{"plain Swift protocol", graph.KindType, false, false},
+		{"non-type ObjC conformer", graph.KindFunction, true, false},
+		{"qualifying protocol populations", graph.KindType, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			swift := []*graph.Node{
@@ -228,17 +231,18 @@ func TestRebuildSwiftObjCUnnamedDeclarations(t *testing.T) {
 			objc := []*graph.Node{
 				{ID: objcPath + "::notify:", Name: "notify:", Language: "objc", FilePath: objcPath, Kind: graph.KindMethod},
 			}
-			if tc.protocols {
-				// Only the protocol populations can open this guard. The empty
-				// adoption token must use the last qualifying unnamed protocol.
-				swift = append(swift,
-					&graph.Node{ID: winner, Language: "swift", FilePath: swiftPath,
-						Kind: graph.KindInterface, Meta: map[string]any{"objc": true}},
-					&graph.Node{ID: swiftPath + "::a-protocol", Language: "swift", FilePath: swiftPath,
-						Kind: graph.KindInterface, Meta: map[string]any{"objc": true}},
-				)
+			if tc.conformer != "" {
+				// Only qualifying protocol populations can open the guard and
+				// expose the otherwise matchable unnamed selector.
+				for _, id := range []string{winner, swiftPath + "::a-protocol"} {
+					proto := &graph.Node{ID: id, Language: "swift", FilePath: swiftPath, Kind: graph.KindInterface}
+					if tc.objc {
+						proto.Meta = map[string]any{"objc": true}
+					}
+					swift = append(swift, proto)
+				}
 				objc = append(objc, &graph.Node{ID: objcPath + "::Adopter", Name: "Adopter", Language: "objc", FilePath: objcPath,
-					Kind: graph.KindType, Meta: map[string]any{"objc_protocols": "Unknown, "}})
+					Kind: tc.conformer, Meta: map[string]any{"objc_protocols": "Unknown, "}})
 			}
 			swiftFacts := store_pebble.ParseFacts{
 				EffectiveLanguage: "swift",
@@ -254,7 +258,7 @@ func TestRebuildSwiftObjCUnnamedDeclarations(t *testing.T) {
 			report := RunFrameworkSynthesizersWithSelection(native, selection)
 			require.NoError(t, report.Err)
 			b := openRebuildGRPCBuild(t, swiftFacts, objcFacts)
-			if !tc.protocols {
+			if !tc.joins {
 				require.Zero(t, report.Total)
 				require.Empty(t, native.AllEdges())
 				stats, err := RunRebuildSwiftObjC(t.Context(), b, func(func(store_pebble.ParseFacts, error) bool) {
@@ -304,7 +308,7 @@ func TestRebuildSwiftObjCNativeDropsStructuralProtocolTargets(t *testing.T) {
 			native := rebuildGRPCNative(t, store_pebble.ParseFacts{Nodes: []*graph.Node{&winner, loser, adopter}})
 			report := RunFrameworkSynthesizersWithSelection(native, selection)
 			require.NoError(t, report.Err)
-			require.Equal(t, 1, report.Total) // Native counts the adoption, then AddBatch drops the edge.
+			require.Equal(t, 1, report.Total) // Native counts the adoption, then AddEdge drops the edge.
 			require.Empty(t, native.AllEdges())
 			b := openRebuildGRPCBuild(t, swift, objc)
 			// The rejected winner needs no receipt. The valid loser must not
@@ -319,20 +323,43 @@ func TestRebuildSwiftObjCNativeDropsStructuralProtocolTargets(t *testing.T) {
 	}
 }
 
-func TestRebuildSwiftObjCRefusesMissingEndpointReceiptBeforeWriting(t *testing.T) {
+func TestRebuildSwiftObjCRefusesUnprovedEndpointsBeforeWriting(t *testing.T) {
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthSwiftObjC})
 	require.NoError(t, err)
-	facts, stationary := rebuildSwiftObjCFixture(0)
-	b := openRebuildGRPCBuild(t, facts...)
-	before := rebuildSwiftObjCPrivateEdges(t, b)
-	require.Equal(t, map[graph.EdgeIdentity]*graph.Edge{graph.EdgeIdentityFor(stationary): stationary}, before)
+	for _, tc := range []struct {
+		name       string
+		file, node int
+		alter      func(*graph.Node)
+		count      uint64
+	}{
+		{name: "missing protocol receipt", file: 2, count: 1},
+		{"objc_selector", 0, 0, func(n *graph.Node) { n.Meta["objc_selector"] = "changed:" }, 1},
+		{"objc_setter_selector", 0, 3, func(n *graph.Node) { n.Meta["objc_setter_selector"] = "changed:" }, 2},
+		{"objc_protocols", 1, 2, func(n *graph.Node) { n.Meta["objc_protocols"] = "Other" }, 1},
+		{"Name", 0, 0, func(n *graph.Node) { n.Name = "changed" }, 1},
+		{"StartLine", 0, 0, func(n *graph.Node) { n.StartLine++ }, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, stationary := rebuildSwiftObjCFixture(0)
+			b := openRebuildGRPCBuild(t, facts...)
+			before := rebuildSwiftObjCPrivateEdges(t, b)
+			require.Equal(t, map[graph.EdgeIdentity]*graph.Edge{graph.EdgeIdentityFor(stationary): stationary}, before)
+			if tc.alter == nil {
+				facts = facts[:tc.file]
+			} else {
+				proof := roundTripRebuildRNBridgeFacts(t, facts[tc.file])
+				tc.alter(proof.Nodes[tc.node])
+				facts[tc.file] = proof
+			}
 
-	// Selector pairs are proved; only the protocol endpoint lacks a receipt.
-	_, err = RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(facts[:2]...), selection, 1)
-	require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
-	var refusal *store_pebble.RebuildUnknownProvenanceError
-	require.ErrorAs(t, err, &refusal)
-	require.Equal(t, before, rebuildSwiftObjCPrivateEdges(t, b))
+			stats, err := RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(facts...), selection, 1)
+			var refusal *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, tc.count, refusal.Count)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildSwiftObjCPrivateEdges(t, b))
+		})
+	}
 }
 
 func TestRebuildSwiftObjCProtocolOrder(t *testing.T) {

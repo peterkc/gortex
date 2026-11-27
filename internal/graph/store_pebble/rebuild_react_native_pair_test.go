@@ -46,6 +46,24 @@ func TestRebuildReactNativeNativePairingLightNodeScan(t *testing.T) {
 	}
 }
 
+func TestRebuildReactNativeNativePairingRefusesMismatchedNodeKey(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	n := &graph.Node{ID: "method", Kind: graph.KindMethod, Language: "go"}
+	raw, err := encodeNode(n)
+	require.NoError(t, err)
+	require.NoError(t, b.pending.Set(pendingNodeKey("other"), raw, pebble.NoSync))
+	stats, err := b.RebuildReactNativeNativePairing(t.Context(), func(func(ParseFacts, error) bool) {
+		t.Fatal("refusal must precede receipt reads")
+	}, 1, func(string) string { return "" }, func(*graph.Node, *graph.Node, string, string) *graph.Edge {
+		t.Fatal("a Go row cannot pair")
+		return nil
+	})
+	require.ErrorIs(t, err, ErrRebuildReactNativeNativePairing)
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "working node ID does not match key")
+	require.Zero(t, stats)
+}
+
 func TestRebuildReactNativeNativePairingScratch(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	ctx := t.Context()
