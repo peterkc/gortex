@@ -191,11 +191,7 @@ func (b *BuildStore) RebuildOverrides(ctx context.Context, receipts iter.Seq2[Pa
 		if err != nil || bytes.Equal(pp, []byte{deferred}) {
 			return err
 		}
-		from, err := b.csharpPartialReceiptSource(e)
-		if err != nil {
-			return err
-		}
-		ep, err := get(edgeProof(e, from))
+		ep, err := get(edgeProof(e, e.From))
 		if err != nil {
 			return err
 		}

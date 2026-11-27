@@ -86,7 +86,7 @@ func (b *BuildStore) RebuildImplements(ctx context.Context, receipts iter.Seq2[P
 		})
 	}
 	// A membership or explicit implements edge can be retargeted in main.
-	// Match the original site and source, including a proved C# fragment fold.
+	// Match the original site and source.
 	edgeProof := func(e *graph.Edge, from string) []byte {
 		return appendKeyLine(key('e', string(e.Kind), from, e.FilePath), e.Line)
 	}
@@ -167,11 +167,7 @@ func (b *BuildStore) RebuildImplements(ctx context.Context, receipts iter.Seq2[P
 	// Preserve native pair suppression, including its historical pair key.
 	pair := func(from, to string) []byte { return key('x', from+"\x00"+to) }
 	if err := b.visitRebuildDataflowKind(ctx, graph.EdgeImplements, decodeEdgeLight, func(e *graph.Edge) error {
-		from, err := b.csharpPartialReceiptSource(e)
-		if err != nil {
-			return err
-		}
-		p, err := read(edgeProof(e, from))
+		p, err := read(edgeProof(e, e.From))
 		if err != nil {
 			return err
 		}

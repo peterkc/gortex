@@ -148,3 +148,32 @@ func TestRebuildCSharpPartialSQLiteFragmentOrder(t *testing.T) {
 	require.NoError(t, runRebuildCSharpPartial(t.Context(), build, rebuildGRPCReceipts(facts...)))
 	require.Equal(t, want, rebuildEventSavedRows(t, build))
 }
+
+// Native processes linked partial groups in map order. U5 records that
+// difference; rebuild uses the first receipt in each cohort (Option B).
+func TestRebuildCSharpPartialLinkedGroupOrder(t *testing.T) {
+	a := &graph.Node{ID: "a", Name: "A", Kind: graph.KindType, FilePath: "A.cs", Language: "csharp"}
+	af := &graph.Node{ID: "aa", Name: "A", Kind: graph.KindType, FilePath: "AA.cs", Language: "csharp"}
+	b := &graph.Node{ID: "b", Name: "B", Kind: graph.KindType, FilePath: "B.cs", Language: "csharp"}
+	bf := &graph.Node{ID: "bb", Name: "B", Kind: graph.KindType, FilePath: "BB.cs", Language: "csharp"}
+	link := &graph.Edge{From: af.ID, To: bf.ID, Kind: graph.EdgeExtends, FilePath: af.FilePath, Line: 2}
+	aFacts, afFacts := rebuildEventFacts(a.FilePath, "csharp", []*graph.Node{a}), rebuildEventFacts(af.FilePath, "csharp", []*graph.Node{af}, link)
+	bFacts, bfFacts := rebuildEventFacts(b.FilePath, "csharp", []*graph.Node{b}), rebuildEventFacts(bf.FilePath, "csharp", []*graph.Node{bf})
+	for _, aFirst := range []bool{true, false} {
+		build := openRebuildGRPCBuild(t, aFacts, afFacts, bFacts, bfFacts)
+		facts := []store_pebble.ParseFacts{bFacts, bfFacts, aFacts, afFacts}
+		if aFirst {
+			facts = []store_pebble.ParseFacts{aFacts, afFacts, bFacts, bfFacts}
+		}
+		require.NoError(t, runRebuildCSharpPartial(t.Context(), build, rebuildGRPCReceipts(facts...)))
+		copy := csharpPartialCopyFrom(link, a.ID)
+		if aFirst {
+			copy.To = b.ID
+			require.Equal(t, []*graph.Edge{copy}, rebuildEventSavedRows(t, build).edges)
+			continue
+		}
+		moved := *link
+		moved.To = b.ID
+		require.ElementsMatch(t, []*graph.Edge{copy, &moved}, rebuildEventSavedRows(t, build).edges)
+	}
+}
