@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/blake3"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/resolver"
 )
 
@@ -170,7 +171,7 @@ func TestRebuildCppReplaySpill(t *testing.T) {
 	})
 	require.NoError(t, err)
 	r := openTestRebuildCppReplay(t, lease, digest)
-	tables, err := filepath.Glob(filepath.Join(r.dir, "db", "*.sst"))
+	tables, err := filepath.Glob(filepath.Join(lease, "cpp-replay-*", "db", "*.sst"))
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(tables), 4, "TU and union each spill multiple runs")
 	for _, table := range tables {
@@ -205,13 +206,15 @@ func writeRebuildCppReplayFacts(t *testing.T, lease string, facts ...rebuildCppF
 	return digest
 }
 
-func openTestRebuildCppReplay(t *testing.T, lease string, digest rebuildDigest) *rebuildCppReplay {
+func openTestRebuildCppReplay(t *testing.T, lease string, digest rebuildDigest) *store_pebble.RebuildCppReplay {
 	t.Helper()
 	r, err := openRebuildCppReplay(t.Context(), lease, digest)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, r.Close())
-		require.NoDirExists(t, r.dir)
+		dirs, err := filepath.Glob(filepath.Join(lease, "cpp-replay-*"))
+		require.NoError(t, err)
+		require.Empty(t, dirs)
 		require.DirExists(t, lease)
 	})
 	return r

@@ -10,7 +10,6 @@ import (
 
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/indexer/source"
@@ -136,7 +135,9 @@ func servePendingRebuildFile(reg *parser.Registry, path string, ext parser.Extra
 	if err := json.Unmarshal(frozen.IndexConfigJSON, &cfg); err != nil {
 		return nil, nil, fmt.Errorf("decode frozen parse config: %w", err)
 	}
-	idx := New(graph.New(), reg, cfg, zap.NewNop())
+	// The worker extracts a receipt from one file; it neither reads nor writes
+	// a graph. The parent owns transforms and publication.
+	idx := &Indexer{registry: reg, config: cfg, logger: zap.NewNop()}
 	defer idx.Close()
 	idx.installRebuildParsePolicy(rebuildParsePolicy{
 		Codeowners:         frozen.Codeowners,
