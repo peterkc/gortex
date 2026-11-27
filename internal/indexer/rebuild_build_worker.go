@@ -431,6 +431,19 @@ func buildRebuildStages(
 				zap.Uint64("moves", grpc.Moves),
 				zap.Uint64("spill_bytes", grpc.SpillBytes))
 		}
+		temporal, err := resolver.RunRebuildTemporal(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		if err != nil {
+			return err
+		}
+		if temporal.WrapperRounds != 0 {
+			logger.Info("rebuild Temporal applied to private build",
+				zap.Int("wrapper_rounds", temporal.WrapperRounds),
+				zap.Bool("wrapper_capped", temporal.WrapperCapped),
+				zap.Uint64("wrapper_stubs", temporal.Wrappers),
+				zap.Uint64("resolved", temporal.Resolved),
+				zap.Uint64("moves", temporal.Moves),
+				zap.Uint64("spill_bytes", temporal.SpillBytes))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

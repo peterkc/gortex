@@ -168,6 +168,7 @@ var rebuildFailureKinds = [...]error{
 	resolver.ErrRebuildGoExternalRecordingPath, store_pebble.ErrRebuildUnknownProvenance, errRebuildModuleInput, errRebuildWorkspaceOutput,
 	store_pebble.ErrReceiverMutationNonconvergent, store_pebble.ErrReceiverMutationInput, store_pebble.ErrRebuildReceiverMutation,
 	store_pebble.ErrRebuildGRPC,
+	store_pebble.ErrRebuildTemporal,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
