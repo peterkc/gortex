@@ -152,6 +152,7 @@ type rebuildBuildReply struct {
 	UnknownProvenance uint64 // present only on a refused provenance check
 	MyBatisOrder      uint64 // present only on a refused MyBatis order; conservative interacting-move count
 	SQLCallsiteOrder  uint64 // interacting SQL callsite move destinations on refusal
+	StoreFactoryOrder uint64 // interacting Store Factory move destinations on refusal
 }
 
 var rebuildFailureKinds = [...]error{
@@ -186,6 +187,8 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildMyBatis,
 	store_pebble.ErrRebuildSQLCallsiteOrder,
 	store_pebble.ErrRebuildSQLCallsite,
+	store_pebble.ErrRebuildStoreFactoryOrder,
+	store_pebble.ErrRebuildStoreFactory,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
@@ -219,6 +222,9 @@ func buildRefusal(err error) rebuildBuildReply {
 	}
 	if order, ok := errors.AsType[*store_pebble.RebuildSQLCallsiteOrderError](err); ok {
 		r.SQLCallsiteOrder = order.Count
+	}
+	if order, ok := errors.AsType[*store_pebble.RebuildStoreFactoryOrderError](err); ok {
+		r.StoreFactoryOrder = order.Count
 	}
 	return r
 }

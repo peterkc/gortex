@@ -160,3 +160,47 @@ func TestRebuildSQLCallsiteOrderWireRefusal(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildStoreFactoryOrderWireRefusal(t *testing.T) {
+	const first = `first=("caller","calls","reset","store.ts",7)`
+	cause := &store_pebble.RebuildStoreFactoryOrderError{
+		Count: 2,
+		First: graph.EdgeIdentity{From: "caller", To: "reset", Kind: graph.EdgeCalls, FilePath: "store.ts", Line: 7},
+	}
+	valid := buildRefusal(fmt.Errorf("%w: %w", store_pebble.ErrRebuildStoreFactory, cause))
+	require.EqualValues(t, 59, valid.Refusal)
+	require.EqualValues(t, 2, valid.StoreFactoryOrder)
+	require.Zero(t, valid.MyBatisOrder)
+	require.Zero(t, valid.AttributionChains)
+	require.Zero(t, valid.UnknownProvenance)
+	for _, tc := range []struct {
+		name  string
+		reply rebuildBuildReply
+		want  error
+		text  string
+	}{
+		{"valid", valid, store_pebble.ErrRebuildStoreFactoryOrder, "store_factory_order=2"},
+		{"missing count", rebuildBuildReply{Refusal: 59}, errRebuildBuildWire, "invalid Store Factory move order count"},
+		{"wrong refusal", rebuildBuildReply{Refusal: 60, StoreFactoryOrder: 2}, errRebuildBuildWire, "invalid Store Factory move order count"},
+		{"MyBatis refusal with Store Factory count", rebuildBuildReply{Refusal: 55, MyBatisOrder: 1, StoreFactoryOrder: 2}, errRebuildBuildWire, "invalid Store Factory move order count"},
+		{"stage offer with count", rebuildBuildReply{Witness: store_pebble.Witness{Stage: store_pebble.StageManifest}, StoreFactoryOrder: 2},
+			errRebuildBuildWire, "Store Factory move order count on a stage offer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reply, acks bytes.Buffer
+			require.NoError(t, writeRebuildBuildReply(&reply, tc.reply))
+			err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
+				func(context.Context, store_pebble.StageTables) error {
+					t.Fatal("a refusal or invalid offer must not publish")
+					return nil
+				})
+			require.ErrorIs(t, err, tc.want)
+			require.ErrorContains(t, err, tc.text)
+			if tc.want == store_pebble.ErrRebuildStoreFactoryOrder {
+				require.ErrorIs(t, err, ErrRebuildWorker)
+				require.ErrorContains(t, err, first)
+			}
+			require.Empty(t, acks.Bytes())
+		})
+	}
+}

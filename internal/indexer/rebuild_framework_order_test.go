@@ -40,6 +40,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Fabric", "edges", 2},
 		{"MyBatis", "moves", 1},
 		{"SQL callsite", "moves", 1},
+		{"Store Factory", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name  string
@@ -419,6 +420,9 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	const app, ts = "app.ts", "typescript"
 	const sqlFunction = "load_calendar"
 	sql := node("calendar.sql", "sql", sqlFunction, graph.KindFunction, 1)
+	const storeBinding, storeAction = "useCalendarStore", "reloadCalendar"
+	action := node("calendarStore.ts", ts, "calendarDispatch", graph.KindFunction, 1)
+	action.Meta = map[string]any{"store_factory": storeBinding, "store_member": storeAction}
 	setup := node(app, ts, "setup", graph.KindFunction, 2)
 	subscribe := node(app, ts, "subscribe", graph.KindMethod, 6)
 	notify := node(app, ts, "notify", graph.KindMethod, 9)
@@ -443,6 +447,8 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 			map[string]any{"via": "rn.native", "rn_module": module, "rn_method": method}),
 		edge(show, "unresolved::sqlfn::"+sqlFunction, graph.EdgeCalls, 22,
 			map[string]any{"via": "sql.callsite", "sql_function": sqlFunction}),
+		edge(show, "unresolved::*."+storeAction, graph.EdgeCalls, 25,
+			map[string]any{"via": "store-factory", "store_binding": storeBinding, "store_action": storeAction}),
 	)
 
 	const rpc = "rpc.go"
@@ -509,5 +515,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{expect}),
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
+		receipt([]*graph.Node{action}),
 	}
 }

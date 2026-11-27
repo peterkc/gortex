@@ -21,7 +21,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 		SynthGRPCStub, SynthTemporalStub, SynthEventChannel, SynthSwiftObjC,
 		SynthReactNative, SynthReactNativePair, SynthObserverChannel, SynthClosureCollection,
 		SynthReactSetState, SynthFlutterSetState, SynthKMPExpectActual, SynthExpoModules, SynthFabric, SynthMyBatis,
-		SynthSQLCallsite,
+		SynthSQLCallsite, SynthStoreFactory,
 	} {
 		if selection.allows(name) {
 			frozen.names[name] = struct{}{}
