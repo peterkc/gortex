@@ -52,38 +52,21 @@ func (b *BuildStore) RebuildDjangoDescriptor(ctx context.Context, receipts iter.
 		rebuildCallMoves: rebuildCallMoves{b: b, prefix: prefix, rowBytes: 16 << 20, label: "Django descriptor", inputRow: "input row"},
 		rules:            rules,
 	}
-	// The node table and native name index order tied names by ascending ID
-	// on the cold SQLite access path. Index only eligible descriptor methods.
-	if err := b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
-		n, err := checkedRebuildLightNode(r, p.label)
-		if err != nil || n.Kind != graph.KindMethod || n.Name != "__iter__" {
-			return err
-		}
-		n, err = b.rebuildNativeBridgeNode(ctx, n.ID, p.label)
-		if err != nil {
-			return err
-		}
-		receiver, _ := n.Meta["receiver"].(string)
-		if receiver == "" {
-			return nil
-		}
-		key := p.key('i', receiver)
-		present, err := p.present(key)
-		if err != nil || present {
-			return err
-		}
-		return p.put(key, []byte(n.ID))
-	}); err != nil {
-		return 0, err
-	}
-	active, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('i'))
-	if err != nil || !active {
-		return 0, err
-	}
+	var indexed, hasMethods bool
 	if err := b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
 		id, err := decodeLinkRecorder(r.key)
 		if err != nil || id.Kind != graph.EdgeCalls && id.Kind != graph.EdgeReferences || !p.rules.ClaimsTo(id.To) {
 			return err
+		}
+		if !indexed {
+			hasMethods, err = p.indexIterMethods(ctx)
+			if err != nil {
+				return err
+			}
+			indexed = true
+		}
+		if !hasMethods {
+			return nil
 		}
 		target, err := p.target(ctx, id.From)
 		if err != nil || target == "" || target == id.To {
@@ -130,6 +113,34 @@ func (b *BuildStore) RebuildDjangoDescriptor(ctx context.Context, receipts iter.
 		}
 		return p.apply(ctx, count)
 	})
+}
+
+func (p *rebuildDjango) indexIterMethods(ctx context.Context) (bool, error) {
+	// The node table and native name index order tied names by ascending ID
+	// on the cold SQLite access path. Keep the first method for each receiver.
+	var found bool
+	err := p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
+		n, err := checkedRebuildLightNode(r, p.label)
+		if err != nil || n.Kind != graph.KindMethod || n.Name != "__iter__" {
+			return err
+		}
+		n, err = p.b.rebuildNativeBridgeNode(ctx, n.ID, p.label)
+		if err != nil {
+			return err
+		}
+		receiver, _ := n.Meta["receiver"].(string)
+		if receiver == "" {
+			return nil
+		}
+		key := p.key('i', receiver)
+		present, err := p.present(key)
+		if err != nil || present {
+			return err
+		}
+		found = true
+		return p.put(key, []byte(n.ID))
+	})
+	return found, err
 }
 
 func (p *rebuildDjango) target(ctx context.Context, from string) (string, error) {

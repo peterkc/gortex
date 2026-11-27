@@ -14,22 +14,15 @@ func FreezeRebuildFrameworkFamilyGate(ctx context.Context, view store_pebble.Reb
 	if selection.none() {
 		return false, nil
 	}
-	var first string
-	var distinct bool
-	err := view.VisitFrameworkGateNodes(ctx, func(n *graph.Node) error {
-		if family := languageFamily(n.Language); family != "" {
-			if first == "" {
-				first = family
-			} else {
-				distinct = distinct || family != first
-			}
-		}
+	markers := make(map[string]int)
+	err := selection.visitRebuildFrameworkCensusNodes(ctx, view, func(n *graph.Node) error {
+		recordFrameworkNodeCandidates(markers, n, frameworkLanguageFamily(n.Language))
 		return nil
 	})
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", store_pebble.ErrRebuildFrameworkFamilyGate, err)
 	}
-	return distinct, nil
+	return frameworkFamilyGateNeeded(nil, frameworkCandidateSummary{fullCensus: true, allMarkers: markers}), nil
 }
 
 // RunRebuildFrameworkFamilyGate removes accidental cross-family References

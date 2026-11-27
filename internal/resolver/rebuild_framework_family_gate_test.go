@@ -52,3 +52,35 @@ func TestRebuildFrameworkFamilyGateSQLiteOracle(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, needed)
 }
+
+func TestRebuildFrameworkFamilyGateColdCensus(t *testing.T) {
+	web := rebuildEventNode("view.ts", "view", "typescript", "")
+	for _, tc := range []struct {
+		name, language string
+		replaced, want bool
+	}{
+		{"one strict family", "jsx", false, false},
+		{"normalized second family", " JaVa ", false, true},
+		{"replaced second family", "java", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			other := rebuildEventNode("other", "other", tc.language, "")
+			b, native := openRebuildEventStores(t,
+				rebuildEventFacts(web.FilePath, web.Language, []*graph.Node{web}),
+				rebuildEventFacts(other.FilePath, other.Language, []*graph.Node{other}),
+			)
+			selection := AllFrameworkSynthesizers()
+			if tc.replaced {
+				selection = selection.WithRebuildEarlyContractIDs(map[string]string{other.ID: other.FilePath})
+				require.NoError(t, native.AddBatchChecked([]*graph.Node{{
+					ID: other.ID, Name: other.Name, Kind: graph.KindContract, FilePath: other.FilePath, Language: "contract",
+				}}, nil))
+			}
+			want := frameworkFamilyGateNeeded(nil, summarizeFrameworkCandidates(native, nil))
+			require.Equal(t, tc.want, want)
+			got, err := FreezeRebuildFrameworkFamilyGate(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+		})
+	}
+}

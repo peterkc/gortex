@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -29,6 +30,13 @@ func TestRebuildFamilyDropRequiresSavedPayload(t *testing.T) {
 	got, err := pendingGet(b.pending, key, copyValue)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
+
+	missing := *e
+	missing.Line++
+	var refused *RebuildUnknownProvenanceError
+	require.ErrorAs(t, b.proveRebuildEdgePayload(pendingEdgeKey(&missing), want), &refused)
+	require.EqualValues(t, 1, refused.Count)
+	require.Equal(t, graph.EdgeIdentityFor(&missing), refused.First)
 }
 
 func TestRebuildFamilyDropRemovesExactPendingRows(t *testing.T) {
@@ -86,6 +94,90 @@ func TestRebuildFrameworkFamilyGateCapsOnlyDroppedEndpoints(t *testing.T) {
 			gone, err := b.pendingEdge(pendingEdgeKey(drop))
 			require.NoError(t, err)
 			require.Nil(t, gone)
+		})
+	}
+}
+
+func TestRebuildFrameworkFamilyGateRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason string
+		cause        error
+	}{
+		{"occupied scratch", "framework family gate scratch occupied", errInvalidRecord},
+		{"oversized crossing edge", "framework family edge", ErrRebuildLinkInputSize},
+		{"edge identity", "framework family edge identity", errInvalidRecord},
+		{"endpoint identity", "framework family endpoint identity", errInvalidRecord},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			from := &graph.Node{ID: "caller", Language: "typescript"}
+			to := &graph.Node{ID: "backend", Language: "java"}
+			first := &graph.Edge{From: from.ID, To: to.ID, Kind: graph.EdgeReferences, FilePath: "caller.ts", Line: 1}
+			last := *first
+			last.Line = 2
+			if tc.name == "oversized crossing edge" {
+				last.Context = strings.Repeat("x", rebuildFamilyRowBytes)
+			}
+			b.AddBatch([]*graph.Node{from, to}, []*graph.Edge{first, &last})
+			switch tc.name {
+			case "occupied scratch":
+				require.NoError(t, b.pending.Set(rebuildFamilyDropPrefix, []byte("prior"), pebble.NoSync))
+			case "edge identity":
+				wrong, err := encodeEdge(first)
+				require.NoError(t, err)
+				require.NoError(t, b.pending.Set(pendingEdgeKey(&last), wrong, pebble.NoSync))
+			case "endpoint identity":
+				wrong, err := encodeNode(from)
+				require.NoError(t, err)
+				require.NoError(t, b.pending.Set(pendingNodeKey(to.ID), wrong, pebble.NoSync))
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			count, err := b.RebuildFrameworkFamilyGate(t.Context(), func(*graph.Edge) bool { return true },
+				func(from, to string) bool { return from != to })
+			require.ErrorIs(t, err, ErrRebuildFrameworkFamilyGate)
+			require.ErrorIs(t, err, tc.cause)
+			require.ErrorContains(t, err, tc.reason)
+			require.Zero(t, count)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildDjangoDescriptorLazyMethodIndex(t *testing.T) {
+	const descriptor = "unresolved::_iterable_class"
+	method := &graph.Node{ID: "model.py::__iter__", Kind: graph.KindMethod, Name: "__iter__", FilePath: "model.py",
+		Meta: map[string]any{"receiver": "ModelIterable", "padding": strings.Repeat("x", 16<<20)}}
+	for _, tc := range []struct {
+		kind        graph.EdgeKind
+		to          string
+		wantRefusal bool
+	}{
+		{graph.EdgeCalls, "unresolved::other", false},
+		{graph.EdgeImports, descriptor, false},
+		{graph.EdgeCalls, descriptor, true},
+		{graph.EdgeReferences, descriptor, true},
+	} {
+		t.Run(string(tc.kind)+"/"+tc.to, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			edge := &graph.Edge{From: "caller", To: tc.to, Kind: tc.kind, FilePath: "caller.py", Line: 1}
+			b.AddBatch([]*graph.Node{method}, []*graph.Edge{edge})
+			rules := RebuildDjangoRules{
+				ClaimsTo:     func(to string) bool { return to == descriptor },
+				Rebind:       func(*graph.Edge, string) { t.Fatal("unexpected rebind") },
+				DefaultClass: "ModelIterable",
+			}
+			unread := func(func(ParseFacts, error) bool) { t.Fatal("unexpected receipt read") }
+			before := rebuildFrameworkCustodyRows(t, b)
+			count, err := b.RebuildDjangoDescriptor(t.Context(), unread, rules)
+			if tc.wantRefusal {
+				require.ErrorIs(t, err, ErrRebuildDjangoDescriptor)
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "Django descriptor node row")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, count)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})
 	}
 }

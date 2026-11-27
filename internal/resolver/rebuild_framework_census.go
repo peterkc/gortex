@@ -34,10 +34,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 
 	present, markers := map[string]int{}, map[string]int{}
 	var observerRoles int
-	if err := view.VisitFrameworkGateNodes(ctx, func(n *graph.Node) error {
-		if _, replaced := selection.rebuildEarlyContractIDs[n.ID]; replaced {
-			return nil
-		}
+	if err := selection.visitRebuildFrameworkCensusNodes(ctx, view, func(n *graph.Node) error {
 		family := frameworkLanguageFamily(n.Language)
 		if family != "" {
 			present[family]++
@@ -130,4 +127,15 @@ func completeRebuildObserverGate(ctx context.Context, view store_pebble.RebuildV
 		markers[SynthObserverChannel]++
 	}
 	return err
+}
+
+// Early contract output replaces the parse node at the same ID in the native
+// cold graph. Its parse language and markers do not belong in either census.
+func (s FrameworkSynthesizerSelection) visitRebuildFrameworkCensusNodes(ctx context.Context, view store_pebble.RebuildView, yield func(*graph.Node) error) error {
+	return view.VisitFrameworkGateNodes(ctx, func(n *graph.Node) error {
+		if _, replaced := s.rebuildEarlyContractIDs[n.ID]; replaced {
+			return nil
+		}
+		return yield(n)
+	})
 }
