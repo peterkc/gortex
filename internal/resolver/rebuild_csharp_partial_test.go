@@ -121,3 +121,30 @@ func TestRebuildCSharpPartialMainFrontier(t *testing.T) {
 		}
 	}
 }
+
+func TestRebuildCSharpPartialSQLiteFragmentOrder(t *testing.T) {
+	const a, b, c = "A.cs", "B.cs", "B.cs!.cs"
+	const canonical, target = a + "::T", a + "::IFoo"
+	fixture := func(path string, line int) store_pebble.ParseFacts {
+		n := &graph.Node{ID: path + "::T", Name: "T", FilePath: path, Language: "csharp", Kind: graph.KindType}
+		e := &graph.Edge{From: n.ID, To: target, Kind: graph.EdgeImplements, FilePath: path, Line: line, Origin: graph.OriginASTResolved}
+		return rebuildEventFacts(path, "csharp", []*graph.Node{n}, e)
+	}
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(a, "csharp", []*graph.Node{
+			{ID: canonical, Name: "T", FilePath: a, Language: "csharp", Kind: graph.KindType},
+			{ID: target, Name: "IFoo", FilePath: a, Language: "csharp", Kind: graph.KindInterface},
+		}),
+		fixture(b, 3),
+		fixture(c, 5),
+	}
+	build, native := openRebuildEventStores(t, facts...)
+	New(native).mergeCSharpPartialTypes()
+	want := rebuildEventSQLiteRows(native)
+	require.Len(t, want.edges, 1)
+	require.Equal(t, canonical, want.edges[0].From)
+	require.Equal(t, c, want.edges[0].FilePath, "B.cs!.cs::T comes before B.cs::T in the SQLite scan")
+	require.Equal(t, 5, want.edges[0].Line)
+	require.NoError(t, runRebuildCSharpPartial(t.Context(), build, rebuildGRPCReceipts(facts...)))
+	require.Equal(t, want, rebuildEventSavedRows(t, build))
+}

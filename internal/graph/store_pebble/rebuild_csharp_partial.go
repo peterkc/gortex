@@ -261,7 +261,9 @@ func (p *rebuildCSharpPartial) recordNode(n *graph.Node, ordinal uint64) error {
 	if n.ID == string(canonical) {
 		return nil
 	}
-	return p.put(binary.BigEndian.AppendUint64(order, ordinal), []byte(n.ID))
+	// Native keeps the fragment order of SQLite's C# type scan, not
+	// receipt path order, when it folds duplicate outgoing relations.
+	return p.put(appendKeyString(order, n.ID), []byte(n.ID))
 }
 
 // The incident edge overlay has primary, outgoing and incoming indexes. The
