@@ -374,24 +374,53 @@ func TestRebuildMyBatisMoverCustodyRefusalBatch(t *testing.T) {
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
 
-func TestRebuildMyBatisMoverCallerReceiptRepo(t *testing.T) {
-	b := newBuild(t, FullProfile)
-	old := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
-	xml := myBatisTestXML(t, "local", old)
-	require.NoError(t, b.AddParsedFile("local", xml))
-	local := myBatisTestMethod(t, b, "local")
-	remote := myBatisTestMethod(t, b, "remote")
+func TestRebuildMyBatisMoverCallerReceiptFields(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*ParseFacts, *graph.Node)
+	}{
+		{name: "exact"},
+		{name: "id", change: func(_ *ParseFacts, n *graph.Node) { n.ID += "::other" }},
+		{name: "node_file", change: func(_ *ParseFacts, n *graph.Node) { n.FilePath = "other/UserMapper.xml" }},
+		{name: "receipt_file", change: func(f *ParseFacts, n *graph.Node) {
+			f.File.FilePath = "other/UserMapper.xml"
+			n.FilePath = f.File.FilePath
+		}},
+		{name: "missing_effective_language", change: func(f *ParseFacts, _ *graph.Node) { f.EffectiveLanguage = "" }},
+		{name: "node_language", change: func(_ *ParseFacts, n *graph.Node) { n.Language = "xml" }},
+		{name: "kind", change: func(_ *ParseFacts, n *graph.Node) { n.Kind = graph.KindFunction }},
+		{name: "repo", change: func(_ *ParseFacts, n *graph.Node) { n.RepoPrefix = "remote" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			old := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
+			xml := myBatisTestXML(t, "local", old)
+			require.NoError(t, b.AddParsedFile("local", xml))
+			local := myBatisTestMethod(t, b, "local")
+			remote := myBatisTestMethod(t, b, "remote")
 
-	// The live caller elects local from two candidates. A receipt that differs
-	// only in its qualified repo cannot establish that choice.
-	caller := *xml.Nodes[0]
-	caller.RepoPrefix = "remote"
-	xml.Nodes = []*graph.Node{&caller}
-	before := rebuildFrameworkCustodyRows(t, b)
-	stats, err := runTestRebuildMyBatis(t, b, xml, local, remote)
-	requireRebuildMyBatisRefusal(t, err, old, myBatisTestLocal)
-	require.Zero(t, stats)
-	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			// Only the caller receipt can differ. The live caller resolves
+			// the workspace tie, and the Call and both methods have exact receipts.
+			caller := *xml.Nodes[0]
+			callerFacts := xml
+			callerFacts.Nodes, callerFacts.Edges = []*graph.Node{&caller}, nil
+			xml.Nodes, xml.File.NodeCount = nil, 0
+			if tc.change != nil {
+				tc.change(&callerFacts, &caller)
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := runTestRebuildMyBatis(t, b, xml, callerFacts, local, remote)
+			if tc.change == nil {
+				require.NoError(t, err)
+				require.Equal(t, RebuildMyBatisStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+				requireRebuildMyBatisMove(t, b, old, old, myBatisTestLocal)
+				return
+			}
+			requireRebuildMyBatisRefusal(t, err, old, myBatisTestLocal)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
 }
 
 func TestRebuildMyBatisCandidateCohortProof(t *testing.T) {

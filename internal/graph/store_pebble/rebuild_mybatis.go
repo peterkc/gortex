@@ -261,15 +261,8 @@ func (p *rebuildMyBatisPass) capture(ctx context.Context, rules RebuildMyBatisRu
 			}
 		}
 		if join := rules.Join(ns, stmt); join != "" {
-			key := rebuildMyBatisKey('j', join)
-			found, err := p.present(key)
-			if err != nil {
+			if err := p.put(rebuildMyBatisKey('j', join), nil); err != nil {
 				return err
-			}
-			if !found {
-				if err := p.put(key, nil); err != nil {
-					return err
-				}
 			}
 		}
 		return p.put(append(rebuildMyBatisKey('s'), r.key...), nil)

@@ -188,12 +188,18 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 	})
 
 	for _, tc := range []struct {
-		name, secondOld, secondStatement string
-		affected                         uint64
+		name                       string
+		firstOld, firstStatement   string
+		secondOld, secondStatement string
+		affected                   uint64
+		firstAffected              string
 	}{
-		{name: "commuting", secondOld: "stale::beta", secondStatement: beta},
-		{name: "convergent", secondOld: "stale::beta", secondStatement: alpha, affected: 1},
-		{name: "chain", secondOld: alphaTarget, secondStatement: beta, affected: 1},
+		{"commuting", "stale::alpha", alpha, "stale::beta", beta, 0, ""},
+		{"convergent", "stale::alpha", alpha, "stale::beta", alpha, 1, alphaTarget},
+		{"chain", "stale::alpha", alpha, alphaTarget, beta, 1, alphaTarget},
+		// Alpha sorts before beta but is not a moving old key in this chain.
+		{"chain_descending", "stale::beta", beta, betaTarget, alpha, 1, betaTarget},
+		{"cycle", alphaTarget, beta, betaTarget, alpha, 2, alphaTarget},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Use the same real caller and source site for two synthetic raw
@@ -205,7 +211,7 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 						"mybatis_statement": statement, "fixture": fixture}}
 			}
 			stored := xml
-			stored.Edges = append(slices.Clone(definitions), stub("stale::alpha", alpha, "left"),
+			stored.Edges = append(slices.Clone(definitions), stub(tc.firstOld, tc.firstStatement, "left"),
 				stub(tc.secondOld, tc.secondStatement, "right"))
 			stored = roundTripRebuildRNBridgeFacts(t, stored)
 			if tc.affected != 0 {
@@ -216,10 +222,8 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 				var order *store_pebble.RebuildMyBatisOrderError
 				require.ErrorAs(t, err, &order)
 				require.Equal(t, tc.affected, order.Count)
-				// Convergent moves share alpha. In the chain, only alpha
-				// is also a moving old key; beta is not affected.
 				require.Equal(t, graph.EdgeIdentity{
-					From: from, To: alphaTarget, Kind: graph.EdgeCalls, FilePath: xmlFile, Line: 2,
+					From: from, To: tc.firstAffected, Kind: graph.EdgeCalls, FilePath: xmlFile, Line: 2,
 				}, order.First)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, b))
