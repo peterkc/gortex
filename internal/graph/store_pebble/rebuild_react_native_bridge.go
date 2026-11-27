@@ -130,6 +130,7 @@ type rebuildReactNativeBridge struct {
 // b: module,method -> 1+sole ID, or 2 for several candidates.
 // n: module,method,native ID -> empty candidate membership.
 // r: raw edge key -> proof-state byte + live edge key.
+// l: live edge key -> empty marker for a claim under a different raw key.
 // o: big-endian receipt ordinal -> live edge key.
 // g: caller,module,method -> 1 (first site already elected).
 // w: caller,native ID -> 0 for a stationary key, 1+encoded edge for a
@@ -247,7 +248,13 @@ func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*gra
 			}
 			return p.refusedOutputs(ctx)
 		}
-		return p.put(key, append([]byte{rebuildCapabilityWanted}, live...))
+		if err := p.put(key, append([]byte{rebuildCapabilityWanted}, live...)); err != nil {
+			return err
+		}
+		if !bytes.Equal(raw, live) {
+			return p.put(append(rebuildRNKey('l'), live...), nil)
+		}
+		return nil
 	})
 	// Replay receipts even without a live marker: a duplicate payload may
 	// have hidden the only eligible call.
@@ -265,15 +272,24 @@ func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			key := rebuildRNKey('r', string(pendingEdgeKey(e)))
+			receiptKey := pendingEdgeKey(e)
+			key := rebuildRNKey('r', string(receiptKey))
 			state, err := p.get(key)
 			if err != nil {
 				return err
 			}
 			if len(state) == 0 {
-				if isCall(e) {
-					// No live claim remains for this receipt marker. Only
-					// distinct candidates for its module and method are affected.
+				if !isCall(e) {
+					continue
+				}
+				// A receipt at a moved call's live key is not its recorder.
+				// The claim under its original key still controls its ordinal.
+				inherited, err := pendingGet(p.b.pending, append(rebuildRNKey('l'), receiptKey...),
+					func([]byte) (bool, error) { return true, nil })
+				if err != nil {
+					return err
+				}
+				if !inherited {
 					if err := p.affected(ctx, e); err != nil {
 						return err
 					}
