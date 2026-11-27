@@ -26,9 +26,9 @@ func TestRebuildExpressConventionProof(t *testing.T) {
 	const lang = "javascript"
 	for _, tc := range []struct {
 		name, routeDir, firstDir, secondDir string
-		change                            string
-		want                              int
-		refuse                            bool
+		change                              string
+		want                                int
+		refuse                              bool
 	}{
 		{name: "preferred tie by caller", routeDir: "src/middleware", firstDir: "src/middleware", secondDir: "other/middleware", want: 1},
 		{name: "ordinary tie by caller", routeDir: "src/ordinary", firstDir: "src/ordinary", secondDir: "other/ordinary", want: 1},
