@@ -65,6 +65,8 @@ const (
 	rebuildProofEFCoreModel
 	// Exact SvelteKit route roles and workspace placement.
 	rebuildProofSvelteKitLoad
+	// Native external-call group and package election over proved live bytes.
+	rebuildProofExternalCallSynthesis
 	rebuildProofLimit
 )
 
