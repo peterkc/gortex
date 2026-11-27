@@ -462,6 +462,15 @@ func buildRebuildStages(
 				zap.Uint64("edges", swiftObjC.Edges),
 				zap.Uint64("spill_bytes", swiftObjC.SpillBytes))
 		}
+		reactNative, err := resolver.RunRebuildReactNativeBridge(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		if err != nil {
+			return err
+		}
+		if reactNative.Edges != 0 || reactNative.SpillBytes != 0 {
+			logger.Info("rebuild React Native bridge applied to private build",
+				zap.Uint64("edges", reactNative.Edges),
+				zap.Uint64("spill_bytes", reactNative.SpillBytes))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
