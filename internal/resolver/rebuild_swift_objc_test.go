@@ -71,7 +71,7 @@ func rebuildSwiftObjCFixture(extra int) ([]store_pebble.ParseFacts, *graph.Edge)
 		{
 			EffectiveLanguage: "swift",
 			File:              graph.FileMetaRow{FilePath: protoPath, NodeCount: 1},
-			Nodes:             []*graph.Node{
+			Nodes: []*graph.Node{
 				node(rebuildBridgeProtocol, "BridgeDelegate", "swift", protoPath, graph.KindInterface, 3, map[string]any{"objc": true}),
 			},
 		},
