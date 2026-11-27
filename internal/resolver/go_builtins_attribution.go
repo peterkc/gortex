@@ -496,63 +496,13 @@ func goBuiltinEdgeIdentityLess(a, b graph.EdgeIdentity) bool {
 // the old To value for the batched reindex. Returns "" when the edge
 // is left alone.
 func tryAttributeGoBuiltin(e *graph.Edge, sourceNodes map[string]*graph.Node, materialised map[string]*graph.Node) string {
-	if e == nil || !strings.HasPrefix(e.To, "unresolved::") {
+	name, repoPrefix, boundarySource := goBuiltinSource(e, sourceNodes)
+	if name == "" {
 		return ""
 	}
-	if _, ok := attributeGoBuiltinCandidateKinds[e.Kind]; !ok {
-		return ""
-	}
-	name := strings.TrimPrefix(e.To, "unresolved::")
-	if name == "" || strings.ContainsAny(name, ".*:#") {
-		return ""
-	}
-	// Cheap membership check first: three small map lookups, no graph
-	// access. Only ~2% of candidate names are ever a Go builtin in
-	// practice, so rejecting the rest here — before the language-origin
-	// check and the repo-prefix lookup below, both of which can fall back
-	// to a graph node lookup — avoids paying for either on the ~98% that
-	// were always going to return "" anyway.
-	if !isGoBuiltinName(name) {
-		return ""
-	}
-	// Only attribute when the source is Go. Without this guard a
-	// Python reference to a local named `len` would get re-targeted
-	// at Go's builtin `len`, which would be obviously wrong. Dataflow
-	// edges (arg_of / value_flow) carry an `unresolved::` From placeholder
-	// that fromIsGo cannot classify, so fall back to the call-site file
-	// extension: a `.go` file's `append` / `make` / `len` argument is the Go
-	// builtin regardless of whether the argument side ever bound to a node.
-	// (langFromFilePath only classifies js/ts/py, so a `.go` suffix test is
-	// the right check here.) e.FilePath is a free struct-field read while
-	// fromIsGo's fallback path can hit a node lookup, so try FilePath
-	// first — De Morgan's / && being commutative means this is the exact
-	// same condition, just evaluated in the cheaper order.
-	if !strings.HasSuffix(e.FilePath, ".go") && !sourceIsGo(e.From, sourceNodes) {
-		return ""
-	}
-	// Builtins are repository-owned synthetic nodes. Carry the same boundary
-	// identity as their source so a file-scoped resolve cannot overwrite a
-	// previously stamped builtin with empty workspace/project columns. That
-	// empty rewrite made warm-start backfill repeat on every changed Go file.
-	boundarySource := sourceNodes[e.From]
-	if boundarySource == nil {
-		boundarySource = sourceNodes[enclosingFunctionForBinding(e.From)]
-	}
-	if boundarySource == nil && detachedSource(e.From) {
-		if file := sourceNodes[e.FilePath]; file != nil && file.Kind == graph.KindFile && file.FilePath == e.FilePath {
-			// A detached source spelling may name a different repository even
-			// when recorded at this site; never borrow that file's boundary.
-			if repo := sourceSpellingRepoPrefix(e.From); repo != "" && repo != file.RepoPrefix {
-				return ""
-			}
-			boundarySource = file
-		}
-	}
-	repoPrefix := sourceSpellingRepoPrefix(e.From)
 	workspaceID := ""
 	projectID := ""
 	if boundarySource != nil {
-		repoPrefix = boundarySource.RepoPrefix
 		workspaceID = boundarySource.WorkspaceID
 		projectID = boundarySource.ProjectID
 	}
@@ -578,6 +528,65 @@ func tryAttributeGoBuiltin(e *graph.Edge, sourceNodes map[string]*graph.Node, ma
 	oldTo := e.To
 	e.To = newID
 	return oldTo
+}
+
+func goBuiltinSource(e *graph.Edge, sourceNodes map[string]*graph.Node) (string, string, *graph.Node) {
+	if e == nil || !strings.HasPrefix(e.To, "unresolved::") {
+		return "", "", nil
+	}
+	if _, ok := attributeGoBuiltinCandidateKinds[e.Kind]; !ok {
+		return "", "", nil
+	}
+	name := strings.TrimPrefix(e.To, "unresolved::")
+	if name == "" || strings.ContainsAny(name, ".*:#") {
+		return "", "", nil
+	}
+	// Cheap membership check first: three small map lookups, no graph
+	// access. Only ~2% of candidate names are ever a Go builtin in
+	// practice, so rejecting the rest here — before the language-origin
+	// check and the repo-prefix lookup below, both of which can fall back
+	// to a graph node lookup — avoids paying for either on the ~98% that
+	// were always going to be rejected anyway.
+	if !isGoBuiltinName(name) {
+		return "", "", nil
+	}
+	// Only attribute when the source is Go. Without this guard a
+	// Python reference to a local named `len` would get re-targeted
+	// at Go's builtin `len`, which would be obviously wrong. Dataflow
+	// edges (arg_of / value_flow) carry an `unresolved::` From placeholder
+	// that fromIsGo cannot classify, so fall back to the call-site file
+	// extension: a `.go` file's `append` / `make` / `len` argument is the Go
+	// builtin regardless of whether the argument side ever bound to a node.
+	// (langFromFilePath only classifies js/ts/py, so a `.go` suffix test is
+	// the right check here.) e.FilePath is a free struct-field read while
+	// fromIsGo's fallback path can hit a node lookup, so try FilePath
+	// first — De Morgan's / && being commutative means this is the exact
+	// same condition, just evaluated in the cheaper order.
+	if !strings.HasSuffix(e.FilePath, ".go") && !sourceIsGo(e.From, sourceNodes) {
+		return "", "", nil
+	}
+	// Builtins are repository-owned synthetic nodes. Carry the same boundary
+	// identity as their source so a file-scoped resolve cannot overwrite a
+	// previously stamped builtin with empty workspace/project columns. That
+	// empty rewrite made warm-start backfill repeat on every changed Go file.
+	boundarySource := sourceNodes[e.From]
+	if boundarySource == nil {
+		boundarySource = sourceNodes[enclosingFunctionForBinding(e.From)]
+	}
+	if boundarySource == nil && detachedSource(e.From) {
+		if file := sourceNodes[e.FilePath]; file != nil && file.Kind == graph.KindFile && file.FilePath == e.FilePath {
+			// A detached source spelling may name a different repository even
+			// when recorded at this site; never borrow that file's boundary.
+			if repo := sourceSpellingRepoPrefix(e.From); repo != "" && repo != file.RepoPrefix {
+				return "", "", nil
+			}
+			boundarySource = file
+		}
+	}
+	if boundarySource != nil {
+		return name, boundarySource.RepoPrefix, boundarySource
+	}
+	return name, sourceSpellingRepoPrefix(e.From), nil
 }
 
 // isGoBuiltinName reports whether name is in any of the three builtin
