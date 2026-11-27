@@ -5,10 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -24,9 +28,9 @@ var (
 	fileImportRelative = []byte{'p', 'i', 4}
 )
 
-// RebuildFileImportStats counts checked file rows and staged moves. SpillBytes
-// measures physical L0 table output during threshold flushes of the private DB;
-// it can include other dirty pages of that DB, and is not an RSS measure.
+// RebuildFileImportStats counts checked file rows and staged moves. Flushes
+// counts closed threshold SST runs consumed by the pass, and SpillBytes counts
+// their physical bytes. The basename overlay and final in-memory tails add none.
 type RebuildFileImportStats struct {
 	Files, RelativeMoves, LuaMoves, GodotMoves int
 	Flushes                                    int
@@ -93,6 +97,11 @@ func (b *BuildStore) RebuildFileImports(ctx context.Context, spillAt int,
 		err = errors.Join(err, b.pending.DeleteRange(fileImportPrefix, prefixEnd(fileImportPrefix), pebble.NoSync))
 	}()
 	p := fileImportPass{build: b, spillAt: spillAt}
+	defer func() {
+		if p.dir != "" {
+			err = errors.Join(err, os.RemoveAll(p.dir))
+		}
+	}()
 	v := b.RebuildView()
 	var hasRelative, hasLua, hasGodot bool
 	if err := v.VisitNodes(ctx, func(n *graph.Node) error {
@@ -116,12 +125,13 @@ func (b *BuildStore) RebuildFileImports(ctx context.Context, spillAt int,
 			return invalid("file-import index requires canonical checkout-relative file IDs")
 		}
 		p.stats.Files++
-		return p.put(keyStrings(fileImportByBase, fileImportBase(id), id), []byte(n.Language))
+		return b.pending.Set(keyStrings(fileImportByBase, fileImportBase(id), id), []byte(n.Language), pebble.NoSync)
 	}); err != nil {
 		return stats, err
 	}
 	index := RebuildFileImportIndex{db: b.pending}
 	if hasRelative {
+		stream := fileImportMoves{prefix: fileImportRelative}
 		if relative == nil {
 			return stats, invalid("relative-import reducer is required")
 		}
@@ -134,12 +144,12 @@ func (b *BuildStore) RebuildFileImports(ctx context.Context, spillAt int,
 				return err
 			}
 			p.stats.RelativeMoves++
-			return p.stage(fileImportRelative, e, moved)
+			return p.stage(ctx, &stream, e, moved)
 		}); err != nil {
 			return stats, err
 		}
 		if p.stats.RelativeMoves != 0 {
-			if err := b.withWrites(func() error { return p.apply(ctx, fileImportRelative) }); err != nil {
+			if err := b.withWrites(func() error { return p.apply(ctx, &stream) }); err != nil {
 				return stats, err
 			}
 		}
@@ -147,6 +157,8 @@ func (b *BuildStore) RebuildFileImports(ctx context.Context, spillAt int,
 	if !hasLua && !hasGodot {
 		return p.stats, nil
 	}
+	luaMoves := fileImportMoves{prefix: fileImportLua}
+	godotMoves := fileImportMoves{prefix: fileImportGodot}
 	// This visit opens a fresh snapshot after all relative reindex windows.
 	// As before, Lua moves are excluded from the Godot input; canonical
 	// file IDs cannot create a new res:// placeholder for Godot.
@@ -158,7 +170,7 @@ func (b *BuildStore) RebuildFileImports(ctx context.Context, spillAt int,
 			}
 			if target != "" {
 				p.stats.LuaMoves++
-				return p.stageResolved(fileImportLua, e, target)
+				return p.stageResolved(ctx, &luaMoves, e, target)
 			}
 		}
 		if !hasGodot || (e.Kind != graph.EdgeReferences && e.Kind != graph.EdgeImports) {
@@ -175,16 +187,16 @@ func (b *BuildStore) RebuildFileImports(ctx context.Context, spillAt int,
 		if e.Kind == graph.EdgeImports {
 			order = 1
 		}
-		return p.stageResolved(append(bytes.Clone(fileImportGodot), order), e, target)
+		return p.stageResolved(ctx, &godotMoves, e, target, order)
 	}); err != nil {
 		return stats, err
 	}
 	if p.stats.LuaMoves+p.stats.GodotMoves != 0 {
 		if err := b.withWrites(func() error {
-			if err := p.apply(ctx, fileImportLua); err != nil {
+			if err := p.apply(ctx, &luaMoves); err != nil {
 				return err
 			}
-			return p.apply(ctx, fileImportGodot)
+			return p.apply(ctx, &godotMoves)
 		}); err != nil {
 			return stats, err
 		}
@@ -193,50 +205,162 @@ func (b *BuildStore) RebuildFileImports(ctx context.Context, spillAt int,
 }
 
 type fileImportPass struct {
-	build              *BuildStore
-	spillAt, unflushed int
-	stats              RebuildFileImportStats
+	build   *BuildStore
+	spillAt int
+	dir     string
+	stats   RebuildFileImportStats
 }
 
-func (p *fileImportPass) put(key, value []byte) error {
-	if err := p.build.pending.Set(key, value, pebble.NoSync); err != nil {
-		return err
-	}
-	p.unflushed += len(key) + len(value)
-	if p.unflushed < p.spillAt {
-		return nil
-	}
-	before := p.build.pending.Metrics().Levels[0].TableBytesFlushed
-	if err := p.build.pending.Flush(); err != nil {
-		return err
-	}
-	p.stats.SpillBytes += p.build.pending.Metrics().Levels[0].TableBytesFlushed - before
-	p.stats.Flushes++
-	p.unflushed = 0
-	return nil
+type fileImportMoves struct {
+	prefix []byte
+	rows   []row
+	bytes  int
+	runs   int
 }
 
-func (p *fileImportPass) stageResolved(prefix []byte, e *graph.Edge, target string) error {
+func (p *fileImportPass) stageResolved(ctx context.Context, stream *fileImportMoves, e *graph.Edge, target string, order ...byte) error {
 	moved := *e
 	moved.To, moved.Origin = target, graph.OriginASTResolved
-	return p.stage(prefix, e, &moved)
+	return p.stage(ctx, stream, e, &moved, order...)
 }
 
-func (p *fileImportPass) stage(prefix []byte, e, moved *graph.Edge) error {
+func (p *fileImportPass) stage(ctx context.Context, stream *fileImportMoves, e, moved *graph.Edge, order ...byte) error {
 	raw, err := encodeEdge(moved)
 	if err != nil {
 		return err
 	}
-	key := append(bytes.Clone(prefix), pendingEdgeKey(e)...)
-	return p.put(key, append(appendKeyString(nil, e.To), raw...))
+	key := append(bytes.Clone(stream.prefix), order...)
+	key = append(key, pendingEdgeKey(e)...)
+	value := append(appendKeyString(nil, e.To), raw...)
+	size := len(key) + len(value)
+	if len(stream.rows) != 0 && size > p.spillAt-stream.bytes {
+		if err := p.spill(ctx, stream); err != nil {
+			return err
+		}
+	}
+	stream.rows = append(stream.rows, row{key, value})
+	stream.bytes += size
+	if stream.bytes >= p.spillAt {
+		// A single large row can spill by itself; the threshold is not a cap.
+		return p.spill(ctx, stream)
+	}
+	return nil
 }
 
-func (p *fileImportPass) apply(ctx context.Context, prefix []byte) error {
+func (p *fileImportPass) spill(ctx context.Context, stream *fileImportMoves) error {
+	if p.dir == "" {
+		dir, err := os.MkdirTemp(filepath.Join(p.build.scratchParent, "pending"), "file-import-")
+		if err != nil {
+			return err
+		}
+		p.dir = dir
+	}
+	sortFileImportMoves(stream.rows)
+	path := stream.runPath(p.dir, stream.runs)
+	if err := writeFileImportRun(ctx, path, stream.rows); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	stream.runs++
+	p.stats.Flushes++
+	p.stats.SpillBytes += uint64(info.Size())
+	clear(stream.rows)
+	stream.rows = stream.rows[:0]
+	stream.bytes = 0
+	return nil
+}
+
+func (s *fileImportMoves) runPath(dir string, i int) string {
+	return filepath.Join(dir, fmt.Sprintf("%d-%d.sst", s.prefix[2], i))
+}
+
+func sortFileImportMoves(rows []row) {
+	slices.SortFunc(rows, func(a, b row) int { return bytes.Compare(a.key, b.key) })
+}
+
+func writeFileImportRun(ctx context.Context, path string, rows []row) (err error) {
+	w, err := newLinkTable(path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, w.Close()) }()
+	for _, r := range rows {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := w.Set(r.key, r.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func visitFileImportRun(ctx context.Context, path string, prefix []byte, yield func(row) error) (err error) {
+	table, err := openLinkTable(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, table.Close()) }()
+	it, err := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, it.Close()) }()
+	for kv := it.SeekGE(prefix, 0); kv != nil && bytes.HasPrefix(kv.K.UserKey, prefix); kv = it.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		value, _, err := kv.Value(nil)
+		if err != nil {
+			return err
+		}
+		if err := yield(row{kv.K.UserKey, value}); err != nil {
+			return err
+		}
+	}
+	return errors.Join(ctx.Err(), it.Error())
+}
+
+func (s *fileImportMoves) visit(ctx context.Context, dir string, yield func(row) error) error {
+	sortFileImportMoves(s.rows)
+	prefixes := [][]byte{s.prefix}
+	if bytes.Equal(s.prefix, fileImportGodot) {
+		prefixes = [][]byte{append(bytes.Clone(s.prefix), 0), append(bytes.Clone(s.prefix), 1)}
+	}
+	// Each stream gets at most one row per old key from VisitEdges, which
+	// visits unique old keys in key order. A Godot kind is a subsequence of
+	// that order. For each prefix, concatenate successive runs and the tail;
+	// no heap merge or simultaneous readers are needed.
+	for _, prefix := range prefixes {
+		for i := range s.runs {
+			if err := visitFileImportRun(ctx, s.runPath(dir, i), prefix, yield); err != nil {
+				return err
+			}
+		}
+		for _, r := range s.rows {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if bytes.HasPrefix(r.key, prefix) {
+				if err := yield(r); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return ctx.Err()
+}
+
+func (p *fileImportPass) apply(ctx context.Context, stream *fileImportMoves) error {
+	prefix := stream.prefix
 	// Pinned SQLite frees all moving identities in a 5,000-row window
 	// before any claim. BuildStore.ReindexEdges instead chunks at 256.
 	const nativeChunk = 5000
 	var moves []graph.EdgeReindex
-	if err := pendingVisit(ctx, p.build.pending, prefix, func(r row) error {
+	if err := stream.visit(ctx, p.dir, func(r row) error {
 		oldTo, raw, err := readKeyString(r.value)
 		if err != nil {
 			return err

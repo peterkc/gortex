@@ -95,8 +95,17 @@ func TestRebuildFileImportsNativeRows(t *testing.T) {
 			require.Equal(t, 5, stats.LuaMoves)
 			require.Equal(t, 3, stats.GodotMoves)
 			require.Equal(t, len(files), stats.Files)
-			require.Positive(t, stats.Flushes)
+			// At one byte every move spills as a complete one-row run.
+			require.Equal(t, stats.LuaMoves+stats.GodotMoves, stats.Flushes)
 			require.Positive(t, stats.SpillBytes)
+
+			got, stats = rebuildImportsSaved(t, nodes, edges, 1<<20, nil)
+			require.Equal(t, native, got)
+			require.Equal(t, 5, stats.LuaMoves)
+			require.Equal(t, 3, stats.GodotMoves)
+			require.Equal(t, len(files), stats.Files)
+			require.Zero(t, stats.Flushes)
+			require.Zero(t, stats.SpillBytes)
 		})
 	}
 }

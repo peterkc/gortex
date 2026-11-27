@@ -2,6 +2,8 @@ package store_pebble
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -31,6 +33,7 @@ func TestRebuildFileImportsCorruptRead(t *testing.T) {
 	require.ErrorIs(t, err, errInvalidRecord)
 	require.Equal(t, 1, visited, "the failure must follow a staged move")
 	require.Zero(t, stats)
+	assertFileImportRunsRemoved(t, b)
 	require.NoError(t, pendingVisit(ctx, b.pending, fileImportPrefix, func(row) error {
 		return fmt.Errorf("file-import scratch survived refusal")
 	}))
@@ -43,24 +46,90 @@ func TestRebuildFileImportsCorruptRead(t *testing.T) {
 	require.Equal(t, []*graph.Edge{old}, saved)
 }
 
-func TestRebuildFileImportsIndexSpill(t *testing.T) {
+func TestRebuildFileImportsIndexDoesNotSpill(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	const files = 1300
-	// Force the basename index alone above 1 MiB, with no staged moves.
+	// The basename index exceeds 1 MiB but has no move rows to spill.
 	wide := strings.Repeat(strings.Repeat("p", 200)+"/", 5)
 	for i := range files {
 		id := fmt.Sprintf("%s%04d/item.lua", wide, i)
 		b.AddNode(&graph.Node{ID: id, Name: "item.lua", Kind: graph.KindFile, Language: "lua"})
 	}
-	// Any subsequent explicit flush bytes come from scratch, not input rows.
-	require.NoError(t, b.pending.Flush())
-	stats, err := b.RebuildFileImports(t.Context(), 1<<20, nil, nil, nil) // no edges
+	b.AddEdge(&graph.Edge{From: wide + "0000/item.lua", To: "unresolved::import::miss", Kind: graph.EdgeImports})
+	ctx := t.Context()
+	reads := 0
+	stats, err := b.RebuildFileImports(ctx, 1<<20, nil, func(idx *RebuildFileImportIndex, e *graph.Edge) (string, error) {
+		file, err := idx.File(ctx, e.From)
+		require.NoError(t, err)
+		require.Equal(t, graph.FileLanguageNode{ID: e.From, Language: "lua"}, file)
+		count := 0
+		require.NoError(t, idx.VisitBasename(ctx, "item.lua", func(string) { count++ }))
+		require.Equal(t, files, count)
+		reads++
+		return "", nil
+	}, nil)
 	require.NoError(t, err)
+	require.Equal(t, 1, reads)
 	require.Equal(t, files, stats.Files)
 	require.Zero(t, stats.LuaMoves+stats.GodotMoves)
-	require.Positive(t, stats.Flushes)
-	require.Positive(t, stats.SpillBytes)
-	require.NoError(t, pendingVisit(t.Context(), b.pending, fileImportPrefix, func(row) error {
+	require.Zero(t, stats.Flushes)
+	require.Zero(t, stats.SpillBytes)
+	assertFileImportRunsRemoved(t, b)
+	require.NoError(t, pendingVisit(ctx, b.pending, fileImportPrefix, func(row) error {
 		return fmt.Errorf("file-import scratch survived completion")
 	}))
+}
+
+func TestRebuildFileImportsRunAndTail(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	ctx := t.Context()
+	const threshold = 1 << 10
+	b.AddNode(&graph.Node{ID: "a.lua", Name: "a.lua", Kind: graph.KindFile, Language: "lua"})
+	var want []*graph.Edge
+	for i, from := range []string{"a.lua", "b.lua", "c.lua"} {
+		e := &graph.Edge{From: from, To: "unresolved::import::target", Kind: graph.EdgeImports, Line: i + 1}
+		if i == 0 {
+			e.Via = strings.Repeat("x", threshold)
+		}
+		b.AddEdge(e)
+		moved := *e
+		moved.To, moved.Origin = "target.lua", graph.OriginASTResolved
+		want = append(want, &moved)
+	}
+	var bytes uint64
+	stats, err := b.RebuildFileImports(ctx, threshold, nil, func(_ *RebuildFileImportIndex, e *graph.Edge) (string, error) {
+		if e.From == "c.lua" {
+			// The oversized first move is already on disk. The next move
+			// stays in memory. Neither may have a pending scratch row.
+			paths, err := filepath.Glob(filepath.Join(b.scratchParent, "pending", "file-import-*", "*.sst"))
+			require.NoError(t, err)
+			require.Len(t, paths, 1)
+			info, err := os.Stat(paths[0])
+			require.NoError(t, err)
+			bytes = uint64(info.Size())
+			require.NoError(t, pendingVisit(ctx, b.pending, fileImportLua, func(row) error {
+				return fmt.Errorf("file-import move was written to the overlay")
+			}))
+		}
+		return "target.lua", nil
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 3, stats.LuaMoves)
+	require.Equal(t, 1, stats.Flushes)
+	require.Positive(t, bytes)
+	require.Equal(t, bytes, stats.SpillBytes)
+	assertFileImportRunsRemoved(t, b)
+	var got []*graph.Edge
+	require.NoError(t, b.RebuildView().VisitEdges(ctx, func(e *graph.Edge) error {
+		got = append(got, e)
+		return nil
+	}))
+	require.Equal(t, want, got)
+}
+
+func assertFileImportRunsRemoved(t *testing.T, b *BuildStore) {
+	t.Helper()
+	dirs, err := filepath.Glob(filepath.Join(b.scratchParent, "pending", "file-import-*"))
+	require.NoError(t, err)
+	require.Empty(t, dirs)
 }
