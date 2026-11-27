@@ -186,10 +186,15 @@ func ResolveEventChannelCalls(g graph.Store) int {
 	return synthesized
 }
 
+const (
+	pubsubEventIDPrefix  = "event::pubsub::"
+	emitterEventIDPrefix = "event::emitter::"
+)
+
 // isPubsubEventNode reports whether an ID is a pub/sub KindEvent topic
 // node (event::pubsub::<transport>::<topic>).
 func isPubsubEventNode(id string) bool {
-	return strings.HasPrefix(id, "event::pubsub::")
+	return strings.HasPrefix(id, pubsubEventIDPrefix)
 }
 
 // isEmitterEventNode reports whether an ID is an emitter-literal KindEvent
@@ -197,7 +202,7 @@ func isPubsubEventNode(id string) bool {
 // channel for the in-process `.on` / `.emit` pairs the import-gated
 // pub/sub extractor does not recognise.
 func isEmitterEventNode(id string) bool {
-	return strings.HasPrefix(id, "event::emitter::")
+	return strings.HasPrefix(id, emitterEventIDPrefix)
 }
 
 // edgeTransport reads the transport label an emit/listen edge carries.
@@ -216,7 +221,7 @@ func transportFromEventID(id string) string {
 	if isEmitterEventNode(id) {
 		return emitterLiteralTransport
 	}
-	rest := strings.TrimPrefix(id, "event::pubsub::")
+	rest := strings.TrimPrefix(id, pubsubEventIDPrefix)
 	if t, _, ok := strings.Cut(rest, "::"); ok {
 		return t
 	}
@@ -229,9 +234,9 @@ func transportFromEventID(id string) string {
 // the transport.
 func topicFromEventID(id, transport string) string {
 	if isEmitterEventNode(id) {
-		return strings.TrimPrefix(id, "event::emitter::")
+		return strings.TrimPrefix(id, emitterEventIDPrefix)
 	}
-	return strings.TrimPrefix(id, "event::pubsub::"+transport+"::")
+	return strings.TrimPrefix(id, pubsubEventIDPrefix+transport+"::")
 }
 
 // eventChannelInProcess reports whether a transport is an in-process or

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -68,7 +69,7 @@ func (b *BuildStore) RebuildEventChannel(ctx context.Context, receipts iter.Seq2
 }
 
 // The native framework gate needs only a topic ID prefix. Seek the node
-// keys directly and stop at the first match without decoding node payloads.
+// keys directly and check the first match without decoding unrelated nodes.
 func (b *BuildStore) hasRebuildEventTopic(ctx context.Context, prefixes []string) (found bool, err error) {
 	err = b.RebuildView().read(ctx, func(snap *pebble.Snapshot) (err error) {
 		it, err := snap.NewIterWithContext(ctx, nil)
@@ -80,6 +81,20 @@ func (b *BuildStore) hasRebuildEventTopic(ctx context.Context, prefixes []string
 			key := pendingNodeKey(topic)
 			prefix := key[:len(key)-2] // drop the ID terminator, not escaped ID bytes
 			if it.SeekGE(prefix) && bytes.HasPrefix(it.Key(), prefix) {
+				raw, err := it.ValueAndErr()
+				if err != nil {
+					return err
+				}
+				if len(it.Key())+len(raw) > 16<<20 {
+					return fmt.Errorf("%w: event channel topic probe", ErrRebuildLinkInputSize)
+				}
+				n, err := decodeNodeLight(raw)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(it.Key(), pendingNodeKey(n.ID)) {
+					return invalid("event channel topic probe node identity does not match key")
+				}
 				found = true
 				return nil
 			}
@@ -141,14 +156,9 @@ func (p *rebuildEventChannel) capture(ctx context.Context, topicPrefixes []strin
 		if e.From == "" {
 			return nil
 		}
-		found := false
-		for _, prefix := range topicPrefixes {
-			if strings.HasPrefix(e.To, prefix) {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.ContainsFunc(topicPrefixes, func(prefix string) bool {
+			return strings.HasPrefix(e.To, prefix)
+		}) {
 			return nil
 		}
 		col := byte('l')

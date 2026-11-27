@@ -196,6 +196,7 @@ func TestRebuildEventChannelNodeGates(t *testing.T) {
 	}{
 		{"missing topic", []*graph.Node{emitter, listener}},
 		{"missing listener node", []*graph.Node{emitter, topicNode}},
+		{"missing emitter node", []*graph.Node{listener, topicNode}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := rebuildEventFacts(file, lang, tc.nodes,
@@ -233,40 +234,42 @@ func TestRebuildEventChannelTransportFallback(t *testing.T) {
 		emitter, listener, rebuildEventTopic(file, lang, topic, "tick", transport),
 	}, rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, ""),
 		rebuildEventSite(listener, topic, graph.EdgeListensOn, 8, "kafka"))
-	// The Python site supplies the only Emit label and changes the
-	// transport for both publishers, including the unlabeled one.
-	pyEmitter := rebuildEventNode("producer.py", "produce", "python", "")
+	// The Python site supplies the only Emit label but cannot pair with
+	// the listener. The sole output needs Python only for transport proof.
+	pyEmitter := rebuildEventNode("producer.py", "produce", "python", "foreign")
 	py := rebuildEventFacts(pyEmitter.FilePath, pyEmitter.Language, []*graph.Node{pyEmitter},
 		rebuildEventSite(pyEmitter, topic, graph.EdgeEmits, 2, "socketio"))
 
 	for _, tc := range []struct {
 		name          string
 		facts         []store_pebble.ParseFacts
-		pairs         int
 		wantTransport string
 	}{
-		{"topic ID beats listener label", []store_pebble.ParseFacts{web}, 1, transport},
-		{"Python emit label overrides topic ID", []store_pebble.ParseFacts{web, py}, 2, "socketio"},
+		{"topic ID beats listener label", []store_pebble.ParseFacts{web}, transport},
+		{"Python emit label overrides topic ID", []store_pebble.ParseFacts{web, py}, "socketio"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, native := openRebuildEventStores(t, tc.facts...)
-			require.Equal(t, tc.pairs, ResolveEventChannelCalls(native))
+			require.Equal(t, 1, ResolveEventChannelCalls(native))
 			calls := slices.Collect(native.EdgesByKind(graph.EdgeCalls))
-			require.Len(t, calls, tc.pairs)
-			require.NotNil(t, synthEventEdge(native, emitter.ID, listener.ID))
-			for _, call := range calls {
-				require.Equal(t, tc.wantTransport, call.Meta["event_transport"])
-			}
+			require.Len(t, calls, 1)
+			call := calls[0]
+			require.Equal(t, emitter.ID, call.From)
+			require.Equal(t, listener.ID, call.To)
+			require.Equal(t, tc.wantTransport, call.Meta["event_transport"])
 
 			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(tc.facts...), AllFrameworkSynthesizers(), 1<<20)
 			require.NoError(t, err)
-			require.Equal(t, uint64(tc.pairs), stats.Pairs)
+			require.Equal(t, uint64(1), stats.Pairs)
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
-			if tc.pairs == 2 {
+			if len(tc.facts) == 2 {
 				unproved, _ := openRebuildEventStores(t, tc.facts...)
 				before := rebuildEventSavedRows(t, unproved)
 				stats, err := RunRebuildEventChannel(t.Context(), unproved, rebuildGRPCReceipts(web), AllFrameworkSynthesizers(), 1<<20)
-				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				var refusal *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, uint64(1), refusal.Count)
+				require.Equal(t, graph.EdgeIdentityFor(call), refusal.First)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, unproved))
 			}

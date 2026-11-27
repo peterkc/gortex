@@ -16,7 +16,7 @@ func RunRebuildEventChannel(ctx context.Context, b *store_pebble.BuildStore, rec
 	if !selection.allows(SynthEventChannel) {
 		return store_pebble.RebuildEventChannelStats{}, nil
 	}
-	prefixes := []string{"event::pubsub::", "event::emitter::"}
+	prefixes := []string{pubsubEventIDPrefix, emitterEventIDPrefix}
 	return b.RebuildEventChannel(ctx, receipts, spillAt, prefixes, func(event, transport string) (string, int) {
 		if transport == "" {
 			transport = transportFromEventID(event)

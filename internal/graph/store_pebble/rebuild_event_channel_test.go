@@ -17,10 +17,10 @@ func TestRebuildEventChannelRejectsInvalidScratch(t *testing.T) {
 	const prefix = "event::emitter::"
 	const topic = prefix + "bus::tick"
 	b.AddNode(&graph.Node{ID: topic, Kind: graph.KindEvent, Name: "tick", FilePath: "bus.ts"})
-	run := func(limit int) (RebuildEventChannelStats, error) {
+	run := func(limit int, prefixes []string) (RebuildEventChannelStats, error) {
 		return b.RebuildEventChannel(ctx, func(func(ParseFacts, error) bool) {
 			t.Fatal("scratch refusal must precede receipt reads")
-		}, limit, []string{prefix}, func(string, string) (string, int) {
+		}, limit, prefixes, func(string, string) (string, int) {
 			t.Fatal("scratch refusal must precede election")
 			return "", 0
 		}, func(string, string, *graph.Edge, *graph.Edge) *graph.Edge {
@@ -28,16 +28,27 @@ func TestRebuildEventChannelRejectsInvalidScratch(t *testing.T) {
 			return nil
 		})
 	}
-	for _, limit := range []int{0, goldBufferBytes + 1} {
-		stats, err := run(limit)
-		require.ErrorIs(t, err, ErrRebuildEventChannel)
-		require.ErrorIs(t, err, ErrRebuildLinkInputSize)
-		require.Zero(t, stats)
+	for _, tc := range []struct {
+		name     string
+		limit    int
+		prefixes []string
+	}{
+		{"zero limit", 0, []string{prefix}},
+		{"oversize limit", goldBufferBytes + 1, []string{prefix}},
+		{"nil prefixes", 1, nil},
+		{"empty prefixes", 1, []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stats, err := run(tc.limit, tc.prefixes)
+			require.ErrorIs(t, err, ErrRebuildEventChannel)
+			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+			require.Zero(t, stats)
+		})
 	}
 
 	key := eventScratch('t', "occupied")
 	require.NoError(t, b.pending.Set(key, []byte("owner"), pebble.NoSync))
-	stats, err := run(1)
+	stats, err := run(1, []string{prefix})
 	require.ErrorIs(t, err, ErrRebuildEventChannel)
 	require.ErrorContains(t, err, "event channel scratch range occupied")
 	require.Zero(t, stats)
@@ -64,7 +75,7 @@ func TestRebuildEventChannelRejectsInvalidScratch(t *testing.T) {
 	site.From = "z"
 	oversized := pendingEdgeKey(site)
 	require.NoError(t, b.pending.Set(oversized, large, pebble.NoSync))
-	stats, err = run(1 << 20)
+	stats, err = run(1<<20, []string{prefix})
 	require.ErrorIs(t, err, ErrRebuildEventChannel)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 	require.ErrorContains(t, err, "event channel input row")
@@ -77,7 +88,7 @@ func TestRebuildEventChannelRejectsInvalidScratch(t *testing.T) {
 	require.False(t, busy)
 }
 
-func TestRebuildEventChannelTopicGateReadsKeysOnly(t *testing.T) {
+func TestRebuildEventChannelTopicGateChecksOnlyMatchingRows(t *testing.T) {
 	b, err := OpenBuild(filepath.Join(t.TempDir(), "working"), FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
@@ -94,4 +105,31 @@ func TestRebuildEventChannelTopicGateReadsKeysOnly(t *testing.T) {
 	found, err = b.hasRebuildEventTopic(ctx, prefixes)
 	require.NoError(t, err)
 	require.True(t, found)
+}
+
+func TestRebuildEventChannelTopicGateRefusesInvalidMatch(t *testing.T) {
+	b, err := OpenBuild(filepath.Join(t.TempDir(), "working"), FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	ctx := t.Context()
+	const prefix = "event::pubsub::"
+	key := pendingNodeKey(prefix + "socketio::tick")
+	other, err := encodeNode(&graph.Node{ID: prefix + "socketio::other", Kind: graph.KindEvent, Name: "other", FilePath: "bus.ts"})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name  string
+		value []byte
+		cause error
+	}{
+		{"malformed", []byte("not a node"), errInvalidRecord},
+		{"mismatched identity", other, errInvalidRecord},
+		{"oversized", make([]byte, 16<<20), ErrRebuildLinkInputSize},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, b.pending.Set(key, tc.value, pebble.NoSync))
+			found, err := b.hasRebuildEventTopic(ctx, []string{prefix})
+			require.ErrorIs(t, err, tc.cause)
+			require.False(t, found)
+		})
+	}
 }
