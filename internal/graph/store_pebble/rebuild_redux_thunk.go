@@ -228,6 +228,7 @@ func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string) (pi
 			return pick, err
 		}
 		if !seen {
+			pick.buckets = append(pick.buckets, rebuildStoreCandidateWitness{scoped, 0})
 			continue
 		}
 		pick.inputs = append(pick.inputs, p.poolKey(pool, 'u', callee))
@@ -414,10 +415,10 @@ func (p *rebuildReduxThunkPass) prove(ctx context.Context, receipts iter.Seq2[Pa
 			if len(r.value) <= len(p.prefix)+2 {
 				return invalid("Redux Thunk candidate proof")
 			}
+			anchor = anchor || pool == 't' && rebuildStoreAnchorExact(r.value[0])
 			if !rebuildStoreCandidateExact(r.value[0]) {
 				return nil
 			}
-			anchor = anchor || pool == 't'
 			state, err := p.state(r.value[1:])
 			if err != nil || state == 0 {
 				return err
@@ -516,7 +517,7 @@ func (p *rebuildReduxThunkPass) recordCandidate(pool byte, raw *graph.Node, file
 	if err != nil || len(claim) == 0 {
 		return err
 	}
-	// Even outside the affected cohorts, one exact thunk must prove
+	// Even outside the affected cohorts, one eligible thunk must prove
 	// that native would not return before looking at Calls at all.
 	var state byte
 	if pool != 't' {
@@ -540,22 +541,25 @@ func (p *rebuildReduxThunkPass) recordCandidate(pool byte, raw *graph.Node, file
 		}
 		proof = rebuildScratchProofBit(receipt && sameGetter && raw.FilePath == live.FilePath)
 	} else {
-		var sameRole bool
+		var name string
 		if raw.Kind == graph.KindMethod || rebuildStoreFactoryGetterKind(raw.Kind) {
 			if pool == 't' {
-				name := p.rules.Thunk(raw)
-				sameRole = name != "" && bytes.Equal(claim[1:], p.poolKey(pool, 'u', name))
-			} else {
-				binding, member := p.rules.Action(raw)
-				sameRole = binding != "" && bytes.Equal(claim[1:], p.poolKey(pool, 'u', member))
+				name = p.rules.Thunk(raw)
+			} else if binding, member := p.rules.Action(raw); binding != "" {
+				name = member
 			}
 		}
-		if sameRole && receipt && (raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
-			if err := p.noteCandidateScopeChange(claim[1:], len(p.prefix)+1, 'i', raw, live); err != nil {
+		cohort := p.poolKey(pool, 'u', name)
+		sameRole := name != "" && bytes.Equal(claim[1:], cohort)
+		if receipt && name != "" && (!sameRole || raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
+			if err := p.noteCandidateCohortChange(claim[1:], cohort, len(p.prefix)+1, 'i', raw, live); err != nil {
 				return err
 			}
 		}
 		proof = rebuildStoreCandidateProof(receipt && sameRole, raw, live)
+		if pool == 't' {
+			proof |= rebuildStoreAnchorProof(receipt && name != "")
+		}
 	}
 	return p.noteStoreNodeProof(key, claim, proof)
 }

@@ -114,12 +114,15 @@ func (p *rebuildCallMoves) candidateBucketsProved(buckets []rebuildStoreCandidat
 	return true, nil
 }
 
-// An inexact known candidate may move into a deciding scope. Record only
-// the buckets it enters; changing an irrelevant loser's workspace does not
-// invalidate a different file's winner.
+// A changed receipt for a known candidate may enter deciding buckets.
+// Record only the buckets it enters, without disturbing other scopes.
 func (p *rebuildCallMoves) noteCandidateScopeChange(cohort []byte, column int, global byte, raw, live *graph.Node) error {
-	before := rebuildStoreScopeKeys(cohort, column, global, live)
-	for i, bucket := range rebuildStoreScopeKeys(cohort, column, global, raw) {
+	return p.noteCandidateCohortChange(cohort, cohort, column, global, raw, live)
+}
+
+func (p *rebuildCallMoves) noteCandidateCohortChange(beforeCohort, afterCohort []byte, column int, global byte, raw, live *graph.Node) error {
+	before := rebuildStoreScopeKeys(beforeCohort, column, global, live)
+	for i, bucket := range rebuildStoreScopeKeys(afterCohort, column, global, raw) {
 		if bytes.Equal(bucket, before[i]) {
 			continue
 		}
@@ -143,10 +146,25 @@ func (p *rebuildCallMoves) noteCandidateScopeChange(cohort []byte, column int, g
 const (
 	rebuildStoreOtherWorkspace byte = 1 << (iota + 3)
 	rebuildStoreOtherFile
+	rebuildStoreAnchorEligible
+	rebuildStoreAnchorIneligible
 )
 
 func rebuildStoreCandidateExact(state byte) bool {
-	return state&^(rebuildStoreOtherWorkspace|rebuildStoreOtherFile) == rebuildScratchExact
+	return state&^(rebuildStoreOtherWorkspace|rebuildStoreOtherFile|rebuildStoreAnchorEligible|rebuildStoreAnchorIneligible) == rebuildScratchExact
+}
+
+// The anchor only proves that native enters the Call scan. Conflicting
+// receipts for one declaration cannot establish eligibility.
+func rebuildStoreAnchorProof(eligible bool) byte {
+	if eligible {
+		return rebuildStoreAnchorEligible
+	}
+	return rebuildStoreAnchorIneligible
+}
+
+func rebuildStoreAnchorExact(state byte) bool {
+	return state&(rebuildStoreAnchorEligible|rebuildStoreAnchorIneligible) == rebuildStoreAnchorEligible
 }
 
 func rebuildStoreCandidateProof(ok bool, raw, live *graph.Node) byte {

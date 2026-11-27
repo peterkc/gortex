@@ -601,3 +601,76 @@ func TestRebuildReduxThunkFileElection(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildStoreFactoryAndReduxThunkAnchorProof(t *testing.T) {
+	for _, redux := range []bool{false, true} {
+		stage := "Store Factory"
+		if redux {
+			stage = "Redux Thunk"
+		}
+		t.Run(stage, func(t *testing.T) {
+			for _, member := range []string{"still unrelated", "removed", ""} {
+				t.Run("receipt role="+member, func(t *testing.T) {
+					call := storeFactoryTestCall("retired", 2)
+					call.Meta["store_action"] = "removed"
+					action := storeFactoryTestAction("store.ts::reset", "store.ts", "")
+					if redux {
+						call.Meta["via"] = "redux-thunk"
+						call.Meta["thunk_dispatch"] = "removed"
+						action.Meta = map[string]any{"redux_thunk": storeFactoryTestMember}
+					}
+					source, decls := storeFactoryTestSource(call), producerProofFacts(action)
+					b, _ := seedSyntheticCustody(t, source, decls)
+					before := rebuildFrameworkCustodyRows(t, b)
+					raw := *action
+					if redux {
+						raw.Meta = map[string]any{"redux_thunk": member}
+					} else {
+						raw.Meta = map[string]any{"store_factory": "otherStore", "store_member": member}
+						if member == "removed" {
+							raw.Meta["store_factory"] = storeFactoryTestBinding
+						}
+						if member == "" {
+							delete(raw.Meta, "store_factory")
+						}
+					}
+					decls.Nodes = []*graph.Node{&raw}
+					receipts := sqlCallsiteTestReceipts(source, decls)
+					var moves uint64
+					var err error
+					if redux {
+						var stats RebuildReduxThunkStats
+						stats, err = b.RebuildReduxThunk(t.Context(), receipts, reduxThunkStoreTestRules())
+						moves = stats.Moves
+					} else {
+						var stats RebuildStoreFactoryStats
+						stats, err = b.RebuildStoreFactory(t.Context(), receipts, storeFactoryTestRules())
+						moves = stats.Moves
+					}
+					want := *call
+					want.To = "unresolved::*.removed"
+					if member != "still unrelated" {
+						var refusal *RebuildUnknownProvenanceError
+						require.ErrorAs(t, err, &refusal)
+						require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(&want)}, refusal)
+						require.Zero(t, moves)
+						require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+						return
+					}
+					require.NoError(t, err)
+					require.Equal(t, uint64(1), moves)
+					old, next := pendingEdgeKey(call), pendingEdgeKey(&want)
+					gone, err := b.pendingEdge(old)
+					require.NoError(t, err)
+					require.Nil(t, gone)
+					saved, err := b.pendingEdge(next)
+					require.NoError(t, err)
+					require.Equal(t, &want, saved)
+					custody, err := readRebuildEdgeCustody(b.pending, next)
+					require.NoError(t, err)
+					require.Equal(t, rebuildEdgeCustody{raw: old}, custody)
+				})
+			}
+		})
+	}
+}

@@ -230,8 +230,12 @@ func (p *rebuildStoreFactoryPass) elect(from, binding, member string) (pick rebu
 	scoped := rebuildStoreFactoryKey('a', binding, member)
 	id, seen, err := p.unique(scoped)
 	pick.seen = seen
-	if err != nil || !seen {
+	if err != nil {
 		return pick, err
+	}
+	if !seen {
+		pick.buckets = []rebuildStoreCandidateWitness{{scoped, 0}}
+		return pick, nil
 	}
 	pick.caller, err = p.node(from)
 	if err != nil {
@@ -464,13 +468,18 @@ func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, fil
 	var proof byte
 	if col == 'c' {
 		binding, member := p.rules.Action(raw)
-		sameRole := raw.Kind == graph.KindFunction && bytes.Equal(claim[1:], rebuildStoreFactoryKey('u', binding, member))
-		if sameRole && receipt && (raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
-			if err := p.noteCandidateScopeChange(claim[1:], len(p.prefix), 'a', raw, live); err != nil {
+		eligible := raw.Kind == graph.KindFunction && binding != ""
+		cohort := rebuildStoreFactoryKey('u', binding, member)
+		sameRole := eligible && bytes.Equal(claim[1:], cohort)
+		if receipt && eligible && (!sameRole || raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
+			if err := p.noteCandidateCohortChange(claim[1:], cohort, len(p.prefix), 'a', raw, live); err != nil {
 				return err
 			}
 		}
 		proof = rebuildStoreCandidateProof(receipt && sameRole, raw, live)
+		if p.needsAnchor {
+			proof |= rebuildStoreAnchorProof(receipt && eligible)
+		}
 	} else {
 		sameGetter := rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], rebuildStoreFactoryKey('v', raw.Name))
 		if sameGetter {
@@ -489,13 +498,13 @@ func (p *rebuildStoreFactoryPass) proveActions(ctx context.Context) (anchor bool
 		if len(r.value) <= len(p.prefix)+1 {
 			return invalid("Store Factory candidate proof")
 		}
+		anchor = anchor || rebuildStoreAnchorExact(r.value[0])
 		if !rebuildStoreCandidateExact(r.value[0]) {
 			return nil
 		}
-		anchor = true
 		state, err := p.state(r.value[1:])
 		if err != nil || state == 0 {
-			return err // an unrelated exact action is only an anchor
+			return err // no deciding buckets in this cohort
 		}
 		return p.foldExactCandidate(r, prefix, len(p.prefix), 'a', p.node)
 	})
