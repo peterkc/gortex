@@ -43,16 +43,9 @@ func resolveStoreFactoryCalls(g graph.Store, cands *frameworkPassCandidates) int
 	// same binding name, hence a slice).
 	index := map[string]map[string][]*graph.Node{}
 	for _, n := range functionNodes {
-		if n == nil || n.Meta == nil {
-			continue
-		}
-		binding, _ := n.Meta["store_factory"].(string)
+		binding, member := storeFactoryAction(n)
 		if binding == "" {
 			continue
-		}
-		member, _ := n.Meta["store_member"].(string)
-		if member == "" {
-			member = n.Name
 		}
 		if index[binding] == nil {
 			index[binding] = map[string][]*graph.Node{}
@@ -70,45 +63,22 @@ func resolveStoreFactoryCalls(g graph.Store, cands *frameworkPassCandidates) int
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for e := range stream {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if v, _ := e.Meta["via"].(string); v != storeFactoryVia {
-			continue
-		}
-		binding, _ := e.Meta["store_binding"].(string)
-		action, _ := e.Meta["store_action"].(string)
+		binding, action := storeFactoryCall(e)
 		if binding == "" || action == "" {
 			continue
 		}
 		cands := sameBoundaryCandidates(g, e.From, index[binding][action])
 		target := pickStoreAction(g, e, cands)
 
-		want := "unresolved::*." + action
-		if target != nil {
-			want = target.ID
-		}
-		if e.To == want {
-			if target != nil {
-				resolved++
-			}
-			continue
-		}
 		oldTo := e.To
-		e.To = want
+		var id string
 		if target != nil {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = 0.75
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.75)
-			StampSynthesized(e, SynthStoreFactory)
+			id = target.ID
 			resolved++
-		} else {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = 0
-			e.ConfidenceLabel = ""
-			UnstampSynthesized(e)
 		}
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		if rebindStoreFactoryCall(e, action, id, target != nil) {
+			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		}
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
@@ -178,15 +148,8 @@ func storeGetterFile(g graph.Store, binding string) string {
 	}
 	file := ""
 	for _, n := range nodesByKindsOrAll(g, graph.KindVariable, graph.KindFunction, graph.KindConstant) {
-		if n == nil || n.Name != binding || n.FilePath == "" {
+		if !isStoreFactoryGetter(n, binding) {
 			continue
-		}
-		// A getter node anchors a store: it is the assignment target of the
-		// factory call, never itself a store-factory action.
-		if n.Meta != nil {
-			if _, isAction := n.Meta["store_factory"]; isAction {
-				continue
-			}
 		}
 		if file != "" && file != n.FilePath {
 			return "" // binding defined in two files: ambiguous
@@ -194,4 +157,58 @@ func storeGetterFile(g graph.Store, binding string) string {
 		file = n.FilePath
 	}
 	return file
+}
+
+func storeFactoryAction(n *graph.Node) (binding, member string) {
+	if n == nil {
+		return "", ""
+	}
+	binding, _ = n.Meta["store_factory"].(string)
+	if binding == "" {
+		return "", ""
+	}
+	member, _ = n.Meta["store_member"].(string)
+	if member == "" {
+		member = n.Name
+	}
+	return binding, member
+}
+
+func storeFactoryCall(e *graph.Edge) (binding, action string) {
+	if e == nil || e.Meta["via"] != storeFactoryVia {
+		return "", ""
+	}
+	binding, _ = e.Meta["store_binding"].(string)
+	action, _ = e.Meta["store_action"].(string)
+	return binding, action
+}
+
+func isStoreFactoryGetter(n *graph.Node, binding string) bool {
+	if n == nil || n.Name != binding || n.FilePath == "" {
+		return false
+	}
+	// The getter is the factory assignment target, never an action.
+	_, isAction := n.Meta["store_factory"]
+	return !isAction
+}
+
+func rebindStoreFactoryCall(e *graph.Edge, action, target string, matched bool) bool {
+	if !matched {
+		target = "unresolved::*." + action
+	}
+	if e.To == target {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	if matched {
+		e.Confidence = 0.75
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.75)
+		StampSynthesized(e, SynthStoreFactory)
+	} else {
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		UnstampSynthesized(e)
+	}
+	return true
 }
