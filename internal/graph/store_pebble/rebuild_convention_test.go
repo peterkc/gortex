@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"path"
 	"strings"
 	"testing"
 
@@ -65,24 +66,32 @@ func TestRebuildConventionReceiptDecisionFields(t *testing.T) {
 		Meta: map[string]any{"via": "live"}}
 	for _, tc := range []struct {
 		name, via, owner string
+		rawKind          graph.EdgeKind
 		refuse           bool
 	}{
-		{"same native decision", "raw", file, false},
-		{"shape directories differ", "changed", file, true},
-		{"wrong receipt owner", "raw", "other.py", true},
+		{name: "same native decision", via: "raw", owner: file},
+		{name: "shape directories differ", via: "changed", owner: file, refuse: true},
+		{name: "shape names differ", via: "renamed", owner: file, refuse: true},
+		{name: "wrong receipt owner", via: "raw", owner: "other.py", refuse: true},
+		{name: "wrong receipt kind", via: "raw", owner: file, rawKind: graph.EdgeReferences, refuse: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := ParseFacts{EffectiveLanguage: "python", File: graph.FileMetaRow{FilePath: file},
-				Nodes: []*graph.Node{source}, Edges: []*graph.Edge{call}}
-			targetFacts := producerProofFacts(target)
-			b, _ := seedSyntheticCustody(t, facts, targetFacts)
-			before := rebuildFrameworkCustodyRows(t, b)
+				Nodes: []*graph.Node{source}}
+			b, _ := seedSyntheticCustody(t, facts, producerProofFacts(target))
 			raw := *call
 			raw.Meta = map[string]any{"via": tc.via}
+			var custody rebuildEdgeCustody
+			if tc.rawKind != "" {
+				// A different kind needs an explicit claim to reach the receipt comparison.
+				raw.Kind = tc.rawKind
+				custody.raw = pendingEdgeKey(&raw)
+			}
+			require.NoError(t, b.withWrites(func() error { return b.addEdgeWithCustody(call, custody) }))
+			before := rebuildFrameworkCustodyRows(t, b)
 			rawTarget := *target
 			rawTarget.FilePath = "deps/renamed.py"
 			rawOwner := ParseFacts{EffectiveLanguage: "python", File: graph.FileMetaRow{FilePath: tc.owner}, Edges: []*graph.Edge{&raw}}
-			facts.Edges = nil
 			receipts := func(yield func(ParseFacts, error) bool) {
 				for _, f := range []ParseFacts{facts, producerProofFacts(&rawTarget), rawOwner} {
 					if !yield(f, nil) {
@@ -92,11 +101,14 @@ func TestRebuildConventionReceiptDecisionFields(t *testing.T) {
 			}
 			rules := rebuildConventionTestRules()
 			rules.Shape = func(target, via string) ([]string, []string) {
-				dirs := []string{"deps"}
-				if via == "changed" {
-					dirs = []string{"routes"}
+				switch via {
+				case "changed":
+					return []string{graph.UnresolvedName(target)}, []string{"routes"}
+				case "renamed":
+					return []string{"other"}, []string{"deps"}
+				default:
+					return []string{graph.UnresolvedName(target)}, []string{"deps"}
 				}
-				return []string{graph.UnresolvedName(target)}, dirs
 			}
 			require.NoError(t, b.FreezeFastAPIInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
 			moves, err := b.RebuildFastAPI(t.Context(), receipts, rules)
@@ -115,6 +127,78 @@ func TestRebuildConventionReceiptDecisionFields(t *testing.T) {
 			require.NotNil(t, edge)
 			require.Equal(t, 0.9, edge.Confidence)
 			require.Equal(t, "live", edge.Meta["via"])
+		})
+	}
+}
+
+func TestRebuildConventionUnknownMoverCustody(t *testing.T) {
+	const file = "app.py"
+	source := &graph.Node{ID: "caller", Kind: graph.KindFunction, FilePath: file, Language: "python"}
+	target := &graph.Node{ID: "target", Name: "load", Kind: graph.KindFunction, FilePath: file, Language: "python"}
+	first := &graph.Edge{From: source.ID, To: "unresolved::load", Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+	second := *first
+	second.Line++
+	facts := ParseFacts{
+		EffectiveLanguage: "python",
+		File:              graph.FileMetaRow{FilePath: file},
+		Nodes:             []*graph.Node{source, target},
+	}
+	b, _ := seedSyntheticCustody(t, facts)
+	facts.Edges = []*graph.Edge{first, &second}
+	require.NoError(t, b.withWrites(func() error {
+		for _, e := range facts.Edges {
+			if err := b.addEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofUntrackedMove}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	before := rebuildFrameworkCustodyRows(t, b)
+	require.NoError(t, b.FreezeFastAPIInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
+	moves, err := b.RebuildFastAPI(t.Context(), func(yield func(ParseFacts, error) bool) { yield(facts, nil) }, rebuildConventionTestRules())
+	require.ErrorIs(t, err, ErrRebuildFastAPI)
+	var refused *RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, &RebuildUnknownProvenanceError{Count: 2, First: graph.EdgeIdentityFor(first)}, refused)
+	require.Zero(t, moves)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func TestRebuildConventionCandidateRankAndPermissionProof(t *testing.T) {
+	const file = "App/dependencies/routes/app.py"
+	target := &graph.Node{ID: "target", Name: "load", Kind: graph.KindFunction, FilePath: "App/dependencies/load.py", Language: "python"}
+	for _, tc := range []struct {
+		name, raw string
+		proved    bool
+	}{
+		{name: "same rank and permission", raw: "App/dependencies/renamed.py", proved: true},
+		{name: "different rank at same confidence", raw: "App/dependencies/routes/load.py"},
+		{name: "same rank but winner disallowed", raw: "App/dependencies/blocked.py"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _ := seedSyntheticCustody(t, producerProofFacts(target))
+			rules := rebuildConventionTestRules()
+			rules.Rank = func(candidate, caller string, _ []string) int {
+				if path.Dir(candidate) == path.Dir(caller) {
+					return 3
+				}
+				return 2
+			}
+			rules.AllowWinner = func(_, candidate string) bool { return path.Base(candidate) != "blocked.py" }
+			p := rebuildConventionPass{rebuildCallMoves: rebuildFastAPIColumns(b), rules: rules}
+			require.NoError(t, p.put(p.key('n', target.Name), nil))
+			raw := *target
+			raw.FilePath = tc.raw
+			require.NoError(t, p.recordNode(&raw))
+
+			live, proved, err := p.pick(t.Context(), []string{target.Name}, nil, file, true)
+			require.NoError(t, err)
+			require.Equal(t, rebuildConventionPick{id: target.ID, rank: 2, chosen: true, allowed: true}, live)
+			if tc.proved {
+				require.Equal(t, live, proved)
+			} else {
+				require.Zero(t, proved)
+			}
 		})
 	}
 }

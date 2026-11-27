@@ -50,14 +50,53 @@ func TestRebuildConventionReceiptEntrants(t *testing.T) {
 	}
 }
 
+func TestRebuildConventionLowerRankReceiptEntrant(t *testing.T) {
+	const file = "App/app.py"
+	source := &graph.Node{ID: "source", Kind: graph.KindFunction, FilePath: file, Language: "python"}
+	winner := &graph.Node{ID: "winner", Name: "load", Kind: graph.KindFunction, FilePath: "App/dependencies/load.py", Language: "python"}
+	rival := &graph.Node{ID: "rival", Name: "other", Kind: graph.KindFunction, FilePath: file, Language: "python"}
+	call := &graph.Edge{From: source.ID, To: "unresolved::load", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
+		Meta: map[string]any{"via": "fastapi.Depends"}}
+	caller := rebuildEventFacts(file, "python", []*graph.Node{source, rival}, call)
+	candidates := rebuildEventFacts(winner.FilePath, "python", []*graph.Node{winner})
+	b := openRebuildGRPCBuild(t, caller, candidates)
+	before := rebuildEventSavedRows(t, b)
+	entrant := *rival
+	entrant.Name = winner.Name
+	caller.Nodes = []*graph.Node{source, &entrant}
+
+	// Native sees both names under load, but the preferred directory beats the caller's own.
+	native := rebuildGRPCNative(t, caller)
+	require.NoError(t, native.AddBatchChecked(candidates.Nodes, candidates.Edges))
+	require.Equal(t, 1, ResolveFastAPIDeps(native))
+	want := rebuildEventSQLiteRows(native).edges
+	require.Len(t, want, 1)
+	require.Equal(t, winner.ID, want[0].To)
+	require.Equal(t, 0.9, want[0].Confidence)
+
+	moves, err := RunRebuildFastAPI(t.Context(), b, rebuildGRPCReceipts(caller, candidates), freezeFastAPITest(t, b))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, moves)
+	after := rebuildEventSavedRows(t, b)
+	require.Equal(t, want, after.edges)
+	require.Equal(t, before.nodes, after.nodes)
+}
+
 func TestRebuildConventionReceiptSourceChangesElection(t *testing.T) {
+	const tied = "web/app.py"
+	const sameTie = "other/app.py"
+	const breaksTie = "one/dependencies/app.py"
 	for _, tc := range []struct {
-		name, live, raw string
-		receiptSource   bool
+		name, live string
+		raw        []string
+		refuse     bool
 	}{
-		{name: "enters Python source", live: "web/app.txt", raw: "web/app.py", receiptSource: true},
-		{name: "breaks live tie", live: "web/app.py", raw: "one/dependencies/app.py", receiptSource: true},
-		{name: "missing source proof", live: "one/dependencies/app.py", raw: "one/dependencies/app.py"},
+		{name: "enters Python source", live: "web/app.txt", raw: []string{tied}, refuse: true},
+		{name: "breaks live tie", live: tied, raw: []string{breaksTie}, refuse: true},
+		{name: "keeps live tie", live: tied, raw: []string{sameTie}},
+		{name: "matching caller then deciding caller", live: tied, raw: []string{tied, breaksTie}, refuse: true},
+		{name: "deciding caller then matching caller", live: tied, raw: []string{breaksTie, tied}, refuse: true},
+		{name: "missing source proof", live: breaksTie, refuse: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			source := &graph.Node{ID: "source", Kind: graph.KindFunction, FilePath: tc.live, Language: "python"}
@@ -78,15 +117,19 @@ func TestRebuildConventionReceiptSourceChangesElection(t *testing.T) {
 			require.NoError(t, FreezeRebuildFastAPIInputs(t.Context(), b, selection))
 			caller.Nodes = nil
 			receipts := append(candidates, caller)
-			if tc.receiptSource {
+			for _, file := range tc.raw {
 				raw := *source
-				raw.FilePath = tc.raw
-				receipts = append(receipts, rebuildEventFacts(tc.raw, "python", []*graph.Node{&raw}))
+				raw.FilePath = file
+				receipts = append(receipts, rebuildEventFacts(file, "python", []*graph.Node{&raw}))
 			}
 			moves, err := RunRebuildFastAPI(t.Context(), b, rebuildGRPCReceipts(receipts...), selection)
-			var refused *store_pebble.RebuildUnknownProvenanceError
-			require.ErrorAs(t, err, &refused)
-			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refused)
+			if tc.refuse {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refused)
+			} else {
+				require.NoError(t, err)
+			}
 			require.Zero(t, moves)
 			require.Equal(t, before, rebuildEventSavedRows(t, b))
 		})
