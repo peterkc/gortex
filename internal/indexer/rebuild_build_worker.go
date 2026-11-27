@@ -443,7 +443,7 @@ func buildRebuildStages(
 		if err := resolver.FreezeRebuildFnPointerInputs(ctx, private, selection); err != nil {
 			return err
 		}
-		if err := resolver.FreezeRebuildMacroExpansionInputs(ctx, private, selection); err != nil {
+		if err := resolver.FreezeRebuildMacroExpansionInputs(ctx, private, receipts, selection); err != nil {
 			return err
 		}
 		if err := resolver.FreezeRebuildReactResolveInputs(ctx, private, selection); err != nil {

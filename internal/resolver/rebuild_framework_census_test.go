@@ -307,11 +307,12 @@ func TestRebuildFrameworkCensusMacroOnlySelection(t *testing.T) {
 				macro.Meta = map[string]any{"macro_kind": macroFunctionKindMeta}
 				nodes = append(nodes, macro)
 			}
-			b := openRebuildGRPCBuild(t, rebuildEventFacts(file, tc.sourceLanguage, nodes))
+			facts := rebuildEventFacts(file, tc.sourceLanguage, nodes)
+			b := openRebuildGRPCBuild(t, facts)
 			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 			require.NoError(t, err)
 			require.Equal(t, tc.admitted, frozen.allows(SynthMacroExpansion))
-			err = FreezeRebuildMacroExpansionInputs(t.Context(), b, frozen)
+			err = FreezeRebuildMacroExpansionInputs(t.Context(), b, rebuildGRPCReceipts(facts), frozen)
 			if tc.freezeRefusal {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildMacroExpansion)
 				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)

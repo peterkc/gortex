@@ -73,7 +73,7 @@ int run(int x) {
 	frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 	require.NoError(t, err)
 	require.True(t, frozen.allows(SynthMacroExpansion))
-	require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+	require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, rebuildGRPCReceipts(facts...), frozen))
 
 	report := RunFrameworkSynthesizersWithSelection(native, selection)
 	require.NoError(t, report.Err)
@@ -112,7 +112,7 @@ int run(int x) {
 	require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 	require.Equal(t, before, rebuildEventSavedRows(t, b), "missing proof for the later use must leave even the first use unwritten")
 
-	require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+	require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, rebuildGRPCReceipts(facts...), frozen))
 	_, err = RunRebuildMacroExpansion(ctx, b, rebuildGRPCReceipts(facts...), frozen)
 	require.NoError(t, err)
 	require.Equal(t, want, rebuildEventSavedRows(t, b), "after one Macro expansion turn")
@@ -145,7 +145,6 @@ func TestRebuildMacroExpansionReceiptEntrant(t *testing.T) {
 		before := rebuildEventSavedRows(t, b)
 		frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 		require.NoError(t, err)
-		require.NoError(t, FreezeRebuildMacroExpansionInputs(t.Context(), b, frozen))
 		raw := facts
 		raw.Nodes = slices.Clone(facts.Nodes)
 		if active {
@@ -154,6 +153,7 @@ func TestRebuildMacroExpansionReceiptEntrant(t *testing.T) {
 			entrant.Meta = map[string]any{"macro_kind": macroFunctionKindMeta}
 			raw.Nodes[3] = &entrant
 		}
+		require.NoError(t, FreezeRebuildMacroExpansionInputs(t.Context(), b, rebuildGRPCReceipts(raw), frozen))
 		stats, err := RunRebuildMacroExpansion(t.Context(), b, rebuildGRPCReceipts(raw), frozen)
 		if active {
 			var refused *store_pebble.RebuildUnknownProvenanceError
@@ -200,7 +200,7 @@ func TestRebuildMacroExpansionCountsSkippedUseClaim(t *testing.T) {
 		before := rebuildEventSavedRows(t, b)
 		frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 		require.NoError(t, err)
-		require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+		require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, rebuildGRPCReceipts(facts), frozen))
 		stats, err := RunRebuildMacroExpansion(ctx, b, rebuildGRPCReceipts(facts), frozen)
 		if duplicate {
 			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
@@ -285,7 +285,7 @@ func TestRebuildMacroExpansionProvesAmbiguity(t *testing.T) {
 			}
 			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 			require.NoError(t, err)
-			require.NoError(t, FreezeRebuildMacroExpansionInputs(t.Context(), b, frozen))
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(t.Context(), b, rebuildGRPCReceipts(receipt), frozen))
 			stats, err := RunRebuildMacroExpansion(t.Context(), b, rebuildGRPCReceipts(receipt), frozen)
 			if tc.refuse {
 				var refused *store_pebble.RebuildUnknownProvenanceError
@@ -336,7 +336,7 @@ func TestRebuildMacroExpansionProvesFirstAndLastProposal(t *testing.T) {
 			before := rebuildEventSavedRows(t, b)
 			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 			require.NoError(t, err)
-			require.NoError(t, FreezeRebuildMacroExpansionInputs(t.Context(), b, frozen))
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(t.Context(), b, rebuildGRPCReceipts(facts), frozen))
 			receipt := facts
 			receipt.Edges = slices.DeleteFunc(slices.Clone(edges), func(e *graph.Edge) bool { return slices.Contains(tc.omit, e) })
 			stats, err := RunRebuildMacroExpansion(t.Context(), b, rebuildGRPCReceipts(receipt), frozen)
@@ -383,7 +383,7 @@ func TestRebuildMacroExpansionRequiresDeclarationAndBody(t *testing.T) {
 			b, native := openRebuildEventStores(t, facts)
 			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 			require.NoError(t, err)
-			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, rebuildGRPCReceipts(facts), frozen))
 			moved := *stale
 			moved.To = macro.ID
 			moves := []graph.EdgeReindex{{Edge: &moved, OldTo: stale.To}}
@@ -467,7 +467,7 @@ func TestRebuildMacroExpansionCapsOnlyReachedRoles(t *testing.T) {
 			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 			require.NoError(t, err)
 			require.True(t, frozen.allows(SynthMacroExpansion))
-			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, rebuildGRPCReceipts(facts), frozen))
 			stats, err := RunRebuildMacroExpansion(ctx, b, rebuildGRPCReceipts(facts), frozen)
 			id := graph.EdgeIdentityFor(macroExpansionEdge(caller.ID, callee.ID, file, use.Line, macro.Name))
 			added, readErr := b.RebuildView().Edge(ctx, id)
@@ -515,7 +515,7 @@ func TestRebuildMacroExpansionCFamilyMarkerNodeCap(t *testing.T) {
 			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 			require.NoError(t, err)
 			require.True(t, frozen.allows(SynthMacroExpansion))
-			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, rebuildGRPCReceipts(facts[:count]...), frozen))
 			large := *marker
 			large.Meta = map[string]any{"padding": strings.Repeat("x", 16<<20)}
 			b.AddNode(&large)
@@ -534,6 +534,78 @@ func TestRebuildMacroExpansionCFamilyMarkerNodeCap(t *testing.T) {
 			require.NoError(t, err)
 			require.EqualValues(t, 1, stats.Adds)
 			require.Equal(t, want, got)
+		})
+	}
+}
+
+func TestRebuildMacroExpansionReceiptOnlyDeclaration(t *testing.T) {
+	const file, lang = "use.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	callee := rebuildEventNode(file, "work", lang, "")
+	macro := &graph.Node{ID: file + "::APPLY", Name: "APPLY", Kind: graph.KindMacro, FilePath: file, Language: lang,
+		Meta: map[string]any{"macro_kind": "object"}}
+	body := &graph.Edge{From: macro.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+	use := &graph.Edge{From: caller.ID, To: "unresolved::APPLY", Kind: graph.EdgeCalls, FilePath: file, Line: 3}
+	add := macroExpansionEdge(caller.ID, callee.ID, file, use.Line, macro.Name)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name                    string
+		direct, occupied, empty bool
+	}{
+		{name: "unresolved use"},
+		{name: "direct use", direct: true},
+		{name: "incumbent suppresses add", occupied: true},
+		{name: "no body", empty: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			site := *use
+			if tc.direct {
+				site.To = macro.ID
+			}
+			edges := []*graph.Edge{&site}
+			if !tc.empty {
+				edges = append(edges, body)
+			}
+			if tc.occupied {
+				incumbent := *add
+				incumbent.Meta = map[string]any{"witness": "ordinary call"}
+				edges = append(edges, &incumbent)
+			}
+			facts := rebuildEventFacts(file, lang, []*graph.Node{caller, callee, macro}, edges...)
+			entrant := *macro
+			entrant.Meta = map[string]any{"macro_kind": macroFunctionKindMeta}
+			receipt := rebuildEventFacts(file, lang, []*graph.Node{caller, callee, &entrant}, edges...)
+			native := rebuildGRPCNative(t, receipt)
+			report := RunFrameworkSynthesizersWithSelection(native, selection)
+			require.NoError(t, report.Err)
+			want := rebuildEventSQLiteRows(native)
+			if tc.occupied || tc.empty {
+				require.NotContains(t, want.edges, add)
+			} else {
+				require.Contains(t, want.edges, add)
+			}
+
+			b := openRebuildGRPCBuild(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthMacroExpansion))
+			receipts := rebuildGRPCReceipts(receipt)
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, receipts, frozen))
+			stats, err := RunRebuildMacroExpansion(ctx, b, receipts, frozen)
+			if tc.occupied || tc.empty {
+				require.NoError(t, err)
+			} else {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorIs(t, err, store_pebble.ErrRebuildMacroExpansion)
+				require.ErrorAs(t, err, &refused)
+				require.EqualValues(t, 1, refused.Count)
+				require.Equal(t, graph.EdgeIdentityFor(add), refused.First)
+			}
+			require.Zero(t, stats.Adds)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
 		})
 	}
 }

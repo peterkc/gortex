@@ -87,7 +87,7 @@ func TestRebuildMacroExpansionReceiptCallerRepository(t *testing.T) {
 			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 			require.NoError(t, err)
 			require.True(t, frozen.allows(SynthMacroExpansion))
-			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, rebuildGRPCReceipts(rawFacts...), frozen))
 			if fixture.oversized {
 				large := *live
 				large.Meta = map[string]any{"padding": padding}
@@ -157,10 +157,10 @@ func TestRebuildMacroExpansionScriptHostCaller(t *testing.T) {
 			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 			require.NoError(t, err)
 			require.True(t, frozen.allows(SynthMacroExpansion))
-			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
 			raw := *caller
 			raw.RepoPrefix = fixture.repo
 			receipt := rebuildEventFacts(hostFile, fixture.language, []*graph.Node{&raw}, host.Edges...)
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, rebuildGRPCReceipts(receipt, macroFacts), frozen))
 			stats, err := RunRebuildMacroExpansion(ctx, b, rebuildGRPCReceipts(receipt, macroFacts), frozen)
 			if fixture.name != "script host receipt" {
 				var refused *store_pebble.RebuildUnknownProvenanceError

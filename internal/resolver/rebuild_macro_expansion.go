@@ -8,11 +8,13 @@ import (
 )
 
 // FreezeRebuildMacroExpansionInputs captures the native pre-loop census.
-func FreezeRebuildMacroExpansionInputs(ctx context.Context, b *store_pebble.BuildStore, selection FrameworkSynthesizerSelection) error {
+func FreezeRebuildMacroExpansionInputs(ctx context.Context, b *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error],
+	selection FrameworkSynthesizerSelection,
+) error {
 	if !selection.allows(SynthMacroExpansion) {
 		return nil
 	}
-	return b.FreezeMacroExpansionInputs(ctx, functionLikeMacro)
+	return b.FreezeMacroExpansionInputs(ctx, receipts, functionLikeMacro)
 }
 
 // RunRebuildMacroExpansion executes the private turn after Function pointer.

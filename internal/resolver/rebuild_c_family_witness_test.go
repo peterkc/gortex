@@ -66,7 +66,7 @@ func TestRebuildCFamilyWitness(t *testing.T) {
 						stats, runErr := RunRebuildFnPointerStage(ctx, build, receipts, frozen)
 						writes, err = stats.RefMoves+stats.CallMoves+stats.Adds, runErr
 					case SynthMacroExpansion:
-						require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, build, frozen))
+						require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, build, receipts, frozen))
 						stats, runErr := RunRebuildMacroExpansion(ctx, build, receipts, frozen)
 						writes, err = stats.Adds, runErr
 					}

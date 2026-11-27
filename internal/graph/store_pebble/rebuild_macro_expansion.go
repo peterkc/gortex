@@ -39,6 +39,7 @@ type rebuildMacroExpansion struct {
 	stats      RebuildMacroExpansionStats
 	cProved    bool
 	cOversized bool
+	rawDecls   bool
 }
 
 func rebuildMacroExpansionScratch(b *BuildStore) rebuildCallMoves {
@@ -48,7 +49,7 @@ func rebuildMacroExpansionScratch(b *BuildStore) rebuildCallMoves {
 
 // FreezeMacroExpansionInputs mirrors the native macro-node snapshot and its
 // pre-loop Call identity collector. The body edges remain live.
-func (b *BuildStore) FreezeMacroExpansionInputs(ctx context.Context, macro func(*graph.Node) bool) (err error) {
+func (b *BuildStore) FreezeMacroExpansionInputs(ctx context.Context, receipts iter.Seq2[ParseFacts, error], macro func(*graph.Node) bool) (err error) {
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("%w: %w", ErrRebuildMacroExpansion, err)
@@ -59,7 +60,7 @@ func (b *BuildStore) FreezeMacroExpansionInputs(ctx context.Context, macro func(
 	if err != nil {
 		return err
 	}
-	if busy || macro == nil {
+	if busy || macro == nil || receipts == nil {
 		return invalid("macro expansion census inputs")
 	}
 	defer func() {
@@ -85,7 +86,11 @@ func (b *BuildStore) FreezeMacroExpansionInputs(ctx context.Context, macro func(
 	}); err != nil {
 		return err
 	}
-	if eligible {
+	raw, err := p.freezeMacroReceiptRoles(ctx, receipts, macro)
+	if err != nil {
+		return err
+	}
+	if eligible || raw {
 		if err := b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
 			kind, err := rebuildAttributionEdgeKind(r.key)
 			if err != nil || kind != graph.EdgeCalls {
@@ -100,6 +105,17 @@ func (b *BuildStore) FreezeMacroExpansionInputs(ctx context.Context, macro func(
 				key = p.key('v', graph.UnresolvedName(e.To))
 			}
 			candidate, err := p.present(key)
+			if err != nil {
+				return err
+			}
+			if !candidate && raw {
+				if graph.IsUnresolvedTarget(e.To) {
+					key = p.key('k', graph.UnresolvedName(e.To))
+				} else {
+					key = p.key('K', e.To)
+				}
+				candidate, err = p.present(key)
+			}
 			if err != nil || !candidate {
 				return err
 			}
@@ -140,9 +156,15 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 	if err := p.collectBodies(ctx); err != nil {
 		return stats, err
 	}
-	active, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('a'))
-	if err != nil || !active {
+	p.rawDecls, err = rebuildGuardHasPrefix(ctx, b.pending, p.column('K'))
+	if err != nil {
 		return stats, err
+	}
+	if !p.rawDecls {
+		active, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('a'))
+		if err != nil || !active {
+			return stats, err
+		}
 	}
 	if err := p.collectUses(ctx); err != nil {
 		return stats, err
@@ -154,7 +176,7 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 	if err != nil {
 		return stats, err
 	}
-	if p.stats.Adds == 0 && !ambiguous {
+	if p.stats.Adds == 0 && !ambiguous && !p.rawDecls {
 		callers, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('h'))
 		if err != nil || !callers {
 			return p.stats, err
@@ -175,6 +197,11 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 	if err := p.record(ctx, receipts); err != nil {
 		return stats, err
 	}
+	if p.rawDecls {
+		if err := p.proveRawDeclarations(ctx); err != nil {
+			return stats, err
+		}
+	}
 	if ambiguous {
 		if err := p.proveAmbiguity(ctx); err != nil {
 			return stats, err
@@ -190,6 +217,157 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 		return stats, fmt.Errorf("%w: macro expansion lacks a C-family receipt", ErrRebuildUnknownProvenance)
 	}
 	return p.stats, p.write(ctx)
+}
+
+// Store only differing receipt declaration vocabularies. They widen the
+// pre-loop use census for proof, not the live macro election.
+func (p *rebuildCallMoves) freezeMacroReceiptRoles(ctx context.Context, receipts iter.Seq2[ParseFacts, error], macro func(*graph.Node) bool) (bool, error) {
+	var any bool
+	for facts, err := range receipts {
+		if err != nil {
+			return false, err
+		}
+		if facts.EffectiveLanguage == "" {
+			continue
+		}
+		file := pathkey.Normalize(facts.File.FilePath)
+		for _, n := range facts.Nodes {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			if n.Kind != graph.KindMacro || n.FilePath != file || !macro(n) {
+				continue
+			}
+			live, err := p.storeReceiptNode(n.ID)
+			if err != nil {
+				return false, err
+			}
+			if live == nil {
+				continue
+			}
+			before, err := pendingGet(p.b.pending, p.key('n', n.ID), decodeNode)
+			if err != nil {
+				return false, err
+			}
+			if before != nil && before.Name == n.Name && before.RepoPrefix == n.RepoPrefix && before.FilePath == file {
+				continue
+			}
+			any = true
+			if err := p.put(p.key('K', n.ID), keyStrings(nil, n.RepoPrefix, n.Name)); err != nil {
+				return false, err
+			}
+			if err := p.put(p.key('k', n.Name), nil); err != nil {
+				return false, err
+			}
+			if err := p.put(p.key('B', n.RepoPrefix, n.Name), nil); err != nil {
+				return false, err
+			}
+		}
+	}
+	return any, nil
+}
+
+func (p *rebuildMacroExpansion) recordRawDeclaration(n *graph.Node, exact bool) error {
+	cohort := keyStrings(nil, n.RepoPrefix, n.Name)
+	wanted, err := p.present(append(p.column('B'), cohort...))
+	if err != nil || !wanted {
+		return err
+	}
+	if !exact {
+		frozen, err := p.get(p.key('K', n.ID))
+		if err != nil || !bytes.Equal(frozen, cohort) {
+			return err
+		}
+	}
+	if err := p.put(p.key('R', n.ID), cohort); err != nil {
+		return err
+	}
+	return p.put(appendKeyString(append(p.column('J'), cohort...), n.ID), []byte(n.ID))
+}
+
+func (p *rebuildMacroExpansion) proveRawDeclarations(ctx context.Context) error {
+	prefix := p.column('R')
+	if err := p.visit(ctx, prefix, func(r row) error {
+		id, rest, err := readKeyString(r.key[len(prefix):])
+		if err != nil || len(rest) != 0 || id == "" {
+			return invalid("macro receipt declaration key")
+		}
+		body, err := rebuildGuardHasPrefix(ctx, p.b.pending, p.key('e', id))
+		if err != nil || !body {
+			return err
+		}
+		return p.addUnique(append(p.column('D'), r.value...), id)
+	}); err != nil {
+		return err
+	}
+	uses := p.column('i')
+	return p.visit(ctx, uses, func(r row) error {
+		e, err := p.edge(r.key[len(uses):])
+		if err != nil || e == nil || e.From == "" || e.To == "" {
+			return err
+		}
+		if !graph.IsUnresolvedTarget(e.To) {
+			cohort, err := p.get(p.key('R', e.To))
+			if err != nil || cohort == nil {
+				return err
+			}
+			return p.noteRawDeclarationOutput(ctx, e, e.To, cohort)
+		}
+		name := graph.UnresolvedName(e.To)
+		wanted, err := p.present(p.key('k', name))
+		if err != nil || !wanted {
+			return err
+		}
+		rawRepo, err := p.get(p.key('H', e.From))
+		if err != nil {
+			return err
+		}
+		if rawRepo == nil {
+			caller, _, err := p.readCaller(e.From)
+			if err != nil || caller == nil {
+				return err
+			}
+			rawRepo = keyStrings(nil, caller.RepoPrefix)
+		}
+		cohort := appendKeyString(rawRepo, name)
+		return p.visit(ctx, append(p.column('J'), cohort...), func(r row) error {
+			return p.noteRawDeclarationOutput(ctx, e, string(r.value), cohort)
+		})
+	})
+}
+
+func (p *rebuildMacroExpansion) noteRawDeclarationOutput(ctx context.Context, e *graph.Edge, id string, cohort []byte) error {
+	alternate, err := p.present(p.key('K', id))
+	if err != nil || !alternate {
+		return err
+	}
+	winner, seen, err := p.unique(append(p.column('D'), cohort...))
+	if err != nil || seen && winner != id {
+		return err // two exact members, or an exact different member, exclude this entrant
+	}
+	_, rest, err := readKeyString(cohort)
+	if err != nil {
+		return err
+	}
+	name, rest, err := readKeyString(rest)
+	if err != nil || len(rest) != 0 || name == "" {
+		return invalid("macro receipt declaration cohort")
+	}
+	return p.body(ctx, id, func(_ row, callee string) error {
+		if callee == e.From {
+			return nil
+		}
+		key := pendingEdgeKey(p.rules.Add(e.From, callee, e.FilePath, e.Line, name))
+		exists, err := p.present(key)
+		if err != nil || exists {
+			return err
+		}
+		planned, err := p.present(append(p.column('p'), key...))
+		if err != nil || planned {
+			return err // existing proposal proof checks this identity
+		}
+		return p.put(append(p.column('y'), key...), nil)
+	})
 }
 
 func (p *rebuildMacroExpansion) visit(ctx context.Context, key []byte, yield func(row) error) error {
@@ -217,7 +395,7 @@ func (p *rebuildMacroExpansion) body(ctx context.Context, id string, yield func(
 }
 
 func (p *rebuildMacroExpansion) collectBodies(ctx context.Context) error {
-	return p.visit(ctx, p.column('n'), func(r row) error {
+	if err := p.visit(ctx, p.column('n'), func(r row) error {
 		n, err := decodeNode(r.value)
 		if err != nil {
 			return err
@@ -239,6 +417,20 @@ func (p *rebuildMacroExpansion) collectBodies(ctx context.Context) error {
 			return err
 		}
 		return p.addUnique(p.key('a', n.RepoPrefix, n.Name), n.ID)
+	}); err != nil {
+		return err
+	}
+	return p.visit(ctx, p.column('K'), func(r row) error {
+		id, rest, err := readKeyString(r.key[len(p.prefix)+1:])
+		if err != nil || len(rest) != 0 || id == "" {
+			return invalid("macro receipt declaration key")
+		}
+		return p.body(ctx, id, func(r row, _ string) error {
+			if err := p.put(append(p.column('c'), r.key...), nil); err != nil {
+				return err
+			}
+			return p.claimInput(r.key)
+		})
 	})
 }
 
@@ -504,6 +696,11 @@ func (p *rebuildMacroExpansion) recordNode(ctx context.Context, n *graph.Node, f
 			return err
 		}
 		admitted := language != "" && n.FilePath == file
+		if admitted && p.rawDecls {
+			if err := p.put(p.key('H', n.ID), keyStrings(nil, n.RepoPrefix)); err != nil {
+				return err
+			}
+		}
 		exact := admitted && live != nil && live.FilePath == file && n.RepoPrefix == live.RepoPrefix
 		if admitted && (live == nil || n.RepoPrefix != live.RepoPrefix) {
 			if err := p.noteRawCallerOutputs(ctx, n, oversized); err != nil {
@@ -531,6 +728,11 @@ func (p *rebuildMacroExpansion) recordNode(ctx context.Context, n *graph.Node, f
 	exact := rawRole && admitted && frozen != nil && frozen.FilePath == file && n.RepoPrefix == frozen.RepoPrefix && n.Name == frozen.Name
 	if claim != 0 {
 		if err := noteRebuildScratchState(p.put, macroKey, claim, rebuildScratchProofBit(exact)); err != nil {
+			return err
+		}
+	}
+	if rawRole && admitted && p.rawDecls {
+		if err := p.recordRawDeclaration(n, exact); err != nil {
 			return err
 		}
 	}

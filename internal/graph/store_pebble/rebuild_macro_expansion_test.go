@@ -43,7 +43,7 @@ func TestRebuildMacroExpansionProposalWinnerAndCustody(t *testing.T) {
 		},
 	}
 	ctx := t.Context()
-	require.NoError(t, b.FreezeMacroExpansionInputs(ctx, rules.Macro))
+	require.NoError(t, b.FreezeMacroExpansionInputs(ctx, receipts, rules.Macro))
 	stats, err := b.RebuildMacroExpansion(ctx, receipts, rules)
 	require.NoError(t, err)
 	require.Equal(t, RebuildMacroExpansionStats{Sites: 3, Owned: 3, Adds: 1}, stats)
