@@ -142,16 +142,15 @@ func rebuildGRPCSavedCalls(t *testing.T, b *store_pebble.BuildStore) []*graph.Ed
 }
 
 func TestRebuildGRPCNativeRows(t *testing.T) {
-	for _, large := range []bool{false, true} {
-		name := "base fixture"
-		if large {
-			name = "extra stub call sites"
-		}
-		t.Run(name, func(t *testing.T) {
-			var extra int
-			if large {
-				extra = 270
-			}
+	for _, tc := range []struct {
+		name  string
+		extra int
+	}{
+		{"base fixture", 0},
+		{"extra stub call sites", 270},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extra := tc.extra
 			facts := rebuildGRPCFixture(extra)
 			// The two services converge at one site. Native assigns the earlier
 			// receipt row the smaller edge ID, although it has the later old key.

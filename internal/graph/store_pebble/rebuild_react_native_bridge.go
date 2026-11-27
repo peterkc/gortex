@@ -96,21 +96,19 @@ func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts ite
 	if busy {
 		return stats, invalid(policy.label + " scratch range occupied")
 	}
-	if policy.required != 0 {
-		var families uint8
-		ready, err := b.RebuildView().hasLightNode(ctx, policy.label, func(n *graph.Node) bool {
-			families |= policy.family(n.Language)
-			return families&policy.required == policy.required
-		})
-		if err != nil || !ready {
-			return stats, err
-		}
+	var families uint8
+	ready, err := b.RebuildView().hasLightNode(ctx, policy.label, func(n *graph.Node) bool {
+		families |= policy.family(n.Language)
+		return families&policy.required == policy.required
+	})
+	if err != nil || !ready {
+		return stats, err
 	}
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildReactNativePrefix, prefixEnd(rebuildReactNativePrefix), pebble.NoSync))
 	}()
 	p := rebuildReactNativeBridge{b: b, policy: policy}
-	ready, err := p.capture(ctx, isCall)
+	ready, err = p.capture(ctx, isCall)
 	if err != nil || !ready {
 		return p.stats, err
 	}

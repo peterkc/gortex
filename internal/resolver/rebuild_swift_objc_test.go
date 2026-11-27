@@ -104,16 +104,15 @@ func rebuildSwiftObjCPrivateEdges(t *testing.T, b *store_pebble.BuildStore) map[
 func TestRebuildSwiftObjCNativeRows(t *testing.T) {
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthSwiftObjC})
 	require.NoError(t, err)
-	for _, large := range []bool{false, true} {
-		name := "base fixture"
-		if large {
-			name = "extra bridge pairs"
-		}
-		t.Run(name, func(t *testing.T) {
-			var extra int
-			if large {
-				extra = 144
-			}
+	for _, tc := range []struct {
+		name  string
+		extra int
+	}{
+		{"base fixture", 0},
+		{"extra bridge pairs", 144},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extra := tc.extra
 			facts, stationary := rebuildSwiftObjCFixture(extra)
 			var full store_pebble.ParseFacts
 			for _, file := range facts {

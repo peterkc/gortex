@@ -16,12 +16,14 @@ const (
 )
 
 func TestRebuildClosureCollectionSQLiteOracle(t *testing.T) {
-	for _, large := range []bool{false, true} {
-		name := "base fixture"
-		if large {
-			name = "extra fields"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		extra int
+	}{
+		{"base fixture", 0},
+		{"extra fields", 40},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			const file, language = "request.swift", "swift"
 			dispatch := rebuildClosureCollectionNode(file, "dispatch", language, rebuildCCDispatch, "handlers")
 			keep := rebuildClosureCollectionNode(file, "keep", language, rebuildCCAppend, "handlers")
@@ -29,12 +31,10 @@ func TestRebuildClosureCollectionSQLiteOracle(t *testing.T) {
 			incumbent := rebuildObserverEdge(dispatch, keep, graph.EdgeCalls, dispatch.StartLine)
 			incumbent.Meta = map[string]any{"fixture": "durable incumbent"}
 			nodes := []*graph.Node{dispatch, keep, register}
-			var extra int
-			if large {
+			if tc.extra != 0 {
 				// Each role's candidate stream exceeds 1 MiB, but no field is over cap.
-				const pairs = 40
 				padding := strings.Repeat("x", 32<<10)
-				for i := range pairs {
+				for i := range tc.extra {
 					field := fmt.Sprintf("items%02d%s", i, padding)
 					dispatchName, registerName := fmt.Sprintf("dispatch%02d", i), fmt.Sprintf("register%02d", i)
 					nodes = append(nodes,
@@ -42,7 +42,6 @@ func TestRebuildClosureCollectionSQLiteOracle(t *testing.T) {
 						rebuildClosureCollectionNode(file, registerName, language, rebuildCCAppend, field),
 					)
 				}
-				extra = pairs
 			}
 			facts := rebuildEventFacts(file, language, nodes, incumbent)
 			proof, b, native := openRebuildObserverStores(t, nil, facts)
@@ -60,7 +59,7 @@ func TestRebuildClosureCollectionSQLiteOracle(t *testing.T) {
 			for run := range 2 {
 				require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
 				want := rebuildEventSQLiteRows(native)
-				require.Len(t, want.edges, 2+extra)
+				require.Len(t, want.edges, 2+tc.extra)
 				require.Contains(t, want.edges, incumbent)
 				stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, selection)
 				require.NoError(t, err)

@@ -15,13 +15,15 @@ import (
 )
 
 func TestRebuildReactSetStateSQLiteOracle(t *testing.T) {
-	for _, large := range []bool{false, true} {
-		name := "base fixture"
-		if large {
-			name = "extra callers"
-		}
-		t.Run(name, func(t *testing.T) {
-			facts, want := rebuildReactSetStateFixture("widget.go", large)
+	for _, tc := range []struct {
+		name  string
+		large bool
+	}{
+		{"base fixture", false},
+		{"extra callers", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, want := rebuildReactSetStateFixture("widget.go", tc.large)
 			b, native, proof := openRebuildReactSetStateStores(t, facts)
 			before := rebuildEventSavedRows(t, b)
 			disabled, err := NewFrameworkSynthesizerSelection(nil)

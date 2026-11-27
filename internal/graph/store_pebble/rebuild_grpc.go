@@ -343,8 +343,9 @@ func (p *rebuildGRPC) order(ctx context.Context, receipts iter.Seq2[ParseFacts, 
 	stubs := rebuildGRPCKey('s')
 	ordered := rebuildGRPCKey('o')
 	recorders := rebuildGRPCKey('i')
-	// Index raw receipt claims before election. Duplicate claims refuse
-	// even if one of the stubs would stay stationary.
+	// Known limit: unlike MyBatis, gRPC refuses duplicate receipt claims
+	// before election, even if every claimant would stay stationary and
+	// native would write nothing.
 	if err := pendingVisit(ctx, p.b.pending, stubs, func(r row) error {
 		live := r.key[len(stubs):]
 		custody, err := readRebuildEdgeCustody(p.b.pending, live)
