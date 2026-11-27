@@ -11,30 +11,16 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// RebuildGoBuiltins plans against the pass-entry graph. The resolver selects
-// the native sentinel from one edge and bounded source-node reads. The first
-// successful complete old key for each sentinel supplies its payload.
+// RebuildGoBuiltins moves native builtin targets without storing sentinel nodes.
+// Keep the original ordered plan for same-site placeholder reconciliation.
 func (b *BuildStore) RebuildGoBuiltins(ctx context.Context, reconcileSources bool, spillBytes int,
-	selectBuiltin func(*graph.Edge, func(string) (*graph.Node, error)) (*graph.Node, error),
-	sameBuiltin func(have, want *graph.Node) bool,
-) (err error) {
+	selectBuiltin func(*graph.Edge, func(string) (*graph.Node, error)) (string, error),
+) error {
 	const maxRowBytes = 16 << 20
 	hasGo, err := b.rebuildHasNamedGo(ctx)
 	if err != nil || !hasGo {
 		return err
 	}
-
-	prefix := []byte{'g', 'u'}
-	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, prefix)
-	if err != nil {
-		return err
-	}
-	if occupied {
-		return invalid("Go builtin scratch range occupied")
-	}
-	defer func() {
-		err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
-	}()
 
 	readSource := func(id string) (*graph.Node, error) {
 		key := pendingNodeKey(id)
@@ -49,57 +35,12 @@ func (b *BuildStore) RebuildGoBuiltins(ctx context.Context, reconcileSources boo
 			return n, err
 		})
 	}
-	planTarget := func(e *graph.Edge) (string, error) {
-		n, err := selectBuiltin(e, readSource)
-		if err != nil || n == nil {
-			return "", err
-		}
-		k := keyStrings(bytes.Clone(prefix), n.ID)
-		seen, err := pendingGet(b.pending, k, fnPointerPresent)
-		if err != nil || seen {
-			return n.ID, err
-		}
-		raw, err := encodeNode(n)
-		if err != nil {
-			return "", err
-		}
-		if len(k)+len(raw) > maxRowBytes {
-			return "", fmt.Errorf("%w: Go builtin sentinel", ErrRebuildLinkInputSize)
-		}
-		return n.ID, b.pending.Set(k, raw, pebble.NoSync)
-	}
-	materialize := func() error {
-		return b.withWrites(func() error {
-			return pendingVisit(ctx, b.pending, prefix, func(r row) error {
-				n, err := decodeNode(r.value)
-				if err != nil {
-					return err
-				}
-				if !bytes.Equal(r.key, keyStrings(bytes.Clone(prefix), n.ID)) {
-					return invalid("Go builtin sentinel identity does not match key")
-				}
-				have, err := pendingGet(b.pending, pendingNodeKey(n.ID), func(raw []byte) (*graph.Node, error) {
-					if len(raw) > maxRowBytes {
-						return nil, fmt.Errorf("%w: saved Go builtin node", ErrRebuildLinkInputSize)
-					}
-					have, err := decodeNode(raw)
-					if err == nil && have.ID != n.ID {
-						return nil, invalid("saved Go builtin identity does not match key")
-					}
-					return have, err
-				})
-				if err != nil || (have != nil && sameBuiltin(have, n)) {
-					return err
-				}
-				return b.writeNode(n)
-			})
-		})
-	}
+	planTarget := func(e *graph.Edge) (string, error) { return selectBuiltin(e, readSource) }
 	var afterApply func([]byte) error
 	if reconcileSources {
 		afterApply = func(plan []byte) error { return b.reconcileBuiltinSources(ctx, spillBytes, plan) }
 	}
-	_, err = b.rebuildAttribution(ctx, planTarget, materialize, afterApply, "")
+	_, err = b.rebuildAttribution(ctx, planTarget, nil, afterApply, "")
 	return err
 }
 

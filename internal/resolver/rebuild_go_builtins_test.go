@@ -114,7 +114,7 @@ func TestRebuildGoBuiltinsNativeSourceReplay(t *testing.T) {
 			require.NoError(t, runRebuildGoBuiltins(t.Context(), build, mode.reconcile, 1))
 			require.Equal(t, native, rebuildFnPointerSaved(t, build))
 			if mode.namedGo {
-				rebuildGoBuiltinRequireNode(t, build, sql, rebuildGoBuiltinSentinel(lenID, "len", "ws", "proj"))
+				rebuildGoBuiltinRequireAbsent(t, build, sql, rebuildGoBuiltinSentinel(lenID, "len", "ws", "proj"))
 			}
 			_, err := build.OpenSnapshot()
 			require.ErrorIs(t, err, store_pebble.ErrUnpublishedBuild)
@@ -122,7 +122,7 @@ func TestRebuildGoBuiltinsNativeSourceReplay(t *testing.T) {
 	}
 }
 
-func TestRebuildGoBuiltinsSentinelOrder(t *testing.T) {
+func TestRebuildGoBuiltinsNodeFreeOrder(t *testing.T) {
 	const file = "repo/record.txt"
 	const a, b = "repo/a.txt::A", "repo/b.go::B"
 	const lenID, appendID, capID = "repo::builtin::go::len", "repo::builtin::go::append", "repo::builtin::go::cap"
@@ -167,15 +167,12 @@ func TestRebuildGoBuiltinsSentinelOrder(t *testing.T) {
 			require.Equal(t, nativeLen, sql.GetNode(lenID), "native follows the forced per-target reader order")
 
 			build := openRebuildBareScopeFixture(t)
-			build.AddBatch(nodes, arrival)
+			build.AddBatch(nodes[:2], arrival)
 			require.NoError(t, runRebuildGoBuiltins(t.Context(), build, true, 1))
 			require.Equal(t, want, rebuildFnPointerSaved(t, build))
-			canonical, err := build.RebuildView().Node(t.Context(), lenID)
-			require.NoError(t, err)
-			require.Equal(t, rebuildGoBuiltinSentinel(lenID, "len", "ws-a", "proj-a"), canonical,
-				"first complete old key wins independent of insertion order")
-			rebuildGoBuiltinRequireNode(t, build, sql, kept)
-			rebuildGoBuiltinRequireNode(t, build, sql, rebuildGoBuiltinSentinel(capID, "cap", "ws-a", "proj-a"))
+			rebuildGoBuiltinRequireAbsent(t, build, sql, nativeLen)
+			rebuildGoBuiltinRequireAbsent(t, build, sql, kept)
+			rebuildGoBuiltinRequireAbsent(t, build, sql, rebuildGoBuiltinSentinel(capID, "cap", "ws-a", "proj-a"))
 		})
 	}
 }
@@ -185,12 +182,12 @@ func rebuildGoBuiltinSentinel(id, name, workspace, project string) *graph.Node {
 		WorkspaceID: workspace, ProjectID: project, Meta: map[string]any{"builtin": true, "builtin_kind": "func"}}
 }
 
-func rebuildGoBuiltinRequireNode(t *testing.T, build *store_pebble.BuildStore, sql *store_sqlite.Store, want *graph.Node) {
+func rebuildGoBuiltinRequireAbsent(t *testing.T, build *store_pebble.BuildStore, sql *store_sqlite.Store, want *graph.Node) {
 	t.Helper()
 	require.Equal(t, want, sql.GetNode(want.ID))
 	saved, err := build.RebuildView().Node(t.Context(), want.ID)
 	require.NoError(t, err)
-	require.Equal(t, want, saved)
+	require.Nil(t, saved)
 }
 
 func openRebuildGoBuiltinSQLite(t *testing.T) *store_sqlite.Store {

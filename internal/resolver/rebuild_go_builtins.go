@@ -9,14 +9,12 @@ import (
 
 func runRebuildGoBuiltins(ctx context.Context, build *store_pebble.BuildStore, reconcileSources bool, spillBytes int) error {
 	sources := make(map[string]*graph.Node, 3)
-	materialized := make(map[string]*graph.Node, 1)
 	return build.RebuildGoBuiltins(ctx, reconcileSources, spillBytes,
-		func(e *graph.Edge, readSource func(string) (*graph.Node, error)) (*graph.Node, error) {
+		func(e *graph.Edge, readSource func(string) (*graph.Node, error)) (string, error) {
 			if !goBuiltinPendingCandidate(e) {
-				return nil, nil
+				return "", nil
 			}
 			clear(sources)
-			clear(materialized)
 			ids := [3]string{e.From, enclosingFunctionForBinding(e.From)}
 			if detachedSource(e.From) {
 				ids[2] = e.FilePath
@@ -27,14 +25,15 @@ func runRebuildGoBuiltins(ctx context.Context, build *store_pebble.BuildStore, r
 				}
 				n, err := readSource(id)
 				if err != nil {
-					return nil, err
+					return "", err
 				}
 				sources[id] = n
 			}
-			candidate := *e
-			if tryAttributeGoBuiltin(&candidate, sources, materialized) == "" {
-				return nil, nil
+			name, repo, _ := goBuiltinSource(e, sources)
+			id, _, _ := goBuiltinTarget(repo, name)
+			if _, ok := graph.LookupPlatformBuiltin(graph.PlatformCatalogRevision, id); !ok {
+				return "", nil
 			}
-			return materialized[candidate.To], nil
-		}, sameBuiltinSentinel)
+			return id, nil
+		})
 }
