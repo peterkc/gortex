@@ -35,6 +35,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"React setState", "edges", 1},
 		{"Flutter setState", "edges", 1},
 		{"KMP expect/actual", "edges", 2},
+		{"Expo module bridge", "edges", 1},
 	}
 	for _, tc := range []struct {
 		name  string
@@ -164,6 +165,8 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	objc.Meta = map[string]any{"rn_module": module, "rn_method": method}
 	swift := node("Bridge.swift", "swift", "custom", graph.KindMethod, 3)
 	swift.Meta = map[string]any{"objc_selector": "deliverTo:"}
+	expo := node(swift.FilePath, swift.Language, "openClock", graph.KindMethod, 5)
+	expo.Meta = map[string]any{"expo_module": module, "expo_method": method}
 	dispatch := node(swift.FilePath, "swift", "dispatchQueue", graph.KindMethod, 7)
 	dispatch.Meta = map[string]any{"cc_dispatch_field": "queuedHandlers"}
 	appendHandler := node(swift.FilePath, "swift", "appendHandler", graph.KindMethod, 9)
@@ -251,7 +254,7 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
-		receipt([]*graph.Node{swift, dispatch, appendHandler}),
+		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
 		receipt([]*graph.Node{java}),
 		appFacts, grpcFacts, widgetFacts, temporalFacts,
 		receipt([]*graph.Node{expect}),

@@ -525,6 +525,15 @@ func buildRebuildStages(
 				zap.Uint64("edges", kmp.Edges),
 				zap.Uint64("spill_bytes", kmp.SpillBytes))
 		}
+		expoModules, err := resolver.RunRebuildExpoModuleBridge(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		if err != nil {
+			return err
+		}
+		if expoModules.Edges != 0 || expoModules.SpillBytes != 0 {
+			logger.Info("rebuild Expo module bridge applied to private build",
+				zap.Uint64("edges", expoModules.Edges),
+				zap.Uint64("spill_bytes", expoModules.SpillBytes))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

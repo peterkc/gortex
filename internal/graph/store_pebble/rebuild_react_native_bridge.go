@@ -13,7 +13,10 @@ import (
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
-var ErrRebuildReactNativeBridge = errors.New("pebble rebuild React Native bridge stage failed")
+var (
+	ErrRebuildReactNativeBridge = errors.New("pebble rebuild React Native bridge stage failed")
+	ErrRebuildExpoModuleBridge  = errors.New("pebble rebuild Expo module bridge stage failed")
+)
 
 var rebuildReactNativePrefix = []byte{'g', 'K'}
 
@@ -26,28 +29,78 @@ type RebuildReactNativeBridgeStats struct {
 // framework turn. Frozen receipt order elects the first site per output pair.
 func (b *BuildStore) RebuildReactNativeBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
 	inFamily func(string) bool, isCall func(*graph.Edge) bool, buildCall func(*graph.Edge, *graph.Node) *graph.Edge,
+) (RebuildReactNativeBridgeStats, error) {
+	var family func(string) uint8
+	if inFamily != nil {
+		family = func(language string) uint8 {
+			if inFamily(language) {
+				return 1
+			}
+			return 0
+		}
+	}
+	return b.rebuildNativeModuleBridge(ctx, receipts, spillAt, rebuildNativeModuleBridgePolicy{
+		stage:    ErrRebuildReactNativeBridge,
+		label:    "React Native bridge",
+		proof:    rebuildProofRNBridge,
+		names:    rebuildRNNames,
+		family:   family,
+		required: 1,
+	}, isCall, buildCall)
+}
+
+// RebuildExpoModuleBridgeStats describes installed Calls and physical spill.
+type RebuildExpoModuleBridgeStats = RebuildReactNativeBridgeStats
+
+// RebuildExpoModuleBridge joins live RN call markers to Expo declarations.
+// The family census applies to the whole pass: web is bit 1 and either
+// Apple or JVM is bit 2. Neither bit filters individual endpoints.
+func (b *BuildStore) RebuildExpoModuleBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+	family func(string) uint8, isCall func(*graph.Edge) bool, buildCall func(*graph.Edge, *graph.Node) *graph.Edge,
+) (RebuildExpoModuleBridgeStats, error) {
+	return b.rebuildNativeModuleBridge(ctx, receipts, spillAt, rebuildNativeModuleBridgePolicy{
+		stage:    ErrRebuildExpoModuleBridge,
+		label:    "Expo module bridge",
+		proof:    rebuildProofExpoModules,
+		names:    rebuildExpoNames,
+		family:   family,
+		required: 3,
+	}, isCall, buildCall)
+}
+
+type rebuildNativeModuleBridgePolicy struct {
+	stage    error
+	label    string
+	proof    rebuildEdgeProof
+	names    func(map[string]any) (string, string)
+	family   func(string) uint8
+	required uint8
+}
+
+func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
+	policy rebuildNativeModuleBridgePolicy, isCall func(*graph.Edge) bool, buildCall func(*graph.Edge, *graph.Node) *graph.Edge,
 ) (stats RebuildReactNativeBridgeStats, err error) {
 	defer func() {
 		if err != nil {
 			stats = RebuildReactNativeBridgeStats{}
-			err = fmt.Errorf("%w: %w", ErrRebuildReactNativeBridge, err)
+			err = fmt.Errorf("%w: %w", policy.stage, err)
 		}
 	}()
-	if spillAt < 1 || spillAt > goldBufferBytes || receipts == nil || inFamily == nil || isCall == nil || buildCall == nil {
-		return stats, fmt.Errorf("%w: invalid React Native bridge inputs", ErrRebuildLinkInputSize)
+	if spillAt < 1 || spillAt > goldBufferBytes || receipts == nil || policy.family == nil || isCall == nil || buildCall == nil {
+		return stats, fmt.Errorf("%w: invalid %s inputs", ErrRebuildLinkInputSize, policy.label)
 	}
 	busy, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildReactNativePrefix)
 	if err != nil {
 		return stats, err
 	}
 	if busy {
-		return stats, invalid("React Native bridge scratch range occupied")
+		return stats, invalid(policy.label + " scratch range occupied")
 	}
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildReactNativePrefix, prefixEnd(rebuildReactNativePrefix), pebble.NoSync))
 	}()
-	p := rebuildReactNativeBridge{b: b, threshold: spillAt}
-	active, err := p.capture(ctx, inFamily, isCall)
+	p := rebuildReactNativeBridge{b: b, threshold: spillAt, policy: policy}
+	active, err := p.capture(ctx, isCall)
 	if err != nil || !active {
 		return p.stats, err
 	}
@@ -70,6 +123,7 @@ type rebuildReactNativeBridge struct {
 	buffered  int
 	changes   bool
 	stats     RebuildReactNativeBridgeStats
+	policy    rebuildNativeModuleBridgePolicy
 }
 
 // Scratch columns (all under g/K):
@@ -91,9 +145,15 @@ func rebuildRNNames(meta map[string]any) (module, method string) {
 	return module, method
 }
 
+func rebuildExpoNames(meta map[string]any) (module, method string) {
+	module, _ = meta["expo_module"].(string)
+	method, _ = meta["expo_method"].(string)
+	return module, method
+}
+
 func (p *rebuildReactNativeBridge) put(key, value []byte) error {
 	if len(key)+len(value) > 16<<20 {
-		return fmt.Errorf("%w: React Native bridge scratch row", ErrRebuildLinkInputSize)
+		return fmt.Errorf("%w: %s scratch row", ErrRebuildLinkInputSize, p.policy.label)
 	}
 	if err := p.b.pending.Set(key, value, pebble.NoSync); err != nil {
 		return err
@@ -116,12 +176,15 @@ func (p *rebuildReactNativeBridge) get(key []byte) ([]byte, error) {
 	})
 }
 
-func (p *rebuildReactNativeBridge) capture(ctx context.Context, inFamily func(string) bool, isCall func(*graph.Edge) bool) (bool, error) {
+func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*graph.Edge) bool) (bool, error) {
 	view := p.b.RebuildView()
-	var family, methods, active bool
+	var families uint8
+	var methods, active bool
 	if err := view.VisitNodes(ctx, func(n *graph.Node) error {
-		family = family || inFamily(n.Language)
-		mod, method := rebuildRNNames(n.Meta)
+		if families&p.policy.required != p.policy.required {
+			families |= p.policy.family(n.Language)
+		}
+		mod, method := p.policy.names(n.Meta)
 		if n.Kind != graph.KindMethod || n.ID == "" || mod == "" || method == "" {
 			return nil
 		}
@@ -141,7 +204,7 @@ func (p *rebuildReactNativeBridge) capture(ctx context.Context, inFamily func(st
 			}
 		}
 		return p.put(rebuildRNKey('n', mod, method, n.ID), nil)
-	}); err != nil || !family || !methods {
+	}); err != nil || families&p.policy.required != p.policy.required || !methods {
 		return false, err
 	}
 	err := view.VisitEdges(ctx, func(e *graph.Edge) error {
@@ -191,7 +254,7 @@ func (p *rebuildReactNativeBridge) capture(ctx context.Context, inFamily func(st
 				return err
 			}
 			if previous == nil {
-				return invalid("React Native bridge census lost a call")
+				return invalid(p.policy.label + " census lost a call")
 			}
 			if err := p.affected(ctx, previous); err != nil {
 				return err
@@ -231,7 +294,7 @@ func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2
 				return err
 			}
 			if live == nil {
-				return invalid("React Native bridge census lost a call")
+				return invalid(p.policy.label + " census lost a call")
 			}
 			mod, method := rebuildRNNames(e.Meta)
 			liveMod, liveMethod := rebuildRNNames(live.Meta)
@@ -263,7 +326,7 @@ func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2
 	}
 	if err := pendingVisit(ctx, p.b.pending, rebuildRNKey('r'), func(r row) error {
 		if len(r.value) < 2 {
-			return invalid("React Native bridge recorder key")
+			return invalid(p.policy.label + " recorder key")
 		}
 		if r.value[0] == rebuildCapabilityWanted|rebuildCapabilityProved {
 			return nil
@@ -273,7 +336,7 @@ func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2
 			return err
 		}
 		if e == nil {
-			return invalid("React Native bridge census lost a call")
+			return invalid(p.policy.label + " census lost a call")
 		}
 		return p.affected(ctx, e)
 	}); err != nil {
@@ -332,7 +395,7 @@ func (p *rebuildReactNativeBridge) elect(ctx context.Context, buildCall func(*gr
 			return err
 		}
 		if e == nil {
-			return invalid("React Native bridge census lost a call")
+			return invalid(p.policy.label + " census lost a call")
 		}
 		mod, method := rebuildRNNames(e.Meta)
 		// One method belongs to exactly one module/method bucket. Its first
@@ -357,7 +420,7 @@ func (p *rebuildReactNativeBridge) elect(ctx context.Context, buildCall func(*gr
 				return err
 			}
 			if native == nil {
-				return invalid("React Native bridge census lost a method")
+				return invalid(p.policy.label + " census lost a method")
 			}
 			out := buildCall(e, native)
 			old, err := p.b.pendingEdge(pendingEdgeKey(out))
@@ -409,11 +472,11 @@ func (p *rebuildReactNativeBridge) prove(ctx context.Context, receipts iter.Seq2
 			if err != nil {
 				return err
 			}
-			mod, method := rebuildRNNames(n.Meta)
+			mod, method := p.policy.names(n.Meta)
 			bit := byte(rebuildCapabilityUnproved)
 			if live != nil && n.FilePath == file && live.FilePath == file && facts.EffectiveLanguage == n.Language &&
 				live.Language == n.Language && live.Kind == n.Kind && live.Name == n.Name && live.RepoPrefix == n.RepoPrefix {
-				liveMod, liveMethod := rebuildRNNames(live.Meta)
+				liveMod, liveMethod := p.policy.names(live.Meta)
 				if liveMod == mod && liveMethod == method {
 					bit = rebuildCapabilityProved
 				}
@@ -456,7 +519,7 @@ func (p *rebuildReactNativeBridge) visit(ctx context.Context, yield func(*graph.
 			return nil
 		}
 		if len(r.value) < 2 || r.value[0] != 1 {
-			return invalid("React Native bridge winner row")
+			return invalid(p.policy.label + " winner row")
 		}
 		e, err := decodeEdge(r.value[1:])
 		if err != nil {
@@ -468,7 +531,7 @@ func (p *rebuildReactNativeBridge) visit(ctx context.Context, yield func(*graph.
 
 func (p *rebuildReactNativeBridge) apply(ctx context.Context) error {
 	return p.visit(ctx, func(e *graph.Edge) error {
-		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofRNBridge}); err != nil {
+		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: p.policy.proof}); err != nil {
 			return err
 		}
 		p.stats.Edges++
