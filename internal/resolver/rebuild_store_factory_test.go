@@ -715,20 +715,23 @@ func TestRebuildStoreFactoryAndReduxThunkNodeRoleProof(t *testing.T) {
 						call = rebuildReduxThunkMarker(caller, "reset", 9)
 						call.Meta["store_binding"] = "useStore"
 					}
-					left := rebuildEventFacts(callerFile, caller.Language, []*graph.Node{caller}, call)
-					right := rebuildEventFacts(storeFile, caller.Language, []*graph.Node{remote})
+					leftNodes := []*graph.Node{caller}
+					rightNodes := []*graph.Node{remote}
 					want := remote.ID
 					switch mode {
 					case "role fields only", "getter file action needs matching path":
-						left.Nodes = append(left.Nodes, local)
-						right.Nodes = append(right.Nodes, getter)
+						leftNodes = append(leftNodes, local)
+						rightNodes = append(rightNodes, getter)
 					case "caller file decides":
-						left.Nodes = append(left.Nodes, local)
+						leftNodes = append(leftNodes, local)
 						want = local.ID
 					case "global singleton ignores scope":
-						left.Nodes = nil
+						leftNodes = nil
 					}
-					facts := []store_pebble.ParseFacts{left, right}
+					facts := []store_pebble.ParseFacts{
+						rebuildEventFacts(callerFile, caller.Language, leftNodes, call),
+						rebuildEventFacts(storeFile, caller.Language, rightNodes),
+					}
 					var tail []store_pebble.ParseFacts
 					if synth == SynthReduxThunk {
 						anchor := rebuildReduxThunkNode("anchor.ts", "unrelated")
@@ -754,25 +757,29 @@ func TestRebuildStoreFactoryAndReduxThunkNodeRoleProof(t *testing.T) {
 							changed.Name = "someOtherName"
 							changed.Meta = map[string]any{"store_factory": "useStore", "store_member": "reset"}
 						}
-						left.Nodes = []*graph.Node{&c, local}
-						right.Nodes = []*graph.Node{&changed, &g}
+						leftNodes = []*graph.Node{&c, local}
+						rightNodes = []*graph.Node{&changed, &g}
 					case "caller file decides":
 						c := *caller
 						c.FilePath = storeFile
-						left.Nodes = []*graph.Node{local}
-						right.Nodes = []*graph.Node{remote, &c}
+						leftNodes = []*graph.Node{local}
+						rightNodes = []*graph.Node{remote, &c}
 					case "workspace singleton ignores file", "global singleton ignores scope", "getter file action needs matching path":
 						changed.FilePath = movedFile
 						if mode == "global singleton ignores scope" {
 							changed.WorkspaceID = "other"
 						}
-						right.Nodes = right.Nodes[1:]
+						rightNodes = rightNodes[1:]
 						tail = append(tail, rebuildEventFacts(movedFile, caller.Language, []*graph.Node{&changed}))
 					case "action loses eligibility":
 						changed.Kind = graph.KindType
-						right.Nodes = []*graph.Node{&changed}
+						rightNodes = []*graph.Node{&changed}
 					}
-					receipts := rebuildGRPCReceipts(append([]store_pebble.ParseFacts{left, right}, tail...)...)
+					recorded := []store_pebble.ParseFacts{
+						rebuildEventFacts(callerFile, caller.Language, leftNodes, call),
+						rebuildEventFacts(storeFile, caller.Language, rightNodes),
+					}
+					receipts := rebuildGRPCReceipts(append(recorded, tail...)...)
 					var moves uint64
 					confidence := 0.75
 					if synth == SynthStoreFactory {
