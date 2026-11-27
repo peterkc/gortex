@@ -35,6 +35,7 @@ type ReceiverMutationRules struct {
 
 type ReceiverMutationStats struct {
 	Facts, Rounds, RoundBound, Emitted, SpillBytes uint64
+	Matches                                        uint64 // peak call/field matches per sweep, before masking or deduplication
 }
 
 // VisitReceiverMutations yields collapsed indirect capability rows in native
@@ -57,6 +58,9 @@ func (v RebuildView) visitReceiverMutations(ctx context.Context, scratchParent s
 ) (stats ReceiverMutationStats, err error) {
 	defer func() {
 		if err != nil {
+			if _, ok := errors.AsType[*sortedRunLimitError](err); ok {
+				err = fmt.Errorf("%w: receiver_matches=%d: %w", ErrReceiverMutationInput, stats.Matches, err)
+			}
 			stats = ReceiverMutationStats{}
 			err = fmt.Errorf("%w: %w", ErrRebuildReceiverMutation, err)
 		}
@@ -566,6 +570,12 @@ func (p receiverPass) inputs(ctx context.Context, v RebuildView, rules ReceiverM
 }
 
 func (p receiverPass) visitMatches(ctx context.Context, facts, calls receiverTable, visit func(rebuildReceiverCall, string, uint64) error) error {
+	var count uint64
+	match := func(call rebuildReceiverCall, fieldID string, site uint64) error {
+		count++
+		return visit(call, fieldID, site)
+	}
+	defer func() { p.stats.Matches = max(p.stats.Matches, count) }()
 	return withReceiverTable(facts, func(f *receiverCursor) error {
 		return withReceiverTable(calls, func(c *receiverCursor) error {
 			var site uint64
@@ -586,14 +596,14 @@ func (p receiverPass) visitMatches(ctx context.Context, facts, calls receiverTab
 							return err
 						}
 					}
-					return visit(call, call.fieldID, site)
+					return match(call, call.fieldID, site)
 				}
 				return f.all(ctx, prefix, func(r row) error {
 					id, rest, err := readKeyString(r.key[len(prefix):])
 					if err != nil || len(rest) != 0 || id == "" {
 						return errors.Join(err, invalid("receiver mutation fact"))
 					}
-					return visit(call, id, site)
+					return match(call, id, site)
 				})
 			})
 		})

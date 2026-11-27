@@ -70,12 +70,18 @@ func (s *sortedRuns) add(key, value []byte) error {
 	return nil
 }
 
+type sortedRunLimitError struct{ name string }
+
+func (e *sortedRunLimitError) Error() string {
+	return fmt.Sprintf("pebble %s exceeds %d sorted runs", e.name, goldFileCap)
+}
+
 func (s *sortedRuns) flush() (err error) {
 	if len(s.rows) == 0 {
 		return nil
 	}
 	if len(s.paths) >= goldFileCap {
-		return fmt.Errorf("pebble %s exceeds %d sorted runs", s.name, goldFileCap)
+		return &sortedRunLimitError{name: s.name}
 	}
 	slices.SortFunc(s.rows, func(a, b row) int { return bytes.Compare(a.key, b.key) })
 	path := filepath.Join(s.dir, fmt.Sprintf("%s-%04d.sst", s.name, len(s.paths)))

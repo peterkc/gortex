@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -235,7 +236,10 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 				sent = append(sent, tables.Witness.Stage)
 				return nil
 			})
-			applied := logs.FilterMessage("rebuild clone relations applied to private build").All()
+			const capabilityMessage = "rebuild capabilities applied to private build"
+			const cloneMessage = "rebuild clone relations applied to private build"
+			capabilities := logs.FilterMessage(capabilityMessage).All()
+			applied := logs.FilterMessage(cloneMessage).All()
 			if tc.shadowed {
 				// Receipt validation precedes file_graph for both checkout modes.
 				require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest}, sent)
@@ -244,6 +248,7 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 				require.Equal(t, uint8(36), reply.Refusal)
 				require.EqualValues(t, 1, reply.UnknownProvenance)
 				require.Contains(t, reply.Detail, "receipt shadowed_id=1 unexplained_id=1 shadowed_edge=0:")
+				require.Empty(t, capabilities)
 				require.Empty(t, applied)
 				return
 			}
@@ -253,7 +258,16 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 				require.Empty(t, applied)
 				return
 			}
+			require.Len(t, capabilities, 1)
 			require.Len(t, applied, 1)
+			entries := logs.All()
+			capabilityAt := slices.IndexFunc(entries, func(e observer.LoggedEntry) bool { return e.Message == capabilityMessage })
+			cloneAt := slices.IndexFunc(entries, func(e observer.LoggedEntry) bool { return e.Message == cloneMessage })
+			require.Less(t, capabilityAt, cloneAt)
+			capabilityFields := capabilities[0].ContextMap()
+			require.EqualValues(t, 1, capabilityFields["receiver_rounds"])
+			require.EqualValues(t, 1, capabilityFields["receiver_round_bound"])
+			require.EqualValues(t, 0, capabilityFields["receiver_matches"])
 			fields := applied[0].ContextMap()
 			require.EqualValues(t, 0, fields["raw_bodies"])
 			require.EqualValues(t, 2, fields["signed_only"])
@@ -637,6 +651,38 @@ func TestRebuildBuildViewRefusal(t *testing.T) {
 				})
 			require.ErrorIs(t, err, ErrRebuildWorker)
 			require.ErrorIs(t, err, tc.want)
+			require.Empty(t, acks.Bytes())
+		})
+	}
+}
+
+func TestRebuildBuildReceiverRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		cause error
+		code  uint8
+	}{
+		{store_pebble.ErrReceiverMutationNonconvergent, 39},
+		{store_pebble.ErrReceiverMutationInput, 40},
+		{io.ErrUnexpectedEOF, 41},
+	} {
+		t.Run(tc.cause.Error(), func(t *testing.T) {
+			cause := fmt.Errorf("%w: %w", store_pebble.ErrRebuildReceiverMutation, tc.cause)
+			want := tc.cause
+			if tc.code == 41 {
+				want = store_pebble.ErrRebuildReceiverMutation
+			}
+			var reply, acks bytes.Buffer
+			r := buildRefusal(cause)
+			require.Equal(t, tc.code, r.Refusal)
+			require.NoError(t, writeRebuildBuildReply(&reply, r))
+			err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
+				func(context.Context, store_pebble.StageTables) error {
+					t.Fatal("a receiver refusal must not publish")
+					return nil
+				})
+			require.ErrorIs(t, err, ErrRebuildWorker)
+			require.ErrorIs(t, err, want)
+			require.ErrorContains(t, err, tc.cause.Error())
 			require.Empty(t, acks.Bytes())
 		})
 	}

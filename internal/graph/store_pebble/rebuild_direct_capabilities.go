@@ -17,9 +17,8 @@ import (
 
 const rebuildCapabilityRowLimit = 16 << 20
 
-// RebuildDirectCapabilities derives the native direct rows from a quiet
-// working graph. First elect the native winners without using receipt proof
-// as a filter. Refuse before writing if any winner's proof is missing.
+// RebuildDirectCapabilities lets tests exercise the direct writer in isolation.
+// The worker uses RebuildCapabilities.
 func (b *BuildStore) RebuildDirectCapabilities(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	processMechanism func(string) string, processImport func(string, string) (path, symbol string),
 ) error {
@@ -28,7 +27,8 @@ func (b *BuildStore) RebuildDirectCapabilities(ctx context.Context, receipts ite
 }
 
 // RebuildCapabilities elects and proves both sets of winners before writing
-// the combined native capability stage to the private graph.
+// the combined native capability stage to the private graph. On error the
+// worker discards the private graph without publishing these relations.
 func (b *BuildStore) RebuildCapabilities(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	processMechanism func(string) string, processImport func(string, string) (path, symbol string),
 	rules ReceiverMutationRules, spillAt int,
@@ -36,6 +36,7 @@ func (b *BuildStore) RebuildCapabilities(ctx context.Context, receipts iter.Seq2
 	return b.rebuildCapabilities(ctx, receipts, processMechanism, processImport, &rules, spillAt)
 }
 
+// A nil rules argument is used only by the direct-only tests.
 func (b *BuildStore) rebuildCapabilities(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	processMechanism func(string) string, processImport func(string, string) (path, symbol string),
 	rules *ReceiverMutationRules, spillAt int,
@@ -136,40 +137,18 @@ func (b *BuildStore) rebuildCapabilities(ctx context.Context, receipts iter.Seq2
 	if count != 0 {
 		return stats, &RebuildUnknownProvenanceError{Count: count, First: graph.EdgeIdentityFor(first)}
 	}
-	writeDirect := visit
 	if rules != nil && hasWinners {
-		ordered := rebuildCapabilityKey('d')
-		if err := visit(func(e *graph.Edge) error {
-			n, err := s.node(e.From, decodeNodeLight)
-			if err != nil {
-				return err
-			}
-			if n == nil {
-				return invalid("proved direct capability has no live source")
-			}
-			key := appendKeyLine(keyStrings(bytes.Clone(ordered), n.RepoPrefix, e.From, e.To, string(e.Kind), e.FilePath), e.Line)
-			value, err := encodeEdge(e)
-			if err != nil {
-				return err
-			}
-			return s.put(key, value)
-		}); err != nil {
+		// Keep the prior row-size refusal without staging a second copy of
+		// each winner. The former ordering key added the source repo prefix.
+		if err := visit(s.checkDirectWinnerSize); err != nil {
 			return stats, err
-		}
-		writeDirect = func(write func(*graph.Edge) error) error {
-			return pendingVisit(ctx, s.db, ordered, func(r row) error {
-				e, err := decodeEdgeLight(r.value)
-				if err != nil {
-					return err
-				}
-				return write(e)
-			})
 		}
 	}
 	return stats, b.withWrites(func() error {
-		// The native matcher returns one of a fixed set of mechanisms.
+		// Edge winners have disjoint saved keys; repeated process nodes have
+		// the same payload regardless of which source is written first.
 		written := make(map[string]bool)
-		if err := writeDirect(func(input *graph.Edge) error {
+		if err := visit(func(input *graph.Edge) error {
 			e, mechanism := rebuildDirectCapability(input, processMechanism)
 			if mechanism != "" && !written[mechanism] {
 				n := &graph.Node{ID: e.To, Kind: graph.KindString, Name: mechanism,
@@ -288,10 +267,13 @@ func (s rebuildCapabilityScratch) receiverSink() func(*graph.Edge, string) error
 		if err != nil {
 			return err
 		}
-		for _, key := range [][]byte{
-			rebuildCapabilityKey('n', e.From), rebuildCapabilityKey('n', e.To),
-			rebuildCapabilityReceiverRecorder(call, true), rebuildCapabilityReceiverRecorder(call, false),
-		} {
+		keys := [][]byte{
+			rebuildCapabilityKey('n', e.From), rebuildCapabilityKey('n', e.To), rebuildCapabilityReceiverRecorder(call, true),
+		}
+		if !graph.IsUnresolvedTarget(call.To) {
+			keys = append(keys, rebuildCapabilityReceiverRecorder(call, false))
+		}
+		for _, key := range keys {
 			if err := s.put(key, []byte{rebuildCapabilityWanted}); err != nil {
 				return err
 			}
@@ -350,11 +332,31 @@ func (s rebuildCapabilityScratch) provesReceiver(e *graph.Edge, id []byte) (bool
 		return false, err
 	}
 	stationary, err := s.state(rebuildCapabilityReceiverRecorder(call, true))
-	if err != nil {
-		return false, err
+	if err != nil || graph.IsUnresolvedTarget(call.To) {
+		// A pending target is not a move. Another unresolved spelling at
+		// the same site cannot prove or taint this call's exact recorder.
+		return stationary == exact, err
 	}
 	moving, err := s.state(rebuildCapabilityReceiverRecorder(call, false))
 	return stationary|moving == exact, err
+}
+
+func (s rebuildCapabilityScratch) checkDirectWinnerSize(e *graph.Edge) error {
+	n, err := s.node(e.From, decodeNodeLight)
+	if err != nil || n == nil {
+		return err // A successful proof already required the live source.
+	}
+	value, err := encodeEdge(e)
+	if err != nil {
+		return err
+	}
+	// The old key used a three-byte prefix instead of the two-byte
+	// pending edge prefix, plus a terminated repository string.
+	keySize := len(pendingEdgeKey(e)) + 3 + len(n.RepoPrefix) + strings.Count(n.RepoPrefix, "\x00")
+	if keySize+len(value) > rebuildCapabilityRowLimit {
+		return fmt.Errorf("%w: direct capability scratch row", ErrRebuildLinkInputSize)
+	}
+	return nil
 }
 
 func (s rebuildCapabilityScratch) node(id string, decode func([]byte) (*graph.Node, error)) (*graph.Node, error) {

@@ -392,6 +392,7 @@ func buildRebuildStages(
 		zap.Uint64("receiver_facts", capability.Facts),
 		zap.Uint64("receiver_rounds", capability.Rounds),
 		zap.Uint64("receiver_round_bound", capability.RoundBound),
+		zap.Uint64("receiver_matches", capability.Matches),
 		zap.Uint64("receiver_claims", capability.Emitted),
 		zap.Uint64("receiver_spill_bytes", capability.SpillBytes))
 	if exactCheckout {

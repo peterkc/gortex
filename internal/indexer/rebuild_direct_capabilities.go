@@ -8,6 +8,7 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
+// runRebuildDirectCapabilities is the direct-only control used by tests.
 func runRebuildDirectCapabilities(ctx context.Context, build *store_pebble.BuildStore,
 	receipts iter.Seq2[store_pebble.ParseFacts, error],
 ) error {
