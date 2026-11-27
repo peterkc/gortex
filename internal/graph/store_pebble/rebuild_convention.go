@@ -165,6 +165,25 @@ func (p *rebuildConventionPass) pick(ctx context.Context, names, dirs []string, 
 	return live, proved, nil
 }
 
+func (p *rebuildConventionPass) receiptPick(ctx context.Context, names, dirs []string, file string) (pick rebuildConventionPick, err error) {
+	for _, name := range names {
+		prefix := p.key('P', name)
+		if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+			id, rest, err := readKeyString(r.key[len(prefix):])
+			if err != nil || id == "" || len(rest) != 0 {
+				return invalid(p.label + " receipt candidate key")
+			}
+			path := string(r.value)
+			allowed := p.rules.AllowWinner == nil || p.rules.AllowWinner(name, path)
+			pick.add(id, p.rules.Rank(path, file, dirs), allowed)
+			return nil
+		}); err != nil {
+			return pick, err
+		}
+	}
+	return pick, nil
+}
+
 func (p *rebuildConventionPass) source(id string) (*graph.Node, error) {
 	return pendingGet(p.b.pending, pendingNodeKey(id), decodeNodeLight)
 }
@@ -208,7 +227,7 @@ func (p *rebuildConventionPass) captureSite(ctx context.Context, old, val []byte
 		return err
 	}
 	live, _, err := p.pick(ctx, names, dirs, source.FilePath, false)
-	if err != nil || !live.chosen {
+	if err != nil {
 		return err
 	}
 	if err := p.input(old, val); err != nil {
@@ -286,6 +305,11 @@ func (p *rebuildConventionPass) recordNode(raw *graph.Node) error {
 	if err != nil || !source && !named {
 		return err
 	}
+	if named && raw.ID != "" && p.rules.Eligible(raw) {
+		if err := p.put(p.key('P', raw.Name, raw.ID), []byte(raw.FilePath)); err != nil {
+			return err
+		}
+	}
 	live, err := p.source(raw.ID)
 	if err != nil || live == nil || raw.FilePath != live.FilePath {
 		return err
@@ -340,7 +364,12 @@ func (p *rebuildConventionPass) prove(ctx context.Context) error {
 		}
 		id, confidence := live.result()
 		proofID, proofConfidence := proved.result()
-		if id != proofID || confidence != proofConfidence {
+		receipt, err := p.receiptPick(ctx, names, dirs, source.FilePath)
+		if err != nil {
+			return err
+		}
+		receiptID, receiptConfidence := receipt.result()
+		if id != proofID || confidence != proofConfidence || id != receiptID || confidence != receiptConfidence {
 			refused.add(graph.EdgeIdentityFor(e), nil)
 			return nil
 		}
