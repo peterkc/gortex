@@ -57,6 +57,16 @@ func TestStaleLangsDetection(t *testing.T) {
 		}
 	})
 
+	t.Run("native_thrift_namespace_upgrade", func(t *testing.T) {
+		old := snapshotJSON(t, nil, "thrift")
+		if got, want := ExtractorVersionStaleLangs(old), []string{"thrift"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("previous Thrift extraction must restage only Thrift: got %v, want %v", got, want)
+		}
+		if got, want := merkleSaltFor("model.thrift"), "_post_extraction_policy@2|thrift@2"; got != want {
+			t.Errorf("Thrift extractor salt = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("only_behind_langs", func(t *testing.T) {
 		stored := map[string]int{"go": 1, "python": 2, "ruby": 1}
 		current := map[string]int{"go": 2, "python": 2, "ruby": 1, "rust": 3, "lua": 1}

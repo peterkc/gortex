@@ -50,6 +50,7 @@ var extractorVersions = map[string]int{
 	"julia":      3,                                      // callee and macro decoding from CST children (chained/parametric callees, Base.@time, Base.:(==)), macro/operator exports, member_of for module consts and nested modules, @doc and public metadata (was: bespoke tree-sitter extractor replaced the regex extractor)
 	"javascript": 2,                                      // renamed per-binding imports persist import_alias Meta; older rows keyed a renamed import by its original name
 	"typescript": 4,                                      // gRPC import detection uses the TSX grammar for case-insensitive .tsx suffixes
+	"thrift":     2,                                      // fallback namespace selection orders scopes instead of depending on map iteration
 }
 
 // extractorSaltExtLang maps a lower-case file extension to the language
@@ -102,6 +103,7 @@ var extractorSaltExtLang = map[string]string{
 	".bash":   "bash",
 	".jl":     "julia",
 	".sql":    "sql",
+	".thrift": "thrift",
 }
 
 // ExtractorLangForFile returns the extractor-staleness language key for a

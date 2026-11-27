@@ -133,17 +133,21 @@ func (e *ThriftExtractor) Extract(filePath string, src []byte, nodes []*graph.No
 
 // pickThriftNamespace selects the Meta["package"] value from the
 // declared namespaces, preferring the generator-agnostic "*" scope,
-// then a stable per-language order, then any remaining scope.
+// then a stable per-language order, then the lexicographically first scope.
 func pickThriftNamespace(namespaces map[string]string) string {
 	for _, scope := range thriftNamespacePreference {
 		if ns, ok := namespaces[scope]; ok {
 			return ns
 		}
 	}
-	for _, ns := range namespaces {
-		return ns
+	var first string
+	var found bool
+	for scope := range namespaces {
+		if !found || scope < first {
+			first, found = scope, true
+		}
 	}
-	return ""
+	return namespaces[first]
 }
 
 // thriftArgList parses the parenthesised field list that starts after

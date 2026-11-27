@@ -155,3 +155,43 @@ func TestThriftExtractor_NonThriftFileIgnored(t *testing.T) {
 		t.Fatalf("non-.thrift file must produce no contracts, got %+v", out)
 	}
 }
+
+func TestThriftExtractor_NamespaceFallback(t *testing.T) {
+	ext := &ThriftExtractor{}
+	// PHP comes first in the source and its namespace sorts first by value.
+	// The fallback must sort by scope instead.
+	src := []byte(`namespace php alpha.php
+namespace csharp zeta.csharp
+
+service Example {
+  void ping()
+}
+`)
+	for i := range 64 {
+		out := ext.Extract("example.thrift", src, nil, nil)
+		if len(out) != 1 {
+			t.Fatalf("run %d: got %d contracts, want 1", i, len(out))
+		}
+		if got := out[0].Meta["package"]; got != "zeta.csharp" {
+			t.Fatalf("run %d: package = %v, want zeta.csharp", i, got)
+		}
+		if got := out[0].Meta["canonical"]; got != "zeta.csharp.Example/ping" {
+			t.Fatalf("run %d: canonical = %v, want zeta.csharp.Example/ping", i, got)
+		}
+	}
+}
+
+func TestPickThriftNamespace_PreferenceOrder(t *testing.T) {
+	// Keep the expected order independent of the production list.
+	order := []string{"*", "go", "java", "py", "python", "js", "rb", "cpp"}
+	namespaces := map[string]string{"aaa": "fallback"}
+	for _, scope := range order {
+		namespaces[scope] = "preferred:" + scope
+	}
+	for _, scope := range order {
+		if got, want := pickThriftNamespace(namespaces), namespaces[scope]; got != want {
+			t.Fatalf("when %q has highest preference, got %q, want %q", scope, got, want)
+		}
+		delete(namespaces, scope)
+	}
+}
