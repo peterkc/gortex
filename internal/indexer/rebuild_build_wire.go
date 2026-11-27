@@ -222,6 +222,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildValueRefs,
 	store_pebble.ErrRebuildFrameworkFamilyGate,
 	store_pebble.ErrRebuildDjangoDescriptor,
+	nil, // 97: deferred C# receiver demotion
 }
 
 func buildRefusal(err error) rebuildBuildReply {

@@ -126,6 +126,7 @@ func TestRebuildCallMoveOrderWireCodesRetired(t *testing.T) {
 		{84, nil}, // deferred Godot scene connections
 		{90, nil}, // deferred Rust scope
 		{93, nil}, // deferred Pascal form
+		{97, nil}, // deferred C# receiver demotion
 	} {
 		t.Run(fmt.Sprint(tc.retired), func(t *testing.T) {
 			require.Nil(t, rebuildFailureKinds[tc.retired-1])
