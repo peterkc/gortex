@@ -112,7 +112,6 @@ func (p *rebuildReduxThunkPass) node(id string) (*graph.Node, error) {
 
 func (p *rebuildReduxThunkPass) collect(ctx context.Context) (bool, error) {
 	haveThunks := false
-	var actionCap error
 	err := p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
 		light, err := checkedRebuildLightNode(r, p.label)
 		if err != nil || (light.Kind != graph.KindMethod && !rebuildStoreFactoryGetterKind(light.Kind)) {
@@ -127,36 +126,32 @@ func (p *rebuildReduxThunkPass) collect(ctx context.Context) (bool, error) {
 		if thunk == "" && (binding == "" || member == "") {
 			return nil
 		}
-		if err := p.nodeInput(r.key, r.value); err != nil {
-			if thunk != "" {
-				return err
-			}
-			actionCap = err
-			return nil
-		}
 		if n.ID == "" {
 			return invalid("Redux Thunk candidate has no ID")
 		}
-		if thunk != "" {
-			haveThunks = true
-			if err := p.candidate('t', thunk, n); err != nil {
-				return err
-			}
+		haveThunks = haveThunks || thunk != ""
+		if binding == "" {
+			member = ""
 		}
-		if binding != "" && member != "" {
-			err := p.candidate('a', member, n)
-			if !errors.Is(err, ErrRebuildLinkInputSize) {
+		oversized := p.nodeInput(r.key, r.value) != nil
+		for i, name := range [...]string{thunk, member} {
+			if name == "" {
+				continue
+			}
+			pool := [...]byte{'t', 'a'}[i]
+			if oversized {
+				if err := p.put(p.poolKey(pool, 'z', name), nil); err != nil {
+					return err
+				}
+				if err := p.put(p.poolKey(pool, 'Z', name, n.WorkspaceID), nil); err != nil {
+					return err
+				}
+			} else if err := p.candidate(pool, name, n); err != nil {
 				return err
 			}
-			actionCap = err
 		}
 		return nil
 	})
-	// Native does not consult the action index without a thunk. Defer
-	// its size refusal so iteration order cannot decide activation.
-	if err == nil && haveThunks {
-		err = actionCap
-	}
 	return haveThunks, err
 }
 
@@ -220,8 +215,12 @@ func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string, res
 		if err != nil {
 			return pick, err
 		}
+		oversized, err := p.present(p.poolKey(pool, 'z', callee))
+		if err != nil {
+			return pick, err
+		}
 		pick.inputs = append(pick.inputs, p.poolKey(pool, 'u', callee))
-		if !seen {
+		if !seen && !oversized {
 			pick.buckets = append(pick.buckets, rebuildStoreCandidateWitness{scoped, 0})
 			continue
 		}
@@ -240,7 +239,16 @@ func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string, res
 			if err != nil {
 				return pick, err
 			}
+			if oversized {
+				oversized, err = p.present(p.poolKey(pool, 'Z', callee, caller.WorkspaceID))
+				if err != nil {
+					return pick, err
+				}
+			}
 			callerFile = caller.FilePath
+		}
+		if oversized {
+			return pick, fmt.Errorf("%w: Redux Thunk node row", ErrRebuildLinkInputSize)
 		}
 		if seen && id == "" {
 			pick.bindingMatters = true

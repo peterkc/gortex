@@ -402,6 +402,59 @@ func requireRebuildReduxThunkOracle(t *testing.T, facts []store_pebble.ParseFact
 	}
 }
 
+func TestRebuildReduxThunkConsultedNodeCap(t *testing.T) {
+	const file = "thunks.ts"
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthReduxThunk})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name, callee, largeRole string
+		refuse                  bool
+	}{
+		{name: "no Call", largeRole: "thunk"},
+		{name: "unrelated thunk", callee: "first", largeRole: "thunk"},
+		{name: "consulted thunk", callee: "large", largeRole: "thunk", refuse: true},
+		{name: "thunk wins before action", callee: "first", largeRole: "same-name action"},
+		{name: "consulted action", callee: "large", largeRole: "action", refuse: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := rebuildEventNode(file, "dispatch", "typescript", "")
+			first := rebuildReduxThunkNode(file, "first")
+			large := rebuildReduxThunkNode(file, "large")
+			if tc.largeRole != "thunk" {
+				member := "large"
+				if tc.largeRole == "same-name action" {
+					member = first.Name
+				}
+				large.Meta = map[string]any{"store_factory": "useStore", "store_member": member}
+			}
+			large.Meta["payload"] = strings.Repeat("x", 16<<20)
+			facts := rebuildEventFacts(file, caller.Language, []*graph.Node{caller, first, large})
+			if tc.callee != "" {
+				facts.Edges = []*graph.Edge{rebuildReduxThunkMarker(caller, tc.callee, 3)}
+			}
+			b := openRebuildGRPCBuild(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			stats, err := RunRebuildReduxThunk(t.Context(), b, rebuildGRPCReceipts(facts), selection)
+			if tc.refuse {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildReduxThunk)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "Redux Thunk node row")
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			native := openRebuildTemporalOracle(t, facts)
+			want := 0
+			if tc.callee != "" {
+				want = 1
+			}
+			require.Equal(t, want, ResolveReduxThunkCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
 func rebuildReduxThunkNode(file, name string) *graph.Node {
 	n := rebuildEventNode(file, name, "typescript", "")
 	n.Kind = graph.KindVariable
