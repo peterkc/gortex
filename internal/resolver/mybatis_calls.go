@@ -64,14 +64,7 @@ func ResolveMyBatisCalls(g graph.Store) int {
 	var stubs []stubEdge
 	fromIDs := map[string]struct{}{}
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if v, _ := e.Meta["via"].(string); v != "mybatis.mapper" {
-			continue
-		}
-		ns, _ := e.Meta["mybatis_namespace"].(string)
-		stmt, _ := e.Meta["mybatis_statement"].(string)
+		ns, stmt := myBatisStub(e)
 		if ns == "" || stmt == "" {
 			continue
 		}
@@ -92,49 +85,60 @@ func ResolveMyBatisCalls(g graph.Store) int {
 		if from := fromNodes[e.From]; from != nil {
 			callerRepo = from.RepoPrefix
 		}
-		methodID, origin, conf := idx.lookup(s.namespace, s.statement, callerRepo)
-
-		want := methodID
-		if want == "" {
-			want = myBatisStubPlaceholder(s.namespace, s.statement)
-		}
-		if e.To == want {
-			if methodID != "" {
-				resolved++
-			}
-			continue
-		}
-
-		oldTo := e.To
-		e.To = want
-		if e.Meta == nil {
-			e.Meta = map[string]any{}
-		}
+		methodID := idx.lookup(s.namespace, s.statement, callerRepo)
 		if methodID != "" {
-			e.Origin = origin
-			e.Confidence = conf
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, conf)
-			e.Meta["synthesized_by"] = "mybatis"
-			e.Meta["provenance"] = "heuristic"
-			e.Meta["mybatis_resolution"] = origin
 			resolved++
-		} else {
-			// Re-orphaned (method removed since the last pass): drop the
-			// resolution-tier metadata so the edge reads as a plain
-			// unresolved placeholder again.
-			e.Origin = ""
-			e.Confidence = 0
-			e.ConfidenceLabel = ""
-			delete(e.Meta, "synthesized_by")
-			delete(e.Meta, "provenance")
-			delete(e.Meta, "mybatis_resolution")
 		}
-		reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		oldTo := e.To
+		if rebindMyBatisCall(e, s.namespace, s.statement, methodID) {
+			reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		}
 	}
 	if len(reindexBatch) > 0 {
 		g.ReindexEdges(reindexBatch)
 	}
 	return resolved
+}
+
+func myBatisStub(e *graph.Edge) (namespace, statement string) {
+	if e != nil {
+		if via, _ := e.Meta["via"].(string); via == "mybatis.mapper" {
+			namespace, _ = e.Meta["mybatis_namespace"].(string)
+			statement, _ = e.Meta["mybatis_statement"].(string)
+		}
+	}
+	return namespace, statement
+}
+
+// rebindMyBatisCall leaves a stationary payload untouched. Moving rows share
+// the same resolution and re-orphaning stamps on both write paths.
+func rebindMyBatisCall(e *graph.Edge, namespace, statement, method string) bool {
+	want := method
+	if want == "" {
+		want = myBatisStubPlaceholder(namespace, statement)
+	}
+	if e.To == want {
+		return false
+	}
+	e.To = want
+	if method != "" {
+		const confidence = 0.7
+		e.Origin = graph.OriginASTInferred
+		e.Confidence = confidence
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, confidence)
+		e.Meta["synthesized_by"] = "mybatis"
+		e.Meta["provenance"] = "heuristic"
+		e.Meta["mybatis_resolution"] = e.Origin
+	} else {
+		// A removed or ambiguous method leaves a plain placeholder again.
+		e.Origin = ""
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		delete(e.Meta, "synthesized_by")
+		delete(e.Meta, "provenance")
+		delete(e.Meta, "mybatis_resolution")
+	}
+	return true
 }
 
 // myBatisStubPlaceholder is the canonical placeholder target for an
@@ -152,16 +156,16 @@ type myBatisMethodIndex struct {
 // lookup returns the Java DAO method node for (namespace, statement),
 // preferring a same-repo candidate over a cross-repo one. namespace is
 // the interface FQCN (`com.app.UserMapper`); its simple class name plus
-// the statement id form the join key. Returns ("", "", 0) when no unique
+// the statement id form the join key. Returns "" when no unique
 // method is found.
-func (idx *myBatisMethodIndex) lookup(namespace, statement, callerRepo string) (id, origin string, confidence float64) {
+func (idx *myBatisMethodIndex) lookup(namespace, statement, callerRepo string) string {
 	key := myBatisJoinKey(namespace, statement)
 	if key == "" {
-		return "", "", 0
+		return ""
 	}
 	cands := idx.byKey[key]
 	if len(cands) == 0 {
-		return "", "", 0
+		return ""
 	}
 	var sameRepo []*graph.Node
 	for _, n := range cands {
@@ -170,12 +174,12 @@ func (idx *myBatisMethodIndex) lookup(namespace, statement, callerRepo string) (
 		}
 	}
 	if len(sameRepo) == 1 {
-		return sameRepo[0].ID, graph.OriginASTInferred, 0.7
+		return sameRepo[0].ID
 	}
 	if len(sameRepo) == 0 && len(cands) == 1 {
-		return cands[0].ID, graph.OriginASTInferred, 0.7
+		return cands[0].ID
 	}
-	return "", "", 0
+	return ""
 }
 
 // buildMyBatisMethodIndex walks every Java method node once and indexes
