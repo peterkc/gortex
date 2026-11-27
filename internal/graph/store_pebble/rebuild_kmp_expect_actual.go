@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -280,9 +281,9 @@ func sameRebuildKMPInput(raw, live *graph.Node) bool {
 		live.FilePath != raw.FilePath || live.StartLine != raw.StartLine || live.RepoPrefix != raw.RepoPrefix {
 		return false
 	}
-	rawRole, _ := raw.Meta["kmp_role"].(string)
-	liveRole, _ := live.Meta["kmp_role"].(string)
-	return rawRole == liveRole
+	value, present := raw.Meta["kmp_role"]
+	current, found := live.Meta["kmp_role"]
+	return present == found && reflect.DeepEqual(value, current)
 }
 
 func (p *rebuildKMPPass) visitProposals(ctx context.Context, yield func(*graph.Edge) error) error {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"reflect"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
@@ -234,9 +235,14 @@ func sameRebuildRNPairInput(raw, live *graph.Node) bool {
 		live.Name != raw.Name || live.FilePath != raw.FilePath || live.StartLine != raw.StartLine || live.RepoPrefix != raw.RepoPrefix {
 		return false
 	}
-	rawModule, rawMethod := rebuildRNNames(raw.Meta)
-	liveModule, liveMethod := rebuildRNNames(live.Meta)
-	return rawModule == liveModule && rawMethod == liveMethod
+	for _, key := range [...]string{"rn_module", "rn_method"} {
+		value, present := raw.Meta[key]
+		current, found := live.Meta[key]
+		if present != found || !reflect.DeepEqual(value, current) {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *rebuildRNPairPass) visit(ctx context.Context, yield func(*graph.Edge) error) error {

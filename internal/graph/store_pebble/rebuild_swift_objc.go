@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"reflect"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
@@ -145,16 +146,14 @@ func sameRebuildSwiftObjCInput(raw, live *graph.Node) bool {
 		live.Name != raw.Name || live.FilePath != raw.FilePath || live.StartLine != raw.StartLine || live.RepoPrefix != raw.RepoPrefix {
 		return false
 	}
-	for _, key := range [...]string{"objc_selector", "objc_setter_selector", "objc_protocols"} {
-		a, _ := raw.Meta[key].(string)
-		b, _ := live.Meta[key].(string)
-		if a != b {
+	for _, key := range [...]string{"objc_selector", "objc_setter_selector", "objc_protocols", "objc"} {
+		value, present := raw.Meta[key]
+		current, found := live.Meta[key]
+		if present != found || !reflect.DeepEqual(value, current) {
 			return false
 		}
 	}
-	a, _ := raw.Meta["objc"].(bool)
-	b, _ := live.Meta["objc"].(bool)
-	return a == b
+	return true
 }
 
 func (p *rebuildSwiftObjCPass) visit(ctx context.Context, yield func(*graph.Edge) error) error {
