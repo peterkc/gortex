@@ -64,8 +64,7 @@ func (r *Resolver) mergeCSharpPartialTypes() {
 func (r *Resolver) mergeCSharpPartialTypesForFile(filePath string) {
 	var keys map[csharpTypeKey]bool
 	for _, n := range r.incrementalFileNodes(filePath) {
-		if n == nil || n.Kind != graph.KindType || n.Language != "csharp" ||
-			n.Name == "" || n.FilePath == "" {
+		if !csharpPartialType(n) {
 			continue
 		}
 		if keys == nil {
@@ -146,12 +145,9 @@ func (r *Resolver) mergeCSharpPartialGroups(groups map[csharpTypeKey][]*graph.No
 			// To-rewrite: anything pointing AT the fragment now points at
 			// canonical (member_of, defines, incoming references).
 			for _, e := range inByFrag[fid] {
-				if e.To != fid || e.To == canonical.ID {
-					continue
+				if move, ok := csharpPartialRetarget(e, fid, canonical.ID); ok {
+					batch = append(batch, move)
 				}
-				oldTo := e.To
-				e.To = canonical.ID
-				batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 			}
 			// From-rewrite: edges originating AT the fragment move to
 			// canonical (implements / extends), deduped.
@@ -161,28 +157,16 @@ func (r *Resolver) mergeCSharpPartialGroups(groups map[csharpTypeKey][]*graph.No
 				}
 				sig := [2]string{string(e.Kind), e.To}
 				if !out[sig] {
-					ne := *e // copy provenance (Origin / Tier / Confidence / Meta)
-					ne.From = canonical.ID
-					r.graph.AddEdge(&ne)
+					r.graph.AddEdge(csharpPartialCopyFrom(e, canonical.ID))
 					out[sig] = true
 				}
 				r.graph.RemoveEdge(e.From, e.To, e.Kind)
 			}
-			if frag := r.graph.GetNode(fid); frag != nil {
-				if frag.Meta == nil {
-					frag.Meta = map[string]any{}
-				}
-				if frag.Meta[metaPartialMergedInto] != canonical.ID {
-					frag.Meta[metaPartialMergedInto] = canonical.ID
-					changedNodes = append(changedNodes, frag)
-				}
+			if frag := r.graph.GetNode(fid); frag != nil && csharpPartialStamp(frag, metaPartialMergedInto, canonical.ID) {
+				changedNodes = append(changedNodes, frag)
 			}
 		}
-		if canonical.Meta == nil {
-			canonical.Meta = map[string]any{}
-		}
-		if canonical.Meta["partial"] != true {
-			canonical.Meta["partial"] = true
+		if csharpPartialStamp(canonical, "partial", true) {
 			changedNodes = append(changedNodes, canonical)
 		}
 		merged++
@@ -201,4 +185,34 @@ func (r *Resolver) mergeCSharpPartialGroups(groups map[csharpTypeKey][]*graph.No
 			zap.Int("retargeted_in_edges", len(batch)),
 			zap.Duration("took", time.Since(t0)))
 	}
+}
+
+func csharpPartialType(n *graph.Node) bool {
+	return n != nil && n.Kind == graph.KindType && n.Language == "csharp" && n.Name != "" && n.FilePath != ""
+}
+
+func csharpPartialRetarget(e *graph.Edge, fragment, canonical string) (graph.EdgeReindex, bool) {
+	if e.To != fragment || e.To == canonical {
+		return graph.EdgeReindex{}, false
+	}
+	oldTo := e.To
+	e.To = canonical
+	return graph.EdgeReindex{Edge: e, OldTo: oldTo}, true
+}
+
+func csharpPartialCopyFrom(e *graph.Edge, canonical string) *graph.Edge {
+	ne := *e // Preserve the source row's provenance and metadata.
+	ne.From = canonical
+	return &ne
+}
+
+func csharpPartialStamp(n *graph.Node, key string, value any) bool {
+	if n.Meta[key] == value {
+		return false
+	}
+	if n.Meta == nil {
+		n.Meta = map[string]any{}
+	}
+	n.Meta[key] = value
+	return true
 }
