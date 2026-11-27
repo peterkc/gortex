@@ -22,7 +22,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 		SynthReactNative, SynthReactNativePair, SynthObserverChannel, SynthClosureCollection,
 		SynthReactSetState, SynthFlutterSetState, SynthKMPExpectActual, SynthExpoModules, SynthFabric, SynthMyBatis,
 		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthNgRxEffect,
-		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery, SynthSpringEvent, SynthMediatR, SynthSidekiq,
+		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery, SynthSpringEvent, SynthMediatR, SynthCSharpIfaceDispatch, SynthSidekiq,
 	} {
 		if selection.allows(name) {
 			frozen.names[name] = struct{}{}

@@ -51,6 +51,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Celery", "moves", 1},
 		{"Spring events", "moves", 1},
 		{"MediatR", "moves", 1},
+		{"C# interface dispatch", "edges", 1},
 		{"Sidekiq", "moves", 1},
 	}
 	for _, tc := range []struct {
@@ -620,6 +621,21 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	mediatrFacts := receipt([]*graph.Node{mediatrDispatch, handler}, edge(mediatrDispatch, mediatrDispatch.ID, graph.EdgeCalls, 2,
 		map[string]any{"via": "mediatr-dispatch", "mediatr_kind": "request", "mediatr_request_type": "UpdateClock"}))
 
+	const ifaceFile = "DispatchInterface.cs"
+	iface := node(ifaceFile, "csharp", "IClock", graph.KindInterface, 1)
+	ifaceMethod := node(ifaceFile, "csharp", "Tick", graph.KindMethod, 2)
+	ifaceMethod.Meta = map[string]any{"iface_member": true}
+	impl := node(ifaceFile, "csharp", "Clock", graph.KindType, 4)
+	implMethod := node(ifaceFile, "csharp", ifaceMethod.Name, graph.KindMethod, 5)
+	ifaceMethod.ID, implMethod.ID = iface.ID+".Tick", impl.ID+".Tick"
+	invoke := node(ifaceFile, "csharp", "invoke", graph.KindMethod, 7)
+	ifaceFacts := receipt([]*graph.Node{iface, ifaceMethod, impl, implMethod, invoke},
+		edge(ifaceMethod, iface.ID, graph.EdgeMemberOf, 2, nil),
+		edge(impl, iface.ID, graph.EdgeImplements, 4, nil),
+		edge(implMethod, impl.ID, graph.EdgeMemberOf, 5, nil),
+		edge(invoke, ifaceMethod.ID, graph.EdgeCalls, 8, nil),
+	)
+
 	const sidekiqFile = "workers.rb"
 	enqueue := node(sidekiqFile, "ruby", "enqueue", graph.KindMethod, 1)
 	perform := node(sidekiqFile, "ruby", "perform", graph.KindMethod, 4)
@@ -637,6 +653,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
-		celeryFacts, springFacts, mediatrFacts, sidekiqFacts,
+		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts,
 	}
 }
