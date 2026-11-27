@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"testing"
 
@@ -92,10 +93,13 @@ func TestRebuildObjectRegistrySQLiteOracle(t *testing.T) {
 			require.Equal(t, true, e.Meta["registry_claimed"])
 		}
 	}
-	for _, moves := range []uint64{5, 0} {
+	for _, wantStats := range []store_pebble.RebuildObjectRegistryStats{
+		{Stubs: 6, Resolved: 5, Moves: 5},
+		{Stubs: 4, Resolved: 3},
+	} {
 		stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(facts), selection)
 		require.NoError(t, err)
-		require.Equal(t, moves, stats.Moves)
+		require.Equal(t, wantStats, stats)
 		require.Equal(t, want, rebuildEventSavedRows(t, private))
 	}
 
@@ -155,7 +159,7 @@ func TestRebuildObjectRegistryCandidateProof(t *testing.T) {
 			stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(proof), selection)
 			if bad == "none" {
 				require.NoError(t, err)
-				require.Equal(t, uint64(1), stats.Moves)
+				require.Equal(t, store_pebble.RebuildObjectRegistryStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
 				native := openRebuildTemporalOracle(t, facts, remote)
 				require.Equal(t, 1, ResolveObjectRegistryCalls(native))
 				require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
@@ -208,7 +212,7 @@ func TestRebuildObjectRegistryRoleProof(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, uint64(1), stats.Moves)
+			require.Equal(t, store_pebble.RebuildObjectRegistryStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
 			native := openRebuildTemporalOracle(t, facts)
 			require.Equal(t, 1, ResolveObjectRegistryCalls(native))
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
@@ -265,7 +269,7 @@ func TestRebuildObjectRegistrySQLiteMoveWindow(t *testing.T) {
 			require.Equal(t, sameWindow, hasB)
 			stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(facts), selection)
 			require.NoError(t, err)
-			require.Equal(t, uint64(graph.SQLiteReindexChunkSize+1), stats.Moves)
+			require.Equal(t, store_pebble.RebuildObjectRegistryStats{Stubs: graph.SQLiteReindexChunkSize + 1, Resolved: graph.SQLiteReindexChunkSize + 1, Moves: graph.SQLiteReindexChunkSize + 1}, stats)
 			require.Equal(t, want, rebuildEventSavedRows(t, private))
 		})
 	}
@@ -338,6 +342,221 @@ func TestRebuildObjectRegistryStationaryMembershipOrder(t *testing.T) {
 				require.Equal(t, store_pebble.RebuildObjectRegistryStats{Stubs: 1, Resolved: 1}, stats)
 			}
 			require.Equal(t, before, rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
+func TestRebuildObjectRegistryNoMethods(t *testing.T) {
+	const file = "registry.js"
+	method, member := objectRegistryTestMethod(file, file+"::Cmd.run", "run", "Cmd")
+	method.Kind = graph.KindVariable
+	call := objectRegistryTestCall(file+"::dispatch", "stale", file, "Cmd", "run", 3)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
+	require.NoError(t, err)
+	for _, haveMember := range []bool{false, true} {
+		t.Run(fmt.Sprint(haveMember), func(t *testing.T) {
+			facts := rebuildEventFacts(file, "javascript", []*graph.Node{method}, call)
+			if haveMember {
+				facts.Edges = append(facts.Edges, member)
+			}
+			private := openRebuildGRPCBuild(t, facts)
+			before := rebuildEventSavedRows(t, private)
+			replays := 0
+			receipts := func(yield func(store_pebble.ParseFacts, error) bool) {
+				replays++
+				yield(facts, nil)
+			}
+			stats, err := RunRebuildObjectRegistry(t.Context(), private, receipts, selection)
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildObjectRegistryStats{Stubs: 1}, stats)
+			if haveMember {
+				require.Equal(t, 1, replays)
+			} else {
+				require.Zero(t, replays)
+			}
+			native := openRebuildTemporalOracle(t, facts)
+			require.Zero(t, ResolveObjectRegistryCalls(native))
+			require.Equal(t, before, rebuildEventSQLiteRows(native))
+			require.Equal(t, before, rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
+func TestRebuildObjectRegistryAlternateMembershipBucket(t *testing.T) {
+	const file = "registry.js"
+	winner, member := objectRegistryTestMethod(file, file+"::Cmd.run", "run", "Cmd")
+	peer, other := objectRegistryTestMethod(file, file+"::Other.run", "run", "Other")
+	call := objectRegistryTestCall(file+"::dispatch", "unresolved::*.Cmd", file, "Cmd", "run", 4)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
+	require.NoError(t, err)
+	for _, class := range []string{"Cmd", "Unrelated"} {
+		t.Run(class, func(t *testing.T) {
+			alternate := *other
+			alternate.To = "other.js::" + class
+			facts := rebuildEventFacts(file, "javascript", []*graph.Node{winner, peer}, member, other, &alternate, call)
+			proof := facts
+			proof.Edges = []*graph.Edge{member, other, call}
+			private := openRebuildGRPCBuild(t, facts)
+			before := rebuildEventSavedRows(t, private)
+			stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(proof), selection)
+			if class == "Cmd" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, private))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildObjectRegistryStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+			native := openRebuildTemporalOracle(t, facts)
+			require.Equal(t, 1, ResolveObjectRegistryCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
+func TestRebuildObjectRegistryCallProof(t *testing.T) {
+	const file, remote = "registry.js", "remote.js"
+	caller := &graph.Node{ID: file + "::dispatch", Name: "dispatch", Kind: graph.KindFunction, FilePath: file, Language: "javascript"}
+	local, member := objectRegistryTestMethod(file, file+"::Cmd.run", "run", "Cmd")
+	peer, other := objectRegistryTestMethod(remote, remote+"::Cmd.run", "run", "Cmd")
+	call := objectRegistryTestCall(caller.ID, "stale", file, "Cmd", "run", 4)
+	call.Meta["store_binding"] = "useStore"
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
+	require.NoError(t, err)
+	for _, field := range []string{"class", "method", "binding", "owner", "language", "caller file", "caller workspace", "unused binding"} {
+		t.Run(field, func(t *testing.T) {
+			liveCaller := *caller
+			rawCaller := *caller
+			raw := *call
+			raw.Meta = maps.Clone(call.Meta)
+			switch field {
+			case "class":
+				raw.Meta["registry_value"] = "Other"
+			case "method":
+				raw.Meta["registry_method"] = "execute"
+			case "binding", "unused binding":
+				raw.Meta["store_binding"] = "otherStore"
+			case "caller file":
+				rawCaller.FilePath = remote
+			case "caller workspace":
+				liveCaller.WorkspaceID = "foreign"
+			}
+			facts := rebuildEventFacts(file, "javascript", []*graph.Node{&liveCaller, local}, member, call)
+			input := []store_pebble.ParseFacts{facts}
+			// Keep membership and candidate receipts exact when the Call's owning file or language differs.
+			proof := rebuildEventFacts(file, "javascript", []*graph.Node{local}, member)
+			callProof := rebuildEventFacts(file, "javascript", nil, &raw)
+			switch field {
+			case "owner":
+				callProof.File.FilePath = remote
+			case "language":
+				callProof.EffectiveLanguage = ""
+			}
+			receipts := []store_pebble.ParseFacts{proof, callProof, rebuildEventFacts(rawCaller.FilePath, "javascript", []*graph.Node{&rawCaller})}
+			if field == "binding" {
+				remoteFacts := rebuildEventFacts(remote, "javascript", []*graph.Node{peer}, other)
+				input, receipts = append(input, remoteFacts), append(receipts, remoteFacts)
+			}
+			private := openRebuildGRPCBuild(t, input...)
+			before := rebuildEventSavedRows(t, private)
+			stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(receipts...), selection)
+			if field == "unused binding" {
+				require.NoError(t, err)
+				require.Equal(t, store_pebble.RebuildObjectRegistryStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+				native := openRebuildTemporalOracle(t, input...)
+				require.Equal(t, 1, ResolveObjectRegistryCalls(native))
+				require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
+				return
+			}
+			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
+func TestRebuildObjectRegistryAnchorProof(t *testing.T) {
+	const file = "registry.js"
+	caller := &graph.Node{ID: file + "::dispatch", Kind: graph.KindFunction, FilePath: file, Language: "javascript"}
+	method, member := objectRegistryTestMethod(file, file+"::Cmd.run", "run", "Cmd")
+	call := objectRegistryTestCall(caller.ID, "stale", file, "Gone", "run", 4)
+	facts := rebuildEventFacts(file, "javascript", []*graph.Node{caller, method}, member, call)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
+	require.NoError(t, err)
+	for _, mode := range []string{"missing", "unpositioned"} {
+		t.Run(mode, func(t *testing.T) {
+			private := openRebuildGRPCBuild(t, facts)
+			before := rebuildEventSavedRows(t, private)
+			proof := rebuildEventFacts(file, "javascript", nil, call)
+			if mode == "unpositioned" {
+				proof.Nodes = []*graph.Node{method}
+			}
+			stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(proof), selection)
+			if mode == "missing" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, private))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildObjectRegistryStats{Stubs: 1, Moves: 1}, stats)
+			native := openRebuildTemporalOracle(t, facts)
+			require.Zero(t, ResolveObjectRegistryCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
+func TestRebuildObjectRegistryGetterProof(t *testing.T) {
+	const file, remote, absent = "registry.js", "remote.js", "absent.js"
+	caller := &graph.Node{ID: file + "::dispatch", Kind: graph.KindFunction, FilePath: file, Language: "javascript"}
+	local, member := objectRegistryTestMethod(file, file+"::Cmd.run", "run", "Cmd")
+	peer, other := objectRegistryTestMethod(remote, remote+"::Cmd.run", "run", "Cmd")
+	call := objectRegistryTestCall(caller.ID, "unresolved::*.Cmd", file, "Cmd", "run", 4)
+	call.Meta["store_binding"] = "useStore"
+	facts := rebuildEventFacts(file, "javascript", []*graph.Node{caller, local}, member, call)
+	remoteFacts := rebuildEventFacts(remote, "javascript", []*graph.Node{peer}, other)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
+	require.NoError(t, err)
+	for _, mode := range []string{"undeciding", "winner", "moved", "same as caller"} {
+		t.Run(mode, func(t *testing.T) {
+			getter := &graph.Node{ID: "useStore", Name: "useStore", Kind: graph.KindVariable, FilePath: absent, Language: "javascript"}
+			input := []store_pebble.ParseFacts{facts, remoteFacts}
+			if mode == "winner" {
+				getter.FilePath = remote
+				decl := remoteFacts
+				decl.Nodes = []*graph.Node{peer, getter}
+				decl.File.NodeCount = len(decl.Nodes)
+				input[1] = decl
+			} else if mode == "same as caller" {
+				getter.FilePath = file
+				decl := facts
+				decl.Nodes = []*graph.Node{caller, local, getter}
+				decl.File.NodeCount = len(decl.Nodes)
+				input[0] = decl
+			} else {
+				input = append(input, rebuildEventFacts(absent, "javascript", []*graph.Node{getter}))
+			}
+			proof := []store_pebble.ParseFacts{facts, remoteFacts}
+			if mode == "moved" {
+				raw := *getter
+				raw.FilePath = remote
+				proof = append(proof, rebuildEventFacts(remote, "javascript", []*graph.Node{&raw}))
+			}
+			private := openRebuildGRPCBuild(t, input...)
+			before := rebuildEventSavedRows(t, private)
+			stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(proof...), selection)
+			if mode == "winner" || mode == "moved" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, private))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildObjectRegistryStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+			native := openRebuildTemporalOracle(t, input...)
+			require.Equal(t, 1, ResolveObjectRegistryCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
 		})
 	}
 }

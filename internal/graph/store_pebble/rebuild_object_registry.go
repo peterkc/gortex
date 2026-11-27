@@ -32,8 +32,9 @@ type RebuildObjectRegistryStats struct {
 
 type rebuildObjectRegistryPass struct {
 	rebuildCallMoves
-	rules RebuildObjectRegistryRules
-	stats RebuildObjectRegistryStats
+	rules       RebuildObjectRegistryRules
+	stats       RebuildObjectRegistryStats
+	haveMembers bool
 }
 
 // RebuildObjectRegistry matches the direct SQLite path. The native mutation
@@ -63,15 +64,15 @@ func (b *BuildStore) RebuildObjectRegistry(ctx context.Context, receipts iter.Se
 	}()
 	p := rebuildObjectRegistryPass{
 		rebuildCallMoves: rebuildCallMoves{
-			b: b, prefix: prefix, rowBytes: 16 << 20, label: "Object Registry", inputRow: "edge row", allowUncheckedRows: true,
+			b: b, prefix: prefix, rowBytes: 16 << 20, label: "Object Registry", inputRow: "edge row",
 		},
 		rules: rules,
 	}
 	if err := p.collectEdges(ctx, graph.EdgeCalls); err != nil || p.stats.Stubs == 0 {
 		return p.stats, err
 	}
-	if err := p.collectEdges(ctx, graph.EdgeMemberOf); err != nil {
-		return stats, err
+	if err := p.collectEdges(ctx, graph.EdgeMemberOf); err != nil || !p.haveMembers {
+		return p.stats, err
 	}
 	if err := p.orderMemberships(ctx, receipts); err != nil {
 		return stats, err
@@ -125,7 +126,8 @@ func (p *rebuildObjectRegistryPass) collectEdges(ctx context.Context, kind graph
 			if err != nil {
 				return err
 			}
-			if class, _ := p.rules.Call(e); class == "" {
+			class, _ := p.rules.Call(e)
+			if class == "" {
 				return nil
 			}
 			if err := p.input(r.key, r.value); err != nil {
@@ -134,10 +136,8 @@ func (p *rebuildObjectRegistryPass) collectEdges(ctx context.Context, kind graph
 			if err := p.put(append(p.column('l'), r.key...), nil); err != nil {
 				return err
 			}
-			if binding, _ := e.Meta["store_binding"].(string); binding != "" {
-				if err := p.put(p.key('b', binding), nil); err != nil {
-					return err
-				}
+			if err := p.put(p.key('k', class), nil); err != nil {
+				return err
 			}
 			p.stats.Stubs++
 			col = 'r' // shared move helper's Call recorder
@@ -146,6 +146,7 @@ func (p *rebuildObjectRegistryPass) collectEdges(ctx context.Context, kind graph
 			if err != nil || e.From == "" || e.To == "" {
 				return err
 			}
+			p.haveMembers = true
 		}
 		raw, err := rebuildReceiptKey(snap, r.key)
 		if errors.Is(err, ErrRebuildUnknownProvenance) {
@@ -238,26 +239,6 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 		if err != nil {
 			return err
 		}
-		if rebuildStoreFactoryGetterKind(n.Kind) && n.FilePath != "" {
-			wanted, err := p.present(p.key('b', n.Name))
-			if err != nil {
-				return err
-			}
-			if wanted {
-				full, err := decodeNode(r.value)
-				if err != nil {
-					return err
-				}
-				if p.rules.Getter(full, n.Name) {
-					if err := p.put(p.key('g', n.ID), append([]byte{rebuildCapabilityWanted}, p.key('v', n.Name)...)); err != nil {
-						return err
-					}
-					if err := p.addUnique(p.key('t', n.Name), n.FilePath); err != nil {
-						return err
-					}
-				}
-			}
-		}
 		if !rebuildObjectRegistryCallable(n.Kind) || n.ID == "" {
 			return nil
 		}
@@ -291,6 +272,13 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 					if possible == "" {
 						continue
 					}
+					wanted, err := p.present(p.key('k', possible))
+					if err != nil {
+						return err
+					}
+					if !wanted {
+						continue
+					}
 					cohort := p.key('u', possible, n.Name)
 					for _, bucket := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'i', n) {
 						if err := p.put(p.key('e', string(bucket)), nil); err != nil {
@@ -318,8 +306,9 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 		if err := p.put(p.key('c', n.ID), append([]byte{state}, cohort...)); err != nil {
 			return err
 		}
-		if class == "" {
-			return nil
+		wanted, err := p.present(p.key('k', class))
+		if err != nil || !wanted {
+			return err
 		}
 		for _, key := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'i', n) {
 			if err := p.addUnique(key, n.ID); err != nil {
@@ -331,39 +320,81 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 	return haveMethods, err
 }
 
-type rebuildObjectRegistryPick struct {
-	target  string
-	caller  *graph.Node
-	buckets []rebuildStoreCandidateWitness
-	getter  bool
+func (p *rebuildObjectRegistryPass) collectGetters(ctx context.Context) error {
+	return p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
+		n, err := checkedRebuildLightNode(r, p.label)
+		if err != nil || !rebuildStoreFactoryGetterKind(n.Kind) || n.FilePath == "" {
+			return err
+		}
+		wanted, err := p.present(p.key('b', n.Name))
+		if err != nil || !wanted {
+			return err
+		}
+		full, err := decodeNode(r.value)
+		if err != nil || !p.rules.Getter(full, n.Name) {
+			return err
+		}
+		if err := p.put(p.key('g', n.ID), append([]byte{rebuildCapabilityWanted}, p.key('v', n.Name)...)); err != nil {
+			return err
+		}
+		return p.addUnique(p.key('t', n.Name), n.FilePath)
+	})
 }
 
-func (p *rebuildObjectRegistryPass) elect(e *graph.Edge) (pick rebuildObjectRegistryPick, err error) {
+type rebuildObjectRegistryPick struct {
+	target       string
+	caller       *graph.Node
+	buckets      []rebuildStoreCandidateWitness
+	nonempty     bool
+	readsBinding bool
+	getterProof  bool
+	deferred     bool
+}
+
+func (p *rebuildObjectRegistryPass) elect(e *graph.Edge, resolveGetter bool) (pick rebuildObjectRegistryPick, err error) {
 	class, method := p.rules.Call(e)
 	binding, _ := e.Meta["store_binding"].(string)
-	pick.caller, err = p.node(e.From)
-	if err != nil {
-		return pick, err
-	}
-	var callerFile string
-	if pick.caller != nil {
-		callerFile = pick.caller.FilePath
-	}
+	var callerRead bool
 	for _, name := range p.rules.MethodOrder(method) {
 		scoped := p.key('i', class, name)
-		if pick.caller != nil {
-			scoped = p.key('w', class, name, pick.caller.WorkspaceID)
-		}
 		id, seen, err := p.unique(scoped)
 		if err != nil {
 			return pick, err
 		}
+		if !seen {
+			pick.buckets = append(pick.buckets, rebuildStoreCandidateWitness{scoped, 0})
+			continue
+		}
+		if !callerRead {
+			pick.caller, err = p.node(e.From)
+			if err != nil {
+				return pick, err
+			}
+			callerRead = true
+		}
+		var callerFile string
+		if pick.caller != nil {
+			callerFile = pick.caller.FilePath
+			scoped = p.key('w', class, name, pick.caller.WorkspaceID)
+			id, seen, err = p.unique(scoped)
+			if err != nil {
+				return pick, err
+			}
+		}
+		if seen && id == "" {
+			pick.readsBinding = true
+			if !resolveGetter && binding != "" {
+				pick.deferred = true
+				return pick, nil
+			}
+		}
+		var getterFile string
 		decision, err := pickRebuildStoreCandidate(p.unique, scoped, id, seen, func() (string, error) {
 			if binding == "" {
 				return "", nil
 			}
-			pick.getter = true
 			file, _, err := p.unique(p.key('t', binding))
+			getterFile = file
 			return file, err
 		}, callerFile, func(file string) []byte {
 			if pick.caller != nil {
@@ -374,6 +405,10 @@ func (p *rebuildObjectRegistryPass) elect(e *graph.Edge) (pick rebuildObjectRegi
 		if err != nil {
 			return pick, err
 		}
+		if seen && id == "" && binding != "" {
+			pick.getterProof = pick.getterProof || getterFile == "" || decision.getterWinner
+		}
+		pick.nonempty = pick.nonempty || decision.nonempty
 		pick.buckets = append(pick.buckets, decision.buckets...)
 		if decision.target != "" {
 			pick.target = decision.target
@@ -384,74 +419,95 @@ func (p *rebuildObjectRegistryPass) elect(e *graph.Edge) (pick rebuildObjectRegi
 }
 
 func (p *rebuildObjectRegistryPass) plan(ctx context.Context) error {
-	prefix := p.column('l')
 	var refused rebuildScratchRefusals
-	err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		old := r.key[len(prefix):]
-		e, err := p.edge(old)
-		if err != nil {
-			return err
-		}
-		if e == nil {
-			return invalid("Object Registry Call missing")
-		}
-		pick, err := p.elect(e)
-		if err != nil {
-			return err
-		}
-		if pick.target != "" {
-			p.stats.Resolved++
-		}
-		class, _ := p.rules.Call(e)
-		if !p.rules.Rebind(e, class, pick.target, pick.target != "") {
-			// A no-op still needs a stable class membership election.
-			for _, witness := range pick.buckets {
-				uncertain, err := p.present(p.key('e', string(witness.bucket)))
-				if err != nil {
-					return err
-				}
-				if uncertain {
-					refused.add(graph.EdgeIdentityFor(e), old)
-					break
-				}
+	deferred := false
+	for _, col := range [...]byte{'l', 'd'} {
+		if col == 'd' {
+			if !deferred {
+				break
 			}
-			return nil
-		}
-		if pick.caller != nil {
-			if err := p.put(p.key('n', pick.caller.ID), []byte{rebuildCapabilityWanted}); err != nil {
+			if err := p.collectGetters(ctx); err != nil {
 				return err
 			}
 		}
-		if pick.getter {
-			binding, _ := e.Meta["store_binding"].(string)
-			if err := p.put(p.key('v', binding), []byte{rebuildCapabilityWanted}); err != nil {
-				return err
-			}
-		}
-		if err := p.wantCandidateBuckets(pick.buckets); err != nil {
-			return err
-		}
-		for _, witness := range pick.buckets {
-			extra, err := p.present(p.key('e', string(witness.bucket)))
+		prefix := p.column(col)
+		if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+			old := r.key[len(prefix):]
+			e, err := p.edge(old)
 			if err != nil {
 				return err
 			}
-			if extra {
-				if err := p.put(p.candidateProofKey(witness.bucket), []byte{1 | rebuildStoreCandidateExtra}); err != nil {
+			if e == nil {
+				return invalid("Object Registry Call missing")
+			}
+			pick, err := p.elect(e, col == 'd')
+			if err != nil {
+				return err
+			}
+			if pick.deferred {
+				deferred = true
+				binding, _ := e.Meta["store_binding"].(string)
+				if err := p.put(p.key('b', binding), nil); err != nil {
 					return err
 				}
+				return p.put(append(p.column('d'), old...), nil)
 			}
-		}
-		if err := p.stage(old, e); err != nil {
+			return p.planCall(old, e, pick, &refused)
+		}); err != nil {
 			return err
 		}
-		p.stats.Moves++
-		return nil
-	})
-	if err != nil {
-		return err
 	}
 	return refused.err()
+}
+
+func (p *rebuildObjectRegistryPass) planCall(old []byte, e *graph.Edge, pick rebuildObjectRegistryPick, refused *rebuildScratchRefusals) error {
+	if pick.target != "" {
+		p.stats.Resolved++
+	}
+	class, _ := p.rules.Call(e)
+	if !p.rules.Rebind(e, class, pick.target, pick.target != "") {
+		// A no-op still needs a stable class membership election.
+		for _, witness := range pick.buckets {
+			uncertain, err := p.present(p.key('e', string(witness.bucket)))
+			if err != nil {
+				return err
+			}
+			if uncertain {
+				refused.add(graph.EdgeIdentityFor(e), old)
+				break
+			}
+		}
+		return nil
+	}
+	if pick.caller != nil {
+		if err := p.put(p.key('n', pick.caller.ID), []byte{rebuildCapabilityWanted}); err != nil {
+			return err
+		}
+	}
+	if binding, _ := e.Meta["store_binding"].(string); binding != "" && pick.readsBinding {
+		if err := p.put(p.key('v', binding), []byte{rebuildCapabilityWanted}); err != nil {
+			return err
+		}
+	}
+	if err := p.wantCandidateBuckets(pick.buckets); err != nil {
+		return err
+	}
+	for _, witness := range pick.buckets {
+		extra, err := p.present(p.key('e', string(witness.bucket)))
+		if err != nil {
+			return err
+		}
+		if extra {
+			if err := p.put(p.candidateProofKey(witness.bucket), []byte{1 | rebuildStoreCandidateExtra}); err != nil {
+				return err
+			}
+		}
+	}
+	if err := p.stage(old, e); err != nil {
+		return err
+	}
+	p.stats.Moves++
+	return nil
 }
 
 func (p *rebuildObjectRegistryPass) recordNode(ctx context.Context, raw *graph.Node, file, lang string) error {
@@ -548,7 +604,14 @@ func (p *rebuildObjectRegistryPass) recordCall(raw *graph.Edge, file, lang strin
 	liveClass, liveMethod := p.rules.Call(live)
 	binding, _ := raw.Meta["store_binding"].(string)
 	liveBinding, _ := live.Meta["store_binding"].(string)
-	exact := lang != "" && raw.FilePath == file && class == liveClass && method == liveMethod && binding == liveBinding
+	exact := lang != "" && raw.FilePath == file && class == liveClass && method == liveMethod
+	if exact && binding != liveBinding {
+		pick, err := p.elect(live, true)
+		if err != nil {
+			return err
+		}
+		exact = !pick.readsBinding
+	}
 	return p.noteReceipt(key, claim, exact)
 }
 
@@ -605,9 +668,6 @@ func (p *rebuildObjectRegistryPass) prove(ctx context.Context, receipts iter.Seq
 }
 
 func (p *rebuildObjectRegistryPass) proved(old []byte, e *graph.Edge, anchor bool) (bool, error) {
-	if !anchor {
-		return false, nil
-	}
 	raw, err := rebuildReceiptKey(p.b.pending, old)
 	if errors.Is(err, ErrRebuildUnknownProvenance) {
 		return false, nil
@@ -619,9 +679,12 @@ func (p *rebuildObjectRegistryPass) proved(old []byte, e *graph.Edge, anchor boo
 	if err != nil || len(claim) <= 1 || claim[0] != rebuildScratchExact || !bytes.Equal(claim[1:], old) {
 		return false, err
 	}
-	pick, err := p.elect(e)
+	pick, err := p.elect(e, true)
 	if err != nil {
 		return false, err
+	}
+	if !pick.nonempty && !anchor {
+		return false, nil
 	}
 	if pick.caller != nil {
 		state, err := p.state(p.key('n', pick.caller.ID))
@@ -629,9 +692,14 @@ func (p *rebuildObjectRegistryPass) proved(old []byte, e *graph.Edge, anchor boo
 			return false, err
 		}
 	}
-	if pick.getter {
-		binding, _ := e.Meta["store_binding"].(string)
-		ok, err := p.getterFilesProved(p.key('t', binding), p.key('v', binding), p.unique)
+	if binding, _ := e.Meta["store_binding"].(string); binding != "" && pick.readsBinding {
+		wanted := p.key('v', binding)
+		var ok bool
+		if pick.getterProof {
+			ok, err = p.getterFilesProved(p.key('t', binding), wanted, p.unique)
+		} else {
+			ok, err = p.getterFileUnchanged(wanted)
+		}
 		if err != nil || !ok {
 			return false, err
 		}
