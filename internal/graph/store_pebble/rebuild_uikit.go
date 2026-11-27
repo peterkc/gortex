@@ -59,23 +59,6 @@ func (b *BuildStore) RebuildUIKit(ctx context.Context, receipts iter.Seq2[ParseF
 	}); err != nil {
 		return 0, err
 	}
-	active, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('h'))
-	if err != nil || !active {
-		return 0, err
-	}
 	kinds := [...]graph.EdgeKind{graph.EdgeInstantiates, graph.EdgeReferences, graph.EdgeTypedAs, graph.EdgeCalls}
-	if err := p.captureClaims(ctx, kinds[:]); err != nil {
-		return 0, err
-	}
-	for _, kind := range kinds {
-		if err := p.record(ctx, receipts, kind); err != nil {
-			return 0, err
-		}
-	}
-	if err := p.prove(ctx); err != nil || p.count == 0 {
-		return 0, err
-	}
-	return p.count, b.withWrites(func() error {
-		return p.apply(ctx, p.count)
-	})
+	return p.run(ctx, receipts, kinds[:])
 }

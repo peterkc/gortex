@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -180,4 +181,47 @@ func TestRebuildConventionKindAndWindowOrder(t *testing.T) {
 	row, err := b.pendingEdge(pendingEdgeKey(ignored))
 	require.NoError(t, err)
 	require.NotNil(t, row)
+}
+
+func TestRebuildConventionNodeCapsAndSingleReplay(t *testing.T) {
+	const file = "app.py"
+	padding := strings.Repeat("x", 16<<20)
+	for _, oversized := range []string{"source", "candidate", "unrelated"} {
+		t.Run(oversized, func(t *testing.T) {
+			source := &graph.Node{ID: "source", Kind: graph.KindFunction, FilePath: file, Language: "python"}
+			candidate := &graph.Node{ID: "candidate", Name: "load", Kind: graph.KindFunction, FilePath: file, Language: "python"}
+			unrelated := &graph.Node{ID: "unrelated", Name: "other", Kind: graph.KindFunction, FilePath: file, Language: "python"}
+			nodes := []*graph.Node{source, candidate, unrelated}
+			for _, node := range nodes {
+				if node.ID == oversized {
+					node.Meta = map[string]any{"padding": padding}
+				}
+			}
+			call := &graph.Edge{From: source.ID, To: "unresolved::load", Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+			ref := *call
+			ref.Kind = graph.EdgeReferences
+			b, receipts := seedSyntheticCustody(t, ParseFacts{
+				EffectiveLanguage: "python",
+				File:              graph.FileMetaRow{FilePath: file},
+				Nodes:             nodes,
+				Edges:             []*graph.Edge{&ref, call},
+			})
+			replays := 0
+			once := func(yield func(ParseFacts, error) bool) {
+				replays++
+				receipts(yield)
+			}
+			require.NoError(t, b.FreezeFastAPIInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
+			moves, err := b.RebuildFastAPI(t.Context(), once, rebuildConventionTestRules())
+			if oversized == "unrelated" {
+				require.NoError(t, err)
+				require.EqualValues(t, 2, moves)
+				require.Equal(t, 1, replays)
+				return
+			}
+			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+			require.Zero(t, moves)
+			require.Zero(t, replays)
+		})
+	}
 }

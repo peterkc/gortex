@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"iter"
@@ -93,28 +94,71 @@ func (b *BuildStore) rebuildConvention(ctx context.Context, receipts iter.Seq2[P
 	if err := p.capture(ctx, renders); err != nil {
 		return 0, err
 	}
-	active, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('h'))
-	if err != nil || !active {
-		return 0, err
-	}
 	kinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
 	if renders {
 		kinds = append(kinds, graph.EdgeRendersChild)
 	}
+	return p.run(ctx, receipts, kinds)
+}
+
+func (p *rebuildConventionPass) run(ctx context.Context, receipts iter.Seq2[ParseFacts, error], kinds []graph.EdgeKind) (uint64, error) {
+	active, err := rebuildGuardHasPrefix(ctx, p.b.pending, p.column('h'))
+	if err != nil || !active {
+		return 0, err
+	}
 	if err := p.captureClaims(ctx, kinds); err != nil {
 		return 0, err
 	}
-	for _, kind := range kinds {
-		if err := p.record(ctx, receipts, kind); err != nil {
-			return 0, err
-		}
+	if err := p.record(ctx, receipts, kinds); err != nil {
+		return 0, err
 	}
 	if err := p.prove(ctx); err != nil || p.count == 0 {
 		return 0, err
 	}
-	return p.count, b.withWrites(func() error {
-		return p.apply(ctx, p.count)
-	})
+	if err := p.orderReceipts(ctx); err != nil {
+		return 0, err
+	}
+	return p.count, p.b.withWrites(func() error { return p.apply(ctx, p.count) })
+}
+
+func (b *BuildStore) rebuildLiveAppleConvention(ctx context.Context, receipts iter.Seq2[ParseFacts, error], cols rebuildCallMoves,
+	rules RebuildConventionRules, stageErr error,
+) (count uint64, err error) {
+	defer func() {
+		if err != nil {
+			count = 0
+			err = fmt.Errorf("%w: %w", stageErr, err)
+		}
+	}()
+	if receipts == nil || rules.Shape == nil || rules.Source == nil || rules.Eligible == nil || rules.Rank == nil || rules.Rebind == nil || rules.AllowWinner == nil {
+		return 0, invalid(cols.label + " inputs")
+	}
+	prefix := cols.prefix
+	busy, err := rebuildGuardHasPrefix(ctx, b.pending, prefix)
+	if err != nil {
+		return 0, err
+	}
+	if busy {
+		return 0, invalid(cols.label + " scratch occupied")
+	}
+	defer func() {
+		err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
+	}()
+	p := rebuildConventionPass{
+		rebuildCallMoves: cols,
+		rules:            rules,
+	}
+	kinds := [...]graph.EdgeKind{graph.EdgeInstantiates, graph.EdgeReferences, graph.EdgeTypedAs, graph.EdgeCalls}
+	if err := b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
+		id, err := decodeLinkRecorder(r.key)
+		if err != nil || !slices.Contains(kinds[:], id.Kind) || !graph.IsUnresolvedTarget(id.To) {
+			return err
+		}
+		return p.captureSite(ctx, r.key, r.value)
+	}); err != nil {
+		return 0, err
+	}
+	return p.run(ctx, receipts, kinds[:])
 }
 
 // Rank uses one bit for caller directory and another for preferred directory.
@@ -150,6 +194,9 @@ func (p *rebuildConventionPass) pick(ctx context.Context, names, dirs []string, 
 		if err := p.b.RebuildView().VisitNameCandidates(ctx, name, nil, func(n *graph.Node) error {
 			if !p.rules.Eligible(n) {
 				return nil
+			}
+			if err := p.capNode(n.ID); err != nil {
+				return err
 			}
 			rank := p.rules.Rank(n.FilePath, file, dirs)
 			allowed := p.rules.AllowWinner == nil || p.rules.AllowWinner(name, n.FilePath)
@@ -194,7 +241,18 @@ func (p *rebuildConventionPass) receiptPick(ctx context.Context, names, dirs []s
 }
 
 func (p *rebuildConventionPass) source(id string) (*graph.Node, error) {
-	return pendingGet(p.b.pending, pendingNodeKey(id), decodeNodeLight)
+	return p.storeReceiptNode(id)
+}
+
+func (p *rebuildConventionPass) capNode(id string) error {
+	key := pendingNodeKey(id)
+	_, err := pendingGet(p.b.pending, key, func(val []byte) (bool, error) {
+		if len(key)+len(val) > p.rowBytes {
+			return false, fmt.Errorf("%w: %s node row", ErrRebuildLinkInputSize, p.label)
+		}
+		return true, nil
+	})
+	return err
 }
 
 // h holds active sites and their raw keys; n and s request only the possible
@@ -237,6 +295,9 @@ func (p *rebuildConventionPass) captureSite(ctx context.Context, old, val []byte
 	}
 	var live rebuildConventionPick
 	if source != nil && p.rules.Source(source.FilePath) {
+		if err := p.capNode(source.ID); err != nil {
+			return err
+		}
 		if err := p.input(old, val); err != nil {
 			return err
 		}
@@ -299,7 +360,8 @@ func (p *rebuildConventionPass) captureClaims(ctx context.Context, kinds []graph
 	})
 }
 
-func (p *rebuildConventionPass) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error], kind graph.EdgeKind) error {
+func (p *rebuildConventionPass) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error], kinds []graph.EdgeKind) error {
+	var ordinal uint64
 	for facts, err := range receipts {
 		if err != nil {
 			return err
@@ -308,15 +370,13 @@ func (p *rebuildConventionPass) record(ctx context.Context, receipts iter.Seq2[P
 		if facts.EffectiveLanguage == "" {
 			continue
 		}
-		if kind == graph.EdgeCalls {
-			for _, n := range facts.Nodes {
-				if err := ctx.Err(); err != nil {
+		for _, n := range facts.Nodes {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if n.FilePath == file {
+				if err := p.recordNode(n); err != nil {
 					return err
-				}
-				if n.FilePath == file {
-					if err := p.recordNode(n); err != nil {
-						return err
-					}
 				}
 			}
 		}
@@ -324,10 +384,11 @@ func (p *rebuildConventionPass) record(ctx context.Context, receipts iter.Seq2[P
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if e.Kind == kind {
-				if err := p.recordEdge(e, file); err != nil {
+			if kind := slices.Index(kinds, e.Kind); kind >= 0 {
+				if err := p.recordEdge(e, file, byte(kind), ordinal); err != nil {
 					return err
 				}
+				ordinal++
 			}
 		}
 	}
@@ -356,8 +417,9 @@ func (p *rebuildConventionPass) recordNode(raw *graph.Node) error {
 	return nil
 }
 
-func (p *rebuildConventionPass) recordEdge(raw *graph.Edge, file string) error {
-	key := append(p.column('r'), pendingEdgeKey(raw)...)
+func (p *rebuildConventionPass) recordEdge(raw *graph.Edge, file string, kind byte, ordinal uint64) error {
+	rawKey := pendingEdgeKey(raw)
+	key := append(p.column('r'), rawKey...)
 	claim, err := p.marked(key)
 	if err != nil || len(claim) < 2 {
 		return err
@@ -371,7 +433,25 @@ func (p *rebuildConventionPass) recordEdge(raw *graph.Edge, file string) error {
 	rawNames, rawDirs := p.rules.Shape(raw.To, rawVia)
 	liveNames, liveDirs := p.rules.Shape(live.To, liveVia)
 	exact := raw.FilePath == file && raw.Kind == live.Kind && slices.Equal(rawNames, liveNames) && slices.Equal(rawDirs, liveDirs)
-	return p.noteReceipt(key, claim, exact)
+	if exact && claim[0] == rebuildCapabilityWanted {
+		order := binary.BigEndian.AppendUint64(append(p.column('u'), kind), ordinal)
+		if err := p.put(order, rawKey); err != nil {
+			return err
+		}
+	}
+	return noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(exact))
+}
+
+// Native processes kinds in registry order, and each kind in receipt order.
+func (p *rebuildConventionPass) orderReceipts(ctx context.Context) error {
+	return pendingVisit(ctx, p.b.pending, p.column('u'), func(r row) error {
+		order := binary.BigEndian.AppendUint64(p.window(p.ordered), p.ordered)
+		if err := p.put(order, r.value); err != nil {
+			return err
+		}
+		p.ordered++
+		return nil
+	})
 }
 
 func (p *rebuildConventionPass) prove(ctx context.Context) error {
