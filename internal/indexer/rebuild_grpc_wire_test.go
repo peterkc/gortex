@@ -58,6 +58,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"Godot autoload", store_pebble.ErrRebuildGodotAutoload, 82},
 		{"Godot preload alias", store_pebble.ErrRebuildGodotPreloadAlias, 83},
 		{"SwiftUI", store_pebble.ErrRebuildSwiftUI, 85},
+		{"Vapor", store_pebble.ErrRebuildVapor, 87},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {
