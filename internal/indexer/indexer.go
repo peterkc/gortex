@@ -8169,23 +8169,9 @@ func (idx *Indexer) bulkCommit(nodes []*graph.Node, edges []*graph.Edge) {
 // mount file (a FastAPI main.py) frequently has no route contract of its
 // own and so can't be discovered from the registry alone.
 func (idx *Indexer) routerPrefixScanFiles(reg *contracts.Registry) []string {
-	eligible := false
-	for _, c := range reg.All() {
-		if c.Type != contracts.ContractHTTP || c.Meta == nil {
-			continue
-		}
-		switch fw, _ := c.Meta["framework"].(string); fw {
-		case "fastapi/flask", "express", "nestjs":
-			eligible = true
-		}
-		if eligible {
-			break
-		}
-	}
-	if !eligible {
+	if !routerPrefixScanEnabled(reg) {
 		return nil
 	}
-
 	return graph.ReadRepoFilePaths(
 		idx.graph,
 		idx.repoPrefix,
@@ -8193,6 +8179,19 @@ func (idx *Indexer) routerPrefixScanFiles(reg *contracts.Registry) []string {
 		[]string{"python", "typescript", "javascript"},
 		[]string{".py", ".ts", ".tsx", ".js", ".jsx"},
 	)
+}
+
+func routerPrefixScanEnabled(reg *contracts.Registry) bool {
+	for _, c := range reg.All() {
+		if c.Type != contracts.ContractHTTP || c.Meta == nil {
+			continue
+		}
+		switch fw, _ := c.Meta["framework"].(string); fw {
+		case "fastapi/flask", "express", "nestjs":
+			return true
+		}
+	}
+	return false
 }
 
 // contractFileSrc reads the source behind a contract FilePath (which is
