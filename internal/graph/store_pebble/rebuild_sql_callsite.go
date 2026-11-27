@@ -313,7 +313,7 @@ func (p *rebuildSQLCallsitePass) recordNode(raw *graph.Node, file, lang string) 
 		return err
 	}
 	proved := lang == "sql" && live != nil && rebuildSQLCallsiteCandidate(raw) &&
-		raw.FilePath == file && live.FilePath == file && raw.Language == live.Language && raw.Kind == live.Kind && raw.Name == live.Name
+		raw.FilePath == file && live.FilePath == file && raw.Name == live.Name
 	return noteRebuildScratchPayload(p.put, candidate, claim, rebuildScratchProofBit(proved))
 }
 

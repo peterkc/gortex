@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"iter"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -293,12 +294,21 @@ func TestRebuildSQLCallsiteReceiptOwnershipFields(t *testing.T) {
 		change func(*ParseFacts, *ParseFacts)
 	}{
 		{name: "raw call file", change: func(app, _ *ParseFacts) { app.File.FilePath = "other.ts" }},
-		{name: "raw call function", change: func(app, _ *ParseFacts) { app.Edges[0].Meta["sql_function"] = "other" }},
+		{name: "raw call function", change: func(app, _ *ParseFacts) {
+			edge := *app.Edges[0]
+			edge.Meta = maps.Clone(edge.Meta)
+			edge.Meta["sql_function"] = "other"
+			app.Edges = []*graph.Edge{&edge}
+		}},
 		{name: "node receipt language", change: func(_, sql *ParseFacts) { sql.EffectiveLanguage = "typescript" }},
 		{name: "node receipt file", change: func(_, sql *ParseFacts) { sql.File.FilePath = "other.sql" }},
-		{name: "node file", change: func(_, sql *ParseFacts) { sql.Nodes[0].FilePath = "other.sql" }},
-		{name: "node language", change: func(_, sql *ParseFacts) { sql.Nodes[0].Language = "typescript" }},
-		{name: "node kind", change: func(_, sql *ParseFacts) { sql.Nodes[0].Kind = graph.KindMethod }},
+		{name: "raw node file", change: func(_, sql *ParseFacts) { sql.Nodes[0].FilePath = "other.sql" }},
+		{name: "live node file", change: func(_, sql *ParseFacts) {
+			sql.File.FilePath = "other.sql"
+			sql.Nodes[0].FilePath = "other.sql"
+		}},
+		{name: "candidate must be SQL", change: func(_, sql *ParseFacts) { sql.Nodes[0].Language = "typescript" }},
+		{name: "candidate must be a function", change: func(_, sql *ParseFacts) { sql.Nodes[0].Kind = graph.KindMethod }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			old := sqlCallsiteStoreEdge("unresolved::sqlfn::find", "find")
