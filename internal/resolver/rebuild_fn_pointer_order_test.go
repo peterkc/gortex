@@ -603,3 +603,55 @@ func rebuildFnPointerReceiptCalls(t *testing.T, receipt store_pebble.ParseFacts,
 	require.NoError(t, report.Err)
 	return slices.Collect(native.EdgesByKind(graph.EdgeCalls))
 }
+
+func TestRebuildFnPointerStageProofOnlySweeps(t *testing.T) {
+	const file, lang, stub = "saved.c", "c", "unresolved::*.fn"
+	caller := rebuildEventNode(file, "run", lang, "")
+	earlier := rebuildEventNode(file, "a", lang, "")
+	current := rebuildEventNode(file, "b", lang, "")
+	// The unproved registration cannot seed the live graph. The exact
+	// seeds make both dispatches stationary from the first live sweep.
+	unknown := rebuildFnPointerReg(caller.ID, earlier.ID, 1, "s0", "missing")
+	edges := []*graph.Edge{
+		rebuildFnPointerReg(caller.ID, current.ID, 2, "s8", current.Name),
+		rebuildFnPointerReg(caller.ID, current.ID, 3, "s9", current.Name),
+	}
+	for hop := 9; hop > 0; hop-- {
+		copyRef := rebuildFnPointerReg(caller.ID, stub, 20-hop, fmt.Sprint("s", hop), "")
+		copyRef.Meta["fnptr_copy_struct"], copyRef.Meta["fnptr_copy_field"] = fmt.Sprint("s", hop-1), "fn"
+		edges = append(edges, copyRef)
+	}
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthFnPointerDispatch})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		slot   string
+		refuse bool
+	}{
+		{"s8", true},
+		{"s9", false},
+	} {
+		t.Run(tc.slot, func(t *testing.T) {
+			ctx := t.Context()
+			call := rebuildFnPointerCall(caller.ID, current.ID, 30, tc.slot)
+			receipt := rebuildEventFacts(file, lang, []*graph.Node{caller, earlier, current}, append(slices.Clone(edges), call)...)
+			live := receipt
+			live.Edges = append(slices.Clone(receipt.Edges), unknown)
+			b := openRebuildGRPCBuild(t, live)
+			before := rebuildEventSavedRows(t, b)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.NoError(t, FreezeRebuildFnPointerInputs(ctx, b, frozen))
+			stats, err := RunRebuildFnPointerStage(ctx, b, rebuildGRPCReceipts(receipt), frozen)
+			if tc.refuse {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refused)
+				require.Zero(t, stats)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, store_pebble.RebuildFnPointerStageStats{Resolved: 1, Sweeps: 1}, stats)
+			}
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
