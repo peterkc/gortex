@@ -119,7 +119,7 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 	format := b.db.FormatMajorVersion().MaxTableFormat()
 	gold := sortedRuns{dir: dir, name: "relations", options: b.options, format: format, limit: goldBufferBytes}
 	refs := sortedRuns{dir: dir, name: "relations-refs", options: b.options, format: format, limit: goldBufferBytes}
-	seal := &goldSeal{refs: refs, owner: b.keptOwner}
+	seal := &goldSeal{refs: refs, owner: b.keptOwner, edgeOwner: b.rebuildEdgeSourceOwner}
 	if err := b.writeRows(ctx, &gold, StageRelations); err != nil {
 		return StageTables{}, err
 	}

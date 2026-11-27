@@ -134,7 +134,7 @@ func (b *BuildStore) PrepareFileGraph(ctx context.Context, dir string, manifest 
 	format := b.db.FormatMajorVersion().MaxTableFormat()
 	gold := sortedRuns{dir: dir, name: "file-graph", options: b.options, format: format, limit: goldBufferBytes}
 	refs := sortedRuns{dir: dir, name: "file-refs", options: b.options, format: format, limit: goldBufferBytes}
-	seal := &goldSeal{refs: refs, owner: b.keptOwner}
+	seal := &goldSeal{refs: refs, owner: b.keptOwner, edgeOwner: b.rebuildEdgeSourceOwner}
 	if err := b.writeRows(ctx, &gold, StageFileGraph); err != nil {
 		return StageTables{}, err
 	}

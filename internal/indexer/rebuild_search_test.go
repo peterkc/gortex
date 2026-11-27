@@ -26,6 +26,7 @@ func TestRebuildSearchRendersFinalFacts(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, head.Close()) })
 	manifest, err := store_pebble.PrepareManifest(ctx, t.TempDir(), []store_pebble.ManifestFile{{Path: path, Kind: 'f', Language: "go"}}, store_pebble.Witness{
 		Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2}, Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile,
+		PlatformCatalogRevision: graph.PlatformCatalogRevision,
 	}, rebuildTestIncarnation)
 	require.NoError(t, err)
 	_, err = head.PublishStage(ctx, manifest)
@@ -36,7 +37,6 @@ func TestRebuildSearchRendersFinalFacts(t *testing.T) {
 		{ID: path, Kind: graph.KindFile, Name: "noise", FilePath: path, RepoPrefix: repo, Language: "go"},
 		{ID: "import", Kind: graph.KindImport, Name: "noise", RepoPrefix: repo, Language: "go"},
 		{ID: "local", Kind: graph.KindLocal, Name: "noise", RepoPrefix: repo, Language: "go"},
-		{ID: "builtin", Kind: graph.KindBuiltin, Name: "noise", Language: "go"},
 		{ID: "skip", Kind: graph.KindFunction, Name: "noise", RepoPrefix: repo, Language: "yaml"},
 		{ID: "content", Kind: graph.KindDoc, Name: "noise", RepoPrefix: repo, Language: "markdown", Meta: map[string]any{"data_class": "content"}},
 		{ID: "prose", Kind: graph.KindDoc, Name: "proseanchor", RepoPrefix: repo, Language: "markdown"},
@@ -54,8 +54,16 @@ func TestRebuildSearchRendersFinalFacts(t *testing.T) {
 	linked := *decl
 	linked.QualName = "linkedqualifier"
 	global := &graph.Node{ID: "external-call::dep::example.org/lib", Kind: graph.KindModule, Name: "lib", QualName: "globalanchor", Language: "go"}
-	build.AddBatch([]*graph.Node{global, &linked}, nil)
-	relations, err := build.PrepareRelations(ctx, t.TempDir(), retained, nil)
+	builtinID := graph.StubID(repo, graph.StubKindBuiltin, "go", "len")
+	call := &graph.Edge{From: decl.ID, To: builtinID, Kind: graph.EdgeCalls, FilePath: path, Line: 2,
+		Meta: map[string]any{graph.MetaLinkStatus: string(graph.LinkStatusProbablePlatform)}}
+	build.AddBatch([]*graph.Node{global, &linked}, []*graph.Edge{call})
+	relations, err := build.PrepareRelations(ctx, t.TempDir(), retained, func(file string) string {
+		if file == path {
+			return "go"
+		}
+		return ""
+	})
 	require.NoError(t, err)
 	digest, err := head.PublishStage(ctx, relations)
 	require.NoError(t, err)
@@ -75,9 +83,11 @@ func TestRebuildSearchRendersFinalFacts(t *testing.T) {
 	require.NoError(t, err)
 	snap := head.OpenSnapshot()
 	t.Cleanup(func() { require.NoError(t, snap.Close()) })
+	require.Equal(t, []*graph.Edge{call}, snap.GetInEdges(builtinID))
+	require.Nil(t, snap.GetNode(builtinID))
 	for _, tc := range []struct{ term, id string }{
 		{"linkedqualifier", decl.ID}, {"globalanchor", global.ID}, {"proseanchor", "prose"},
-		{"oldqualifier", ""}, {"receiptstale", ""}, {"workbench", ""}, {"noise", ""},
+		{"oldqualifier", ""}, {"receiptstale", ""}, {"workbench", ""}, {"noise", ""}, {"len", ""},
 	} {
 		t.Run(tc.term, func(t *testing.T) {
 			// Two terms bypass the tier-0 exact-name lookup.

@@ -132,16 +132,12 @@ func TestRebuildDeferredAttribution(t *testing.T) {
 			}))
 			node, err := view.Node(ctx, builtinLen)
 			require.NoError(t, err)
+			require.Nil(t, node, "attribution must not materialize the builtin endpoint")
 			if arm.want == nil {
 				require.Empty(t, lenEdges)
-				require.Nil(t, node)
 				return
 			}
 			require.Equal(t, []*graph.Edge{arm.want}, lenEdges)
-			require.Equal(t, &graph.Node{
-				ID: builtinLen, Name: "len", Kind: graph.KindBuiltin, Language: "go",
-				Meta: map[string]any{"builtin": true, "builtin_kind": "func"},
-			}, node)
 		})
 	}
 }

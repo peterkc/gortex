@@ -162,7 +162,7 @@ func (b *BuildStore) Publish(ctx context.Context) (err error) {
 	format := b.db.FormatMajorVersion().MaxTableFormat()
 	gold := sortedRuns{dir: dir, name: "graph", options: b.options, format: format, limit: goldBufferBytes}
 	refs := sortedRuns{dir: dir, name: "refs", options: b.options, format: format, limit: goldBufferBytes}
-	seal := &goldSeal{refs: refs, owner: b.keptOwner}
+	seal := &goldSeal{refs: refs, owner: b.keptOwner, edgeOwner: b.rebuildEdgeSourceOwner}
 	if err := b.writeRows(ctx, &gold, StageSearch); err != nil {
 		return err
 	}

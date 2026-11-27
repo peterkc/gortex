@@ -3,6 +3,8 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+
+	"github.com/zzet/gortex/internal/graph"
 )
 
 // goldSeal validates the selected key stream, never the destination DB. Its
@@ -11,6 +13,7 @@ type goldSeal struct {
 	refs sortedRuns
 	// Resolve owners from private input keys, never from the serving DB.
 	owner                              func(string) (sourceOwner, error)
+	edgeOwner                          func(*graph.Edge) (sourceOwner, error)
 	nodes, edges, nodeCount, edgeCount int
 }
 
@@ -60,7 +63,7 @@ func (s *goldSeal) visit(r row) error {
 			return invalid("outgoing edge identity mismatch")
 		}
 		s.edges++
-		owner, err := s.owner(e.From)
+		owner, err := s.edgeOwner(e)
 		if err != nil {
 			return err
 		}
