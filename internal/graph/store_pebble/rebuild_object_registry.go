@@ -467,23 +467,23 @@ func (p *rebuildObjectRegistryPass) recordNode(raw *graph.Node, file, lang strin
 	if err != nil {
 		return err
 	}
-	same := rebuildStoreNodeReceipt(raw, live, file, lang) && live.FilePath == file &&
-		raw.Language == live.Language && raw.Kind == live.Kind
+	admitted := rebuildStoreNodeReceipt(raw, live, file, lang)
 	if caller != 0 {
-		ok := same && raw.WorkspaceID == live.WorkspaceID
+		ok := rebuildStoreCallerReceipt(raw, live, file, lang)
 		if err := noteRebuildScratchState(p.put, callerKey, caller, rebuildScratchProofBit(ok)); err != nil {
 			return err
 		}
 	}
 	if candidate != nil {
-		role := live != nil && rebuildObjectRegistryCallable(raw.Kind) && lang != "" && raw.FilePath == file
-		if role {
+		eligible := admitted && rebuildObjectRegistryCallable(raw.Kind)
+		if eligible {
 			if err := p.noteCandidateChange(candidate[1:], raw, live); err != nil {
 				return err
 			}
 		}
-		ok := same && raw.Name == live.Name && raw.WorkspaceID == live.WorkspaceID
-		if err := noteRebuildScratchPayload(p.put, candidateKey, candidate, rebuildScratchProofBit(ok)); err != nil {
+		ok := eligible && raw.Name == live.Name
+		proof := rebuildStoreCandidateProof(ok, raw, live) | rebuildStoreAnchorProof(eligible)
+		if err := p.noteStoreNodeProof(candidateKey, candidate, proof); err != nil {
 			return err
 		}
 	}
@@ -500,7 +500,7 @@ func (p *rebuildObjectRegistryPass) recordNode(raw *graph.Node, file, lang strin
 			return err
 		}
 	}
-	return noteRebuildScratchPayload(p.put, getterKey, getter, rebuildScratchProofBit(same && role))
+	return noteRebuildScratchPayload(p.put, getterKey, getter, rebuildScratchProofBit(admitted && role && raw.FilePath == live.FilePath))
 }
 
 func (p *rebuildObjectRegistryPass) noteCandidateChange(cohort []byte, raw, live *graph.Node) error {
@@ -511,19 +511,7 @@ func (p *rebuildObjectRegistryPass) noteCandidateChange(cohort []byte, raw, live
 	if err != nil {
 		return err
 	}
-	for _, bucket := range rebuildStoreScopeKeys(p.key('u', class, raw.Name), len(p.prefix), 'i', raw) {
-		key := p.candidateProofKey(bucket)
-		state, err := p.state(key)
-		if err != nil {
-			return err
-		}
-		if state != 0 {
-			if err := noteRebuildScratchState(p.put, key, state, rebuildStoreCandidateExtra); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return p.noteCandidateCohortChange(cohort, p.key('u', class, raw.Name), len(p.prefix), 'i', raw, live)
 }
 
 func (p *rebuildObjectRegistryPass) recordCall(raw *graph.Edge, file, lang string) error {
@@ -575,10 +563,10 @@ func (p *rebuildObjectRegistryPass) prove(ctx context.Context, receipts iter.Seq
 	anchor := false
 	prefix := p.column('c')
 	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		if r.value[0] != rebuildScratchExact {
+		anchor = anchor || rebuildStoreAnchorExact(r.value[0])
+		if !rebuildStoreCandidateExact(r.value[0]) {
 			return nil
 		}
-		anchor = true
 		return p.foldExactCandidate(r, prefix, len(p.prefix), 'i', p.node)
 	}); err != nil {
 		return err

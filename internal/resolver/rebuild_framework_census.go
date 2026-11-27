@@ -21,7 +21,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 		SynthGRPCStub, SynthTemporalStub, SynthEventChannel, SynthSwiftObjC,
 		SynthReactNative, SynthReactNativePair, SynthObserverChannel, SynthClosureCollection,
 		SynthReactSetState, SynthFlutterSetState, SynthKMPExpectActual, SynthExpoModules, SynthFabric, SynthMyBatis,
-		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthRTKQuery,
+		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthObjectRegistry, SynthRTKQuery,
 	} {
 		if selection.allows(name) {
 			frozen.names[name] = struct{}{}
@@ -61,15 +61,19 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 	_, react := frozen.names[SynthReactSetState]
 	_, flutter := frozen.names[SynthFlutterSetState]
 	_, redux := frozen.names[SynthReduxThunk]
+	_, registry := frozen.names[SynthObjectRegistry]
 	_, rtk := frozen.names[SynthRTKQuery]
 	if redux || rtk {
 		edges.via = make(map[string]bool, 2)
 	}
-	if grpc || temporal || react || flutter || redux || rtk {
+	if grpc || temporal || react || flutter || redux || registry || rtk {
 		if err := view.VisitFrameworkGateEdges(ctx, temporal, func(e graph.FrameworkCensusEdge) error {
 			if e.Kind == graph.EdgeCalls {
 				if (redux && e.Via == reduxThunkVia) || (rtk && e.Via == rtkQueryVia) {
 					edges.via[e.Via] = true
+				}
+				if registry && e.Via == objectRegistryVia && e.RegistryValue != "" {
+					edges.objectRegistryValue = true
 				}
 				edges.setStateTarget = edges.setStateTarget || isSetStateTarget(e.To)
 				edges.grpcStub = edges.grpcStub || e.Via == "grpc.stub" && e.GRPCService != "" && e.GRPCMethod != ""

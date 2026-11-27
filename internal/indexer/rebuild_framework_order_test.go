@@ -42,6 +42,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"SQL callsite", "moves", 1},
 		{"Store Factory", "moves", 1},
 		{"Redux Thunk", "moves", 1},
+		{"Object Registry", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name  string
@@ -438,9 +439,12 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	show := node(app, ts, "show", graph.KindFunction, 20)
 	spec := node(app, ts, "ClockView", graph.KindType, 23)
 	spec.Meta = map[string]any{"fabric_component": "ClockView"}
+	command := node(app, ts, "ClockCommand", graph.KindType, 28)
+	execute := node(app, ts, "execute", graph.KindMethod, 29)
+	execute.ID = command.ID + "." + execute.Name
 	// Observer must accept the registrar call proved by event channel;
 	// the original receipt has no call to subscribe.
-	appFacts := receipt([]*graph.Node{thunk, setup, subscribe, notify, callback, field, topic, show, spec},
+	appFacts := receipt([]*graph.Node{thunk, setup, subscribe, notify, callback, field, topic, show, spec, command, execute},
 		edge(setup, topic.ID, graph.EdgeEmits, 3, event),
 		edge(subscribe, topic.ID, graph.EdgeListensOn, 7, event),
 		edge(subscribe, field.ID, graph.EdgeAccessesField, 8, nil),
@@ -454,6 +458,10 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 			map[string]any{"via": "store-factory", "store_binding": storeBinding, "store_action": storeAction}),
 		edge(thunk, "unresolved::*."+storeAction, graph.EdgeCalls, 26,
 			map[string]any{"via": "redux-thunk", "thunk_dispatch": storeAction}),
+		edge(execute, command.ID, graph.EdgeMemberOf, 29, nil),
+		// A stale real target cannot be rebound by the main unresolved-call pass.
+		edge(show, setup.ID, graph.EdgeCalls, 30,
+			map[string]any{"via": "object-registry", "registry_value": command.Name, "registry_method": execute.Name}),
 	)
 
 	const rpc = "rpc.go"

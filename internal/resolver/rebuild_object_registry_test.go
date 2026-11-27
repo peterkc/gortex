@@ -173,6 +173,67 @@ func TestRebuildObjectRegistryCandidateProof(t *testing.T) {
 	}
 }
 
+func TestRebuildObjectRegistryRoleProof(t *testing.T) {
+	const file, otherFile, recordedFile = "registry.js", "other.js", "recorded.js"
+	caller := &graph.Node{ID: file + "::dispatch", Name: "dispatch", Kind: graph.KindFunction, FilePath: file, Language: "javascript"}
+	local, member := objectRegistryTestMethod(file, file+"::Cmd.run", "run", "Cmd")
+	rival, other := objectRegistryTestMethod(otherFile, otherFile+"::Cmd.run", "run", "Cmd")
+	call := objectRegistryTestCall(caller.ID, "unresolved::*.Cmd", file, "Cmd", "run", 10)
+	facts := rebuildEventFacts(file, "javascript", []*graph.Node{caller, local}, member, call)
+	recordedCaller := *caller
+	recordedCaller.Kind, recordedCaller.Language = graph.KindMethod, "typescript"
+	recordedCandidate := *local
+	recordedCandidate.Kind, recordedCandidate.FilePath = graph.KindFunction, recordedFile
+	proof := []store_pebble.ParseFacts{
+		rebuildEventFacts(file, "javascript", []*graph.Node{&recordedCaller}, member, call),
+		rebuildEventFacts(recordedFile, "javascript", []*graph.Node{&recordedCandidate}),
+	}
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
+	require.NoError(t, err)
+	for _, withRival := range []bool{false, true} {
+		t.Run(fmt.Sprint(withRival), func(t *testing.T) {
+			input, receipts := []store_pebble.ParseFacts{facts}, slices.Clone(proof)
+			if withRival {
+				remote := rebuildEventFacts(otherFile, "javascript", []*graph.Node{rival}, other)
+				input, receipts = append(input, remote), append(receipts, remote)
+			}
+			private := openRebuildGRPCBuild(t, input...)
+			before := rebuildEventSavedRows(t, private)
+			stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(receipts...), selection)
+			if withRival {
+				// Ambiguity makes native read the caller-file candidate pool.
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, private))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), stats.Moves)
+			native := openRebuildTemporalOracle(t, facts)
+			require.Equal(t, 1, ResolveObjectRegistryCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
+func TestRebuildObjectRegistryFrozenSelection(t *testing.T) {
+	const file = "registry.js"
+	method, member := objectRegistryTestMethod(file, file+"::Cmd.run", "run", "Cmd")
+	malformed := objectRegistryTestCall(file+"::dispatch", "unresolved::*.Cmd", file, "", "run", 3)
+	b := openRebuildGRPCBuild(t, rebuildEventFacts(file, "javascript", []*graph.Node{method}, member, malformed))
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
+	require.NoError(t, err)
+	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.False(t, frozen.allows(SynthObjectRegistry))
+	b.AddEdge(objectRegistryTestCall(malformed.From, malformed.To, file, "Cmd", "run", 4))
+	withLateTag := rebuildEventSavedRows(t, b)
+	stats, err := RunRebuildObjectRegistry(t.Context(), b, nil, frozen)
+	require.NoError(t, err)
+	require.Zero(t, stats)
+	require.Equal(t, withLateTag, rebuildEventSavedRows(t, b))
+}
+
 func TestRebuildObjectRegistrySQLiteMoveWindow(t *testing.T) {
 	const file, dispatch = "registry.js", "registry.js::dispatch"
 	b, bMember := objectRegistryTestMethod(file, file+"::B.run", "run", "B")
