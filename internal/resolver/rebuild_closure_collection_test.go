@@ -16,8 +16,12 @@ const (
 )
 
 func TestRebuildClosureCollectionSQLiteOracle(t *testing.T) {
-	for _, fixtureSize := range []int{1, 1 << 20} {
-		t.Run(fmt.Sprint(fixtureSize), func(t *testing.T) {
+	for _, large := range []bool{false, true} {
+		name := "base fixture"
+		if large {
+			name = "extra fields"
+		}
+		t.Run(name, func(t *testing.T) {
 			const file, language = "request.swift", "swift"
 			dispatch := rebuildClosureCollectionNode(file, "dispatch", language, rebuildCCDispatch, "handlers")
 			keep := rebuildClosureCollectionNode(file, "keep", language, rebuildCCAppend, "handlers")
@@ -26,7 +30,7 @@ func TestRebuildClosureCollectionSQLiteOracle(t *testing.T) {
 			incumbent.Meta = map[string]any{"fixture": "durable incumbent"}
 			nodes := []*graph.Node{dispatch, keep, register}
 			var extra int
-			if fixtureSize == 1<<20 {
+			if large {
 				// Each role's candidate stream exceeds 1 MiB, but no field is over cap.
 				const pairs = 40
 				padding := strings.Repeat("x", 32<<10)

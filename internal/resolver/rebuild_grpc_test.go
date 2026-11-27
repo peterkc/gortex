@@ -141,11 +141,15 @@ func rebuildGRPCSavedCalls(t *testing.T, b *store_pebble.BuildStore) []*graph.Ed
 	return got
 }
 
-func TestRebuildGRPCNativeRowsWithoutSpill(t *testing.T) {
-	for _, fixtureSize := range []int{1, 1 << 20} {
-		t.Run(fmt.Sprint(fixtureSize), func(t *testing.T) {
+func TestRebuildGRPCNativeRows(t *testing.T) {
+	for _, large := range []bool{false, true} {
+		name := "base fixture"
+		if large {
+			name = "extra stub call sites"
+		}
+		t.Run(name, func(t *testing.T) {
 			var extra int
-			if fixtureSize == 1<<20 {
+			if large {
 				extra = 270
 			}
 			facts := rebuildGRPCFixture(extra)

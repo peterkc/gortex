@@ -101,13 +101,17 @@ func rebuildSwiftObjCPrivateEdges(t *testing.T, b *store_pebble.BuildStore) map[
 	return rows
 }
 
-func TestRebuildSwiftObjCNativeRowsWithoutSpill(t *testing.T) {
+func TestRebuildSwiftObjCNativeRows(t *testing.T) {
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthSwiftObjC})
 	require.NoError(t, err)
-	for _, fixtureSize := range []int{1, 1 << 20} {
-		t.Run(fmt.Sprint(fixtureSize), func(t *testing.T) {
+	for _, large := range []bool{false, true} {
+		name := "base fixture"
+		if large {
+			name = "extra bridge pairs"
+		}
+		t.Run(name, func(t *testing.T) {
 			var extra int
-			if fixtureSize > 1 {
+			if large {
 				extra = 144
 			}
 			facts, stationary := rebuildSwiftObjCFixture(extra)
