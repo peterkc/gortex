@@ -213,7 +213,9 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 	return b.reindexChunkWithRecorders(batch, false)
 }
 
-// Checked reindexes can capture an existing old key as raw receipt lineage.
+// Checked target or kind reindexes (ApplyLinkReindexes) capture an existing
+// old key as raw receipt lineage; dataflow identity refreshes (ArgOf,
+// ReturnsTo) do not.
 // Generic reindexes, including placeholder source moves and function-pointer
 // moves, do not capture an old key. They keep inherited raw lineage or mark
 // a receipt-input move as untracked. A producer proof cannot move to a new
