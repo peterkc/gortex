@@ -247,3 +247,33 @@ func TestRebuildGinMiddlewareOccupiedDispatcherLine(t *testing.T) {
 	require.EqualValues(t, 1, count)
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
+
+func TestRebuildGinMiddlewareOptionalNULSeenKey(t *testing.T) {
+	const file = "gin.go"
+	first := &graph.Node{ID: "a", Kind: graph.KindMethod, Language: "go", FilePath: file, WorkspaceID: "one",
+		Meta: map[string]any{"gin_dispatcher": true}}
+	second := &graph.Node{ID: "a\x00b", Kind: graph.KindMethod, Language: "go", FilePath: file, WorkspaceID: "two",
+		Meta: map[string]any{"gin_dispatcher": true, "gin_handlers": []string{"Second"}}}
+	x := &graph.Node{ID: "b\x00c", Name: "First", Kind: graph.KindFunction, Language: "go", FilePath: file, WorkspaceID: "one"}
+	y := &graph.Node{ID: "c", Name: "Second", Kind: graph.KindFunction, Language: "go", FilePath: file, WorkspaceID: "two"}
+	registrar := &graph.Node{ID: "register", Kind: graph.KindFunction, Language: "go", FilePath: file,
+		Meta: map[string]any{"gin_handlers": []string{"First"}}}
+	rules := ginProofTestRules()
+	require.Equal(t, rules.SeenKey(first.ID, x.ID), rules.SeenKey(second.ID, y.ID))
+	b := newBuild(t, FullProfile)
+	// The earlier pair only exists on the receipt side: a missing registrar
+	// receipt could leave its name known or absent. Its physical key is occupied.
+	liveFirst := *first
+	liveFirst.WorkspaceID = "other"
+	b.AddBatch([]*graph.Node{&liveFirst, second, x, y, registrar}, []*graph.Edge{rules.Edge(first, x)})
+	before := rebuildFrameworkCustodyRows(t, b)
+	facts := ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: file}, Nodes: []*graph.Node{first, second, x, y}}
+	receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
+	count, err := b.RebuildGinMiddleware(t.Context(), receipts, rules)
+	require.Zero(t, count)
+	var refused *RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	require.EqualValues(t, 1, refused.Count)
+	require.Equal(t, graph.EdgeIdentityFor(rules.Edge(second, y)), refused.First)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
