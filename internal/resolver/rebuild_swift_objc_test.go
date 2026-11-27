@@ -421,17 +421,26 @@ func TestRebuildSwiftObjCProtocolOrder(t *testing.T) {
 	changedWinner := *winner
 	changedWinner.Meta = map[string]any{"objc": false}
 	changed[2].Nodes[0] = &changedWinner
+	// The plain interface sorts later than the live winner. If it were
+	// @objc, native would choose it instead.
+	changedLoser := slices.Clone(facts)
+	changedLoser[2].Nodes = slices.Clone(facts[2].Nodes)
+	changedPlain := *plain
+	changedPlain.Meta = map[string]any{"objc": true}
+	changedLoser[2].Nodes[2] = &changedPlain
 	for _, tc := range []struct {
 		name     string
 		receipts []store_pebble.ParseFacts
 	}{
 		{"missing winner receipt", noWinner},
 		{"changed objc field in winner receipt", changed},
+		{"changed objc field in losing receipt", changedLoser},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bad := openRebuildGRPCBuild(t, facts...)
 			before := rebuildSwiftObjCPrivateEdges(t, bad)
 			stats, err := RunRebuildSwiftObjC(t.Context(), bad, rebuildGRPCReceipts(tc.receipts...), selection)
+			require.ErrorIs(t, err, store_pebble.ErrRebuildSwiftObjC)
 			var refusal *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
 			require.Equal(t, uint64(1), refusal.Count)

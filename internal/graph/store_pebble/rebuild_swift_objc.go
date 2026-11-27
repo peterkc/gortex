@@ -47,7 +47,9 @@ func (b *BuildStore) RebuildSwiftObjC(ctx context.Context, receipts iter.Seq2[Pa
 		err = errors.Join(err, b.pending.DeleteRange(rebuildSwiftObjCPrefix, prefixEnd(rebuildSwiftObjCPrefix), pebble.NoSync))
 	}()
 	p := rebuildSwiftObjCPass{b: b}
-	if err := reduce(b.RebuildView(), p.propose); err != nil {
+	if err := reduce(b.RebuildView(), func(e *graph.Edge) error {
+		return p.propose(ctx, e)
+	}); err != nil {
 		return stats, err
 	}
 	if !p.changed {
@@ -61,9 +63,10 @@ func (b *BuildStore) RebuildSwiftObjC(ctx context.Context, receipts iter.Seq2[Pa
 }
 
 type rebuildSwiftObjCPass struct {
-	b       *BuildStore
-	changed bool
-	stats   RebuildSwiftObjCStats
+	b               *BuildStore
+	changed         bool
+	hasAlternatives bool
+	stats           RebuildSwiftObjCStats
 }
 
 func rebuildSwiftObjCKey(col byte, fields ...string) []byte {
@@ -74,7 +77,7 @@ func (p *rebuildSwiftObjCPass) put(key, value []byte) error {
 	return p.b.putRebuildScratch(key, value, 16<<20, "Swift/ObjC")
 }
 
-func (p *rebuildSwiftObjCPass) propose(e *graph.Edge) error {
+func (p *rebuildSwiftObjCPass) propose(ctx context.Context, e *graph.Edge) error {
 	key := pendingEdgeKey(e)
 	prior, err := p.b.pendingEdge(key)
 	if err != nil || prior != nil {
@@ -96,8 +99,49 @@ func (p *rebuildSwiftObjCPass) propose(e *graph.Edge) error {
 	if err := p.put(rebuildSwiftObjCKey('n', e.To), []byte{rebuildCapabilityWanted}); err != nil {
 		return err
 	}
+	if e.Kind == graph.EdgeImplements {
+		if err := p.wantProtocolAlternatives(ctx, e.To); err != nil {
+			return err
+		}
+	}
 	p.changed = true
 	return p.put(proposal, raw)
+}
+
+func (p *rebuildSwiftObjCPass) wantProtocolAlternatives(ctx context.Context, winnerID string) error {
+	// Conformers that chose the same protocol share one election proof.
+	group := rebuildSwiftObjCKey('g', winnerID)
+	state, err := p.state(group)
+	if err != nil || state != 0 {
+		return err
+	}
+	view := p.b.RebuildView()
+	winner, err := view.Node(ctx, winnerID)
+	if err != nil {
+		return err
+	}
+	if winner == nil {
+		return invalid("Swift/ObjC protocol winner missing")
+	}
+	// The winner already needs endpoint proof. Stream only the other
+	// interfaces, including ones that the live objc bit made ineligible.
+	want := func(n *graph.Node) error {
+		if n.Kind != graph.KindInterface || n.Language != "swift" || n.Name != winner.Name || n.ID == winnerID {
+			return nil
+		}
+		p.hasAlternatives = true
+		return p.put(rebuildSwiftObjCKey('p', n.ID), append([]byte{rebuildCapabilityWanted}, winnerID...))
+	}
+	if winner.Name == "" {
+		err = view.VisitNodes(ctx, want)
+	} else {
+		err = view.VisitNameCandidates(ctx, winner.Name, []string{"swift"}, want)
+	}
+	if err != nil {
+		return err
+	}
+	// The receipt sweep clears this proof if any alternative is unproved.
+	return p.put(group, []byte{rebuildScratchExact})
 }
 
 func (p *rebuildSwiftObjCPass) state(key []byte) (byte, error) {
@@ -114,28 +158,89 @@ func (p *rebuildSwiftObjCPass) prove(ctx context.Context, receipts iter.Seq2[Par
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			key := rebuildSwiftObjCKey('n', n.ID)
-			state, err := p.state(key)
-			if err != nil {
-				return err
-			}
-			if state == 0 {
-				continue
-			}
-			live, err := p.b.RebuildView().Node(ctx, n.ID)
-			if err != nil {
-				return err
-			}
-			proved := facts.EffectiveLanguage == n.Language && n.FilePath == file && sameRebuildSwiftObjCInput(n, live)
-			if err := noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(proved)); err != nil {
+			if err := p.noteReceipt(ctx, n, file, facts.EffectiveLanguage); err != nil {
 				return err
 			}
 		}
 	}
-	return proveRebuildScratchEndpoints(ctx, p.visit, func(id string) (bool, error) {
+	if err := pendingVisit(ctx, p.b.pending, rebuildSwiftObjCKey('p'), func(r row) error {
+		if len(r.value) < 2 {
+			return invalid("Swift/ObjC protocol proof state")
+		}
+		if r.value[0] != rebuildScratchExact {
+			return p.put(rebuildSwiftObjCKey('g', string(r.value[1:])), []byte{rebuildCapabilityUnproved})
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	var refused rebuildScratchRefusals
+	if err := p.visit(ctx, func(e *graph.Edge) error {
+		ok, err := p.proved(e)
+		if err == nil && !ok {
+			refused.add(graph.EdgeIdentityFor(e), nil)
+		}
+		return err
+	}); err != nil {
+		return err
+	}
+	return refused.err()
+}
+
+func (p *rebuildSwiftObjCPass) noteReceipt(ctx context.Context, raw *graph.Node, file, language string) error {
+	key := rebuildSwiftObjCKey('n', raw.ID)
+	state, err := p.state(key)
+	if err != nil {
+		return err
+	}
+	var alt, alternative []byte
+	if p.hasAlternatives {
+		alt = rebuildSwiftObjCKey('p', raw.ID)
+		alternative, err = pendingGet(p.b.pending, alt, copyValue)
+		if err != nil {
+			return err
+		}
+	}
+	if state == 0 && len(alternative) == 0 {
+		return nil
+	}
+	live, err := p.b.RebuildView().Node(ctx, raw.ID)
+	if err != nil {
+		return err
+	}
+	inReceipt := language == raw.Language && raw.FilePath == file
+	if state != 0 {
+		proved := inReceipt && sameRebuildSwiftObjCInput(raw, live)
+		if err := noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(proved)); err != nil {
+			return err
+		}
+	}
+	if len(alternative) != 0 {
+		proved := inReceipt && live != nil && live.Kind == raw.Kind && live.Language == raw.Language &&
+			live.Name == raw.Name && sameRebuildSwiftObjCBit(raw, live)
+		return noteRebuildScratchPayload(p.put, alt, alternative, rebuildScratchProofBit(proved))
+	}
+	return nil
+}
+
+func (p *rebuildSwiftObjCPass) proved(e *graph.Edge) (bool, error) {
+	for _, id := range [...]string{e.From, e.To} {
 		state, err := p.state(rebuildSwiftObjCKey('n', id))
-		return state == rebuildScratchExact, err
-	}, nil)
+		if err != nil || state != rebuildScratchExact {
+			return false, err
+		}
+	}
+	if e.Kind != graph.EdgeImplements {
+		return true, nil
+	}
+	state, err := p.state(rebuildSwiftObjCKey('g', e.To))
+	return state == rebuildScratchExact, err
+}
+
+func sameRebuildSwiftObjCBit(raw, live *graph.Node) bool {
+	rawObjC, _ := raw.Meta["objc"].(bool)
+	liveObjC, _ := live.Meta["objc"].(bool)
+	return rawObjC == liveObjC
 }
 
 func sameRebuildSwiftObjCInput(raw, live *graph.Node) bool {
@@ -153,9 +258,7 @@ func sameRebuildSwiftObjCInput(raw, live *graph.Node) bool {
 			}
 		}
 		if raw.Kind == graph.KindInterface {
-			rawObjC, _ := raw.Meta["objc"].(bool)
-			liveObjC, _ := live.Meta["objc"].(bool)
-			return rawObjC == liveObjC
+			return sameRebuildSwiftObjCBit(raw, live)
 		}
 	case "objc":
 		if raw.Kind == graph.KindType {
