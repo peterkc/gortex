@@ -42,13 +42,12 @@ type RebuildFnPointerStageStats struct {
 
 type rebuildFnPointerStage struct {
 	rebuildStoreFactoryPass
-	calls        rebuildCallMoves
-	decide       RebuildFnPointerStageRules
-	result       RebuildFnPointerStageStats
-	refused      rebuildScratchRefusals
-	dependencies rebuildScratchRefusals
-	adds         uint64
-	cProved      bool
+	calls   rebuildCallMoves
+	decide  RebuildFnPointerStageRules
+	result  RebuildFnPointerStageStats
+	refused rebuildScratchRefusals
+	adds    uint64
+	cProved bool
 }
 
 func rebuildFnPointerStageColumns(b *BuildStore) rebuildCallMoves {
@@ -161,11 +160,6 @@ func (b *BuildStore) RebuildFnPointerStage(ctx context.Context, receipts iter.Se
 	}
 	if err := p.refused.err(); err != nil {
 		return stats, err
-	}
-	if p.result.CallMoves != 0 || p.result.Adds != 0 {
-		if err := p.dependencies.err(); err != nil {
-			return stats, err
-		}
 	}
 	return p.result, p.write(ctx)
 }
@@ -460,8 +454,10 @@ func (p *rebuildFnPointerStage) finishRegistrations(ctx context.Context) error {
 			}
 			if moving {
 				p.refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
-			} else {
-				p.dependencies.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
+			} else if slot != source {
+				if _, err := p.noteDependency(slot, old); err != nil {
+					return err
+				}
 			}
 		}
 		if source == "" || slot == source {
@@ -470,6 +466,16 @@ func (p *rebuildFnPointerStage) finishRegistrations(ctx context.Context) error {
 		tuple := appendKeyLine(p.key('X', e.From, string(e.Kind), e.To, e.FilePath), e.Line)
 		return p.put(tuple, keyStrings(nil, slot, source))
 	})
+}
+
+// Keep one unproved input per slot. Preserve the first exact key for errors.
+func (p *rebuildFnPointerStage) noteDependency(slot string, old []byte) (bool, error) {
+	key := p.key('U', slot)
+	prior, err := p.get(key)
+	if err != nil || prior != nil && bytes.Compare(prior, old) <= 0 {
+		return false, err
+	}
+	return true, p.put(key, old)
 }
 
 func (p *rebuildFnPointerStage) members(ctx context.Context, slot string, visit func(string) error) error {
@@ -484,8 +490,9 @@ func (p *rebuildFnPointerStage) members(ctx context.Context, slot string, visit 
 }
 
 func (p *rebuildFnPointerStage) propagate(ctx context.Context) error {
+	live := true
 	for range p.decide.Sweeps {
-		changed := false
+		changed, proofChanged := false, false
 		err := p.visit(ctx, p.column('X'), func(r row) error {
 			to, rest, err := readKeyString(r.value)
 			if err != nil {
@@ -494,6 +501,20 @@ func (p *rebuildFnPointerStage) propagate(ctx context.Context) error {
 			from, rest, err := readKeyString(rest)
 			if err != nil || len(rest) != 0 {
 				return invalid("function pointer copy tuple")
+			}
+			input, err := p.get(p.key('U', from))
+			if err != nil {
+				return err
+			}
+			if input != nil {
+				changedSlot, err := p.noteDependency(to, input)
+				if err != nil {
+					return err
+				}
+				proofChanged = proofChanged || changedSlot
+			}
+			if !live {
+				return nil
 			}
 			return p.members(ctx, from, func(id string) error {
 				key := p.key('y', to, id)
@@ -508,8 +529,13 @@ func (p *rebuildFnPointerStage) propagate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		p.result.Sweeps++
-		if !changed {
+		if live {
+			p.result.Sweeps++
+			live = changed
+		}
+		// Proof can still move during unused sweeps if an unproved
+		// registration would have seeded an otherwise empty slot.
+		if !live && !proofChanged {
 			break
 		}
 	}
@@ -547,6 +573,18 @@ func (p *rebuildFnPointerStage) planDispatch(ctx context.Context) error {
 		p.result.Resolved += uint64(len(ids))
 		moving := p.decide.BindCall(e, first, len(ids) != 0)
 		if !moving && len(ids) <= 1 {
+			return nil
+		}
+		dependency, err := p.get(p.key('U', st+"\x00"+field))
+		if err != nil {
+			return err
+		}
+		if dependency != nil {
+			id, err := decodeLinkRecorder(dependency)
+			if err != nil {
+				return err
+			}
+			p.refused.add(id, dependency)
 			return nil
 		}
 		proved, err := fnPointerInputProved(&p.calls, old, r.value)

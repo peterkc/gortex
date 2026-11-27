@@ -172,3 +172,57 @@ func TestRebuildFnPointerStageGetterWithCopy(t *testing.T) {
 	require.EqualValues(t, 1, stats.CallMoves)
 	require.Equal(t, want, rebuildEventSavedRows(t, b))
 }
+
+func TestRebuildFnPointerStageProofFollowsDispatchSlots(t *testing.T) {
+	const file, lang = "saved.c", "c"
+	const stub = "unresolved::*.fn"
+	caller := rebuildEventNode(file, "run", lang, "")
+	handler := rebuildEventNode(file, "work", lang, "")
+	spare := rebuildEventNode(file, "spare", lang, "")
+	seed := rebuildFnPointerReg(caller.ID, handler.ID, 1, "root", handler.Name)
+	isolated := rebuildFnPointerReg(caller.ID, spare.ID, 2, "isolated", spare.Name)
+	copyRef := rebuildFnPointerReg(caller.ID, stub, 3, "branch", "")
+	copyRef.Meta["fnptr_copy_struct"], copyRef.Meta["fnptr_copy_field"] = "root", "fn"
+	self := rebuildFnPointerReg(caller.ID, stub, 4, "branch", "")
+	self.Meta["fnptr_copy_struct"], self.Meta["fnptr_copy_field"] = "branch", "fn"
+	dispatch := rebuildFnPointerCall(caller.ID, stub, 5, "branch")
+	facts := rebuildEventFacts(file, lang, []*graph.Node{caller, handler, spare}, seed, isolated, copyRef, self, dispatch)
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthFnPointerDispatch})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name   string
+		omit   *graph.Edge
+		refuse bool
+	}{
+		{"disconnected seed", isolated, false},
+		{"self copy", self, false},
+		{"connected seed", seed, true},
+		{"connected copy", copyRef, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, native := openRebuildEventStores(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.NoError(t, FreezeRebuildFnPointerInputs(t.Context(), b, frozen))
+			missing := facts
+			missing.Edges = slices.DeleteFunc(slices.Clone(facts.Edges), func(e *graph.Edge) bool { return e == tc.omit })
+			stats, err := RunRebuildFnPointerStage(t.Context(), b, rebuildGRPCReceipts(missing), frozen)
+			if tc.refuse {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, graph.EdgeIdentityFor(tc.omit), refused.First)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, stats.CallMoves)
+			report := RunFrameworkSynthesizersWithSelection(native, selected)
+			require.NoError(t, report.Err)
+			want := rebuildEventSQLiteRows(native)
+			require.Equal(t, handler.ID, rebuildFnPointerSavedAt(t, want.edges, graph.EdgeCalls, caller.ID, 5).To)
+			require.Equal(t, want, rebuildEventSavedRows(t, b))
+		})
+	}
+}
