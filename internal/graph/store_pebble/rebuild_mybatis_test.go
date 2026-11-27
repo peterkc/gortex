@@ -410,6 +410,11 @@ func TestRebuildMyBatisCandidateCohortProof(t *testing.T) {
 			other := &graph.Node{ID: otherFile + "::OtherMapper.find", Name: "find", Kind: graph.KindMethod,
 				FilePath: otherFile, Language: "java", Meta: map[string]any{"receiver": "OtherMapper"}}
 			require.NoError(t, b.AddParsedFile("local", myBatisTestQualifiedFacts(t, "local", other)))
+			// The stationary stub makes the unrelated join live without making
+			// its missing method receipt relevant to the move.
+			stationary := myBatisTestStub(other.ID, "find")
+			stationary.Meta["mybatis_namespace"] = "OtherMapper"
+			b.AddEdge(stationary)
 
 			// Change only the losing receipt, after installing the exact live candidates.
 			switch name {
@@ -428,8 +433,11 @@ func TestRebuildMyBatisCandidateCohortProof(t *testing.T) {
 			stats, err := runTestRebuildMyBatis(t, b, receipts...)
 			if name == "unrelated_unproved" {
 				require.NoError(t, err)
-				require.Equal(t, RebuildMyBatisStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+				require.Equal(t, RebuildMyBatisStats{Stubs: 2, Resolved: 2, Moves: 1}, stats)
 				requireRebuildMyBatisMove(t, b, old, old, myBatisTestLocal)
+				saved, err := b.pendingEdge(pendingEdgeKey(stationary))
+				require.NoError(t, err)
+				require.Equal(t, stationary, saved)
 				return
 			}
 			requireRebuildMyBatisRefusal(t, err, old, myBatisTestLocal)
