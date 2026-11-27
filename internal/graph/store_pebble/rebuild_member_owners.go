@@ -8,8 +8,8 @@ import (
 )
 
 type rebuildMemberOwners struct {
-	class, movedClass                                      string
-	seen, different, exact, unproved, moved, movedConflict bool
+	class, unorderedClass                        string
+	seen, different, exact, unordered, disagrees bool
 }
 
 func (o *rebuildMemberOwners) observe(class string) {
@@ -19,21 +19,30 @@ func (o *rebuildMemberOwners) observe(class string) {
 	o.different = o.different || o.class != class
 }
 
+func (p *rebuildCallMoves) memberOrderRetained(raw, live []byte) (bool, error) {
+	if bytes.Equal(raw, live) {
+		return true, nil
+	}
+	witness, err := p.get(rebuildReceiverOrderKey(live))
+	return bytes.Equal(witness, raw), err
+}
+
 func (o *rebuildMemberOwners) prove(p *rebuildCallMoves, raw, live []byte, class string) error {
-	if raw == nil {
-		o.unproved = true
-		return nil
+	if raw != nil {
+		claim, err := p.marked(append(p.column('u'), raw...))
+		if err != nil {
+			return err
+		}
+		if len(claim) > 1 && claim[0] == rebuildScratchExact && bytes.Equal(claim[1:], live) {
+			o.exact = true
+			retained, err := p.memberOrderRetained(raw, live)
+			if err != nil || retained {
+				return err
+			}
+		}
 	}
-	claim, err := p.marked(append(p.column('u'), raw...))
-	if err != nil {
-		return err
-	}
-	ok := len(claim) > 1 && claim[0] == rebuildScratchExact && bytes.Equal(claim[1:], live)
-	o.exact, o.unproved = o.exact || ok, o.unproved || !ok
-	if !bytes.Equal(raw, live) {
-		o.movedConflict = o.movedConflict || o.moved && o.movedClass != class
-		o.moved, o.movedClass = true, class
-	}
+	o.disagrees = o.disagrees || o.unordered && o.unorderedClass != class
+	o.unordered, o.unorderedClass = true, class
 	return nil
 }
 
@@ -41,21 +50,21 @@ func (o *rebuildMemberOwners) elect(p *rebuildCallMoves, id string, lastCol byte
 	if err != nil || !o.different {
 		return o.class, o.exact, false, err
 	}
-	// The SQLite resolved-to-resolved MemberOf rewrite appends after
-	// retained rows. Raw receipts don't order different rewritten owners.
-	if o.unproved || o.movedConflict {
-		return "", false, true, nil
-	}
-	if o.moved {
-		return o.movedClass, true, false, nil
-	}
+	// Known in-place repairs keep their receipt position. Other rewrites
+	// can append or retain their position; don't guess when the winner changes.
 	last, err := p.get(p.key(lastCol, id))
 	if err != nil {
 		return "", false, false, err
 	}
+	if last == nil || o.disagrees {
+		return "", false, true, nil
+	}
 	class, rest, err := readKeyString(last)
 	if err != nil || len(rest) != 0 {
 		return "", false, false, invalid(p.label + " last owner")
+	}
+	if o.unordered && o.unorderedClass != class {
+		return "", false, true, nil
 	}
 	return class, true, false, nil
 }
@@ -85,7 +94,14 @@ func (p *rebuildCallMoves) recordOwnerEdge(e *graph.Edge, admitted bool, order u
 			if err := p.put(binary.BigEndian.AppendUint64(p.column('z'), order), raw); err != nil {
 				return err
 			}
-		} else if bytes.Equal(raw, claim[1:]) {
+		} else {
+			retained, err := p.memberOrderRetained(raw, claim[1:])
+			if err != nil {
+				return err
+			}
+			if !retained {
+				return noteRebuildScratchPayload(p.put, key, claim, rebuildCapabilityProved)
+			}
 			class, ok := owner(live)
 			if !ok {
 				return invalid(p.label + " member role changed")

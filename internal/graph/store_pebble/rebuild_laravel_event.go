@@ -315,7 +315,7 @@ func (p *rebuildLaravelEventPass) recordNode(n *graph.Node, file string) error {
 }
 
 // z retains each Call's first exact receipt; w retains the last
-// receipt-backed stationary owner per handle.
+// receipt-backed owner with a retained position per handle.
 func (p *rebuildLaravelEventPass) recordEdge(e *graph.Edge, admitted bool, order uint64) error {
 	return p.recordOwnerEdge(e, admitted, order, func(live *graph.Edge) bool {
 		return p.rules.Call(e) == p.rules.Call(live)
