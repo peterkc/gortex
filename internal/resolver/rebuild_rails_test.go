@@ -175,7 +175,14 @@ func TestRebuildRailsConflictingEFCoreReceipt(t *testing.T) {
 			// proves that the rejected turn left no usable model witness.
 			_, err = RunRebuildRails(t.Context(), build, seq, frozen)
 			require.NoError(t, err)
-			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, build))
+			want, got := rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, build)
+			require.Equal(t, want.edges, got.edges)
+			if fixture.want == 0 {
+				// Only the SQLite input includes the conflicting receipt's node.
+				require.Equal(t, before.nodes, got.nodes)
+			} else {
+				require.Equal(t, want.nodes, got.nodes)
+			}
 		})
 	}
 }
