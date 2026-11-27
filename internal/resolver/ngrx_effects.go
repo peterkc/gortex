@@ -25,10 +25,7 @@ func ResolveNgRxEffects(g graph.Store) int {
 	}
 	var placeholders []*graph.Edge
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if v, _ := e.Meta["via"].(string); v != ngrxEffectVia {
+		if !isNgRxEffectCall(e) {
 			continue
 		}
 		placeholders = append(placeholders, e)
@@ -50,40 +47,57 @@ func ResolveNgRxEffects(g graph.Store) int {
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for _, e := range placeholders {
-		action, _ := e.Meta["ngrx_action"].(string)
+		action := ngRxEffectAction(e)
 		if action == "" {
 			continue
 		}
 		target := pickStoreAction(g, e, sameBoundaryCandidates(g, e.From, actionByName[action]))
 
-		want := "unresolved::*." + action
-		if target != nil {
-			want = target.ID
-		}
-		if e.To == want {
-			if target != nil {
-				resolved++
-			}
-			continue
-		}
 		oldTo := e.To
-		e.To = want
+		var id string
 		if target != nil {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = ConfidenceHeuristic
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceHeuristic)
-			StampSynthesized(e, SynthNgRxEffect)
+			id = target.ID
 			resolved++
-		} else {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = 0
-			e.ConfidenceLabel = ""
-			UnstampSynthesized(e)
 		}
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		if rebindNgRxEffectCall(e, action, id, target != nil) {
+			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		}
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func isNgRxEffectCall(e *graph.Edge) bool {
+	return e != nil && e.Meta["via"] == ngrxEffectVia
+}
+
+func ngRxEffectAction(e *graph.Edge) string {
+	if !isNgRxEffectCall(e) {
+		return ""
+	}
+	action, _ := e.Meta["ngrx_action"].(string)
+	return action
+}
+
+func rebindNgRxEffectCall(e *graph.Edge, action, target string, matched bool) bool {
+	if !matched {
+		target = "unresolved::*." + action
+	}
+	if e.To == target {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	if matched {
+		e.Confidence = ConfidenceHeuristic
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceHeuristic)
+		StampSynthesized(e, SynthNgRxEffect)
+	} else {
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		UnstampSynthesized(e)
+	}
+	return true
 }
