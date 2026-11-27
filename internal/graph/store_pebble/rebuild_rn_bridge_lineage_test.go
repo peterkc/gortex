@@ -8,12 +8,16 @@ import (
 )
 
 func TestRebuildReactNativeBridgeSkipsSoleSelfRecorder(t *testing.T) {
-	for _, peer := range []bool{false, true} {
-		name := "sole self candidate"
-		if peer {
-			name = "distinct candidate"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		peer      bool
+		wantReads int
+		wantEdges uint64
+	}{
+		{name: "sole self candidate", wantReads: 1},
+		{name: "distinct candidate", peer: true, wantReads: 2, wantEdges: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			const file, language = "app.ts", "typescript"
 			meta := map[string]any{"rn_module": "Calendar", "rn_method": "open"}
 			caller := &graph.Node{ID: "caller", Name: "open", FilePath: file, Language: language, Kind: graph.KindMethod, Meta: meta}
@@ -21,7 +25,7 @@ func TestRebuildReactNativeBridgeSkipsSoleSelfRecorder(t *testing.T) {
 			app := ParseFacts{EffectiveLanguage: language, File: graph.FileMetaRow{FilePath: file}, Nodes: []*graph.Node{caller}, Edges: []*graph.Edge{call}}
 			facts := []ParseFacts{app}
 			native := &graph.Node{ID: "Calendar.java::open", Name: "open", FilePath: "Calendar.java", Language: "java", Kind: graph.KindMethod, Meta: meta}
-			if peer {
+			if tc.peer {
 				facts = append(facts, producerProofFacts(native))
 			}
 			b, exact := seedSyntheticCustody(t, facts...)
@@ -32,7 +36,7 @@ func TestRebuildReactNativeBridgeSkipsSoleSelfRecorder(t *testing.T) {
 				if reads == 1 {
 					row, err := pendingGet(b.pending, rebuildRNKey('r', string(key)), copyValue)
 					require.NoError(t, err)
-					if peer {
+					if tc.peer {
 						require.Equal(t, append([]byte{rebuildCapabilityWanted}, key...), row)
 					} else {
 						require.Empty(t, row, "the sole self match cannot elect an output")
@@ -47,13 +51,10 @@ func TestRebuildReactNativeBridgeSkipsSoleSelfRecorder(t *testing.T) {
 				func(lang string) bool { return lang == language },
 				func(e *graph.Edge) bool { return e.To == call.To }, makeCall)
 			require.NoError(t, err)
-			if peer {
-				require.Equal(t, 2, reads)
-				require.EqualValues(t, 1, stats.Edges)
+			require.Equal(t, tc.wantReads, reads)
+			require.Equal(t, RebuildReactNativeBridgeStats{Edges: tc.wantEdges}, stats)
+			if tc.peer {
 				checkSetStateProofOutput(t, b, makeCall(call, native), rebuildProofRNBridge)
-			} else {
-				require.Equal(t, 1, reads)
-				require.Zero(t, stats)
 			}
 		})
 	}

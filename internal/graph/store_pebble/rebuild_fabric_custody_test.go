@@ -87,10 +87,10 @@ func TestRebuildFabricStorePreservesOccupiedPairWithoutProof(t *testing.T) {
 		proof, err := readRebuildEdgeCustody(b.pending, key)
 		require.NoError(t, err)
 		require.Equal(t, rebuildEdgeCustody{proof: rebuildProofFabric}, proof)
-		reverse := string(pendingReverseKey(want, key))
-		require.Equal(t, key, after[reverse])
+		reverseKey := string(pendingReverseKey(want, key))
+		require.Equal(t, key, after[reverseKey])
 		delete(after, string(key))
-		delete(after, reverse)
+		delete(after, reverseKey)
 		delete(after, string(rebuildLinkRecorderKey(key)))
 	}
 	require.Equal(t, before, after, "both incumbents must stay byte-identical")

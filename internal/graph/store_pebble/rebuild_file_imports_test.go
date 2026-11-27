@@ -166,11 +166,15 @@ func TestRebuildFileImportsGodotRunAndTailOrder(t *testing.T) {
 	require.Len(t, stream.rows, 2)
 	var got []string
 	require.NoError(t, stream.visit(ctx, p.dir, func(r row) error {
-		from, _, err := readKeyString(r.key[len(fileImportGodot)+1+2:]) // move prefix, group, edge family and direction
+		_, raw, err := readKeyString(r.value)
 		if err != nil {
 			return err
 		}
-		got = append(got, from)
+		e, err := decodeEdge(raw)
+		if err != nil {
+			return err
+		}
+		got = append(got, e.From)
 		return nil
 	}))
 	require.Equal(t, []string{"a.tscn", "c.tscn", "e.tscn", "b.tscn", "d.tscn", "f.tscn"}, got)

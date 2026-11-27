@@ -464,8 +464,12 @@ func Run(ctx workflow.Context) {
 	defer facts.ReleaseTree()
 	const activityTarget = "unresolved::temporal::activity::Charge"
 	const workflowTarget = "unresolved::temporal::workflow::ChildWorkflow"
-	var goCall, activitySpawn, workflowSpawn *graph.Edge
+	var activityCall, activitySpawn, workflowCall, workflowSpawn *graph.Edge
 	for _, e := range facts.Edges {
+		if e.To == workflowTarget && e.Kind == graph.EdgeCalls {
+			require.Nil(t, workflowCall)
+			workflowCall = e
+		}
 		if e.To == workflowTarget && e.Kind == graph.EdgeSpawns {
 			require.Nil(t, workflowSpawn)
 			workflowSpawn = e
@@ -475,16 +479,23 @@ func Run(ctx workflow.Context) {
 		}
 		switch e.Kind {
 		case graph.EdgeCalls:
-			require.Nil(t, goCall)
-			goCall = e
+			require.Nil(t, activityCall)
+			activityCall = e
 		case graph.EdgeSpawns:
 			require.Nil(t, activitySpawn)
 			activitySpawn = e
 		}
 	}
-	require.NotNil(t, goCall)
+	require.NotNil(t, activityCall)
 	require.NotNil(t, activitySpawn)
+	require.NotNil(t, workflowCall)
 	require.NotNil(t, workflowSpawn)
+
+	t.Run("Go activity spawn without a name", func(t *testing.T) {
+		row := cloneFrameworkEdge(activitySpawn)
+		row.To = "unresolved::temporal::activity::"
+		require.Empty(t, rebuildFrameworkFullNameMissFamily(row, graph.UnresolvedName(row.To)))
+	})
 
 	java := languages.NewJavaExtractor()
 	java.SetTemporalInvokers([]string{"Invoker"}, nil)
@@ -518,8 +529,9 @@ func Run(ctx workflow.Context) {
 		edge *graph.Edge
 		lang string
 	}{
-		{"Go call", goCall, "go"},
+		{"Go activity call", activityCall, "go"},
 		{"Go activity spawn", activitySpawn, "go"},
+		{"Go workflow call", workflowCall, "go"},
 		{"Go workflow spawn", workflowSpawn, "go"},
 		{"Java stub", javaStub, "java"},
 		{"Java start", javaStart, "java"},
