@@ -248,6 +248,64 @@ func TestRebuildSQLCallsiteRestubProof(t *testing.T) {
 	}
 }
 
+func TestRebuildSQLCallsiteCapsOnlyNeededNodeWitnesses(t *testing.T) {
+	for _, tc := range []struct {
+		name, largeName string
+		bounded         []string
+		repeatBounded   bool
+		wantLimit       bool
+	}{
+		{name: "spare anchor", largeName: "other", bounded: []string{"other"}},
+		{name: "spare ambiguous member", largeName: "find", bounded: []string{"find", "find"}},
+		{name: "sole anchor", largeName: "other", wantLimit: true},
+		{name: "unique target", largeName: "find", wantLimit: true},
+		{name: "second ambiguous member despite repeated receipt", largeName: "find", bounded: []string{"find"}, repeatBounded: true, wantLimit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := sqlCallsiteStoreEdge("retired", "find")
+			source := sqlCallsiteStoreSource(old)
+			oversized := sqlCallsiteStoreFunction("a-large", tc.largeName)
+			facts := []ParseFacts{source, oversized}
+			ids := []string{"b-bounded", "c-bounded"}
+			for i, name := range tc.bounded {
+				facts = append(facts, sqlCallsiteStoreFunction(ids[i], name))
+			}
+			b, _ := seedSyntheticCustody(t, facts...)
+			live := *oversized.Nodes[0]
+			live.Meta = map[string]any{"large": strings.Repeat("x", rebuildSQLCallsiteRowBytes)}
+			key := pendingNodeKey(live.ID)
+			raw, err := encodeNode(&live)
+			require.NoError(t, err)
+			require.Greater(t, len(key)+len(raw), rebuildSQLCallsiteRowBytes)
+			require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+			if tc.repeatBounded {
+				facts = append(facts, facts[2])
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := runSQLCallsiteStore(t, b, sqlCallsiteTestReceipts(facts...))
+			if tc.wantLimit {
+				require.ErrorIs(t, err, ErrRebuildSQLCallsite)
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "SQL callsite node row")
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, RebuildSQLCallsiteStats{Stubs: 1, Moves: 1}, stats)
+			want := *old
+			want.To = "unresolved::sqlfn::find"
+			saved, err := b.pendingEdge(pendingEdgeKey(&want))
+			require.NoError(t, err)
+			require.Equal(t, &want, saved)
+			requireRebuildLinkCustody(t, b, &want, rebuildEdgeCustody{raw: pendingEdgeKey(old)})
+			removed, err := b.pendingEdge(pendingEdgeKey(old))
+			require.NoError(t, err)
+			require.Nil(t, removed)
+		})
+	}
+}
+
 func TestRebuildSQLCallsitePreservesOversizedIncumbent(t *testing.T) {
 	old := sqlCallsiteStoreEdge("unresolved::sqlfn::find", "find")
 	incumbent := *sqlCallsiteStoreEdge("new-b", "find")

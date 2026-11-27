@@ -16,7 +16,10 @@ var ErrRebuildSQLCallsite = errors.New("pebble rebuild SQL callsite stage failed
 
 var rebuildSQLCallsitePrefix = []byte{'g', 'P'}
 
-const rebuildSQLCallsiteRowBytes = 16 << 20
+const (
+	rebuildSQLCallsiteRowBytes  = 16 << 20
+	rebuildSQLCallsiteOversized = 1 << 3 // separate from the generic candidate proof flags
+)
 
 // RebuildSQLCallsiteStats describes the live census and planned moves.
 type RebuildSQLCallsiteStats struct {
@@ -80,19 +83,44 @@ func (b *BuildStore) RebuildSQLCallsites(ctx context.Context, receipts iter.Seq2
 }
 
 // c: SQL Function proof and name by ID; a: unique ID or ambiguity by name;
-// u: affected name, storing 1 plus the exact member count (capped at two);
+// u: affected name, storing exact witness counts with and without the row cap;
 // r: raw-key claims.
 // m: new payload by old key; o: raw receipt key in move order.
 func rebuildSQLCallsiteKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildSQLCallsitePrefix), col), fields...)
 }
 
-func (p *rebuildSQLCallsitePass) cohort(name string) (byte, error) {
-	return pendingGet(p.b.pending, rebuildSQLCallsiteKey('u', name), func(val []byte) (byte, error) {
-		if len(val) != 1 || val[0] < 1 || val[0] > 3 {
-			return 0, invalid("SQL callsite receipt proof")
+// Each count stores one plus the number of exact witnesses (at most two).
+// A zero total means this name does not need a cohort proof.
+type rebuildSQLCallsiteWitnesses struct {
+	bounded, total byte
+}
+
+func (w *rebuildSQLCallsiteWitnesses) add(oversized bool) {
+	if w.total < 3 {
+		w.total++
+	}
+	if !oversized && w.bounded < 3 {
+		w.bounded++
+	}
+}
+
+func (w rebuildSQLCallsiteWitnesses) proves(needed byte) (bool, error) {
+	if w.bounded > needed {
+		return true, nil
+	}
+	if w.total > needed {
+		return false, fmt.Errorf("%w: SQL callsite node row", ErrRebuildLinkInputSize)
+	}
+	return false, nil
+}
+
+func (p *rebuildSQLCallsitePass) cohort(name string) (rebuildSQLCallsiteWitnesses, error) {
+	return pendingGet(p.b.pending, rebuildSQLCallsiteKey('u', name), func(val []byte) (rebuildSQLCallsiteWitnesses, error) {
+		if len(val) != 2 || val[0] < 1 || val[0] > val[1] || val[1] > 3 {
+			return rebuildSQLCallsiteWitnesses{}, invalid("SQL callsite receipt proof")
 		}
-		return val[0], nil
+		return rebuildSQLCallsiteWitnesses{bounded: val[0], total: val[1]}, nil
 	})
 }
 
@@ -120,7 +148,11 @@ func (p *rebuildSQLCallsitePass) collect(ctx context.Context) (bool, error) {
 			return invalid("SQL function has no ID")
 		}
 		haveFunctions = true
-		if err := p.put(rebuildSQLCallsiteKey('c', n.ID), append([]byte{rebuildCapabilityWanted}, n.Name...)); err != nil {
+		state := rebuildCapabilityWanted
+		if len(r.key)+len(r.value) > rebuildSQLCallsiteRowBytes {
+			state |= rebuildSQLCallsiteOversized
+		}
+		if err := p.put(rebuildSQLCallsiteKey('c', n.ID), append([]byte{state}, n.Name...)); err != nil {
 			return err
 		}
 		key := rebuildSQLCallsiteKey('a', n.Name)
@@ -193,7 +225,7 @@ func (p *rebuildSQLCallsitePass) plan(ctx context.Context) error {
 			return nil
 		}
 		if seen {
-			if err := p.put(rebuildSQLCallsiteKey('u', name), []byte{1}); err != nil {
+			if err := p.put(rebuildSQLCallsiteKey('u', name), []byte{1, 1}); err != nil {
 				return err
 			}
 		} else {
@@ -298,15 +330,12 @@ func (p *rebuildSQLCallsitePass) recordNode(raw *graph.Node, file, lang string) 
 	}
 	if !p.needsAnchor {
 		state, err := p.cohort(string(claim[1:]))
-		if err != nil || state == 0 {
+		if err != nil || state.total == 0 {
 			return err
 		}
 	}
 	key := pendingNodeKey(raw.ID)
 	live, err := pendingGet(p.b.pending, key, func(val []byte) (*graph.Node, error) {
-		if len(key)+len(val) > rebuildSQLCallsiteRowBytes {
-			return nil, fmt.Errorf("%w: SQL callsite node row", ErrRebuildLinkInputSize)
-		}
 		return checkedRebuildLightNode(row{key, val}, "SQL callsite")
 	})
 	if err != nil {
@@ -317,26 +346,34 @@ func (p *rebuildSQLCallsitePass) recordNode(raw *graph.Node, file, lang string) 
 	return noteRebuildScratchPayload(p.put, candidate, claim, rebuildScratchProofBit(proved))
 }
 
-func (p *rebuildSQLCallsitePass) proveCohorts(ctx context.Context) (anchor bool, err error) {
-	err = pendingVisit(ctx, p.b.pending, rebuildSQLCallsiteKey('c'), func(r row) error {
+func (p *rebuildSQLCallsitePass) proveCohorts(ctx context.Context) (rebuildSQLCallsiteWitnesses, error) {
+	anchor := rebuildSQLCallsiteWitnesses{bounded: 1, total: 1}
+	err := pendingVisit(ctx, p.b.pending, rebuildSQLCallsiteKey('c'), func(r row) error {
 		if len(r.value) < 2 {
 			return invalid("SQL callsite candidate proof")
 		}
-		if r.value[0] != rebuildScratchExact {
+		state := r.value[0]
+		if state&^rebuildSQLCallsiteOversized != rebuildScratchExact {
 			return nil
 		}
-		anchor = true
+		oversized := state&rebuildSQLCallsiteOversized != 0
+		anchor.add(oversized)
 		name := string(r.value[1:])
 		count, err := p.cohort(name)
-		if err != nil || count == 0 || count == 3 {
+		if err != nil || count.total == 0 {
 			return err
 		}
-		return p.put(rebuildSQLCallsiteKey('u', name), []byte{count + 1})
+		next := count
+		next.add(oversized)
+		if next == count {
+			return nil
+		}
+		return p.put(rebuildSQLCallsiteKey('u', name), []byte{next.bounded, next.total})
 	})
 	return anchor, err
 }
 
-func (p *rebuildSQLCallsitePass) proved(old []byte, e *graph.Edge, anchor bool) (bool, error) {
+func (p *rebuildSQLCallsitePass) proved(old []byte, e *graph.Edge, anchor rebuildSQLCallsiteWitnesses) (bool, error) {
 	raw, err := rebuildReceiptKey(p.b.pending, old)
 	if errors.Is(err, ErrRebuildUnknownProvenance) {
 		return false, nil // count the affected output rather than the old call
@@ -353,14 +390,17 @@ func (p *rebuildSQLCallsitePass) proved(old []byte, e *graph.Edge, anchor bool) 
 	if err != nil {
 		return false, err
 	}
-	if count == 0 {
+	if count.total == 0 {
 		// A different exact SQL function proves native reaches the Call pass.
-		return anchor, nil
+		return anchor.proves(1)
 	}
 	target, _, err := p.elect(name)
+	if err != nil {
+		return false, err
+	}
 	if target != "" {
-		return count == 2, err // the unique live member must be exact
+		return count.proves(1) // the unique live member must be exact
 	}
 	// Two exact members rule out a unique target even if others are missing.
-	return count == 3, err
+	return count.proves(2)
 }
