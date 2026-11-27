@@ -105,7 +105,7 @@ func (p *rebuildObserverPass) capture(ctx context.Context, registrar, dispatcher
 			return err
 		}
 		n, err := p.node(ctx, e.From)
-		if err != nil || !observerCallable(n) {
+		if err != nil || !graph.ObserverCallable(n) {
 			return err
 		}
 		reg, disp := registrar(n.Name), dispatcher(n.Name)
@@ -125,10 +125,6 @@ func (p *rebuildObserverPass) capture(ctx context.Context, registrar, dispatcher
 		}
 		return nil
 	})
-}
-
-func observerCallable(n *graph.Node) bool {
-	return n != nil && (n.Kind == graph.KindMethod || n.Kind == graph.KindFunction)
 }
 
 func observerInput(r row) (*graph.Edge, error) {
@@ -241,7 +237,7 @@ func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*grap
 		if err := pendingVisit(ctx, p.b.pending, prefix, func(row) error {
 			count++
 			return nil
-		}); err != nil || count == 0 || count > maxCallbacks {
+		}); err != nil || !graph.ObserverCallbackCountAllowed(count, maxCallbacks) {
 			return err
 		}
 		if reporting {
@@ -276,7 +272,7 @@ func (p *rebuildObserverPass) pairDispatcher(ctx context.Context, access *graph.
 	prefix := observerScratch('c', field)
 	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 		id, _, err := readKeyString(r.key[len(prefix):])
-		if err != nil || id == access.From {
+		if err != nil || !graph.ObserverCallbackIsDistinct(access.From, id) {
 			return err
 		}
 		cb, err := p.node(ctx, id)
@@ -320,14 +316,14 @@ func (p *rebuildObserverPass) callbackWitnesses(ctx context.Context, registrar s
 		if in.To != registrar {
 			return invalid("Observer reverse identity")
 		}
-		for _, kind := range [...]graph.EdgeKind{graph.EdgeReads, graph.EdgeReferences} {
+		for _, kind := range graph.ObserverCallbackKinds() {
 			if err := pendingVisit(ctx, p.b.pending, guardOutgoing(in.From, kind), func(r row) error {
 				ref, err := observerInput(r)
-				if err != nil || ref.To == "" || ref.FilePath != in.FilePath || ref.Line != in.Line {
+				if err != nil || !graph.ObserverCallbackAtSite(in, ref) {
 					return err
 				}
 				n, err := p.node(ctx, ref.To)
-				if err != nil || !observerCallable(n) {
+				if err != nil || !graph.ObserverCallable(n) {
 					return err
 				}
 				return yield(in, ref)
