@@ -68,15 +68,10 @@ func TestRebuildValueRefsSQLiteOracle(t *testing.T) {
 				b.AddEdge(&stationary)
 			}
 			before := rebuildEventSavedRows(t, b)
-			selected := selection
-			// Both oversized cases test this stage's role limit, not the census limit.
-			if mode != "unrelated large local" && mode != "large declaration" {
-				frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
-				require.NoError(t, err)
-				require.True(t, frozen.allows(SynthValueRefName))
-				selected = frozen
-			}
-			count, err := RunRebuildValueRefs(t.Context(), b, rebuildGRPCReceipts(raw), selected)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthValueRefName))
+			count, err := RunRebuildValueRefs(t.Context(), b, rebuildGRPCReceipts(raw), frozen)
 			switch mode {
 			case "nearest declaration", "unrelated large local":
 				require.NoError(t, err)

@@ -540,10 +540,6 @@ func TestRebuildSwiftObjCNodeRowCap(t *testing.T) {
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			b := openRebuildGRPCBuild(t, facts...)
-			selection, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selected)
-			require.NoError(t, err)
-			require.True(t, selection.allows(SynthSwiftObjC))
-			before := rebuildSwiftObjCPrivateEdges(t, b)
 			large := *facts[0].Nodes[0]
 			large.Meta = map[string]any{"unrelated": padding}
 			if fixture.reached {
@@ -551,8 +547,11 @@ func TestRebuildSwiftObjCNodeRowCap(t *testing.T) {
 			} else {
 				large.ID, large.Name = "p/Bridge.swift::unused", "unused"
 			}
-			// Enlarge the live row after the census to test the stage's own cap.
 			b.AddNode(&large)
+			selection, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.True(t, selection.allows(SynthSwiftObjC))
+			before := rebuildSwiftObjCPrivateEdges(t, b)
 			stats, err := RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(facts...), selection)
 			if fixture.reached {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildSwiftObjC)

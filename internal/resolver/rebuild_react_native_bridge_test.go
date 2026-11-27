@@ -12,6 +12,49 @@ import (
 	"github.com/zzet/gortex/internal/parser/languages"
 )
 
+func TestRebuildReactNativeBridgeCallerNodeCap(t *testing.T) {
+	const module, method = "Calendar", "open"
+	padding := strings.Repeat("x", 16<<20)
+	for _, mode := range []string{"adds bridge", "stationary bridge"} {
+		t.Run(mode, func(t *testing.T) {
+			caller := &graph.Node{ID: "app.ts::caller", Kind: graph.KindFunction, FilePath: "app.ts", Language: "typescript",
+				Meta: map[string]any{"padding": padding}}
+			native := &graph.Node{ID: "Calendar.swift::open", Kind: graph.KindMethod, FilePath: "Calendar.swift", Language: "swift",
+				Meta: map[string]any{"rn_module": module, "rn_method": method}}
+			call := &graph.Edge{From: caller.ID, To: "unresolved::Calendar.open", Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: 5,
+				Meta: map[string]any{"via": rnNativeVia, "rn_module": module, "rn_method": method}}
+			edges := []*graph.Edge{call}
+			if mode == "stationary bridge" {
+				edges = append(edges, &graph.Edge{From: caller.ID, To: native.ID, Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: call.Line})
+			}
+			web := rebuildEventFacts(caller.FilePath, caller.Language, []*graph.Node{caller}, edges...)
+			ios := rebuildEventFacts(native.FilePath, native.Language, []*graph.Node{native})
+			b := openRebuildGRPCBuild(t, web, ios)
+			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
+			require.NoError(t, err)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthReactNative))
+			before := rebuildEventSavedRows(t, b)
+			// Preserve the exact Call receipt but omit the caller declaration.
+			// The reducer must reject the oversized endpoint during election,
+			// not during the later loop over declaration receipts.
+			web.Nodes = nil
+			web.File.NodeCount = 0
+			stats, err := RunRebuildReactNativeBridge(t.Context(), b, rebuildGRPCReceipts(web, ios), frozen)
+			if mode == "adds bridge" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildReactNativeBridge)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "React Native bridge node row")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
 func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -608,9 +651,6 @@ func TestRebuildNativeBridgeNodeRowCaps(t *testing.T) {
 			require.NoError(t, err)
 			for _, reached := range []bool{false, true} {
 				b := openRebuildGRPCBuild(t, facts...)
-				selection, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selected)
-				require.NoError(t, err)
-				require.True(t, selection.allows(stage.name))
 				large := *ios
 				large.Meta = maps.Clone(ios.Meta)
 				large.Meta["unrelated"] = padding
@@ -618,8 +658,10 @@ func TestRebuildNativeBridgeNodeRowCaps(t *testing.T) {
 					large.ID = "Calendar.swift::unused"
 					large.Meta["rn_method"], large.Meta["expo_method"] = "unused", "unused"
 				}
-				// Freeze the shared census before changing the live row size.
 				b.AddNode(&large)
+				selection, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selected)
+				require.NoError(t, err)
+				require.True(t, selection.allows(stage.name))
 				receipts := rebuildGRPCReceipts(facts...)
 				var edges uint64
 				switch stage.name {

@@ -65,20 +65,27 @@ func TestRebuildFamilyDropRemovesExactPendingRows(t *testing.T) {
 }
 
 func TestRebuildFrameworkFamilyGateCapsOnlyDroppedEndpoints(t *testing.T) {
-	for _, lang := range []string{"go", "javascript"} {
-		t.Run(lang, func(t *testing.T) {
+	padding := strings.Repeat("x", 16<<20)
+	for _, role := range []string{"from", "to", "same family"} {
+		t.Run(role, func(t *testing.T) {
 			b := newBuild(t, FullProfile)
 			from := &graph.Node{ID: "from", Kind: graph.KindFunction, Language: "go"}
 			to := &graph.Node{ID: "to", Kind: graph.KindFunction, Language: "javascript"}
-			large := &graph.Node{ID: "large", Kind: graph.KindFunction, Language: lang,
-				Meta: map[string]any{"padding": strings.Repeat("x", 16<<20)}}
+			large := &graph.Node{ID: "large", Kind: graph.KindFunction, Language: "javascript",
+				Meta: map[string]any{"padding": padding}}
 			drop := &graph.Edge{From: from.ID, To: to.ID, Kind: graph.EdgeReferences, FilePath: "from.go", Line: 1}
 			extra := &graph.Edge{From: large.ID, To: to.ID, Kind: graph.EdgeReferences, FilePath: "large", Line: 1}
+			switch role {
+			case "from":
+				large.Language = from.Language
+			case "to":
+				extra.From, extra.To = from.ID, large.ID
+			}
 			b.AddBatch([]*graph.Node{from, to, large}, []*graph.Edge{drop, extra})
 			before := rebuildFrameworkCustodyRows(t, b)
 			count, err := b.RebuildFrameworkFamilyGate(t.Context(), func(*graph.Edge) bool { return true },
 				func(from, to string) bool { return from != to })
-			if lang == "go" {
+			if role != "same family" {
 				require.ErrorIs(t, err, ErrRebuildFrameworkFamilyGate)
 				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 				require.ErrorContains(t, err, "framework family endpoint node")

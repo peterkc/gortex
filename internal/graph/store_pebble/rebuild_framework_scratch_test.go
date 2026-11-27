@@ -8,6 +8,43 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+func TestRebuildLanguageMarkerSizeOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		largeID string
+		bounded bool
+	}{
+		{name: "bounded first", largeID: "z", bounded: true},
+		{name: "oversized first", largeID: "a", bounded: true},
+		{name: "only oversized", largeID: "a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			prefix := []byte("gx")
+			small := &graph.Node{ID: "m", Language: "kotlin"}
+			raw, err := encodeNode(small)
+			require.NoError(t, err)
+			limit := len(pendingNodeKey(small.ID)) + len(raw)
+			large := &graph.Node{ID: tc.largeID, Language: "kotlin", Meta: map[string]any{"padding": "wide"}}
+			b.AddNode(large)
+			require.NoError(t, b.putRebuildScratch(keyStrings(prefix, large.ID), []byte{rebuildScratchExact}, limit, "example"))
+			if tc.bounded {
+				b.AddNode(small)
+				require.NoError(t, b.putRebuildScratch(keyStrings(prefix, small.ID), []byte{rebuildScratchExact}, limit, "example"))
+			}
+			proved, err := b.proveRebuildLanguageMarker(t.Context(), prefix, limit, "example")
+			if !tc.bounded {
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "example marker node")
+				require.False(t, proved)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, proved)
+		})
+	}
+}
+
 func TestRebuildScratchRowLimit(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	const limit = 8

@@ -114,18 +114,17 @@ func TestRebuildGoFrameRoutes(t *testing.T) {
 		require.EqualValues(t, 1, moves)
 	})
 
-	t.Run("oversized handler after census", func(t *testing.T) {
+	t.Run("oversized handler", func(t *testing.T) {
 		receipts := []store_pebble.ParseFacts{callFacts, factsFor(winner)}
 		build := openRebuildGRPCBuild(t, receipts...)
-		selection := freeze(t, build)
-		require.True(t, selection.allows(SynthGoFrameRoute))
 		large := *winner
 		large.Meta = map[string]any{
 			"goframe_request_type": req, "goframe_request_pkg": pkg, "goframe_bound": true,
 			"unrelated": strings.Repeat("x", 16<<20),
 		}
-		// Enlarge the live handler after the census so this exercises the stage's cap.
 		build.AddNode(&large)
+		selection := freeze(t, build)
+		require.True(t, selection.allows(SynthGoFrameRoute))
 		moves, err := RunRebuildGoFrame(t.Context(), build, rebuildGRPCReceipts(receipts...), selection)
 		require.ErrorIs(t, err, store_pebble.ErrRebuildGoFrame)
 		require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
