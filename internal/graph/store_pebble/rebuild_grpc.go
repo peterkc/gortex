@@ -345,6 +345,31 @@ func (p *rebuildGRPC) handlers(ctx context.Context, snap *pebble.Snapshot, servi
 func (p *rebuildGRPC) order(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
 	stubs := rebuildGRPCKey('s')
 	ordered := rebuildGRPCKey('o')
+	recorders := rebuildGRPCKey('i')
+	// Match receipts by the original key of each surviving stub. Two
+	// different live stubs cannot both claim the same receipt ordinal.
+	if err := pendingVisit(ctx, p.b.pending, stubs, func(r row) error {
+		live := r.key[len(stubs):]
+		raw, err := rebuildReceiptKey(p.b.pending, live)
+		if err != nil {
+			return err
+		}
+		key := append(bytes.Clone(recorders), raw...)
+		present, err := pendingGet(p.b.pending, key, func([]byte) (bool, error) { return true, nil })
+		if err != nil {
+			return err
+		}
+		if present {
+			id, err := decodeLinkRecorder(live)
+			if err != nil {
+				return err
+			}
+			return &RebuildUnknownProvenanceError{Count: 1, First: id}
+		}
+		return p.put(key, live)
+	}); err != nil {
+		return err
+	}
 	var ordinal uint64
 	for facts, err := range receipts {
 		if err != nil {
@@ -361,7 +386,16 @@ func (p *rebuildGRPC) order(ctx context.Context, receipts iter.Seq2[ParseFacts, 
 			if service == "" || method == "" {
 				continue
 			}
-			old := pendingEdgeKey(e)
+			raw := pendingEdgeKey(e)
+			old, err := pendingGet(p.b.pending, append(bytes.Clone(recorders), raw...), func(value []byte) ([]byte, error) {
+				return bytes.Clone(value), nil
+			})
+			if err != nil {
+				return err
+			}
+			if old == nil {
+				continue
+			}
 			key := append(bytes.Clone(stubs), old...)
 			ready, err := pendingGet(p.b.pending, key, func(raw []byte) (bool, error) {
 				return len(raw) == 0, nil
@@ -506,9 +540,7 @@ func (p *rebuildGRPC) apply(ctx context.Context) error {
 			// Copy only inherited custody before deleteEdge removes it. The
 			// exact old key proved by this turn is already in the move row.
 			if saved := rebuildMoveCustodyBytes(custody); len(saved) != 0 {
-				// Pebble bounds this copy with its existing scratch memtables.
-				// An existing key needs no new cap for the scratch address.
-				if err := p.b.pending.Set(rebuildGRPCMoveCustodyKey(r.key), saved, pebble.NoSync); err != nil {
+				if err := p.put(rebuildGRPCMoveCustodyKey(r.key), saved); err != nil {
 					return err
 				}
 			}
@@ -582,7 +614,11 @@ func rebuildGRPCRecorder(old []byte, e *graph.Edge) []byte {
 }
 
 func (p *rebuildGRPC) wantProvenance(e *graph.Edge, old []byte, handler string) error {
-	if err := p.put(rebuildGRPCRecorder(old, e), []byte{rebuildCapabilityWanted}); err != nil {
+	raw, err := rebuildReceiptKey(p.b.pending, old)
+	if err != nil {
+		return err
+	}
+	if err := p.put(rebuildGRPCRecorder(raw, e), []byte{rebuildCapabilityWanted}); err != nil {
 		return err
 	}
 	if err := p.put(rebuildGRPCKey('n', e.From), []byte{rebuildCapabilityWanted}); err != nil {
@@ -666,7 +702,11 @@ func (p *rebuildGRPC) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, 
 		if err != nil {
 			return err
 		}
-		keys := [][]byte{rebuildGRPCRecorder([]byte(old), e), rebuildGRPCKey('n', e.From)}
+		raw, err := rebuildReceiptKey(p.b.pending, []byte(old))
+		if err != nil {
+			return err
+		}
+		keys := [][]byte{rebuildGRPCRecorder(raw, e), rebuildGRPCKey('n', e.From)}
 		if handler != "" {
 			keys = append(keys, rebuildGRPCKey('n', handler))
 		}

@@ -226,7 +226,8 @@ func (p *RebuildFnPointerPass) Apply(ctx context.Context) (FnPointerSpill, error
 			if err != nil || existing != nil {
 				return err
 			}
-			return p.build.addEdge(e)
+			// Fanout is synthetic, not an exact receipt from the recorder site.
+			return p.build.addEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofUntrackedMove})
 		})
 	})
 	if err != nil {

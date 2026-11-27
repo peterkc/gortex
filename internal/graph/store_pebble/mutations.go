@@ -98,7 +98,7 @@ func (b *BuildStore) setEdgeProvenance(e *graph.Edge, origin string) (bool, erro
 	if old.Tier != "" {
 		old.Tier = graph.ResolvedBy(origin)
 	}
-	if err := b.putEdge(old); err != nil {
+	if err := b.refreshPendingEdge(old); err != nil {
 		return false, err
 	}
 	if err := b.noteRevision(); err != nil {
@@ -214,8 +214,9 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 }
 
 // Capture records the original key on checked target or kind reindexes,
-// including main linking, Go receiver repair, and target attribution. Other
-// reindexes can inherit an existing recorder but do not seed one.
+// including main linking, Go receiver repair, and target attribution. A
+// generic move preserves an inherited raw key or marks a receipt input as
+// untracked. A missing old row is not proof of a raw source.
 func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, capture bool) error {
 	// First free every moving stored identity. A stationary destination
 	// preserves its row, and the first claimant wins any free destination.
@@ -258,9 +259,11 @@ func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, captur
 				delete(created, string(oldKey))
 			} else if r.RefreshIdentity {
 				continue
+			} else {
+				custody = custody.moved(nil, e.Kind, false)
 			}
 		} else if bytes.Equal(oldKey, key) {
-			if err := b.putEdge(e); err != nil {
+			if err := b.refreshPendingEdge(e); err != nil {
 				return err
 			}
 			continue
@@ -269,13 +272,7 @@ func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, captur
 			if err != nil {
 				return err
 			}
-			if custody.raw == nil && custody.proof == 0 {
-				if capture {
-					custody.raw = oldKey
-				} else if rebuildObserverInputKind(e.Kind) {
-					custody.proof = rebuildProofUntrackedMove
-				}
-			}
+			custody = custody.moved(oldKey, e.Kind, capture)
 			if err := b.deleteEdge(oldKey, old); err != nil {
 				return err
 			}
@@ -334,7 +331,7 @@ func (b *BuildStore) PersistEdgeAttributesBatch(edges []*graph.Edge) {
 			}
 			old.Confidence, old.ConfidenceLabel = e.Confidence, e.ConfidenceLabel
 			old.Origin, old.Tier, old.Meta = e.Origin, e.Tier, e.Meta
-			if err := b.putEdge(old); err != nil {
+			if err := b.refreshPendingEdge(old); err != nil {
 				return err
 			}
 		}

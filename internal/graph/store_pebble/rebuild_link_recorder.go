@@ -23,7 +23,7 @@ func rebuildLinkRecorderKey(live []byte) []byte {
 type rebuildEdgeProof byte
 
 const (
-	// Exact source recorder and endpoint declarations.
+	// Direct capability policy passed.
 	rebuildProofDirect rebuildEdgeProof = iota + 1
 	// Checked receiver Call and field ownership.
 	rebuildProofReceiver
@@ -51,6 +51,7 @@ const (
 	rebuildProofKMPExpectActual
 	// First source recorder and Expo declaration ownership.
 	rebuildProofExpoModules
+	rebuildProofLimit
 )
 
 type rebuildEdgeCustody struct {
@@ -60,9 +61,11 @@ type rebuildEdgeCustody struct {
 
 const rebuildEdgeProofFormat byte = 1
 
-func rebuildObserverInputKind(kind graph.EdgeKind) bool {
+// These kinds may be treated as original receipts by a later custody
+// consumer. SetState also reads MemberOf to elect the first owner.
+func rebuildReceiptInputKind(kind graph.EdgeKind) bool {
 	switch kind {
-	case graph.EdgeAccessesField, graph.EdgeCalls, graph.EdgeReads, graph.EdgeReferences:
+	case graph.EdgeAccessesField, graph.EdgeCalls, graph.EdgeReads, graph.EdgeReferences, graph.EdgeMemberOf:
 		return true
 	default:
 		return false
@@ -73,7 +76,7 @@ func (c rebuildEdgeCustody) encode(edge []byte) ([]byte, error) {
 	if c.proof == 0 {
 		return c.raw, nil
 	}
-	if c.proof > rebuildProofExpoModules || len(c.raw) != 0 {
+	if c.proof >= rebuildProofLimit || len(c.raw) != 0 {
 		return nil, invalid("edge custody proof")
 	}
 	digest := sha256.Sum256(edge)
@@ -83,9 +86,12 @@ func (c rebuildEdgeCustody) encode(edge []byte) ([]byte, error) {
 func readRebuildEdgeCustody(reader pebble.Reader, live []byte) (rebuildEdgeCustody, error) {
 	return pendingGet(reader, rebuildLinkRecorderKey(live), func(raw []byte) (rebuildEdgeCustody, error) {
 		if len(raw) >= 2 && raw[0] == familyEdge && raw[1] == edgeOut {
+			if _, err := decodeLinkRecorder(raw); err != nil {
+				return rebuildEdgeCustody{}, err
+			}
 			return rebuildEdgeCustody{raw: bytes.Clone(raw)}, nil
 		}
-		if len(raw) != 2+sha256.Size || raw[0] != rebuildEdgeProofFormat || raw[1] == 0 || rebuildEdgeProof(raw[1]) > rebuildProofExpoModules {
+		if len(raw) != 2+sha256.Size || raw[0] != rebuildEdgeProofFormat || raw[1] == 0 || rebuildEdgeProof(raw[1]) >= rebuildProofLimit {
 			return rebuildEdgeCustody{}, invalid("edge custody format")
 		}
 		match, err := pendingGet(reader, live, func(edge []byte) (bool, error) {
@@ -106,9 +112,47 @@ func readRebuildEdgeCustody(reader pebble.Reader, live []byte) (rebuildEdgeCusto
 	})
 }
 
-// OriginalLinkRecorder returns the raw identity for an installed move. An
-// synthetic or stationary row has no original move link. This method does not
-// distinguish those cases; use custody when an absent link is not enough.
+// rebuildReceiptKey is for readers that require raw receipt custody. A
+// genuinely stationary row can prove its exact live key. A synthetic or
+// untracked row cannot use a receipt at that key instead of its own proof.
+func rebuildReceiptKey(reader pebble.Reader, live []byte) ([]byte, error) {
+	custody, err := readRebuildEdgeCustody(reader, live)
+	if err != nil {
+		return nil, err
+	}
+	if custody.proof != 0 {
+		id, err := decodeLinkRecorder(live)
+		if err != nil {
+			return nil, err
+		}
+		return nil, &RebuildUnknownProvenanceError{Count: 1, First: id}
+	}
+	if custody.raw != nil {
+		return custody.raw, nil
+	}
+	return live, nil
+}
+
+// A generic identity change may keep raw lineage. A producer proof does
+// not certify a different identity. A tracked kind without raw lineage
+// must not look like a stationary receipt at the new key.
+func (c rebuildEdgeCustody) moved(old []byte, kind graph.EdgeKind, capture bool) rebuildEdgeCustody {
+	if c.raw != nil {
+		return c
+	}
+	if c.proof == 0 && capture && old != nil {
+		return rebuildEdgeCustody{raw: old}
+	}
+	if c.proof != 0 || rebuildReceiptInputKind(kind) {
+		return rebuildEdgeCustody{proof: rebuildProofUntrackedMove}
+	}
+	return rebuildEdgeCustody{}
+}
+
+// OriginalLinkRecorder returns the raw identity for an installed move.
+// A stationary row, a synthetic proof and an untracked move all return
+// found=false. A stale proof returns an error. Use full custody when the
+// caller must distinguish those cases.
 func (v RebuildView) OriginalLinkRecorder(ctx context.Context, live graph.EdgeIdentity) (raw graph.EdgeIdentity, found bool, err error) {
 	key := pendingEdgeKey(&graph.Edge{From: live.From, To: live.To, Kind: live.Kind, FilePath: live.FilePath, Line: live.Line})
 	err = v.read(ctx, func(snap *pebble.Snapshot) error {

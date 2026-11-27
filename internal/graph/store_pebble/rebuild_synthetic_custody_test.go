@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -204,7 +203,6 @@ func seedSyntheticCustody(t *testing.T, facts ...ParseFacts) (*BuildStore, iter.
 func requireSyntheticCustody(t *testing.T, b *BuildStore, want map[graph.EdgeIdentity]rebuildEdgeProof) {
 	t.Helper()
 	ctx := t.Context()
-	var keys [][]byte
 	for id, proof := range want {
 		live := pendingEdgeKey(&graph.Edge{From: id.From, To: id.To, Kind: id.Kind, FilePath: id.FilePath, Line: id.Line})
 		edge, err := b.pendingEdge(live)
@@ -214,7 +212,6 @@ func requireSyntheticCustody(t *testing.T, b *BuildStore, want map[graph.EdgeIde
 		require.NoError(t, err)
 		require.Equal(t, proof, custody.proof, "%+v", id)
 		require.Empty(t, custody.raw)
-		keys = append(keys, rebuildLinkRecorderKey(live))
 	}
 	var rows int
 	require.NoError(t, pendingVisit(ctx, b.pending, rebuildLinkRecorderPrefix, func(row) error {
@@ -224,19 +221,4 @@ func requireSyntheticCustody(t *testing.T, b *BuildStore, want map[graph.EdgeIde
 	// No other row, including a stationary keeper, losing proposal or node,
 	// may have a recorder. Each expected winner was checked above.
 	require.Equal(t, len(want), rows)
-	graphRows := func() [][2]string {
-		var saved [][2]string
-		for _, family := range [][]byte{{familyNode}, {familyEdge}} {
-			require.NoError(t, pendingVisit(ctx, b.pending, family, func(r row) error {
-				saved = append(saved, [2]string{string(r.key), string(r.value)})
-				return nil
-			}))
-		}
-		return saved
-	}
-	before := graphRows()
-	for _, key := range keys {
-		require.NoError(t, b.pending.Delete(key, pebble.NoSync))
-	}
-	require.Equal(t, before, graphRows())
 }

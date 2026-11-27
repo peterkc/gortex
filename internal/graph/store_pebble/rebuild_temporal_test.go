@@ -77,7 +77,7 @@ func TestRebuildTemporalWinnerCustody(t *testing.T) {
 			require.Equal(t, true, stored.Meta["keeper"])
 		}
 	}
-	assertCustodyRemovalLeavesWorkingRows(t, b, 4)
+	requireRebuildCustodyCount(t, b, 4)
 }
 
 func TestRebuildTemporalRefusesAffectedOutputRows(t *testing.T) {

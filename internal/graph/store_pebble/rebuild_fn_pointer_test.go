@@ -51,3 +51,35 @@ func TestRebuildFnPointerScratchSpill(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildFnPointerFanoutMarksOnlyNewCalls(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	const file = "dispatch.go"
+	incumbent := &graph.Edge{From: "caller", To: "old", Kind: graph.EdgeCalls, FilePath: file, Line: 3,
+		Origin: graph.OriginASTResolved}
+	fanout := &graph.Edge{From: "caller", To: "extra", Kind: graph.EdgeCalls, FilePath: file, Line: 3,
+		Origin: graph.OriginASTInferred}
+	b.AddEdge(incumbent)
+	ctx := t.Context()
+	pass, err := b.CaptureFnPointerCensus(ctx, 1, func(*graph.Edge) bool { return false })
+	require.NoError(t, err)
+	defer func() { require.NoError(t, pass.Close()) }()
+	collision := *incumbent
+	collision.Origin = graph.OriginASTInferred
+	require.NoError(t, pass.StageFanout(&collision))
+	require.NoError(t, pass.StageFanout(fanout))
+	_, err = pass.Apply(ctx)
+	require.NoError(t, err)
+
+	saved, err := b.pendingEdge(pendingEdgeKey(incumbent))
+	require.NoError(t, err)
+	require.Equal(t, incumbent, saved)
+	custody, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(incumbent))
+	require.NoError(t, err)
+	require.Empty(t, custody)
+	saved, err = b.pendingEdge(pendingEdgeKey(fanout))
+	require.NoError(t, err)
+	require.Equal(t, fanout, saved)
+	_, err = rebuildReceiptKey(b.pending, pendingEdgeKey(fanout))
+	require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+}

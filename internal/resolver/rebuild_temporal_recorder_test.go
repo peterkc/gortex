@@ -47,7 +47,7 @@ func TestRebuildTemporalFollowsInstalledCallRecorder(t *testing.T) {
 	require.Len(t, native.GetOutEdges(caller), 2)
 
 	for _, withRecorder := range []bool{true, false} {
-		name := "missing original key cannot use same-site decoy"
+		name := "untracked trigger refuses an exact live-key decoy"
 		if withRecorder {
 			name = "main winner is the wrapper recorder"
 		}
@@ -64,9 +64,8 @@ func TestRebuildTemporalFollowsInstalledCallRecorder(t *testing.T) {
 				require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{move}))
 			} else {
 				b.ReindexEdges([]graph.EdgeReindex{move})
-				decoy := *call
-				decoy.To = "unresolved::other::run"
-				receipt.Edges = []*graph.Edge{&decoy}
+				// A matching receipt at the moved live key does not prove it.
+				receipt.Edges = []*graph.Edge{&landed}
 			}
 			before := rebuildGRPCSavedCalls(t, b)
 			stats, err := RunRebuildTemporal(t.Context(), b, rebuildGRPCReceipts(wrapperFacts, receipt), selection, 1)
@@ -74,7 +73,8 @@ func TestRebuildTemporalFollowsInstalledCallRecorder(t *testing.T) {
 				var refused *store_pebble.RebuildUnknownProvenanceError
 				require.ErrorAs(t, err, &refused)
 				require.Equal(t, uint64(1), refused.Count)
-				require.Equal(t, graph.EdgeIdentity{From: caller, To: activity, Kind: graph.EdgeCalls, FilePath: callerFile, Line: call.Line}, refused.First)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildTemporal)
+				require.Equal(t, graph.EdgeIdentityFor(&landed), refused.First)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildGRPCSavedCalls(t, b))
 				return
@@ -90,6 +90,68 @@ func TestRebuildTemporalFollowsInstalledCallRecorder(t *testing.T) {
 				got[graph.EdgeIdentityFor(e)] = e
 			}
 			require.Equal(t, want, got)
+		})
+	}
+}
+
+func TestRebuildTemporalGuardRevertNeedsRawRecorder(t *testing.T) {
+	const file, caller, activity = "flow.go", "flow.go::Run", "flow.go::Charge"
+	trigger := rebuildTemporalOracleStub(file, caller, "Charge")
+	facts := store_pebble.ParseFacts{
+		EffectiveLanguage: "go",
+		File:              graph.FileMetaRow{FilePath: file, NodeCount: 2},
+		Nodes: []*graph.Node{
+			{ID: caller, Name: "Run", Kind: graph.KindFunction, Language: "go", FilePath: file},
+			{ID: activity, Name: "Charge", Kind: graph.KindFunction, Language: "go", FilePath: file,
+				Meta: map[string]any{"signature": "func Charge(ctx context.Context) error"}},
+		},
+		Edges: []*graph.Edge{trigger},
+	}
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthTemporalStub})
+	require.NoError(t, err)
+	native := openRebuildTemporalOracle(t, facts)
+	require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
+	nativeRows := rebuildEventSQLiteRows(native)
+	require.Len(t, nativeRows.edges, 1)
+	require.Equal(t, activity, nativeRows.edges[0].To)
+
+	for _, tc := range []struct {
+		name    string
+		capture bool
+	}{
+		{"checked move", true},
+		{"untracked move cannot borrow a live-key receipt", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			b := openRebuildGRPCBuild(t, facts)
+			prior := *trigger
+			prior.To = "prior"
+			moves := []graph.EdgeReindex{{Edge: &prior, OldTo: trigger.To}}
+			if tc.capture {
+				require.NoError(t, b.ApplyLinkReindexes(ctx, moves))
+			} else {
+				b.ReindexEdges(moves)
+			}
+			reverted := *trigger
+			_, err := b.ApplyRebuildGuardPage(ctx, []graph.EdgeReindex{{Edge: &reverted, OldTo: prior.To}}, nil)
+			require.NoError(t, err)
+			before := rebuildEventSavedRows(t, b)
+			require.Equal(t, []*graph.Edge{trigger}, before.edges)
+			stats, err := RunRebuildTemporal(ctx, b, rebuildGRPCReceipts(facts), selection, 1)
+			if !tc.capture {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildTemporal)
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.EqualValues(t, 1, refused.Count)
+				require.Equal(t, graph.EdgeIdentityFor(trigger), refused.First)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, stats.Moves)
+			require.Equal(t, nativeRows, rebuildEventSavedRows(t, b))
 		})
 	}
 }

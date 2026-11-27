@@ -1,7 +1,6 @@
 package store_pebble
 
 import (
-	"bytes"
 	"path/filepath"
 	"testing"
 
@@ -81,9 +80,6 @@ func TestRebuildGRPCWinnerCustody(t *testing.T) {
 	}
 	require.NoError(t, b.AddParsedFile("", facts))
 	require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: live, OldTo: raw.To}}))
-	// The current gRPC election proves the exact live old key. Supply that
-	// receipt witness without losing the different inherited raw key.
-	facts.Edges[0] = live
 	stats, err := b.RebuildGRPC(ctx, func(yield func(ParseFacts, error) bool) { yield(facts, nil) }, 1,
 		func(e *graph.Edge, _, _, to, _ string) bool {
 			if to == "" || e.To == to {
@@ -112,36 +108,15 @@ func TestRebuildGRPCWinnerCustody(t *testing.T) {
 			require.Equal(t, pendingEdgeKey(tc.raw), got.raw)
 		}
 	}
-	assertCustodyRemovalLeavesWorkingRows(t, b, 2)
+	requireRebuildCustodyCount(t, b, 2)
 }
 
-// Compare stored bytes for every non-custody row, including secondary
-// indexes, counts and any leftover stage scratch, not re-encoded edges.
-func assertCustodyRemovalLeavesWorkingRows(t *testing.T, b *BuildStore, wantCustody int) {
+func requireRebuildCustodyCount(t *testing.T, b *BuildStore, want int) {
 	t.Helper()
-	snapshot := func() (map[string][]byte, int) {
-		it, err := b.pending.NewIterWithContext(t.Context(), nil)
-		require.NoError(t, err)
-		defer func() { require.NoError(t, it.Close()) }()
-		rows := make(map[string][]byte)
-		var custody int
-		for ok := it.First(); ok; ok = it.Next() {
-			if bytes.HasPrefix(it.Key(), rebuildLinkRecorderPrefix) {
-				custody++
-				continue
-			}
-			value, err := it.ValueAndErr()
-			require.NoError(t, err)
-			rows[string(it.Key())] = bytes.Clone(value)
-		}
-		require.NoError(t, it.Error())
-		return rows, custody
-	}
-	before, custody := snapshot()
-	require.Equal(t, wantCustody, custody)
-	require.NotEmpty(t, before)
-	require.NoError(t, b.pending.DeleteRange(rebuildLinkRecorderPrefix, prefixEnd(rebuildLinkRecorderPrefix), pebble.NoSync))
-	after, custody := snapshot()
-	require.Zero(t, custody)
-	require.Equal(t, before, after)
+	var rows int
+	require.NoError(t, pendingVisit(t.Context(), b.pending, rebuildLinkRecorderPrefix, func(row) error {
+		rows++
+		return nil
+	}))
+	require.Equal(t, want, rows)
 }

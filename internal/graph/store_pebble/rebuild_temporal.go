@@ -510,16 +510,19 @@ func (p *RebuildTemporalPass) FinishWrapper(ctx context.Context, old graph.EdgeI
 // WantRecorder proves the original exact row, not the synthetic placeholder,
 // a bare file suffix, or a same-line contestant.
 func (s RebuildTemporalProof) WantRecorder(ctx context.Context, e *graph.Edge) error {
-	id := graph.EdgeIdentityFor(e)
-	raw, found, err := s.pass.View().OriginalLinkRecorder(ctx, id)
+	var raw []byte
+	err := s.pass.View().read(ctx, func(snap *pebble.Snapshot) error {
+		var err error
+		raw, err = rebuildReceiptKey(snap, pendingEdgeKey(e))
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	if found {
-		id = raw
+	id, err := decodeLinkRecorder(raw)
+	if err != nil {
+		return err
 	}
-	// No inherited identity doesn't establish provenance. In that case
-	// the very same full live key must be present in a checked receipt.
 	return s.want(ctx, rebuildTemporalRecorder(id, e))
 }
 

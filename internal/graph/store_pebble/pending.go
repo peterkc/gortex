@@ -162,8 +162,18 @@ func (b *BuildStore) putEdgeWithCustody(e *graph.Edge, custody rebuildEdgeCustod
 	return b.writePendingEdge(e, custody, false)
 }
 
+// refreshPendingEdge verifies custody against the still-saved payload and
+// binds it to the new bytes. This is only for sanctioned same-key writes.
+func (b *BuildStore) refreshPendingEdge(e *graph.Edge) error {
+	custody, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(e))
+	if err != nil {
+		return err
+	}
+	return b.putEdgeWithCustody(e, custody)
+}
+
 // clearRecorder lets a payload replacement invalidate the old key's
-// recorder when the incoming row has no lineage. Same-key stamps leave it.
+// recorder when the incoming row has no lineage.
 func (b *BuildStore) writePendingEdge(e *graph.Edge, custody rebuildEdgeCustody, clearRecorder bool) error {
 	if graph.IsProxyID(e.From) || graph.IsProxyID(e.To) {
 		return invalid("proxy edge cannot be published")

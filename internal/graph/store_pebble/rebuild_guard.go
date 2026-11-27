@@ -130,7 +130,7 @@ func (b *BuildStore) ApplyRebuildGuardPage(ctx context.Context, reverts []graph.
 			if dst.Tier != "" {
 				dst.Tier = graph.ResolvedBy("")
 			}
-			if err := b.putEdge(dst); err != nil {
+			if err := b.refreshPendingEdge(dst); err != nil {
 				return err
 			}
 			// Match the native write's change to the borrowed pointer too.
@@ -326,9 +326,10 @@ func (b *BuildStore) rebuildGuardReindex(ctx context.Context, moves []graph.Edge
 			if err != nil {
 				return err
 			}
-			// An untracked revert is not a stationary receipt at its new key.
-			if origin != key && custody.raw == nil && custody.proof == 0 && rebuildObserverInputKind(after.Kind) {
-				custody.proof = rebuildProofUntrackedMove
+			// A revert may keep raw lineage, but not a stage proof at a
+			// different identity. Same-key guard stamps preserve custody.
+			if origin != key || before == nil {
+				custody = custody.moved(nil, after.Kind, false)
 			}
 			if err := b.writePendingEdge(after, custody, before != nil); err != nil {
 				return err
