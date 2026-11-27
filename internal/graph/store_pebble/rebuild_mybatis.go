@@ -14,7 +14,7 @@ import (
 
 var (
 	ErrRebuildMyBatis      = errors.New("pebble rebuild MyBatis stage failed")
-	ErrRebuildMyBatisOrder = errors.New("rebuild MyBatis moves depend on native scan order")
+	ErrRebuildMyBatisOrder = errors.New("rebuild MyBatis conservatively refuses interacting moves")
 )
 
 // RebuildMyBatisOrderError counts distinct destinations of interacting moves.
@@ -317,14 +317,10 @@ func (p *rebuildMyBatisPass) checkOrder(ctx context.Context) error {
 	// With unique destinations and no destination among the moving old keys,
 	// every incumbent stays put. No mover can affect another's SQLite result,
 	// even across a 5,000-move window boundary.
-	if err := p.moves(ctx, func(old []byte, e *graph.Edge) error {
+	if err := p.moves(ctx, func(_ []byte, e *graph.Edge) error {
 		dest := pendingEdgeKey(e)
-		incoming, err := p.present(append(rebuildMyBatisKey('d'), old...))
-		if err != nil {
-			return err
-		}
-		outgoing, err := p.present(append(rebuildMyBatisKey('m'), dest...))
-		if err != nil || (!incoming && !outgoing) {
+		occupiedByMover, err := p.present(append(rebuildMyBatisKey('m'), dest...))
+		if err != nil || !occupiedByMover {
 			return err
 		}
 		return p.put(append(rebuildMyBatisKey('x'), dest...), nil)

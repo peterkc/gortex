@@ -172,7 +172,7 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 	}{
 		{name: "commuting", secondOld: "stale::beta", secondStatement: beta},
 		{name: "convergent", secondOld: "stale::beta", secondStatement: alpha, affected: 1},
-		{name: "chain", secondOld: alphaTarget, secondStatement: beta, affected: 2},
+		{name: "chain", secondOld: alphaTarget, secondStatement: beta, affected: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Use the same real caller and source site for two synthetic raw
@@ -195,8 +195,8 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 				var order *store_pebble.RebuildMyBatisOrderError
 				require.ErrorAs(t, err, &order)
 				require.Equal(t, tc.affected, order.Count)
-				// All destination identity fields except To are shared; alpha
-				// sorts before beta, even though beta's old key comes first in the chain.
+				// Convergent moves share alpha. In the chain, only alpha
+				// is also a moving old key; beta is not affected.
 				require.Equal(t, graph.EdgeIdentity{
 					From: from, To: alphaTarget, Kind: graph.EdgeCalls, FilePath: xmlFile, Line: 2,
 				}, order.First)
