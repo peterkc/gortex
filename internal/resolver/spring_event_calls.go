@@ -90,6 +90,7 @@ func springEventType(e *graph.Edge) string {
 	return t
 }
 
+// rebindSpringEvent returns true only when the target changes and needs reindexing.
 func rebindSpringEvent(e *graph.Edge, evType, listener string, matched bool) bool {
 	if !matched {
 		if graph.IsUnresolvedTarget(e.To) {

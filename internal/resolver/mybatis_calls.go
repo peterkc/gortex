@@ -109,8 +109,8 @@ func myBatisStub(e *graph.Edge) (namespace, statement string) {
 	return namespace, statement
 }
 
-// rebindMyBatisCall leaves a stationary payload untouched. Moving rows share
-// the same resolution and re-orphaning stamps on both write paths.
+// rebindMyBatisCall returns true only when the target changes and needs reindexing.
+// Moving rows share the same resolution and re-orphaning stamps on both write paths.
 func rebindMyBatisCall(e *graph.Edge, namespace, statement, method string) bool {
 	want := method
 	if want == "" {

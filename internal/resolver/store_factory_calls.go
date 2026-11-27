@@ -192,6 +192,7 @@ func isStoreFactoryGetter(n *graph.Node, binding string) bool {
 	return !isAction
 }
 
+// rebindStoreFactoryCall returns true only when the target changes and needs reindexing.
 func rebindStoreFactoryCall(e *graph.Edge, action, target string, matched bool) bool {
 	if !matched {
 		target = "unresolved::*." + action

@@ -72,8 +72,8 @@ func sqlCallsiteFunction(e *graph.Edge) string {
 	return ""
 }
 
-// The caller elects from the live function census. Do not restamp a
-// stationary Call, even if its saved payload differs from a new move.
+// rebindSQLCallsite returns true only when the target changes and needs reindexing.
+// Do not restamp a stationary Call, even if its saved payload differs from a new move.
 func rebindSQLCallsite(e *graph.Edge, fn, target string, matched bool) bool {
 	want := target
 	if !matched {

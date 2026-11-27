@@ -588,8 +588,9 @@ type temporalRebindLookup interface {
 	lookupExactSig(kind, name, callerRepo string) string
 }
 
-// rebindTemporalStub computes one native mutation. If the target did not
-// change, SQLite does not persist the decoded payload.
+// rebindTemporalStub returns whether a handler matched and whether the
+// target moved. Only a move needs reindexing; SQLite does not persist the
+// decoded payload of a stationary row.
 func rebindTemporalStub(e *graph.Edge, kind, name, callerRepo, callerLang string,
 	idx temporalRebindLookup, deref func(string) string,
 ) (resolved, moved bool) {

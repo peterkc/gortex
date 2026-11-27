@@ -81,6 +81,7 @@ func ngRxEffectAction(e *graph.Edge) string {
 	return action
 }
 
+// rebindNgRxEffectCall returns true only when the target changes and needs reindexing.
 func rebindNgRxEffectCall(e *graph.Edge, action, target string, matched bool) bool {
 	if !matched {
 		target = "unresolved::*." + action

@@ -119,6 +119,7 @@ func rtkRebind(e *graph.Edge, target *graph.Node, reindex *[]graph.EdgeReindex, 
 	}
 }
 
+// rebindRTKQueryCall returns true only when the target changes and needs reindexing.
 func rebindRTKQueryCall(e *graph.Edge, target string, matched bool) bool {
 	if !matched {
 		name, tagged := rtkQueryCall(e)

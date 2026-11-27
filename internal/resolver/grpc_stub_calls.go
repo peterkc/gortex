@@ -142,6 +142,7 @@ func resolveGRPCStubCalls(g graph.Store, cands *frameworkPassCandidates) int {
 	return resolved
 }
 
+// rebindGRPCStub mutates a moving row and increments resolved only for a matched handler.
 func rebindGRPCStub(e *graph.Edge, want, handlerID, origin string, conf float64, resolved *int) {
 	e.To = want
 	if handlerID != "" {

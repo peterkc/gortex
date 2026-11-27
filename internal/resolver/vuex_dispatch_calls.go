@@ -27,14 +27,17 @@ func ResolveVuexDispatchCalls(g graph.Store) int {
 		return 0
 	}
 	// index: kind → "namespace\x00name" → nodes.
-	index := map[string]map[string][]*graph.Node{"action": {}, "mutation": {}}
+	index := map[string]map[string][]*graph.Node{}
 	for _, n := range nodesByKindsOrAll(g, graph.KindFunction, graph.KindMethod) {
 		kind, key := vuexDispatchNode(n)
 		if kind != "" {
+			if index[kind] == nil {
+				index[kind] = make(map[string][]*graph.Node)
+			}
 			index[kind][key] = append(index[kind][key], n)
 		}
 	}
-	if len(index["action"]) == 0 && len(index["mutation"]) == 0 {
+	if len(index) == 0 {
 		return 0
 	}
 
@@ -84,13 +87,17 @@ func ResolveVuexDispatchCalls(g graph.Store) int {
 	return resolved
 }
 
+func vuexDispatchKind(kind string) bool {
+	return kind == "action" || kind == "mutation"
+}
+
 func vuexDispatchNode(n *graph.Node) (kind, key string) {
 	if n == nil {
 		return "", ""
 	}
 	name, _ := n.Meta["vuex_action"].(string)
 	kind, _ = n.Meta["vuex_kind"].(string)
-	if name == "" || (kind != "action" && kind != "mutation") {
+	if name == "" || !vuexDispatchKind(kind) {
 		return "", ""
 	}
 	ns, _ := n.Meta["vuex_namespace"].(string)
@@ -106,7 +113,7 @@ func vuexDispatchCall(e *graph.Edge) (kind, key, name string) {
 	}
 	full, _ := e.Meta["vuex_key"].(string)
 	kind, _ = e.Meta["vuex_kind"].(string)
-	if full == "" || (kind != "action" && kind != "mutation") {
+	if full == "" || !vuexDispatchKind(kind) {
 		return "", "", ""
 	}
 	ns, name := "", full
@@ -116,6 +123,7 @@ func vuexDispatchCall(e *graph.Edge) (kind, key, name string) {
 	return kind, ns + "\x00" + name, name
 }
 
+// rebindVuexDispatchCall returns true only when the target changes and needs reindexing.
 func rebindVuexDispatchCall(e *graph.Edge, name, target string, matched bool) bool {
 	if !matched {
 		target = "unresolved::*." + name

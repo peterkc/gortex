@@ -131,6 +131,7 @@ func objectRegistryCall(e *graph.Edge) (className, method string) {
 	return className, method
 }
 
+// rebindObjectRegistryCall returns true only when the target changes and needs reindexing.
 func rebindObjectRegistryCall(e *graph.Edge, className, target string, matched bool) bool {
 	if !matched {
 		target = "unresolved::*." + className

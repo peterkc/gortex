@@ -93,6 +93,7 @@ func celeryTaskCall(e *graph.Edge) (task, registered string) {
 	return task, registered
 }
 
+// rebindCeleryCall returns true only when the target changes and needs reindexing.
 func rebindCeleryCall(e *graph.Edge, task, target string, matched bool) bool {
 	if !matched {
 		target = "unresolved::*." + task

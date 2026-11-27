@@ -97,6 +97,7 @@ func reduxThunkCallee(e *graph.Edge) string {
 	return callee
 }
 
+// rebindReduxThunkCall returns true only when the target changes and needs reindexing.
 func rebindReduxThunkCall(e *graph.Edge, callee, target string, matched bool) bool {
 	if !matched {
 		target = "unresolved::*." + callee
