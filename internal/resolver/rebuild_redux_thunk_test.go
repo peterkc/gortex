@@ -267,6 +267,7 @@ func TestRebuildReduxThunkRefusesUnprovedMove(t *testing.T) {
 		{name: "caller workspace excludes getter winner"},
 		{name: "scoped singleton ignores changed raw binding", target: remote.ID},
 		{name: "raw binding omitted for caller-file winner", target: local.ID},
+		{name: "different raw binding with caller-file winner"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			left, right := left, right
@@ -276,7 +277,7 @@ func TestRebuildReduxThunkRefusesUnprovedMove(t *testing.T) {
 				foreign := *local
 				foreign.WorkspaceID = "other"
 				left.Nodes = []*graph.Node{caller, &foreign}
-			case "raw binding omitted for caller-file winner":
+			case "raw binding omitted for caller-file winner", "different raw binding with caller-file winner":
 				localGetter := rebuildEventNode(callerFile, getter.Name, caller.Language, "")
 				localGetter.Kind = getter.Kind
 				left = rebuildEventFacts(callerFile, caller.Language, []*graph.Node{caller, local, localGetter}, call)
@@ -292,10 +293,10 @@ func TestRebuildReduxThunkRefusesUnprovedMove(t *testing.T) {
 			var tail []store_pebble.ParseFacts
 			switch tc.name {
 			case "raw binding", "raw binding omitted for caller-file winner",
-				"scoped singleton ignores changed raw binding":
+				"scoped singleton ignores changed raw binding", "different raw binding with caller-file winner":
 				e := *call
 				e.Meta = maps.Clone(e.Meta)
-				if tc.name == "scoped singleton ignores changed raw binding" {
+				if tc.name == "scoped singleton ignores changed raw binding" || tc.name == "different raw binding with caller-file winner" {
 					e.Meta["store_binding"] = "differentStore"
 				} else {
 					delete(e.Meta, "store_binding")
@@ -330,6 +331,9 @@ func TestRebuildReduxThunkRefusesUnprovedMove(t *testing.T) {
 			}
 			first := graph.EdgeIdentityFor(call)
 			first.To = remote.ID
+			if tc.name == "different raw binding with caller-file winner" {
+				first.To = local.ID
+			}
 			var refusal *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
 			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: first}, refusal)

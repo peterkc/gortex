@@ -414,6 +414,45 @@ func TestRebuildObjectRegistryAlternateMembershipBucket(t *testing.T) {
 	}
 }
 
+func TestRebuildObjectRegistryUnpositionedClassGuards(t *testing.T) {
+	const file = "registry.js"
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name, positioned, unpositioned, callClass string
+		changeName                                bool
+	}{
+		{name: "receipt enters alternate bucket", positioned: "Other", unpositioned: "Cmd", callClass: "Cmd", changeName: true},
+		{name: "empty alternate defeats anchor", positioned: "Other", callClass: "Gone"},
+		{name: "nonempty alternate keeps stage active", unpositioned: "Cmd", callClass: "Cmd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peerName := "run"
+			if tc.changeName {
+				peerName = "unused"
+			}
+			peer, positioned := objectRegistryTestMethod(file, file+"::peer", peerName, tc.positioned)
+			_, unpositioned := objectRegistryTestMethod(file, peer.ID, peerName, tc.unpositioned)
+			call := objectRegistryTestCall(file+"::dispatch", "stale", file, tc.callClass, "run", 4)
+			input := rebuildEventFacts(file, "javascript", []*graph.Node{peer}, positioned, unpositioned, call)
+			proof := rebuildEventFacts(file, "javascript", []*graph.Node{peer}, positioned, call)
+			if tc.changeName {
+				winner, member := objectRegistryTestMethod(file, file+"::winner", "run", "Cmd")
+				raw := *peer
+				raw.Name = "run"
+				input = rebuildEventFacts(file, "javascript", []*graph.Node{peer, winner}, positioned, unpositioned, member, call)
+				proof = rebuildEventFacts(file, "javascript", []*graph.Node{&raw, winner}, positioned, member, call)
+			}
+			b := openRebuildGRPCBuild(t, input)
+			before := rebuildEventSavedRows(t, b)
+			stats, err := RunRebuildObjectRegistry(t.Context(), b, rebuildGRPCReceipts(proof), selection)
+			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
 func TestRebuildObjectRegistryCallProof(t *testing.T) {
 	const file, remote = "registry.js", "remote.js"
 	caller := &graph.Node{ID: file + "::dispatch", Name: "dispatch", Kind: graph.KindFunction, FilePath: file, Language: "javascript"}
