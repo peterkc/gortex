@@ -31,6 +31,16 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 	if frozen.none() {
 		return frozen, nil
 	}
+	if len(frozen.names) == 1 && frozen.allows(SynthMacroExpansion) {
+		admitted, err := view.FrameworkMacroGate(ctx, rebuildCFamilyLanguage)
+		if err != nil {
+			return FrameworkSynthesizerSelection{}, err
+		}
+		if !admitted {
+			delete(frozen.names, SynthMacroExpansion)
+		}
+		return frozen, nil
+	}
 
 	present, markers := map[string]int{}, map[string]int{}
 	var observerRoles int

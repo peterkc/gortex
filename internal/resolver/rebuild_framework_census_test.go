@@ -277,3 +277,44 @@ func TestRebuildFrameworkCensusObserverRoleOverflow(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildFrameworkCensusMacroOnlyNodeCap(t *testing.T) {
+	const file = "source.c"
+	large := strings.Repeat("x", 16<<20)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name             string
+		sourceLanguage   string
+		largeKind        graph.NodeKind
+		includeMacro     bool
+		admitted, refuse bool
+	}{
+		{"large nonmacro", "c", graph.KindFunction, true, true, false},
+		{"no macro", "c", graph.KindFunction, false, false, false},
+		{"no C family", "go", graph.KindMacro, false, false, false},
+		{"admitted large macro", "c", graph.KindMacro, false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wide := rebuildEventNode(file, "wide", tc.sourceLanguage, "")
+			wide.Kind = tc.largeKind
+			wide.Meta = map[string]any{"payload": large, "macro_kind": macroFunctionKindMeta}
+			nodes := []*graph.Node{wide}
+			if tc.includeMacro {
+				macro := rebuildEventNode(file, "small", tc.sourceLanguage, "")
+				macro.Kind = graph.KindMacro
+				macro.Meta = map[string]any{"macro_kind": macroFunctionKindMeta}
+				nodes = append(nodes, macro)
+			}
+			b := openRebuildGRPCBuild(t, rebuildEventFacts(file, tc.sourceLanguage, nodes))
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			if tc.refuse {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "framework census node")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.admitted, frozen.allows(SynthMacroExpansion))
+		})
+	}
+}

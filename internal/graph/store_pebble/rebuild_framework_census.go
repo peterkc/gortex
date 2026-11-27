@@ -33,6 +33,30 @@ func rebuildFrameworkGateNode(raw []byte) (*graph.Node, error) {
 	return decodeNodeLight(raw)
 }
 
+// FrameworkMacroGate reads only the language and macro kind roles used by a
+// macro-only selection. Unrelated node payloads do not enter its size cap.
+func (v RebuildView) FrameworkMacroGate(ctx context.Context, cFamily func(string) bool) (bool, error) {
+	var family, macro, oversized bool
+	if err := v.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
+		n, err := checkedRebuildLightNode(r, "framework census")
+		if err != nil {
+			return err
+		}
+		family = family || cFamily(n.Language)
+		if n.Kind == graph.KindMacro {
+			macro = true
+			oversized = oversized || len(r.value) > rebuildFrameworkGateRowBytes
+		}
+		return nil
+	}); err != nil || !family || !macro {
+		return false, err
+	}
+	if oversized {
+		return false, fmt.Errorf("%w: framework census node", ErrRebuildLinkInputSize)
+	}
+	return true, nil
+}
+
 // VisitFrameworkGateEdges streams only the kinds used by the wired call and
 // annotation preflights. It never accumulates a kind or a metadata vocabulary.
 func (v RebuildView) VisitFrameworkGateEdges(ctx context.Context, annotations bool,
