@@ -53,6 +53,8 @@ const (
 	rebuildProofExpoModules
 	// Exact Fabric spec and manager declaration ownership.
 	rebuildProofFabric
+	// Exact notification Call and handler receipts for a fresh fanout row.
+	rebuildProofMediatRFanout
 	rebuildProofLimit
 )
 

@@ -23,7 +23,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 		SynthReactNative, SynthReactNativePair, SynthObserverChannel, SynthClosureCollection,
 		SynthReactSetState, SynthFlutterSetState, SynthKMPExpectActual, SynthExpoModules, SynthFabric, SynthMyBatis,
 		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthNgRxEffect,
-		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery, SynthSpringEvent,
+		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery, SynthSpringEvent, SynthMediatR,
 	} {
 		if selection.allows(name) {
 			frozen.names[name] = struct{}{}
@@ -69,14 +69,16 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 	_, vuex := frozen.names[SynthVuexDispatch]
 	_, celery := frozen.names[SynthCelery]
 	_, spring := frozen.names[SynthSpringEvent]
-	if redux || ngrx || rtk || vuex || celery || spring {
-		edges.via = make(map[string]bool, 6)
+	_, mediatr := frozen.names[SynthMediatR]
+	if redux || ngrx || rtk || vuex || celery || spring || mediatr {
+		edges.via = make(map[string]bool, 7)
 	}
-	if grpc || temporal || react || flutter || redux || ngrx || registry || rtk || vuex || celery || spring {
+	if grpc || temporal || react || flutter || redux || ngrx || registry || rtk || vuex || celery || spring || mediatr {
 		if err := view.VisitFrameworkGateEdges(ctx, temporal, func(e graph.FrameworkCensusEdge) error {
 			if e.Kind == graph.EdgeCalls {
 				via := (redux && e.Via == reduxThunkVia) || (ngrx && e.Via == ngrxEffectVia) ||
-					(rtk && e.Via == rtkQueryVia) || (vuex && e.Via == vuexDispatchVia) || (celery && e.Via == celeryVia)
+					(rtk && e.Via == rtkQueryVia) || (vuex && e.Via == vuexDispatchVia) || (celery && e.Via == celeryVia) ||
+					(mediatr && e.Via == mediatrVia)
 				setState := (react || flutter) && isSetStateTarget(e.To)
 				grpcStub := grpc && e.Via == "grpc.stub" && e.GRPCService != "" && e.GRPCMethod != ""
 				temporalVia := temporal && strings.HasPrefix(e.Via, "temporal.")

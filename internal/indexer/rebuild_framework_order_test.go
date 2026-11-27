@@ -50,6 +50,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Vuex Dispatch", "moves", 1},
 		{"Celery", "moves", 1},
 		{"Spring events", "moves", 1},
+		{"MediatR", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -77,7 +78,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				ProvidersOff: true,
 				Recipes: map[string]rebuildDigest{
 					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1}, "kotlin": {1}, "mybatis": {1},
-					"sql": {1}, "python": {1},
+					"sql": {1}, "python": {1}, "csharp": {1},
 				},
 				Policy:  freezeRebuildParsePolicy(root, cfg),
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
@@ -611,6 +612,13 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	springFacts := receipt([]*graph.Node{publisher, listener}, edge(publisher, publisher.ID, graph.EdgeCalls, 2,
 		map[string]any{"via": "spring-event", "spring_event_type": "ClockTick"}))
 
+	const mediatrFile = "Dispatch.cs"
+	mediatrDispatch := node(mediatrFile, "csharp", "publish", graph.KindMethod, 1)
+	handler := node(mediatrFile, "csharp", "handle", graph.KindMethod, 4)
+	handler.Meta = map[string]any{"mediatr_kind": "request", "mediatr_request_type": "UpdateClock"}
+	mediatrFacts := receipt([]*graph.Node{mediatrDispatch, handler}, edge(mediatrDispatch, mediatrDispatch.ID, graph.EdgeCalls, 2,
+		map[string]any{"via": "mediatr-dispatch", "mediatr_kind": "request", "mediatr_request_type": "UpdateClock"}))
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -621,6 +629,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
-		celeryFacts, springFacts,
+		celeryFacts, springFacts, mediatrFacts,
 	}
 }

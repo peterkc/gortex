@@ -193,6 +193,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildVuexDispatch,
 	store_pebble.ErrRebuildCelery,
 	store_pebble.ErrRebuildSpringEvents,
+	store_pebble.ErrRebuildMediatR,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

@@ -629,6 +629,15 @@ func buildRebuildStages(
 				zap.Uint64("stubs", spring.Stubs), zap.Uint64("resolved", spring.Resolved),
 				zap.Uint64("moves", spring.Moves), zap.Uint64("adds", spring.Adds))
 		}
+		mediatr, err := resolver.RunRebuildMediatR(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if mediatr.Stubs != 0 {
+			logger.Info("rebuild MediatR applied to private build",
+				zap.Uint64("stubs", mediatr.Stubs), zap.Uint64("resolved", mediatr.Resolved),
+				zap.Uint64("moves", mediatr.Moves), zap.Uint64("adds", mediatr.Adds))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
