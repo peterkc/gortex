@@ -175,6 +175,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildReactNativeNativePairing,
 	store_pebble.ErrRebuildObserver,
 	store_pebble.ErrRebuildClosureCollection,
+	store_pebble.ErrRebuildReactSetState,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
