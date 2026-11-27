@@ -85,7 +85,7 @@ func (b *BuildStore) RebuildReduxThunk(ctx context.Context, receipts iter.Seq2[P
 }
 
 // Pool keys start with t (thunks), a (actions), or g (getters), then
-// a column: c candidate by ID, u cohort proof, i/w global/workspace
+// a column: c candidate by ID, u wanted cohort, i/w global/workspace
 // singleton, f/s their file singletons. Other columns: b wanted getter
 // names, l deferred Calls, n caller scope proof, p election witnesses, x exact getter files.
 // The move helper uses r/m/o.
@@ -112,6 +112,7 @@ func (p *rebuildReduxThunkPass) node(id string) (*graph.Node, error) {
 
 func (p *rebuildReduxThunkPass) collect(ctx context.Context) (bool, error) {
 	haveThunks := false
+	var actionCap error
 	err := p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
 		light, err := checkedRebuildLightNode(r, p.label)
 		if err != nil || (light.Kind != graph.KindMethod && !rebuildStoreFactoryGetterKind(light.Kind)) {
@@ -127,7 +128,11 @@ func (p *rebuildReduxThunkPass) collect(ctx context.Context) (bool, error) {
 			return nil
 		}
 		if err := p.nodeInput(r.key, r.value); err != nil {
-			return err
+			if thunk != "" {
+				return err
+			}
+			actionCap = err
+			return nil
 		}
 		if n.ID == "" {
 			return invalid("Redux Thunk candidate has no ID")
@@ -139,10 +144,19 @@ func (p *rebuildReduxThunkPass) collect(ctx context.Context) (bool, error) {
 			}
 		}
 		if binding != "" && member != "" {
-			return p.candidate('a', member, n)
+			err := p.candidate('a', member, n)
+			if !errors.Is(err, ErrRebuildLinkInputSize) {
+				return err
+			}
+			actionCap = err
 		}
 		return nil
 	})
+	// Native does not consult the action index without a thunk. Defer
+	// its size refusal so iteration order cannot decide activation.
+	if err == nil && haveThunks {
+		err = actionCap
+	}
 	return haveThunks, err
 }
 
@@ -186,7 +200,8 @@ func (p *rebuildReduxThunkPass) collectGetters(ctx context.Context) error {
 
 type rebuildReduxThunkPick struct {
 	target         string
-	inputs         [][]byte                       // consulted pool markers and caller scopes
+	inputs         [][]byte                       // consulted pool markers
+	caller         *graph.Node                    // caller scope when a live pool is nonempty
 	buckets        []rebuildStoreCandidateWitness // deciding candidate buckets
 	getter         bool                           // a pool consulted the getter
 	getterProof    bool                           // the getter file can change a pool's decision
@@ -215,9 +230,7 @@ func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string, res
 			if err != nil {
 				return pick, err
 			}
-			if caller != nil {
-				pick.inputs = append(pick.inputs, keyStrings(p.column('n'), caller.ID))
-			}
+			pick.caller = caller
 			haveCaller = true
 		}
 		var callerFile string
@@ -351,6 +364,11 @@ func (p *rebuildReduxThunkPass) planCall(old []byte, e *graph.Edge, callee, bind
 	}
 	for _, key := range pick.inputs {
 		if err := p.put(key, []byte{rebuildCapabilityWanted}); err != nil {
+			return err
+		}
+	}
+	if pick.caller != nil {
+		if err := p.put(keyStrings(p.column('n'), pick.caller.ID), []byte{rebuildCapabilityWanted}); err != nil {
 			return err
 		}
 	}
@@ -547,16 +565,12 @@ func (p *rebuildReduxThunkPass) proved(old []byte, e *graph.Edge, anchor bool) (
 	if err != nil {
 		return false, err
 	}
-	for _, key := range pick.inputs {
-		state, err := p.state(key)
-		want := byte(rebuildCapabilityWanted)
-		if key[len(p.prefix)] == 'n' {
-			want = rebuildScratchExact
-			if !pick.callerFile {
-				state &^= rebuildStoreOtherFile
-			}
+	if pick.caller != nil {
+		state, err := p.state(keyStrings(p.column('n'), pick.caller.ID))
+		if !pick.callerFile {
+			state &^= rebuildStoreOtherFile
 		}
-		if err != nil || state != want {
+		if err != nil || state != rebuildScratchExact {
 			return false, err
 		}
 	}
@@ -566,7 +580,7 @@ func (p *rebuildReduxThunkPass) proved(old []byte, e *graph.Edge, anchor bool) (
 		if pick.getterProof {
 			ok, err = p.getterFilesProved(p.poolKey('g', 'i', binding), wanted, p.unique)
 		} else {
-			ok, err = p.getterFileUnchanged(wanted)
+			ok, err = p.getterFallbackProved(p.poolKey('g', 'i', binding), wanted)
 		}
 		if err != nil || !ok {
 			return false, err

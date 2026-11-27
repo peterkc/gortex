@@ -450,7 +450,7 @@ func (p *rebuildCeleryPass) proved(old []byte, e *graph.Edge, anchor bool) (bool
 		if pick.getterProof {
 			ok, err = p.getterFilesProved(p.key('t', call.getter), wanted, p.unique)
 		} else {
-			ok, err = p.getterFileUnchanged(wanted)
+			ok, err = p.getterFallbackProved(p.key('t', call.getter), wanted)
 		}
 		if err != nil || !ok {
 			return false, err

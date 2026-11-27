@@ -113,7 +113,7 @@ func (p *rebuildStoreFactoryPass) run(ctx context.Context, receipts iter.Seq2[Pa
 
 // b: needed getter bindings; c/g: action/getter proof with affected key by ID.
 // a/w: global/workspace action singleton; f/s: their file singletons.
-// t: live getter files, x: exact getter files. u/v: affected action/getter proof.
+// t: live getter files, x: exact getter files. u/v: wanted action/getter cohorts.
 // l: deferred Calls; n: affected caller proof; p: election witnesses; r: raw-key claims;
 // m: new payload by old key; o: raw receipt key in move order.
 func rebuildStoreFactoryKey(col byte, fields ...string) []byte {
@@ -535,7 +535,7 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 		if pick.getterProof {
 			ok, err = p.getterFilesProved(p.key('t', call.getter), wanted, p.unique)
 		} else {
-			ok, err = p.getterFileUnchanged(wanted)
+			ok, err = p.getterFallbackProved(p.key('t', call.getter), wanted)
 		}
 		if err != nil || !ok {
 			return false, err

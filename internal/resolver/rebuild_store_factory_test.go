@@ -504,12 +504,17 @@ export const begin = createAsyncThunk('begin', async () => {});
 }
 
 func TestRebuildStoreFactoryAndReduxThunkCandidateProof(t *testing.T) {
-	const callerFile, getterFile = "caller.ts", "getter.ts"
+	const callerFile, getterFile, peerFile = "caller.ts", "getter.ts", "peer.ts"
 	for _, synth := range []string{SynthStoreFactory, SynthReduxThunk} {
 		t.Run(synth, func(t *testing.T) {
-			for _, mode := range []string{"two exact peers", "duplicate receipt", "scope enters winning file"} {
+			for _, mode := range []string{"two exact peers", "three exact peers", "duplicate receipt", "scope enters winning file",
+				"entrant into ambiguous file", "empty getter file gains a candidate"} {
 				t.Run(mode, func(t *testing.T) {
-					caller := rebuildEventNode(callerFile, "call", "typescript", "local")
+					var workspace string
+					if mode == "scope enters winning file" || mode == "entrant into ambiguous file" {
+						workspace = "local"
+					}
+					caller := rebuildEventNode(callerFile, "call", "typescript", workspace)
 					winner := rebuildStoreFactoryAction(callerFile, caller.WorkspaceID)
 					getter := rebuildEventNode(getterFile, "useStore", caller.Language, "")
 					getter.Kind = graph.KindVariable
@@ -518,11 +523,15 @@ func TestRebuildStoreFactoryAndReduxThunkCandidateProof(t *testing.T) {
 						call = rebuildReduxThunkMarker(caller, "reset", 9)
 						call.Meta["store_binding"] = "useStore"
 					}
+					file := getterFile
+					if mode == "empty getter file gains a candidate" {
+						file = peerFile
+					}
 					var peers []*graph.Node
 					for _, suffix := range []string{"@1", "@2", "@3"} {
-						n := rebuildStoreFactoryAction(getterFile, caller.WorkspaceID)
+						n := rebuildStoreFactoryAction(file, caller.WorkspaceID)
 						if synth == SynthReduxThunk {
-							n = rebuildReduxThunkNode(getterFile, "reset")
+							n = rebuildReduxThunkNode(file, "reset")
 							n.WorkspaceID = caller.WorkspaceID
 						}
 						n.ID += suffix
@@ -533,9 +542,19 @@ func TestRebuildStoreFactoryAndReduxThunkCandidateProof(t *testing.T) {
 						peers[1].WorkspaceID, peers[2].WorkspaceID = "foreign", "foreign"
 						want = peers[0].ID
 					}
+					if mode == "entrant into ambiguous file" {
+						peers[2].WorkspaceID = "foreign"
+					}
 					left := rebuildEventFacts(callerFile, caller.Language, []*graph.Node{caller, winner}, call)
-					right := rebuildEventFacts(getterFile, caller.Language, append([]*graph.Node{getter}, peers...))
-					b := openRebuildGRPCBuild(t, left, right)
+					right := rebuildEventFacts(getterFile, caller.Language, []*graph.Node{getter})
+					if file == getterFile {
+						right.Nodes = append(right.Nodes, peers...)
+					}
+					live := []store_pebble.ParseFacts{left, right}
+					if file == peerFile {
+						live = append(live, rebuildEventFacts(peerFile, caller.Language, peers))
+					}
+					b := openRebuildGRPCBuild(t, live...)
 					before := rebuildEventSavedRows(t, b)
 					selection, err := NewFrameworkSynthesizerSelection([]string{synth})
 					require.NoError(t, err)
@@ -544,17 +563,32 @@ func TestRebuildStoreFactoryAndReduxThunkCandidateProof(t *testing.T) {
 					// Native falls through two getter-file peers. A duplicate
 					// receipt cannot prove the second peer. A foreign peer
 					// moved into the winning scope instead breaks a singleton.
-					peer := peers[1]
+					right.Nodes = []*graph.Node{getter, peers[0], peers[1]}
 					switch mode {
+					case "three exact peers":
+						right.Nodes = append(right.Nodes, peers[2])
 					case "duplicate receipt":
-						peer = peers[0]
+						right.Nodes[2] = peers[0]
 					case "scope enters winning file":
-						n := *peer
+						n := *peers[1]
 						n.WorkspaceID = caller.WorkspaceID
-						peer = &n
+						right.Nodes[2] = &n
+					case "entrant into ambiguous file":
+						n := *peers[2]
+						n.WorkspaceID = caller.WorkspaceID
+						right.Nodes = append(right.Nodes, &n)
+					case "empty getter file gains a candidate":
+						n := *peers[0]
+						n.FilePath = getterFile
+						right.Nodes = []*graph.Node{getter, &n}
 					}
-					right.Nodes = []*graph.Node{getter, peers[0], peer}
-					receipts := rebuildGRPCReceipts(left, right)
+					recorded := []store_pebble.ParseFacts{left, right}
+					if file == peerFile {
+						// Keep the scoped pool ambiguous independently of the
+						// entrant into its otherwise empty getter-file bucket.
+						recorded = append(recorded, rebuildEventFacts(peerFile, caller.Language, peers[1:]))
+					}
+					receipts := rebuildGRPCReceipts(recorded...)
 					var moves uint64
 					confidence := 0.75
 					if synth == SynthStoreFactory {
@@ -565,7 +599,7 @@ func TestRebuildStoreFactoryAndReduxThunkCandidateProof(t *testing.T) {
 						moves, err = stats.Moves, proofErr
 						confidence = ConfidenceHeuristic
 					}
-					if mode == "two exact peers" {
+					if mode == "two exact peers" || mode == "three exact peers" || mode == "entrant into ambiguous file" {
 						require.NoError(t, err)
 						require.Equal(t, uint64(1), moves)
 						requireRebuildStoreCandidateMove(t, b, before, call, want, synth, confidence)
@@ -613,14 +647,16 @@ func TestRebuildStoreFactoryAndReduxThunkGetterFileProof(t *testing.T) {
 				unrelated, refuse    bool
 			}{
 				{name: "two exact files", ambiguous: true, extraFile: true},
+				{name: "third getter moves while two exact files remain", ambiguous: true, extraFile: true},
 				{name: "two declarations in one file", ambiguous: true, refuse: true},
 				{name: "one exact declaration in the only file"},
 				{name: "duplicate moved to a second file", extraFile: true, refuse: true},
 				{name: "getter file without candidates needs no receipt", unrelated: true},
 				{name: "otherwise irrelevant getter moves into candidate file", unrelated: true, extraFile: true, refuse: true},
+				{name: "exact getter preserves fallback despite a moved duplicate", unrelated: true, extraFile: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					caller := rebuildEventNode(callerFile, "call", "typescript", "local")
+					caller := rebuildEventNode(callerFile, "call", "typescript", "")
 					candidate := func(file string) *graph.Node {
 						if synth == SynthReduxThunk {
 							n := rebuildReduxThunkNode(file, "reset")
@@ -671,7 +707,11 @@ func TestRebuildStoreFactoryAndReduxThunkGetterFileProof(t *testing.T) {
 					frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 					require.NoError(t, err)
 					if tc.unrelated {
-						right = rebuildEventFacts(getterFile, caller.Language, nil)
+						var nodes []*graph.Node
+						if tc.extraFile && !tc.refuse {
+							nodes = []*graph.Node{one}
+						}
+						right = rebuildEventFacts(getterFile, caller.Language, nodes)
 					} else if !tc.ambiguous || tc.extraFile {
 						right = rebuildEventFacts(getterFile, caller.Language, []*graph.Node{remote, one})
 					}
@@ -686,6 +726,11 @@ func TestRebuildStoreFactoryAndReduxThunkGetterFileProof(t *testing.T) {
 							otherFacts = rebuildEventFacts(moved.FilePath, caller.Language, []*graph.Node{&moved})
 						}
 						recorded = append(recorded, otherFacts)
+					}
+					if tc.name == "third getter moves while two exact files remain" {
+						moved := *third
+						moved.FilePath = "fourth.ts"
+						recorded = append(recorded, rebuildEventFacts(moved.FilePath, caller.Language, []*graph.Node{&moved}))
 					}
 					var moves uint64
 					confidence := 0.75
@@ -721,10 +766,25 @@ func TestRebuildStoreFactoryAndReduxThunkNodeRoleProof(t *testing.T) {
 	const callerFile, storeFile, movedFile = "caller.ts", "store.ts", "moved.ts"
 	for _, synth := range []string{SynthStoreFactory, SynthReduxThunk} {
 		t.Run(synth, func(t *testing.T) {
-			for _, mode := range []string{"role fields only", "workspace singleton ignores file", "global singleton ignores scope",
-				"caller file decides", "getter file action needs matching path", "action loses eligibility"} {
-				t.Run(mode, func(t *testing.T) {
-					caller := rebuildEventNode(callerFile, "call", "typescript", "workspace")
+			for _, tc := range []struct {
+				name, nativeFile string
+				proved           bool
+			}{
+				{"role fields only", storeFile, true},
+				{"workspace singleton ignores file", storeFile, true},
+				{"global singleton ignores scope", storeFile, true},
+				{"caller file decides", storeFile, false},
+				{"getter file action needs matching path", callerFile, false},
+				{"action loses eligibility", "", false},
+				{"moved receipt followed by exact receipt", callerFile, false},
+				{"exact receipt followed by moved receipt", callerFile, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					var workspace string
+					if tc.name == "workspace singleton ignores file" {
+						workspace = "workspace"
+					}
+					caller := rebuildEventNode(callerFile, "call", "typescript", workspace)
 					local := rebuildStoreFactoryAction(callerFile, caller.WorkspaceID)
 					remote := rebuildStoreFactoryAction(storeFile, caller.WorkspaceID)
 					getter := rebuildEventNode(storeFile, "useStore", caller.Language, "")
@@ -737,8 +797,8 @@ func TestRebuildStoreFactoryAndReduxThunkNodeRoleProof(t *testing.T) {
 					leftNodes := []*graph.Node{caller}
 					rightNodes := []*graph.Node{remote}
 					want := remote.ID
-					switch mode {
-					case "role fields only", "getter file action needs matching path":
+					switch tc.name {
+					case "role fields only", "getter file action needs matching path", "moved receipt followed by exact receipt", "exact receipt followed by moved receipt":
 						leftNodes = append(leftNodes, local)
 						rightNodes = append(rightNodes, getter)
 					case "caller file decides":
@@ -751,19 +811,26 @@ func TestRebuildStoreFactoryAndReduxThunkNodeRoleProof(t *testing.T) {
 						rebuildEventFacts(callerFile, caller.Language, leftNodes, call),
 						rebuildEventFacts(storeFile, caller.Language, rightNodes),
 					}
+					if tc.name == "workspace singleton ignores file" {
+						foreign := rebuildStoreFactoryAction(callerFile, "foreign")
+						facts[0].Nodes = append(slices.Clone(facts[0].Nodes), foreign)
+					}
 					var tail []store_pebble.ParseFacts
 					if synth == SynthReduxThunk {
 						anchor := rebuildReduxThunkNode("anchor.ts", "unrelated")
 						tail = append(tail, rebuildEventFacts(anchor.FilePath, anchor.Language, []*graph.Node{anchor}))
 					}
-					b := openRebuildGRPCBuild(t, append(facts, tail...)...)
+					live := append(facts, tail...)
+					requireNativeNodeRoleTarget(t, synth, want, live...)
+					b := openRebuildGRPCBuild(t, live...)
 					before := rebuildEventSavedRows(t, b)
 					selection, err := NewFrameworkSynthesizerSelection([]string{synth})
 					require.NoError(t, err)
 					frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 					require.NoError(t, err)
 					changed := *remote
-					switch mode {
+					conflictingReceipt := false
+					switch tc.name {
 					case "role fields only":
 						c, g := *caller, *getter
 						c.Kind, c.Language = graph.KindMethod, "javascript"
@@ -785,11 +852,14 @@ func TestRebuildStoreFactoryAndReduxThunkNodeRoleProof(t *testing.T) {
 						rightNodes = []*graph.Node{remote, &c}
 					case "workspace singleton ignores file", "global singleton ignores scope", "getter file action needs matching path":
 						changed.FilePath = movedFile
-						if mode == "global singleton ignores scope" {
+						if tc.name == "global singleton ignores scope" {
 							changed.WorkspaceID = "other"
 						}
 						rightNodes = rightNodes[1:]
 						tail = append(tail, rebuildEventFacts(movedFile, caller.Language, []*graph.Node{&changed}))
+					case "moved receipt followed by exact receipt", "exact receipt followed by moved receipt":
+						changed.FilePath = movedFile
+						conflictingReceipt = true
 					case "action loses eligibility":
 						changed.Kind = graph.KindType
 						rightNodes = []*graph.Node{&changed}
@@ -797,6 +867,27 @@ func TestRebuildStoreFactoryAndReduxThunkNodeRoleProof(t *testing.T) {
 					recorded := []store_pebble.ParseFacts{
 						rebuildEventFacts(callerFile, caller.Language, leftNodes, call),
 						rebuildEventFacts(storeFile, caller.Language, rightNodes),
+					}
+					// Duplicate receipts do not define a single native input. Check
+					// native on the moved declaration, then prove both receipt orders.
+					if conflictingReceipt {
+						moved := rebuildEventFacts(movedFile, caller.Language, []*graph.Node{&changed})
+						withoutExact := rebuildEventFacts(storeFile, caller.Language, rightNodes[1:])
+						requireNativeNodeRoleTarget(t, synth, local.ID, append([]store_pebble.ParseFacts{recorded[0], withoutExact, moved}, tail...)...)
+						if tc.name == "moved receipt followed by exact receipt" {
+							recorded = slices.Insert(recorded, 1, moved)
+						} else {
+							recorded = append(recorded, moved)
+						}
+					} else {
+						nativeTarget := call.To
+						switch tc.nativeFile {
+						case callerFile:
+							nativeTarget = local.ID
+						case storeFile:
+							nativeTarget = remote.ID
+						}
+						requireNativeNodeRoleTarget(t, synth, nativeTarget, append(slices.Clone(recorded), tail...)...)
 					}
 					receipts := rebuildGRPCReceipts(append(recorded, tail...)...)
 					var moves uint64
@@ -809,22 +900,34 @@ func TestRebuildStoreFactoryAndReduxThunkNodeRoleProof(t *testing.T) {
 						moves, err = stats.Moves, proofErr
 						confidence = ConfidenceHeuristic
 					}
-					switch mode {
-					case "role fields only", "workspace singleton ignores file", "global singleton ignores scope":
+					if tc.proved {
 						require.NoError(t, err)
 						require.Equal(t, uint64(1), moves)
 						requireRebuildStoreCandidateMove(t, b, before, call, want, synth, confidence)
-					default:
-						var refusal *store_pebble.RebuildUnknownProvenanceError
-						require.ErrorAs(t, err, &refusal)
-						first := graph.EdgeIdentityFor(call)
-						first.To = want
-						require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: first}, refusal)
-						require.Zero(t, moves)
-						require.Equal(t, before, rebuildEventSavedRows(t, b))
+						return
 					}
+					var refusal *store_pebble.RebuildUnknownProvenanceError
+					require.ErrorAs(t, err, &refusal)
+					first := graph.EdgeIdentityFor(call)
+					first.To = want
+					require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: first}, refusal)
+					require.Zero(t, moves)
+					require.Equal(t, before, rebuildEventSavedRows(t, b))
 				})
 			}
 		})
 	}
+}
+
+func requireNativeNodeRoleTarget(t *testing.T, synth, target string, facts ...store_pebble.ParseFacts) {
+	t.Helper()
+	native := openRebuildTemporalOracle(t, facts...)
+	if synth == SynthStoreFactory {
+		ResolveStoreFactoryCalls(native)
+	} else {
+		ResolveReduxThunkCalls(native)
+	}
+	rows := rebuildEventSQLiteRows(native)
+	require.Len(t, rows.edges, 1)
+	require.Equal(t, target, rows.edges[0].To)
 }

@@ -624,7 +624,7 @@ func TestRebuildStoreFactoryAndReduxThunkAnchorProof(t *testing.T) {
 			stage = "Redux Thunk"
 		}
 		t.Run(stage, func(t *testing.T) {
-			for _, member := range []string{"still unrelated", "removed", ""} {
+			for _, member := range []string{"still unrelated", "removed", "", "conflicting anchor receipts"} {
 				t.Run("receipt role="+member, func(t *testing.T) {
 					call := storeFactoryTestCall("retired", 2)
 					call.Meta["store_action"] = "removed"
@@ -649,7 +649,12 @@ func TestRebuildStoreFactoryAndReduxThunkAnchorProof(t *testing.T) {
 							delete(raw.Meta, "store_factory")
 						}
 					}
-					decls.Nodes = []*graph.Node{&raw}
+					if member == "conflicting anchor receipts" {
+						raw.Meta = nil
+						decls.Nodes = []*graph.Node{action, &raw}
+					} else {
+						decls.Nodes = []*graph.Node{&raw}
+					}
 					receipts := sqlCallsiteTestReceipts(source, decls)
 					var moves uint64
 					var err error
@@ -830,4 +835,32 @@ func TestRebuildReduxThunkScratchReadGuards(t *testing.T) {
 			require.ErrorContains(t, err, "Redux Thunk "+guard)
 		})
 	}
+}
+
+func TestRebuildReduxThunkSkipsActionCapWithoutThunk(t *testing.T) {
+	action := storeFactoryTestAction("a.ts::reset", "a.ts", "")
+	action.Meta["large"] = strings.Repeat("x", rebuildReduxThunkRowBytes)
+	call := storeFactoryTestCall("retired", 2)
+	call.Meta["via"] = "redux-thunk"
+	call.Meta["thunk_dispatch"] = storeFactoryTestMember
+	b, _ := seedSyntheticCustody(t, producerProofFacts(action), storeFactoryTestSource(call))
+	receipts := func(func(ParseFacts, error) bool) { t.Fatal("unexpected receipt scan") }
+	before := rebuildFrameworkCustodyRows(t, b)
+	stats, err := b.RebuildReduxThunk(t.Context(), receipts, reduxThunkStoreTestRules())
+	require.NoError(t, err)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+
+	// The over-cap action sorts before an unrelated thunk, which still
+	// activates the action index.
+	thunk := storeFactoryTestAction("z.ts::unrelated", "z.ts", "")
+	thunk.Meta = map[string]any{"redux_thunk": "unrelated"}
+	b.AddNode(thunk)
+	before = rebuildFrameworkCustodyRows(t, b)
+	stats, err = b.RebuildReduxThunk(t.Context(), receipts, reduxThunkStoreTestRules())
+	require.ErrorIs(t, err, ErrRebuildReduxThunk)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.ErrorContains(t, err, "Redux Thunk node row")
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }

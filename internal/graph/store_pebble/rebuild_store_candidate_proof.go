@@ -39,7 +39,7 @@ func pickRebuildStoreCandidate(unique func([]byte) (string, bool, error), scoped
 	if err != nil {
 		return pick, err
 	}
-	for i, file := range [...]string{getterFile, callerFile} {
+	for _, file := range [...]string{getterFile, callerFile} {
 		if file == "" {
 			continue
 		}
@@ -51,7 +51,7 @@ func pickRebuildStoreCandidate(unique func([]byte) (string, bool, error), scoped
 		if id != "" {
 			pick.buckets = append(pick.buckets, rebuildStoreCandidateWitness{key, 1})
 			pick.target = id
-			pick.getterWinner = i == 0 && file != callerFile
+			pick.getterWinner = file != callerFile
 			return pick, nil
 		}
 		var need byte
@@ -374,6 +374,22 @@ func (p *rebuildCallMoves) foldGetterFiles(ctx context.Context, prefix []byte,
 func (p *rebuildCallMoves) getterFileUnchanged(wanted []byte) (bool, error) {
 	state, err := rebuildScratchState(p.b.pending, wanted, p.label+" getter proof")
 	return state == rebuildCapabilityWanted, err
+}
+
+// If a getter did not win, its live file need not have a receipt unless a
+// conflicting receipt adds a file. An exact live file then guarantees the
+// conflict can only make the getter ambiguous, not redirect the Call.
+func (p *rebuildCallMoves) getterFallbackProved(live, wanted []byte) (bool, error) {
+	unchanged, err := p.getterFileUnchanged(wanted)
+	if err != nil || unchanged {
+		return unchanged, err
+	}
+	file, _, err := p.unique(live)
+	if err != nil {
+		return false, err
+	}
+	exactFile, _, err := p.unique(p.getterProofKey(wanted))
+	return file != "" && file == exactFile, err
 }
 
 func (p *rebuildCallMoves) getterFilesProved(live, wanted []byte, unique func([]byte) (string, bool, error)) (bool, error) {
