@@ -116,3 +116,87 @@ func requireRebuildCustodyCount(t *testing.T, b *BuildStore, want int) {
 	}))
 	require.Equal(t, want, rows)
 }
+
+func TestRebuildGRPCStaleCustodyOrder(t *testing.T) {
+	const file, caller, owner, handler = "rpc.go", "caller", "server", "server.Hello"
+	for _, tc := range []struct {
+		name, staleTo string
+	}{{"stationary", handler}, {"moving", "unresolved::0-stale"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			ctx := t.Context()
+			stub := func(to string, line int) *graph.Edge {
+				return &graph.Edge{From: caller, To: to, Kind: graph.EdgeCalls, FilePath: file, Line: line,
+					Meta: map[string]any{"via": "grpc.stub", "grpc_service": "Greeter", "grpc_method": "Hello"}}
+			}
+			stale, mover := stub(tc.staleTo, 1), stub("unresolved::mover", 2)
+			facts := ParseFacts{
+				EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: file, NodeCount: 3},
+				Nodes: []*graph.Node{
+					{ID: caller, Name: "call", Kind: graph.KindFunction, Language: "go", FilePath: file},
+					{ID: owner, Name: "server", Kind: graph.KindType, Language: "go", FilePath: file},
+					{ID: handler, Name: "Hello", Kind: graph.KindMethod, Language: "go", FilePath: file},
+				},
+				Edges: []*graph.Edge{stale, mover,
+					{From: caller, To: "unresolved::RegisterGreeterServer", Kind: graph.EdgeCalls, FilePath: file, Line: 3,
+						Meta: map[string]any{"grpc_register_service": "Greeter", "grpc_register_impl": "server"}},
+					{From: handler, To: owner, Kind: graph.EdgeMemberOf, FilePath: file, Line: 4},
+				},
+			}
+			require.NoError(t, b.AddParsedFile("", facts))
+			require.NoError(t, b.addEdgeWithCustody(stale, rebuildEdgeCustody{proof: rebuildProofReceiver}))
+			staleKey := pendingEdgeKey(stale)
+			// Alter only the live payload, leaving the receipt and its old digest intact.
+			changed := *stale
+			changed.Via = "changed after producer proof"
+			value, err := encodeEdge(&changed)
+			require.NoError(t, err)
+			require.NoError(t, b.pending.Set(staleKey, value, pebble.NoSync))
+			_, err = readRebuildEdgeCustody(b.pending, staleKey)
+			require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+
+			savedRows := func() map[string]string {
+				rows := make(map[string]string)
+				require.NoError(t, pendingVisit(ctx, b.pending, nil, func(r row) error {
+					rows[string(r.key)] = string(r.value)
+					return nil
+				}))
+				return rows
+			}
+			before := savedRows()
+			var reduced []int
+			stats, err := b.RebuildGRPC(ctx, func(yield func(ParseFacts, error) bool) { yield(facts, nil) },
+				func(e *graph.Edge, _, _, to, _ string) bool {
+					require.Equal(t, handler, to)
+					reduced = append(reduced, e.Line)
+					if e.To == to {
+						return false
+					}
+					e.To = to
+					return true
+				})
+			// The stale row appears first in the receipts but cannot claim an ordinal.
+			require.Equal(t, []int{2, 1}, reduced, "gRPC stage error: %v", err)
+			after := savedRows()
+			if tc.staleTo != handler {
+				require.ErrorIs(t, err, ErrRebuildGRPC)
+				var unknown *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &unknown)
+				require.Equal(t, graph.EdgeIdentityFor(stale), unknown.First)
+				require.EqualValues(t, 1, unknown.Count)
+				require.Zero(t, stats)
+				require.Equal(t, before, after)
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, stats.Moves)
+			recorder := string(rebuildLinkRecorderKey(staleKey))
+			require.Equal(t, before[string(staleKey)], after[string(staleKey)])
+			require.Equal(t, before[recorder], after[recorder])
+			old, dest := pendingEdgeKey(mover), pendingEdgeKey(stub(handler, mover.Line))
+			require.NotContains(t, after, string(old))
+			require.Contains(t, after, string(dest))
+			require.Equal(t, string(old), after[string(rebuildLinkRecorderKey(dest))])
+		})
+	}
+}

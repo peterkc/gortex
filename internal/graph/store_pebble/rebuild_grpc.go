@@ -348,9 +348,12 @@ func (p *rebuildGRPC) order(ctx context.Context, receipts iter.Seq2[ParseFacts, 
 	if err := pendingVisit(ctx, p.b.pending, stubs, func(r row) error {
 		live := r.key[len(stubs):]
 		custody, err := readRebuildEdgeCustody(p.b.pending, live)
+		if errors.Is(err, ErrRebuildUnknownProvenance) {
+			return nil // A stale producer stamp cannot supply a raw ordinal.
+		}
 		if err != nil || custody.proof != 0 {
-			// A valid producer record cannot supply a raw ordinal. The
-			// unordered tail still elects this stub and refuses a move.
+			// A producer record cannot supply a raw ordinal. The unordered
+			// tail still elects this stub; a move needs proof during reduce.
 			return err
 		}
 		raw := custody.raw
