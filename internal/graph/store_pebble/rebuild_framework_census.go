@@ -15,7 +15,7 @@ const rebuildFrameworkGateRowBytes = 16 << 20
 // VisitFrameworkGateNodes streams the pre-framework light node projection.
 func (v RebuildView) VisitFrameworkGateNodes(ctx context.Context, yield func(*graph.Node) error) error {
 	return v.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
-		n, err := rebuildFrameworkGateNode(r.value)
+		n, err := decodeNodeLight(r.value)
 		if err == nil && !bytes.Equal(r.key, pendingNodeKey(n.ID)) {
 			return invalid("framework census node identity")
 		}
@@ -24,37 +24,6 @@ func (v RebuildView) VisitFrameworkGateNodes(ctx context.Context, yield func(*gr
 		}
 		return yield(n)
 	})
-}
-
-func rebuildFrameworkGateNode(raw []byte) (*graph.Node, error) {
-	if len(raw) > rebuildFrameworkGateRowBytes {
-		return nil, fmt.Errorf("%w: framework census node", ErrRebuildLinkInputSize)
-	}
-	return decodeNodeLight(raw)
-}
-
-// FrameworkMacroGate reads only the language and macro kind roles used by a
-// macro-only selection. Unrelated node payloads do not enter its size cap.
-func (v RebuildView) FrameworkMacroGate(ctx context.Context, cFamily func(string) bool) (bool, error) {
-	var family, macro, oversized bool
-	if err := v.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
-		n, err := checkedRebuildLightNode(r, "framework census")
-		if err != nil {
-			return err
-		}
-		family = family || cFamily(n.Language)
-		if n.Kind == graph.KindMacro {
-			macro = true
-			oversized = oversized || len(r.value) > rebuildFrameworkGateRowBytes
-		}
-		return nil
-	}); err != nil || !family || !macro {
-		return false, err
-	}
-	if oversized {
-		return false, fmt.Errorf("%w: framework census node", ErrRebuildLinkInputSize)
-	}
-	return true, nil
 }
 
 // VisitFrameworkGateEdges streams only the kinds used by the wired call and
@@ -145,7 +114,7 @@ func (v RebuildView) HasFrameworkAccessRoles(ctx context.Context, want uint8, ro
 			if to != field {
 				field, seen = to, 0
 			}
-			n, err := pendingGet(snap, pendingNodeKey(id.From), rebuildFrameworkGateNode)
+			n, err := pendingGet(snap, pendingNodeKey(id.From), decodeNodeLight)
 			if err != nil {
 				return err
 			}

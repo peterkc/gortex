@@ -278,22 +278,23 @@ func TestRebuildFrameworkCensusObserverRoleOverflow(t *testing.T) {
 	}
 }
 
-func TestRebuildFrameworkCensusMacroOnlyNodeCap(t *testing.T) {
+func TestRebuildFrameworkCensusMacroOnlySelection(t *testing.T) {
 	const file = "source.c"
 	large := strings.Repeat("x", 16<<20)
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
 	require.NoError(t, err)
 	for _, tc := range []struct {
-		name             string
-		sourceLanguage   string
-		largeKind        graph.NodeKind
-		includeMacro     bool
-		admitted, refuse bool
+		name           string
+		sourceLanguage string
+		largeKind      graph.NodeKind
+		includeMacro   bool
+		admitted       bool
+		freezeRefusal  bool
 	}{
 		{"large nonmacro", "c", graph.KindFunction, true, true, false},
 		{"no macro", "c", graph.KindFunction, false, false, false},
 		{"no C family", "go", graph.KindMacro, false, false, false},
-		{"admitted large macro", "c", graph.KindMacro, false, false, true},
+		{"admitted large macro", "c", graph.KindMacro, false, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wide := rebuildEventNode(file, "wide", tc.sourceLanguage, "")
@@ -308,13 +309,40 @@ func TestRebuildFrameworkCensusMacroOnlyNodeCap(t *testing.T) {
 			}
 			b := openRebuildGRPCBuild(t, rebuildEventFacts(file, tc.sourceLanguage, nodes))
 			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
-			if tc.refuse {
+			require.NoError(t, err)
+			require.Equal(t, tc.admitted, frozen.allows(SynthMacroExpansion))
+			err = FreezeRebuildMacroExpansionInputs(t.Context(), b, frozen)
+			if tc.freezeRefusal {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildMacroExpansion)
 				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
-				require.ErrorContains(t, err, "framework census node")
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, tc.admitted, frozen.allows(SynthMacroExpansion))
 		})
 	}
+}
+
+func TestRebuildFrameworkCensusAllowsUnrelatedOversizedNode(t *testing.T) {
+	const file, lang = "bus.ts", "typescript"
+	const topic, transport = "event::pubsub::eventemitter::tick", "eventemitter"
+	emitter := rebuildEventNode(file, "emit", lang, "")
+	listener := rebuildEventNode(file, "listen", lang, "")
+	unrelated := rebuildEventNode(file, "unrelated", lang, "")
+	unrelated.Meta = map[string]any{"padding": strings.Repeat("x", 16<<20)}
+	facts := rebuildEventFacts(file, lang, []*graph.Node{
+		emitter, listener, rebuildEventTopic(file, lang, topic, "tick", transport),
+	}, rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, transport),
+		rebuildEventSite(listener, topic, graph.EdgeListensOn, 8, transport))
+	build, native := openRebuildEventStores(t, facts)
+	build.AddNode(unrelated)
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthEventChannel})
+	require.NoError(t, err)
+	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), build.RebuildView(), selected)
+	require.NoError(t, err)
+	require.True(t, frozen.allows(SynthEventChannel))
+	stats, err := RunRebuildEventChannel(t.Context(), build, rebuildGRPCReceipts(facts), frozen)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, stats.Pairs)
+	require.Equal(t, 1, ResolveEventChannelCalls(native))
+	require.Equal(t, rebuildEventSQLiteRows(native).edges, rebuildEventSavedRows(t, build).edges)
 }

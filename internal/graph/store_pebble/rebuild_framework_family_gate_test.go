@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -53,4 +54,38 @@ func TestRebuildFamilyDropRemovesExactPendingRows(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1, count)
 	require.Equal(t, want, rebuildFrameworkCustodyRows(t, b))
+}
+
+func TestRebuildFrameworkFamilyGateCapsOnlyDroppedEndpoints(t *testing.T) {
+	for _, lang := range []string{"go", "javascript"} {
+		t.Run(lang, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			from := &graph.Node{ID: "from", Kind: graph.KindFunction, Language: "go"}
+			to := &graph.Node{ID: "to", Kind: graph.KindFunction, Language: "javascript"}
+			large := &graph.Node{ID: "large", Kind: graph.KindFunction, Language: lang,
+				Meta: map[string]any{"padding": strings.Repeat("x", 16<<20)}}
+			drop := &graph.Edge{From: from.ID, To: to.ID, Kind: graph.EdgeReferences, FilePath: "from.go", Line: 1}
+			extra := &graph.Edge{From: large.ID, To: to.ID, Kind: graph.EdgeReferences, FilePath: "large", Line: 1}
+			b.AddBatch([]*graph.Node{from, to, large}, []*graph.Edge{drop, extra})
+			before := rebuildFrameworkCustodyRows(t, b)
+			count, err := b.RebuildFrameworkFamilyGate(t.Context(), func(*graph.Edge) bool { return true },
+				func(from, to string) bool { return from != to })
+			if lang == "go" {
+				require.ErrorIs(t, err, ErrRebuildFrameworkFamilyGate)
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "framework family endpoint node")
+				require.Zero(t, count)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, count)
+			kept, err := b.pendingEdge(pendingEdgeKey(extra))
+			require.NoError(t, err)
+			require.Equal(t, extra, kept)
+			gone, err := b.pendingEdge(pendingEdgeKey(drop))
+			require.NoError(t, err)
+			require.Nil(t, gone)
+		})
+	}
 }
