@@ -101,6 +101,73 @@ func (w *Widget) noop() {}
 	require.Equal(t, oracle, rebuildEventSavedRows(t, b))
 }
 
+func TestRebuildSetStateLifecycleCallerProofScope(t *testing.T) {
+	for _, stage := range []struct {
+		synth, lifecycle string
+	}{
+		{SynthReactSetState, "render"},
+		{SynthFlutterSetState, "build"},
+	} {
+		for _, mode := range []string{"only earlier lifecycle", "later lifecycle wins", "gated lifecycle is still a target"} {
+			t.Run(stage.synth+"/"+mode, func(t *testing.T) {
+				const file, class = "widget.go", "widget.go::Widget"
+				earlier := rebuildEventNode(file, "a", "go", "")
+				gated := rebuildEventNode(file, "m", "go", "")
+				earlier.Name, gated.Name = stage.lifecycle, stage.lifecycle
+				earlier.Kind, gated.Kind = graph.KindMethod, graph.KindMethod
+				member := func(n *graph.Node) *graph.Edge {
+					return &graph.Edge{From: n.ID, To: class, Kind: graph.EdgeMemberOf, FilePath: file, Line: n.StartLine}
+				}
+				gate := func(n *graph.Node) *graph.Edge {
+					return &graph.Edge{From: n.ID, To: "unresolved::setState", Kind: graph.EdgeCalls, FilePath: file, Line: n.StartLine}
+				}
+				nodes := []*graph.Node{earlier, gated}
+				edges := []*graph.Edge{member(earlier), member(gated), gate(gated)}
+				var from, target *graph.Node
+				switch mode {
+				case "later lifecycle wins":
+					later := rebuildEventNode(file, "z", "go", "")
+					later.Name, later.Kind = stage.lifecycle, graph.KindMethod
+					nodes, edges = append(nodes, later), append(edges, member(later))
+					from, target = gated, later
+				case "gated lifecycle is still a target":
+					refresh := rebuildEventNode(file, "refresh", "go", "")
+					refresh.Kind = graph.KindMethod
+					nodes, edges = append(nodes, refresh), append(edges, member(refresh), gate(refresh))
+					from, target = refresh, gated
+				}
+				b, native, proof := openRebuildReactSetStateStores(t, rebuildEventFacts(file, "go", nodes, edges...))
+				selection, err := NewFrameworkSynthesizerSelection([]string{stage.synth})
+				require.NoError(t, err)
+				report := RunFrameworkSynthesizersWithSelection(native, selection)
+				require.NoError(t, report.Err)
+				oracle := rebuildEventSQLiteRows(native)
+				receipts := rebuildGRPCReceipts(proof...)
+				run, output := RunRebuildReactSetState, rebuildReactSetStateOutput
+				if stage.synth == SynthFlutterSetState {
+					run, output = RunRebuildFlutterSetState, rebuildFlutterSetStateOutput
+				}
+				var want int
+				if from == nil {
+					// Native elects the gated method itself. There is no
+					// output to prove, even without membership receipts.
+					receipts = func(func(store_pebble.ParseFacts, error) bool) {
+						t.Fatal("replayed receipts for a lifecycle method that cannot call a different target")
+					}
+				} else {
+					want = 1
+					require.Contains(t, oracle.edges, output(from.ID, target.ID, class, file, from.StartLine))
+				}
+				require.Equal(t, want, report.Total)
+				stats, err := run(t.Context(), b, receipts, selection, 1)
+				require.NoError(t, err)
+				require.EqualValues(t, want, stats.Edges)
+				require.Equal(t, oracle, rebuildEventSavedRows(t, b))
+			})
+		}
+	}
+}
+
 func TestRebuildReactSetStateRefusesMissingProof(t *testing.T) {
 	for _, mode := range []string{"first membership", "only matching call", "declaration"} {
 		t.Run(mode, func(t *testing.T) {

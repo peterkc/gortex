@@ -11,40 +11,46 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-func TestRebuildReactSetStateRejectsWrongRecordingPathBeforeOwner(t *testing.T) {
+func TestRebuildReactSetStateRejectsWrongMembershipRecordingPath(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		decoy bool
+		name                    string
+		wrongBefore, wrongAfter bool
 	}{
 		{name: "first valid membership wins"},
-		{name: "same key at wrong path before the competitor", decoy: true},
+		{name: "wrong path before exact receipt", wrongBefore: true},
+		{name: "wrong path after exact receipt", wrongAfter: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			caller := setStateProofMethod("refresh", "refresh", 5)
 			first := setStateProofMethod("render-z", "render", 10)
 			second := setStateProofMethod("render-a", "render", 15)
 			firstOwner := setStateProofMember(caller, "ZWidget")
+			rawSecondOwner := setStateProofMember(caller, "unresolved::AWidget")
 			secondOwner := setStateProofMember(caller, "AWidget")
 			facts := setStateProofFacts([]*graph.Node{caller, first, second},
-				firstOwner, secondOwner,
+				firstOwner, rawSecondOwner,
 				setStateProofMember(first, "ZWidget"), setStateProofMember(second, "AWidget"),
 				setStateProofCall(caller, "unresolved::setState"),
 			)
-			b, replay := seedSyntheticCustody(t, facts)
-			wrong := ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: "wrong.go"}}
-			if tc.decoy {
-				// The first sighting repeats the exact edge key, not the recording path.
-				// Ignoring it would put ZWidget ahead of AWidget on replay.
-				wrong.Edges = []*graph.Edge{secondOwner}
-			}
+			b, _ := seedSyntheticCustody(t, facts)
+			require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{
+				{Edge: secondOwner, OldTo: rawSecondOwner.To},
+			}))
+			wrong := facts
+			wrong.File.FilePath = "wrong.go"
+			wrong.Nodes = nil
+			wrong.Edges = []*graph.Edge{rawSecondOwner}
 			receipts := func(yield func(ParseFacts, error) bool) {
-				if yield(wrong, nil) {
-					replay(yield)
+				if tc.wrongBefore && !yield(wrong, nil) {
+					return
+				}
+				if yield(facts, nil) && tc.wrongAfter {
+					yield(wrong, nil)
 				}
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
 			stats, err := b.RebuildReactSetState(t.Context(), receipts, 1<<20, setStateProofTarget, setStateProofOutput)
-			if tc.decoy {
+			if tc.wrongBefore || tc.wrongAfter {
 				require.ErrorIs(t, err, ErrRebuildReactSetState)
 				var refusal *RebuildUnknownProvenanceError
 				require.ErrorAs(t, err, &refusal)
@@ -165,21 +171,27 @@ func TestRebuildSetStateCountsMissingMembershipsByLiveKey(t *testing.T) {
 	}
 }
 
-func TestRebuildReactSetStateUsesAnotherGateWhenProducerDigestIsStale(t *testing.T) {
+func TestRebuildReactSetStateStaleGateDigest(t *testing.T) {
 	const owner = "Widget"
 	for _, tc := range []struct {
-		name     string
-		stale    bool
-		fallback bool
+		name      string
+		stale     bool
+		fallback  bool
+		incumbent bool
 	}{
 		{name: "checked earlier producer alone"},
 		{name: "stale earlier producer and proved raw gate", stale: true, fallback: true},
 		{name: "stale earlier producer alone", stale: true},
+		{name: "stale gate with an existing lifecycle edge", stale: true, incumbent: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			caller := setStateProofMethod("refresh", "refresh", 5)
 			render := setStateProofMethod("render", "render", 10)
+			output := setStateProofOutput(caller, render, owner)
 			facts := setStateProofFacts([]*graph.Node{caller, render}, setStateProofMember(caller, owner), setStateProofMember(render, owner))
+			if tc.incumbent {
+				facts.Edges = append(facts.Edges, output)
+			}
 			if tc.fallback {
 				facts.Edges = append(facts.Edges, setStateProofCall(caller, "unresolved::setState"))
 			}
@@ -198,19 +210,29 @@ func TestRebuildReactSetStateUsesAnotherGateWhenProducerDigestIsStale(t *testing
 				raw, err := encodeEdge(&changed)
 				require.NoError(t, err)
 				require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+				_, err = readRebuildEdgeCustody(b.pending, key)
+				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
 			stats, err := b.RebuildReactSetState(t.Context(), receipts, 1<<20, setStateProofTarget, setStateProofOutput)
+			if tc.incumbent {
+				require.NoError(t, err)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
 			if tc.stale && !tc.fallback {
 				require.ErrorIs(t, err, ErrRebuildReactSetState)
-				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+				var refusal *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(output)}, refusal)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 				return
 			}
 			require.NoError(t, err)
 			require.EqualValues(t, 1, stats.Edges)
-			checkSetStateProofOutput(t, b, setStateProofOutput(caller, render, owner), rebuildProofReactSetState)
+			checkSetStateProofOutput(t, b, output, rebuildProofReactSetState)
 			after := rebuildFrameworkCustodyRows(t, b)
 			require.Equal(t, before[string(key)], after[string(key)])
 			recorder := rebuildLinkRecorderKey(key)
@@ -219,14 +241,15 @@ func TestRebuildReactSetStateUsesAnotherGateWhenProducerDigestIsStale(t *testing
 	}
 }
 
-func TestRebuildSetStateRejectsOwnCustodyAsGate(t *testing.T) {
+func TestRebuildSetStateRejectsIneligibleCustodyAsGate(t *testing.T) {
 	for _, tc := range []struct {
 		name, lifecycle string
 		proof           rebuildEdgeProof
 		stage           error
 	}{
-		{"React", "render", rebuildProofReactSetState, ErrRebuildReactSetState},
-		{"Flutter", "build", rebuildProofFlutterSetState, ErrRebuildFlutterSetState},
+		{"React with own custody", "render", rebuildProofReactSetState, ErrRebuildReactSetState},
+		{"Flutter with own custody", "build", rebuildProofFlutterSetState, ErrRebuildFlutterSetState},
+		{"React with Flutter custody", "render", rebuildProofFlutterSetState, ErrRebuildReactSetState},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const owner = "Widget"
@@ -242,12 +265,14 @@ func TestRebuildSetStateRejectsOwnCustodyAsGate(t *testing.T) {
 			require.Equal(t, custody, valid)
 			before := rebuildFrameworkCustodyRows(t, b)
 			run := b.RebuildReactSetState
-			if tc.proof == rebuildProofFlutterSetState {
+			if tc.stage == ErrRebuildFlutterSetState {
 				run = b.RebuildFlutterSetState
 			}
 			stats, err := run(t.Context(), receipts, 1, setStateProofTarget, setStateProofOutput)
 			require.ErrorIs(t, err, tc.stage)
-			require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+			var refusal *RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(setStateProofOutput(caller, target, owner))}, refusal)
 			require.Zero(t, stats)
 			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})

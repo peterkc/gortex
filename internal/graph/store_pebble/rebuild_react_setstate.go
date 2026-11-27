@@ -97,11 +97,11 @@ type rebuildSetStatePass struct {
 	stats RebuildReactSetStateStats
 }
 
-// c: lifecycle classes; m: candidate methods; q: possible owners of gated
-// callers; r: exact membership receipt identity -> live key; o: first owner
-// by method; t: qualifying call receipt
-// identity -> caller; g: live call gate; p: proved call gate; n: declaration
-// proof; l: lifecycle winner by class; w: staged output by exact key;
+// c: highest live lifecycle candidate ID by class; m: candidate methods;
+// q: classes that can emit from a gated caller; r: membership receipt key ->
+// live key; o: first owner by method; t: qualifying call receipt key -> caller;
+// g: live call gate; p: proved call gate; n: declaration proof;
+// l: lifecycle winner by class; w: staged output by exact key;
 // x: unproved output keys.
 func setStateScratch(col byte, fields ...string) []byte {
 	return keyStrings([]byte{'g', 'W', col}, fields...)
@@ -162,11 +162,16 @@ func (p *rebuildSetStatePass) capture(ctx context.Context, lifecycle string, isS
 			return err
 		}
 		n, err := p.node(ctx, e.From)
-		if err != nil || n == nil || n.Kind != graph.KindMethod || n.Name != lifecycle {
+		if err != nil || n == nil || n.Kind != graph.KindMethod || n.Name != lifecycle || n.ID == "" {
 			return err
 		}
 		active = true
-		return p.mark('c', e.To)
+		key := setStateScratch('c', e.To)
+		highest, err := p.get(key)
+		if err != nil || string(highest) >= n.ID {
+			return err
+		}
+		return p.put(key, []byte(n.ID))
 	}); err != nil || !active {
 		return false, err
 	}
@@ -195,27 +200,32 @@ func (p *rebuildSetStatePass) capture(ctx context.Context, lifecycle string, isS
 func (p *rebuildSetStatePass) captureGates(ctx context.Context, lifecycle string, isSetState func(string) bool) (bool, error) {
 	active := false
 	if err := p.methods(ctx, func(n *graph.Node) error {
-		gated := false
+		gated, useful := false, false
 		if err := pendingVisit(ctx, p.b.pending, guardOutgoing(n.ID, graph.EdgeCalls), func(r row) error {
 			e, err := setStateInput(r)
 			if err != nil || !isSetState(e.To) {
 				return err
 			}
-			gated = true
+			if !gated {
+				gated = true
+				useful, err = p.markCallerClasses(ctx, n, lifecycle)
+				if err != nil {
+					return err
+				}
+			}
+			if !useful {
+				return nil
+			}
 			return p.wantCall(e, r.key)
-		}); err != nil || !gated {
+		}); err != nil || !useful {
 			return err
 		}
 		active = true
 		if err := p.mark('g', n.ID); err != nil {
 			return err
 		}
-		return p.memberships(ctx, n.ID, func(e *graph.Edge, key []byte) error {
-			if err := p.wantMembership(e, key); err != nil {
-				return err
-			}
-			return p.mark('q', e.To)
-		})
+		// Any owner can win first, even one with no lifecycle target.
+		return p.memberships(ctx, n.ID, p.wantMembership)
 	}); err != nil || !active {
 		return false, err
 	}
@@ -239,6 +249,24 @@ func (p *rebuildSetStatePass) captureGates(ctx context.Context, lifecycle string
 		// disqualify this lifecycle target. Prove every competing owner.
 		return p.memberships(ctx, n.ID, p.wantMembership)
 	})
+}
+
+func (p *rebuildSetStatePass) markCallerClasses(ctx context.Context, n *graph.Node, lifecycle string) (bool, error) {
+	useful := false
+	err := p.memberships(ctx, n.ID, func(e *graph.Edge, _ []byte) error {
+		highest, err := p.get(setStateScratch('c', e.To))
+		if err != nil || len(highest) == 0 {
+			return err
+		}
+		// If this caller owns the class, earlier lifecycle IDs cannot beat
+		// it. At least one later ID is needed for a non-self output.
+		if n.Name == lifecycle && string(highest) <= n.ID {
+			return nil
+		}
+		useful = true
+		return p.mark('q', e.To)
+	})
+	return useful, err
 }
 
 func (p *rebuildSetStatePass) memberships(ctx context.Context, id string, yield func(*graph.Edge, []byte) error) error {
