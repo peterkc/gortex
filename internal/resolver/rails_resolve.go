@@ -60,19 +60,15 @@ func resolveRailsRefs(g graph.Store, cands *frameworkPassCandidates) int {
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for e := range stream {
-		if e == nil || e.Meta == nil || !graph.IsUnresolvedTarget(e.To) {
-			continue
-		}
-		recv, _ := e.Meta["recv_const"].(string)
+		recv, method := railsCallKey(e)
 		if recv == "" {
 			continue
 		}
-		method := strings.TrimPrefix(graph.UnresolvedName(e.To), "*.")
 		fromFile := ""
 		if n := g.GetNode(e.From); n != nil {
 			fromFile = n.FilePath
 		}
-		if !strings.HasSuffix(fromFile, ".rb") {
+		if !railsRefSource(fromFile) {
 			continue
 		}
 		isModel, dirs := railsRefDirs(recv)
@@ -87,19 +83,38 @@ func resolveRailsRefs(g graph.Store, cands *frameworkPassCandidates) int {
 		if m := methodsByClass[classID][method]; m != "" {
 			target = m
 		}
-		oldTo := e.To
-		e.To = target
-		e.Origin = graph.OriginASTInferred
-		e.Confidence = 0.8
-		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.8)
-		StampSynthesized(e, SynthRailsResolve)
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		reindex = append(reindex, railsRefRebind(e, target))
 		resolved++
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func railsCallKey(e *graph.Edge) (receiver, method string) {
+	if e == nil || !graph.IsUnresolvedTarget(e.To) {
+		return "", ""
+	}
+	receiver, _ = e.Meta["recv_const"].(string)
+	if receiver == "" {
+		return "", ""
+	}
+	return receiver, strings.TrimPrefix(graph.UnresolvedName(e.To), "*.")
+}
+
+func railsRefSource(file string) bool {
+	return strings.HasSuffix(file, ".rb")
+}
+
+func railsRefRebind(e *graph.Edge, target string) graph.EdgeReindex {
+	oldTo := e.To
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	e.Confidence = 0.8
+	e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.8)
+	StampSynthesized(e, SynthRailsResolve)
+	return graph.EdgeReindex{Edge: e, OldTo: oldTo}
 }
 
 // railsRefDirs classifies a receiver constant into its convention dirs;
@@ -136,8 +151,8 @@ func railsModelClassSet(g graph.Store) map[string]bool {
 func railsClassMethodIndex(g graph.Store) map[string]map[string]string {
 	classOf := map[string]string{}
 	for e := range graph.EdgesLightSeq(g, graph.EdgeMemberOf) {
-		if e != nil && e.From != "" && e.To != "" {
-			classOf[e.From] = e.To
+		if class := railsMemberOwner(e); class != "" {
+			classOf[e.From] = class
 		}
 	}
 	out := map[string]map[string]string{}
@@ -157,4 +172,11 @@ func railsClassMethodIndex(g graph.Store) map[string]map[string]string {
 		}
 	}
 	return out
+}
+
+func railsMemberOwner(e *graph.Edge) string {
+	if e == nil || e.From == "" {
+		return ""
+	}
+	return e.To
 }
