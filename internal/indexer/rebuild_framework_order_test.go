@@ -69,6 +69,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"UIKit", "moves", 1},
 		{"Vapor", "moves", 1},
 		{"GoFrame", "moves", 1},
+		{"factory chain", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name        string
@@ -807,6 +808,16 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		edge(goFrameRoute, "unresolved::*.HarnessRequest", graph.EdgeCalls, 2,
 			map[string]any{"via": "goframe-route", "goframe_request_type": "HarnessRequest", "goframe_request_pkg": "harness"}))
 
+	const factoryPath = "factory_harness.go"
+	factoryCaller := node(factoryPath, "go", "useFactoryHarness", graph.KindFunction, 1)
+	factorySeed := node(factoryPath, "go", "MakeFactoryHarness", graph.KindFunction, 3)
+	factorySeed.Meta = map[string]any{"return_type": "FactoryHarness"}
+	factoryMember := node(factoryPath, "go", "RunFactoryHarness", graph.KindMethod, 5)
+	factoryMember.Meta = map[string]any{"receiver": "FactoryHarness"}
+	factoryFacts := receipt([]*graph.Node{factoryCaller, factorySeed, factoryMember},
+		edge(factoryCaller, "unresolved::UnboundFactory.RunFactoryHarness", graph.EdgeCalls, 2,
+			map[string]any{"receiver_expr": "MakeFactoryHarness()"}))
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -818,6 +829,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
 		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts, railsFacts,
-		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, uikitFacts, vaporFacts, goFrameFacts,
+		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, uikitFacts, vaporFacts, goFrameFacts, factoryFacts,
 	}
 }
