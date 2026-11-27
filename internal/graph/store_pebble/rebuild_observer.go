@@ -22,7 +22,7 @@ type RebuildObserverStats struct {
 
 // RebuildObserver streams the native field/registrar/site join against the
 // quiet private view. The callback cutoff precedes workspace filtering. Prove
-// exact receipt or checked predecessor custody before writing any calls.
+// exact receipt or checked producer custody before writing any calls.
 // Discard the private build if applying the calls fails.
 func (b *BuildStore) RebuildObserver(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
 	registrar, dispatcher func(string) bool, sameBoundary func(*graph.Node, *graph.Node) bool, maxCallbacks int,
@@ -286,7 +286,7 @@ func observerProofMatches(proof rebuildEdgeProof, kind graph.EdgeKind) bool {
 	switch proof {
 	case rebuildProofDirect, rebuildProofReceiver:
 		return kind == graph.EdgeAccessesField
-	case rebuildProofTemporalSynthetic, rebuildProofEventChannel, rebuildProofRNBridge:
+	case rebuildProofTemporalSynthetic, rebuildProofEventChannel, rebuildProofRNBridge, rebuildProofObserver:
 		return kind == graph.EdgeCalls
 	case rebuildProofSwiftObjC, rebuildProofRNPair:
 		return kind == graph.EdgeReferences

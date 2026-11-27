@@ -81,6 +81,44 @@ func TestRebuildObserverSQLiteOracle(t *testing.T) {
 	}
 }
 
+func TestRebuildObserverReplaysOwnCall(t *testing.T) {
+	const file, lang = "chain.ts", "typescript"
+	first := newRebuildObserverChannel(file, lang)
+	secondRegistrar := rebuildEventNode(file, "register", lang, "")
+	secondDispatch := rebuildEventNode(file, "dispatchNext", lang, "")
+	secondDispatch.StartLine = 13
+	secondField := rebuildEventNode(file, "z-channel", lang, "")
+	secondField.Kind = graph.KindField
+	callback := rebuildEventNode(file, "callback", lang, "")
+	first.facts.Nodes = append(first.facts.Nodes, secondRegistrar, secondDispatch, secondField, callback)
+	first.facts.Edges = append(first.facts.Edges,
+		rebuildObserverEdge(first.caller, secondRegistrar, graph.EdgeReferences, 20),
+		rebuildObserverEdge(secondRegistrar, secondField, graph.EdgeAccessesField, 9),
+		rebuildObserverEdge(secondDispatch, secondField, graph.EdgeAccessesField, 14),
+		rebuildObserverEdge(first.dispatch, callback, graph.EdgeReferences, first.dispatch.StartLine),
+	)
+	receipts, b, native := openRebuildObserverStores(t, nil, first.facts)
+	selection := rebuildObserverSelection(t)
+	ctx := t.Context()
+	want := rebuildEventSavedRows(t, b)
+	firstHop := observerChannelEdge(first.dispatch, secondRegistrar.ID, file+"::a-channel")
+	secondHop := observerChannelEdge(secondDispatch, callback.ID, secondField.ID)
+	for _, hop := range []*graph.Edge{firstHop, secondHop} {
+		// Both runs start from the same file facts. Native stages its output,
+		// so the first hop can become a registrar input only on the next run.
+		frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
+		require.NoError(t, err)
+		stats, err := RunRebuildObserver(ctx, b, rebuildGRPCReceipts(receipts...), frozen, 1)
+		require.NoError(t, err)
+		require.EqualValues(t, 1, stats.Edges)
+		require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
+		want.edges = append(want.edges, hop)
+		want.sort()
+		require.Equal(t, want, rebuildEventSQLiteRows(native))
+		require.Equal(t, want, rebuildEventSavedRows(t, b))
+	}
+}
+
 func TestRebuildObserverInlineScriptProof(t *testing.T) {
 	const file = "page.html"
 	parsed, err := languages.NewHTMLExtractor().Extract(file, []byte("<script>function callback() {}</script>"))

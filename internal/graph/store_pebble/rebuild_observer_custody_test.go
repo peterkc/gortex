@@ -27,6 +27,9 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 			caller := &graph.Node{ID: appFile + "::wire", Name: "wire", Kind: graph.KindFunction, FilePath: appFile, Language: "typescript"}
 			onEvent := &graph.Node{ID: appFile + "::onEvent", Name: "onEvent", Kind: graph.KindFunction, FilePath: appFile, Language: "typescript"}
 			onPlain := &graph.Node{ID: appFile + "::onPlain", Name: "onPlain", Kind: graph.KindFunction, FilePath: appFile, Language: "typescript"}
+			nextDispatch := &graph.Node{ID: appFile + "::notifyNext", Name: "notifyNext", Kind: graph.KindFunction,
+				FilePath: appFile, Language: "typescript", StartLine: 12}
+			nextField := &graph.Node{ID: appFile + "::next", Name: "next", Kind: graph.KindField, FilePath: appFile, Language: "typescript"}
 			channel := ParseFacts{
 				EffectiveLanguage: "go",
 				File:              graph.FileMetaRow{FilePath: channelFile, NodeCount: 3},
@@ -36,13 +39,14 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 					{From: dispatcher.ID, To: "unresolved::Lock", Kind: graph.EdgeCalls, FilePath: channelFile, Line: 9,
 						Meta: map[string]any{"recv_field": "callbacks"}},
 					{From: registrar.ID, To: topic, Kind: graph.EdgeListensOn, FilePath: channelFile, Line: 4},
+					{From: dispatcher.ID, To: onPlain.ID, Kind: graph.EdgeReferences, FilePath: channelFile, Line: dispatcher.StartLine},
 				},
 			}
 			app := ParseFacts{
 				EffectiveLanguage: "typescript",
-				File:              graph.FileMetaRow{FilePath: appFile, NodeCount: 4},
+				File:              graph.FileMetaRow{FilePath: appFile, NodeCount: 6},
 				Nodes: []*graph.Node{
-					caller, onEvent, onPlain,
+					caller, onEvent, onPlain, nextDispatch, nextField,
 					{ID: topic, Name: "ready", Kind: graph.KindString, FilePath: appFile, Language: "typescript"},
 				},
 				Edges: []*graph.Edge{
@@ -50,6 +54,8 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 					{From: caller.ID, To: onEvent.ID, Kind: graph.EdgeReferences, FilePath: appFile, Line: 5},
 					{From: caller.ID, To: registrar.ID, Kind: graph.EdgeCalls, FilePath: appFile, Line: 6},
 					{From: caller.ID, To: onPlain.ID, Kind: graph.EdgeReads, FilePath: appFile, Line: 6},
+					{From: onEvent.ID, To: nextField.ID, Kind: graph.EdgeAccessesField, FilePath: appFile, Line: 7},
+					{From: nextDispatch.ID, To: nextField.ID, Kind: graph.EdgeAccessesField, FilePath: appFile, Line: 13},
 				},
 			}
 			b := newBuild(t, FullProfile)
@@ -158,12 +164,15 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 				}
 			}
 			want := actualRows()
-			observerStats, err := b.RebuildObserver(ctx, receipts, spillAt,
-				func(name string) bool { return name == "subscribe" },
-				func(name string) bool { return name == "notify" },
-				func(from, to *graph.Node) bool {
-					return from != nil && to != nil && from.WorkspaceID == to.WorkspaceID
-				}, 40, makeCall)
+			run := func() (RebuildObserverStats, error) {
+				return b.RebuildObserver(ctx, receipts, spillAt,
+					func(name string) bool { return name == "subscribe" || name == "onEvent" },
+					func(name string) bool { return name == "notify" || name == "notifyNext" },
+					func(from, to *graph.Node) bool {
+						return from != nil && to != nil && from.WorkspaceID == to.WorkspaceID
+					}, 40, makeCall)
+			}
+			observerStats, err := run()
 			if name != "authentic" {
 				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
 				require.Zero(t, observerStats)
@@ -183,6 +192,24 @@ func TestRebuildObserverPredecessorCustody(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, rebuildEdgeCustody{proof: rebuildProofObserver}, custody)
 			}
+			require.Equal(t, want, actualRows())
+
+			// The first Observer run installed the only call to the second
+			// registrar. Change its saved payload without updating custody.
+			firstHop := makeCall(dispatcher, onEvent.ID, field.ID)
+			firstHop.Via = "replacement"
+			key := pendingEdgeKey(firstHop)
+			value, err := encodeEdge(firstHop)
+			require.NoError(t, err)
+			require.NoError(t, b.pending.Set(key, value, pebble.NoSync))
+			want[string(key)] = string(value)
+			observerStats, err = run()
+			require.ErrorIs(t, err, ErrRebuildObserver)
+			var refused *RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.EqualValues(t, 1, refused.Count)
+			require.Equal(t, graph.EdgeIdentityFor(firstHop), refused.First)
+			require.Zero(t, observerStats)
 			require.Equal(t, want, actualRows())
 		})
 	}
