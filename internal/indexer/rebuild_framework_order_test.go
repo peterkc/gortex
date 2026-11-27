@@ -813,12 +813,20 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	const factoryPath = "factory_harness.go"
 	factoryCaller := node(factoryPath, "go", "useFactoryHarness", graph.KindFunction, 1)
 	factorySeed := node(factoryPath, "go", "MakeFactoryHarness", graph.KindFunction, 3)
-	factorySeed.Meta = map[string]any{"return_type": "FactoryHarness"}
-	factoryMember := node(factoryPath, "go", "RunFactoryHarness", graph.KindMethod, 5)
+	factorySeed.Meta = map[string]any{"return_type": "FactoryBuilderHarness"}
+	factoryBuilder := node(factoryPath, "go", "BuildFactoryHarness", graph.KindMethod, 5)
+	factoryBuilder.Meta = map[string]any{"receiver": "FactoryBuilderHarness", "return_type": "FactoryHarness"}
+	factoryMember := node(factoryPath, "go", "FactoryHarness.RunFactoryHarness", graph.KindMethod, 7)
+	factoryMember.Name = "RunFactoryHarness"
 	factoryMember.Meta = map[string]any{"receiver": "FactoryHarness"}
-	factoryFacts := receipt([]*graph.Node{factoryCaller, factorySeed, factoryMember},
-		edge(factoryCaller, "unresolved::UnboundFactory.RunFactoryHarness", graph.EdgeCalls, 2,
-			map[string]any{"receiver_expr": "MakeFactoryHarness()"}))
+	otherMember := node(factoryPath, "go", "OtherHarness.RunFactoryHarness", graph.KindMethod, 9)
+	otherMember.Name = factoryMember.Name
+	otherMember.Meta = map[string]any{"receiver": "OtherHarness"}
+	// Main leaves an untyped wildcard ambiguous. Factory chain then uses
+	// the receivers from the two-hop expression to pick one method.
+	factoryFacts := receipt([]*graph.Node{factoryCaller, factorySeed, factoryBuilder, factoryMember, otherMember},
+		edge(factoryCaller, "unresolved::*."+factoryMember.Name, graph.EdgeCalls, 2,
+			map[string]any{"receiver_expr": "MakeFactoryHarness().BuildFactoryHarness()"}))
 
 	const callbackPath = "CallbackHarness.ts"
 	callbackSite := node(callbackPath, "typescript", "registerCallback", graph.KindFunction, 2)

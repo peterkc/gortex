@@ -58,6 +58,7 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 			case "joint omitted factories":
 				raw.Nodes = nodes[1:4]
 			}
+			raw.File.NodeCount = len(raw.Nodes)
 			b, native := openRebuildEventStores(t, route, live)
 			if mode == "shared raw claim" {
 				mover := ref
@@ -68,10 +69,16 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				b.AddEdge(&stationary)
 			}
 			before := rebuildEventSavedRows(t, b)
-			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
-			require.NoError(t, err)
-			require.True(t, frozen.allows(SynthFactoryChain))
-			count, err := RunRebuildFactoryChain(t.Context(), b, rebuildGRPCReceipts(route, raw), frozen)
+			selected := selection
+			// The census has its own node limit. Exercise the stage's role
+			// limit directly for these two deliberately oversized fixtures.
+			if mode != "unrelated large row" && mode != "related large row" {
+				frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+				require.NoError(t, err)
+				require.True(t, frozen.allows(SynthFactoryChain))
+				selected = frozen
+			}
+			count, err := RunRebuildFactoryChain(t.Context(), b, rebuildGRPCReceipts(route, raw), selected)
 			switch mode {
 			case "conformance", "unrelated large row":
 				require.NoError(t, err)
