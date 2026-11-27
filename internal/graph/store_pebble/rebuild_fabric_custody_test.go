@@ -12,7 +12,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-func TestRebuildFabricStoreCustody(t *testing.T) {
+func TestRebuildFabricStoreBindsNewCustodyAndPreservesIncumbent(t *testing.T) {
 	b, facts := seedRebuildFabricStore(t)
 	before := rebuildFrameworkCustodyRows(t, b)
 	spec, first, second := facts[0].Nodes[0], facts[1].Nodes[0], facts[2].Nodes[0]
@@ -88,7 +88,7 @@ func TestRebuildFabricStorePreservesOccupiedPairWithoutProof(t *testing.T) {
 	require.Equal(t, before, after, "both incumbents must stay byte-identical")
 }
 
-func TestRebuildFabricStoreRefusesPortableDamage(t *testing.T) {
+func TestRebuildFabricStoreRefusesUnprovedEndpointsBeforeWriting(t *testing.T) {
 	spelling := func(f *ParseFacts, n *graph.Node) { n.Meta["fabric_component"] = "COLORVIEW" }
 	for _, tc := range []struct {
 		name   string
