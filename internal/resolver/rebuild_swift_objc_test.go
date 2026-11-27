@@ -425,7 +425,7 @@ func TestRebuildSwiftObjCProtocolOrder(t *testing.T) {
 	// @objc, native would choose it instead.
 	changedLoser := slices.Clone(facts)
 	changedLoser[2].Nodes = slices.Clone(facts[2].Nodes)
-	changedPlain := *plain
+	changedPlain := plain
 	changedPlain.Meta = map[string]any{"objc": true}
 	changedLoser[2].Nodes[2] = &changedPlain
 	for _, tc := range []struct {
