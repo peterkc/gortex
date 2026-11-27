@@ -195,6 +195,15 @@ func TestRebuildStoreFactoryOrder(t *testing.T) {
 			want:  map[string]any{reset: "first payload"},
 		},
 		{
+			name: "single convergence reversed",
+			calls: []call{
+				{"unresolved::*.reset", "reset", "second payload"},
+				{"unresolved::reset", "reset", "first payload"},
+			},
+			moves: 2,
+			want:  map[string]any{reset: "second payload"},
+		},
+		{
 			// The first receipt targets middle, a moving old key that sorts before start.
 			name: "chain",
 			calls: []call{
@@ -224,6 +233,17 @@ func TestRebuildStoreFactoryOrder(t *testing.T) {
 			},
 			moves: 4,
 			want:  map[string]any{middle: "middle first", end: "end first"},
+		},
+		{
+			name: "independent convergences reversed",
+			calls: []call{
+				{"unresolved::b", "end", "end second"},
+				{"unresolved::a", "middle", "middle second"},
+				{"unresolved::y", "end", "end first"},
+				{"unresolved::z", "middle", "middle first"},
+			},
+			moves: 4,
+			want:  map[string]any{middle: "middle second", end: "end second"},
 		},
 		{
 			name: "stationary incumbent",
@@ -261,7 +281,7 @@ func TestRebuildStoreFactoryOrder(t *testing.T) {
 
 			stats, err := RunRebuildStoreFactory(t.Context(), b, rebuildGRPCReceipts(facts), frozen)
 			require.NoError(t, err)
-			require.Equal(t, tc.moves, stats.Moves)
+			require.Equal(t, store_pebble.RebuildStoreFactoryStats{Stubs: uint64(len(tc.calls)), Resolved: uint64(len(tc.calls)), Moves: tc.moves}, stats)
 			require.Equal(t, len(tc.calls), ResolveStoreFactoryCalls(native))
 			want := rebuildEventSQLiteRows(native)
 			require.Len(t, want.edges, len(tc.want))

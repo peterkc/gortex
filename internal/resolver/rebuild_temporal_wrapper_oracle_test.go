@@ -223,15 +223,20 @@ func TestRebuildTemporalSQLiteOracleUntrackedWrapperTail(t *testing.T) {
 	for _, reversed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("reversed=%t", reversed), func(t *testing.T) {
 			edges := []*graph.Edge{seed, tracked}
+			old := untracked
+			old.To = "unresolved::Other"
+			edges = append(edges, &old)
 			if reversed {
 				edges[0], edges[1] = edges[1], edges[0]
 			}
 			facts := rebuildEventFacts(file, "go", nodes, edges...)
 			b, native := openRebuildEventStores(t, facts)
-			// arg_names admits this ordinary Call to the wrapper census, but
-			// it has no raw lineage and its target is not a wrapper.
-			b.AddEdge(&untracked)
-			require.NoError(t, native.AddBatchChecked(nil, []*graph.Edge{&untracked}))
+			// A generic reindex marks the moved Call untracked. It enters
+			// the wrapper census tail, but its target is not a wrapper.
+			moves := []graph.EdgeReindex{{Edge: &untracked, OldTo: old.To}}
+			b.ReindexEdges(moves)
+			native.ReindexEdges(moves)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
 			require.True(t, native.EdgeExists(caller, temporalStubPlaceholder("activity", "Known"), graph.EdgeCalls, file, tracked.Line))
 			_, err := RunRebuildTemporal(t.Context(), b, rebuildGRPCReceipts(facts), selection, 1)
@@ -279,5 +284,56 @@ func rebuildTemporalOracleWrapperParam(file, caller string, position int) *graph
 		Language: "go",
 		FilePath: file,
 		Meta:     map[string]any{"position": position},
+	}
+}
+
+func TestRebuildTemporalWrapperOrdersBeforeProof(t *testing.T) {
+	const file, earlyFile, lateFile = "wf/wrapper.go", "wf/z.go", "wf/a.go"
+	const wrapper, caller = file + "::Wrap", earlyFile + "::Caller"
+	seed := rebuildTemporalOracleStub(file, wrapper, "activityName")
+	seed.Meta["temporal_name_param"] = "activityName"
+	wrapperFacts := rebuildEventFacts(file, "go", []*graph.Node{
+		{ID: wrapper, Name: "Wrap", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		rebuildTemporalOracleWrapperParam(file, wrapper, 0),
+	}, seed)
+	first := &graph.Edge{From: caller, To: wrapper, Kind: graph.EdgeCalls, FilePath: earlyFile, Line: 90,
+		Meta: map[string]any{"arg_names": []string{"Choice"}}}
+	second := *first
+	second.FilePath, second.Line = lateFile, 50
+	early := rebuildEventFacts(earlyFile, "go", []*graph.Node{
+		{ID: caller, Name: "Caller", Kind: graph.KindFunction, Language: "go", FilePath: earlyFile},
+	}, first)
+	late := rebuildEventFacts(lateFile, "go", nil, &second)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthTemporalStub})
+	require.NoError(t, err)
+	for _, defect := range []string{"no receipt language", "outside receipt file"} {
+		t.Run(defect, func(t *testing.T) {
+			b, native := openRebuildEventStores(t, wrapperFacts, early, late)
+			before := rebuildEventSavedRows(t, b)
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
+			target := temporalStubPlaceholder("activity", "Choice")
+			require.True(t, native.EdgeExists(caller, target, graph.EdgeCalls, earlyFile, first.Line))
+			require.False(t, native.EdgeExists(caller, target, graph.EdgeCalls, lateFile, second.Line))
+			bad := early
+			// Keep the caller declaration's proof valid; only its trigger
+			// has the malformed first receipt. The later exact trigger must
+			// not be promoted to the winner.
+			bad.Nodes = nil
+			bad.File.NodeCount = 0
+			if defect == "no receipt language" {
+				bad.EffectiveLanguage = ""
+			} else {
+				bad.File.FilePath = "wf/other.go"
+			}
+			callerReceipt := early
+			callerReceipt.Edges = nil
+			stats, err := RunRebuildTemporal(t.Context(), b, rebuildGRPCReceipts(wrapperFacts, bad, late, callerReceipt), selection, 1)
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.EqualValues(t, 1, refused.Count)
+			require.Equal(t, graph.EdgeIdentity{From: caller, To: target, Kind: graph.EdgeCalls, FilePath: earlyFile, Line: first.Line}, refused.First)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
 	}
 }

@@ -48,8 +48,8 @@ func TestRebuildEventChannelSQLiteOracle(t *testing.T) {
 		rebuildEventFacts(nativeFile, "swift", []*graph.Node{send,
 			rebuildEventTopic(nativeFile, "swift", bridge, "battery", "rn_native_event"),
 		}, rebuildEventSite(send, bridge, graph.EdgeEmits, 6, "rn_native_event")),
-		// Complete keys order the two same-line sites by recording path.
-		// Seed SQLite in that order for this tie, not only the comparator.
+		// The first receipt wins the same-line tie. SQLite sees the same
+		// receipt order at insertion.
 		rebuildEventFacts(otherFile, "typescript", nil, &tied),
 	}
 	b, native := openRebuildEventStores(t, facts...)

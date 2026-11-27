@@ -314,3 +314,37 @@ func TestRebuildTemporalRefusesAffectedOutputRows(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildTemporalWrapperCallRequiresSource(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	ctx := t.Context()
+	seed := &graph.Edge{From: "wrap", To: "unresolved::seed", Kind: graph.EdgeCalls, FilePath: "flow.go", Line: 1}
+	valid := &graph.Edge{From: "caller", To: seed.From, Kind: graph.EdgeCalls, FilePath: seed.FilePath, Line: 2,
+		Meta: map[string]any{"arg_names": []string{"Choice"}}}
+	missing := *valid
+	missing.From = ""
+	b.AddBatch(nil, []*graph.Edge{seed, valid, &missing})
+	facts := ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: seed.FilePath}, Edges: []*graph.Edge{seed, valid, &missing}}
+	_, err := b.RebuildTemporal(ctx, func(yield func(ParseFacts, error) bool) { yield(facts, nil) }, 1,
+		func(p *RebuildTemporalPass) (RebuildTemporalStats, error) {
+			// The missing-source edge is durable but is never a wrapper caller.
+			live, err := p.Edge(ctx, graph.EdgeIdentityFor(&missing))
+			require.NoError(t, err)
+			require.Equal(t, &missing, live)
+			active, err := p.IndexInputs(ctx, func(yield func(ParseFacts, error) bool) { yield(facts, nil) },
+				func(e *graph.Edge) (bool, bool, bool) {
+					isSeed := e.From == seed.From
+					return isSeed, isSeed, isSeed
+				})
+			require.NoError(t, err)
+			require.True(t, active)
+			var got []*graph.Edge
+			require.NoError(t, p.VisitWrapperCalls(ctx, func(e *graph.Edge) error {
+				got = append(got, e)
+				return nil
+			}))
+			require.Equal(t, []*graph.Edge{valid}, got)
+			return RebuildTemporalStats{}, nil
+		})
+	require.NoError(t, err)
+}
