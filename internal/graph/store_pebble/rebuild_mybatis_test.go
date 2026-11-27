@@ -69,6 +69,57 @@ func TestRebuildMyBatisCallerReceiptForAmbiguousWorkspace(t *testing.T) {
 	}
 }
 
+func TestRebuildMyBatisEmptyRepoCandidates(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		firstRepo  string
+		omitCaller bool
+		refuse     bool
+	}{
+		{name: "local wins with caller receipt", firstRepo: "local"},
+		{name: "local win requires caller receipt", firstRepo: "local", omitCaller: true, refuse: true},
+		{name: "two empty repos restub without caller receipt", omitCaller: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			old := myBatisTestStub("retired/UserMapper.java::UserMapper.find", "find")
+			xml := myBatisTestXML(t, "local", old)
+			require.NoError(t, b.AddParsedFile("local", xml))
+			if tc.omitCaller {
+				xml.Nodes, xml.File.NodeCount = nil, 0
+			}
+			receipts := []ParseFacts{xml}
+			target := myBatisTestPlaceholder("find")
+			for i, file := range []string{"FirstMapper.java", "SecondMapper.java"} {
+				repo := ""
+				n := &graph.Node{ID: file + "::UserMapper.find", Name: "find", FilePath: file, Language: "java", Kind: graph.KindMethod,
+					Meta: map[string]any{"receiver": myBatisTestNamespace}}
+				if i == 0 && tc.firstRepo != "" {
+					repo, target = tc.firstRepo, n.ID
+				}
+				facts := myBatisTestQualifiedFacts(t, repo, n)
+				require.NoError(t, b.AddParsedFile(repo, facts))
+				receipts = append(receipts, facts)
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := runTestRebuildMyBatis(t, b, receipts...)
+			if tc.refuse {
+				requireRebuildMyBatisRefusal(t, err, old, target)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			want := RebuildMyBatisStats{Stubs: 1, Moves: 1}
+			if tc.firstRepo != "" {
+				want.Resolved = 1
+			}
+			require.Equal(t, want, stats)
+			requireRebuildMyBatisMove(t, b, old, old, target)
+		})
+	}
+}
+
 func TestRebuildMyBatisStaleCustody(t *testing.T) {
 	for _, name := range []string{"stationary", "moving", "invalid_format"} {
 		t.Run(name, func(t *testing.T) {
@@ -570,36 +621,44 @@ func TestRebuildMyBatisRejectsInvalidInputAndOccupiedScratch(t *testing.T) {
 }
 
 func TestRebuildMyBatisCaptureCapsOnlyMapperCalls(t *testing.T) {
-	for _, owned := range []bool{false, true} {
-		b := newBuild(t, FullProfile)
-		large := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
-		large.Context = strings.Repeat("x", rebuildMyBatisRowBytes)
-		if !owned {
-			delete(large.Meta, "via")
-		}
-		key := pendingEdgeKey(large)
-		raw, err := encodeEdge(large)
-		require.NoError(t, err)
-		require.Greater(t, len(key)+len(raw), rebuildMyBatisRowBytes)
-		require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
-		before := rebuildFrameworkCustodyRows(t, b)
-		p := newRebuildMyBatisPass(b)
-		err = p.capture(t.Context(), RebuildMyBatisRules{
-			Stub: func(e *graph.Edge) (string, string) {
-				if e.Meta["via"] != "mybatis.mapper" {
-					return "", ""
-				}
-				return myBatisTestNamespace, "find"
-			},
-			Join: func(ns, stmt string) string { return ns + "." + stmt },
-		})
-		if owned {
-			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
-			require.ErrorContains(t, err, "MyBatis input row")
-		} else {
+	for _, tc := range []struct {
+		name  string
+		owned bool
+	}{
+		{name: "foreign"},
+		{name: "owned", owned: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			large := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
+			large.Context = strings.Repeat("x", rebuildMyBatisRowBytes)
+			if !tc.owned {
+				delete(large.Meta, "via")
+			}
+			key := pendingEdgeKey(large)
+			raw, err := encodeEdge(large)
 			require.NoError(t, err)
-		}
-		require.Zero(t, p.stats)
-		require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			require.Greater(t, len(key)+len(raw), rebuildMyBatisRowBytes)
+			require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+			before := rebuildFrameworkCustodyRows(t, b)
+			p := newRebuildMyBatisPass(b)
+			err = p.capture(t.Context(), RebuildMyBatisRules{
+				Stub: func(e *graph.Edge) (string, string) {
+					if e.Meta["via"] != "mybatis.mapper" {
+						return "", ""
+					}
+					return myBatisTestNamespace, "find"
+				},
+				Join: func(ns, stmt string) string { return ns + "." + stmt },
+			})
+			if tc.owned {
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "MyBatis input row")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, p.stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
 	}
 }

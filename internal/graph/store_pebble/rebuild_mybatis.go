@@ -485,7 +485,7 @@ func (p *rebuildMyBatisPass) proved(old []byte, e *graph.Edge, rules RebuildMyBa
 	}
 	_, caller, err := p.elect(join, e.From)
 	if err != nil || caller == nil {
-		return err == nil, err // the exact caller point is absent
+		return err == nil, err // no caller declaration decided the election
 	}
 	state, err := p.state(rebuildMyBatisKey('n', e.From))
 	return state == rebuildScratchExact, err

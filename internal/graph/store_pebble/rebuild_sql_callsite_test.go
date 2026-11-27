@@ -12,29 +12,37 @@ import (
 )
 
 func TestRebuildSQLCallsitePlanCapsOnlyOwnedCalls(t *testing.T) {
-	for _, owned := range []bool{false, true} {
-		b := newBuild(t, FullProfile)
-		large := sqlCallsiteStoreEdge("unresolved::sqlfn::find", "find")
-		large.Context = strings.Repeat("x", rebuildSQLCallsiteRowBytes)
-		if !owned {
-			delete(large.Meta, "via")
-		}
-		key := pendingEdgeKey(large)
-		raw, err := encodeEdge(large)
-		require.NoError(t, err)
-		require.Greater(t, len(key)+len(raw), rebuildSQLCallsiteRowBytes)
-		require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
-		before := rebuildFrameworkCustodyRows(t, b)
-		p := newRebuildSQLCallsitePass(b, sqlCallsiteStoreMarker, func(*graph.Edge, string, string, bool) bool { return false })
-		err = p.plan(t.Context())
-		if owned {
-			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
-			require.ErrorContains(t, err, "SQL callsite edge row")
-		} else {
+	for _, tc := range []struct {
+		name  string
+		owned bool
+	}{
+		{name: "foreign"},
+		{name: "owned", owned: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			large := sqlCallsiteStoreEdge("unresolved::sqlfn::find", "find")
+			large.Context = strings.Repeat("x", rebuildSQLCallsiteRowBytes)
+			if !tc.owned {
+				delete(large.Meta, "via")
+			}
+			key := pendingEdgeKey(large)
+			raw, err := encodeEdge(large)
 			require.NoError(t, err)
-		}
-		require.Zero(t, p.stats)
-		require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			require.Greater(t, len(key)+len(raw), rebuildSQLCallsiteRowBytes)
+			require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+			before := rebuildFrameworkCustodyRows(t, b)
+			p := newRebuildSQLCallsitePass(b, sqlCallsiteStoreMarker, func(*graph.Edge, string, string, bool) bool { return false })
+			err = p.plan(t.Context())
+			if tc.owned {
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "SQL callsite edge row")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, p.stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
 	}
 }
 
