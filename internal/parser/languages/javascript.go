@@ -122,6 +122,10 @@ type jsDeferredVar struct {
 }
 
 func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
+	return e.ExtractWithOptions(filePath, src, parser.ExtractionOptions{})
+}
+
+func (e *JavaScriptExtractor) ExtractWithOptions(filePath string, src []byte, opts parser.ExtractionOptions) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
 	if err != nil {
 		return nil, err
@@ -336,6 +340,10 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			FilePath: filePath, Line: c.line, Origin: graph.OriginASTResolved,
 		})
 	}
+	var builtinReceivers *jsBuiltinReceivers
+	if opts.CaptureBuiltinReceiverFacts {
+		builtinReceivers = collectJSBuiltinReceivers(root, src, e.Language())
+	}
 	for _, c := range calls {
 		callerID := findEnclosingFunc(funcRanges, c.line)
 		if callerID == "" {
@@ -382,6 +390,7 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 					Meta: map[string]any{"via": "store-factory", "store_binding": binding, "store_action": c.name},
 				}
 				stampReturnUsage(edge, c.returnUsage)
+				builtinReceivers.stamp(edge, c.expr)
 				result.Edges = append(result.Edges, edge)
 				continue
 			}
@@ -390,6 +399,7 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 			}
 			stampReturnUsage(edge, c.returnUsage)
+			builtinReceivers.stamp(edge, c.expr)
 			result.Edges = append(result.Edges, edge)
 			continue
 		}

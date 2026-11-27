@@ -190,6 +190,10 @@ type deferredTypeUse struct {
 }
 
 func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
+	return e.ExtractWithOptions(filePath, src, parser.ExtractionOptions{})
+}
+
+func (e *TypeScriptExtractor) ExtractWithOptions(filePath string, src []byte, opts parser.ExtractionOptions) (*parser.ExtractionResult, error) {
 	lang, qAll := e.grammarFor(filePath)
 	tree, err := parser.ParseFile(src, lang)
 	if err != nil {
@@ -471,6 +475,10 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 		}
 	}
 
+	var builtinReceivers *jsBuiltinReceivers
+	if opts.CaptureBuiltinReceiverFacts {
+		builtinReceivers = collectJSBuiltinReceivers(root, src, e.Language())
+	}
 	for _, c := range calls {
 		callerID := findEnclosingFunc(funcRanges, c.line)
 		if callerID == "" {
@@ -537,6 +545,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 			}
 			stampReturnUsage(edge, c.returnUsage)
+			builtinReceivers.stamp(edge, c.expr)
 			result.Edges = append(result.Edges, edge)
 			continue
 		}
@@ -558,6 +567,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 				Meta: map[string]any{"via": "store-factory", "store_binding": binding, "store_action": c.method},
 			}
 			stampReturnUsage(edge, c.returnUsage)
+			builtinReceivers.stamp(edge, c.expr)
 			result.Edges = append(result.Edges, edge)
 			continue
 		}
@@ -571,6 +581,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			stampFactoryChainReceiver(edge, c.receiver, resolveChainType(c.receiver, tenv, result))
 		}
 		stampReturnUsage(edge, c.returnUsage)
+		builtinReceivers.stamp(edge, c.expr)
 		result.Edges = append(result.Edges, edge)
 	}
 
