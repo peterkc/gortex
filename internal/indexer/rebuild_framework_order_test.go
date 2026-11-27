@@ -63,6 +63,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"React hooks and context", "moves", 1},
 		{"FastAPI", "moves", 1},
 		{"Rails", "moves", 1},
+		{"Godot autoload", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -91,6 +92,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				Recipes: map[string]rebuildDigest{
 					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1}, "kotlin": {1}, "mybatis": {1},
 					"sql": {1}, "python": {1}, "csharp": {1}, "ruby": {1}, "php": {1}, "c": {1},
+					"godot_project": {1}, "gdscript": {1},
 				},
 				Policy:  freezeRebuildParsePolicy(root, cfg),
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
@@ -735,6 +737,16 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		edge(railsCaller, "unresolved::*.issue", graph.EdgeCalls, 2,
 			map[string]any{"recv_const": railsService.Name}))
 
+	const godotManifestPath, godotScriptPath = "project.godot", "autoload-clock.gd"
+	godotAutoloadDecl := node(godotManifestPath, "godot_project", "GlobalClock", graph.KindType, 2)
+	godotAutoloadDecl.Meta = map[string]any{"gd_kind": "autoload", "gd_script": godotScriptPath}
+	godotScriptFile := &graph.Node{ID: godotScriptPath, Name: godotScriptPath, FilePath: godotScriptPath, Language: "gdscript", Kind: graph.KindFile}
+	godotCaller := node(godotScriptPath, "gdscript", "tick", graph.KindFunction, 2)
+	godotMember := node(godotScriptPath, "gdscript", "scheduleTick", graph.KindFunction, 6)
+	godotManifestFacts := receipt([]*graph.Node{godotAutoloadDecl})
+	godotScriptFacts := receipt([]*graph.Node{godotScriptFile, godotCaller, godotMember},
+		edge(godotCaller, "unresolved::*."+godotMember.Name, graph.EdgeCalls, 3, map[string]any{"receiver_type": godotAutoloadDecl.Name}))
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -746,5 +758,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
 		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts, railsFacts,
+		godotManifestFacts, godotScriptFacts,
 	}
 }

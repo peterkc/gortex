@@ -207,6 +207,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildReactResolve,
 	store_pebble.ErrRebuildFastAPI,
 	store_pebble.ErrRebuildRails,
+	store_pebble.ErrRebuildGodotAutoload,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

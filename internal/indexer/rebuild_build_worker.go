@@ -748,6 +748,13 @@ func buildRebuildStages(
 			logger.Info("rebuild Rails applied to private build",
 				zap.Uint64("stubs", rails.Stubs), zap.Uint64("moves", rails.Moves))
 		}
+		godotAutoloadMoves, err := resolver.RunRebuildGodotAutoload(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if godotAutoloadMoves != 0 {
+			logger.Info("rebuild Godot autoload applied to private build", zap.Uint64("moves", godotAutoloadMoves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

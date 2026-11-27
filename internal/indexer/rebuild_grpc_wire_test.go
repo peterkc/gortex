@@ -55,6 +55,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"React hooks and context", store_pebble.ErrRebuildReactResolve, 79},
 		{"FastAPI", store_pebble.ErrRebuildFastAPI, 80},
 		{"Rails", store_pebble.ErrRebuildRails, 81},
+		{"Godot autoload", store_pebble.ErrRebuildGodotAutoload, 82},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {
