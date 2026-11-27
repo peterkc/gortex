@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -200,6 +201,53 @@ func TestRebuildCSharpDIIfacesPhysicalKeyAndProof(t *testing.T) {
 			require.Equal(t, graph.EdgeIdentityFor(winner), refused.First)
 			require.Zero(t, adds)
 			require.Equal(t, before, rebuildEventSavedRows(t, build))
+		})
+	}
+}
+
+func TestRebuildCSharpDIIfacesNodeRowCaps(t *testing.T) {
+	const file = "Module.cs"
+	reg := &graph.Node{ID: file, Kind: graph.KindFile, FilePath: file, Language: "csharp"}
+	impl := ifaceRebuildNode(file, "Svc", "csharp", graph.KindType)
+	iface := ifaceRebuildNode(file, "IService", "csharp", graph.KindInterface)
+	foreign := *impl
+	foreign.ID, foreign.RepoPrefix = "foreign::Svc", "foreign"
+	marker := diIfacesMarker(file, impl.Name)
+	padding := strings.Repeat("x", 16<<20)
+	for _, fixture := range []struct {
+		name            string
+		large           *graph.Node
+		interfaceTarget string
+		refuse          bool
+	}{
+		{"registration source", reg, iface.ID, true},
+		{"implementation", impl, iface.ID, true},
+		{"resolved interface", iface, iface.ID, true},
+		{"named interface", iface, "unresolved::IService", true},
+		{"foreign implementation", &foreign, iface.ID, false},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			arc := &graph.Edge{From: impl.ID, To: fixture.interfaceTarget, Kind: graph.EdgeImplements, FilePath: file, Line: 3}
+			facts := rebuildEventFacts(file, "csharp", []*graph.Node{reg, impl, iface, &foreign}, marker, arc)
+			build := openRebuildGRPCBuild(t, facts)
+			selection := diRebuildSelection(t, build)
+			require.True(t, selection.allows(SynthCSharpDIIfaces))
+			large := *fixture.large
+			large.Meta = map[string]any{"unrelated": padding}
+			build.AddNode(&large)
+			before := rebuildEventSavedRows(t, build).edges
+			adds, err := RunRebuildCSharpDIIfaces(t.Context(), build, rebuildGRPCReceipts(facts), selection)
+			if fixture.refuse {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildCSharpDIIfaces)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "csharp DI node row")
+				require.Zero(t, adds)
+				require.Equal(t, before, rebuildEventSavedRows(t, build).edges)
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, adds)
+			require.Contains(t, rebuildEventSavedRows(t, build).edges, csharpDIProvideEdge(file, impl.Name, iface))
 		})
 	}
 }

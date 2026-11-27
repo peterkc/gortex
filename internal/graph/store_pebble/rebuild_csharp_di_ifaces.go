@@ -92,6 +92,16 @@ func (p *rebuildCSharpDI) visit(ctx context.Context, prefix []byte, yield func(r
 	return pendingVisit(ctx, p.b.pending, prefix, yield)
 }
 
+func (p *rebuildCSharpDI) node(id string, reached bool) (*graph.Node, error) {
+	key := pendingNodeKey(id)
+	return pendingGet(p.b.pending, key, func(raw []byte) (*graph.Node, error) {
+		if reached && len(key)+len(raw) > p.rowBytes {
+			return nil, fmt.Errorf("%w: csharp DI node row", ErrRebuildLinkInputSize)
+		}
+		return checkedRebuildLightNode(row{key, raw}, p.label)
+	})
+}
+
 func csharpDIBinding(e *graph.Edge) string {
 	binding, _ := e.Meta[graph.MetaDIBinding].(string)
 	return binding
@@ -186,7 +196,7 @@ func (p *rebuildCSharpDI) captureCandidates(ctx context.Context) error {
 		if err := p.put(reg, nil); err != nil {
 			return err
 		}
-		source, err := p.b.pendingNode(from)
+		source, err := p.node(from, false)
 		if err != nil {
 			return err
 		}
@@ -210,7 +220,7 @@ func (p *rebuildCSharpDI) captureCandidates(ctx context.Context) error {
 					iface, err = p.selectNode(ctx, n, impl.RepoPrefix, p.rules.Iface)
 				}
 			} else {
-				iface, err = p.b.pendingNode(e.To)
+				iface, err = p.node(e.To, false)
 			}
 			if err != nil || !p.rules.Iface(iface) {
 				return err
@@ -218,6 +228,12 @@ func (p *rebuildCSharpDI) captureCandidates(ctx context.Context) error {
 			bound, err := p.present(p.key('u', p.rules.Key(from, iface.Name, name)))
 			if err != nil || bound {
 				return err
+			}
+			// Only check the rows of a registration that can offer an edge.
+			for _, id := range [...]string{from, impl.ID, iface.ID} {
+				if _, err := p.node(id, true); err != nil {
+					return err
+				}
 			}
 			if err := p.input(r.key, r.value); err != nil {
 				return err
@@ -264,7 +280,7 @@ func (p *rebuildCSharpDI) record(ctx context.Context, receipts iter.Seq2[ParseFa
 			if !wanted && !sourceWanted {
 				continue
 			}
-			live, err := p.b.pendingNode(n.ID)
+			live, err := p.node(n.ID, true)
 			if err != nil {
 				return err
 			}
@@ -376,7 +392,7 @@ func (p *rebuildCSharpDI) plan(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		iface, err := p.b.pendingNode(ifaceID)
+		iface, err := p.node(ifaceID, true)
 		if err != nil || iface == nil {
 			return errors.Join(err, invalid("C# DI interface disappeared"))
 		}
