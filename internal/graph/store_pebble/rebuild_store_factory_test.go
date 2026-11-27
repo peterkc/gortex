@@ -726,3 +726,90 @@ func TestRebuildStoreFactoryAndReduxThunkGetterCensus(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildReduxThunkInputGuards(t *testing.T) {
+	large := strings.Repeat("x", rebuildReduxThunkRowBytes)
+	for _, tc := range []struct {
+		name, message string
+		cause         error
+	}{
+		{"candidate node cap", "Redux Thunk node row", ErrRebuildLinkInputSize},
+		{"owned Call cap", "Redux Thunk edge row", ErrRebuildLinkInputSize},
+		{"candidate without ID", "Redux Thunk candidate has no ID", errInvalidRecord},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			thunk := storeFactoryTestAction("store.ts::reset", "store.ts", "")
+			thunk.Meta = map[string]any{"redux_thunk": storeFactoryTestMember}
+			b, _ := seedSyntheticCustody(t, producerProofFacts(thunk))
+			var key, val []byte
+			var err error
+			switch tc.name {
+			case "candidate node cap":
+				thunk.Meta["large"] = large
+				key = pendingNodeKey(thunk.ID)
+				val, err = encodeNode(thunk)
+			case "owned Call cap":
+				call := storeFactoryTestCall("retired", 2)
+				call.Meta = map[string]any{"via": "redux-thunk", "thunk_dispatch": storeFactoryTestMember}
+				call.Context = large
+				key = pendingEdgeKey(call)
+				val, err = encodeEdge(call)
+			case "candidate without ID":
+				thunk.ID = ""
+				key = pendingNodeKey(thunk.ID)
+				val, err = encodeNode(thunk)
+			}
+			require.NoError(t, err)
+			require.NoError(t, b.pending.Set(key, val, pebble.NoSync))
+			before := rebuildFrameworkCustodyRows(t, b)
+			receipts := func(func(ParseFacts, error) bool) { t.Fatal("unexpected receipt scan") }
+			stats, err := b.RebuildReduxThunk(t.Context(), receipts, reduxThunkStoreTestRules())
+			require.ErrorIs(t, err, ErrRebuildReduxThunk)
+			require.ErrorIs(t, err, tc.cause)
+			require.ErrorContains(t, err, tc.message)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildReduxThunkScratchReadGuards(t *testing.T) {
+	for _, guard := range []string{"election row", "receipt claim", "deferred Call missing", "recorder has no old Call"} {
+		t.Run(guard, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			p := rebuildReduxThunkPass{
+				rebuildCallMoves: rebuildCallMoves{
+					b: b, prefix: rebuildReduxThunkPrefix, rowBytes: rebuildReduxThunkRowBytes, label: "Redux Thunk", inputRow: "edge row",
+				},
+				rules: reduxThunkStoreTestRules(),
+			}
+			call := storeFactoryTestCall("retired", 2)
+			call.Meta["via"] = "redux-thunk"
+			call.Meta["thunk_dispatch"] = storeFactoryTestMember
+			key := pendingEdgeKey(call)
+			var err error
+			switch guard {
+			case "election row":
+				require.NoError(t, p.put(p.poolKey('t', 'i', storeFactoryTestMember), []byte{1}))
+				_, err = p.elect(call, storeFactoryTestMember, storeFactoryTestBinding, true)
+			case "receipt claim":
+				require.NoError(t, p.put(append(p.column('r'), key...), []byte{0}))
+				err = p.claim(nil, key)
+			case "deferred Call missing":
+				// One real Call makes plan read the deferred range. Its other
+				// entry deliberately references a Call that is not in the store.
+				b.AddEdge(call)
+				require.NoError(t, p.put(p.poolKey('t', 'i', storeFactoryTestMember), []byte{0}))
+				missing := *call
+				missing.To = "before-retired"
+				require.NoError(t, p.put(append(p.column('l'), pendingEdgeKey(&missing)...), nil))
+				err = p.plan(t.Context())
+			case "recorder has no old Call":
+				require.NoError(t, p.claim(nil, key))
+				err = p.record(t.Context(), storeFactoryTestSource(call))
+			}
+			require.ErrorIs(t, err, errInvalidRecord)
+			require.ErrorContains(t, err, "Redux Thunk "+guard)
+		})
+	}
+}

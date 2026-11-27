@@ -1,6 +1,8 @@
 package indexer
 
 import (
+	"bytes"
+	"context"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -45,14 +47,17 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Object Registry", "moves", 1},
 	}
 	for _, tc := range []struct {
-		name  string
-		exact bool
+		name              string
+		exact             bool
+		cancelBeforeRedux bool
 	}{
-		{"exact_checkout", true},
-		{"legacy_without_namespace", false},
+		{name: "exact_checkout", exact: true},
+		{name: "legacy_without_namespace"},
+		{name: "redux_thunk_refusal", exact: true, cancelBeforeRedux: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := t.Context()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
 			root, src := rebuildInputFixture(t)
 			lease := t.TempDir()
 			cfg := config.Default().Index
@@ -109,14 +114,39 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 			req.Witness.Recipe = req.projectRecipe(cfg.Coverage.ClonesThreshold())
 			require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, inputs))
 			core, logs := observer.New(zap.InfoLevel)
+			logger := zap.New(core, zap.Hooks(func(entry zapcore.Entry) error {
+				// Store Factory has returned; Redux Thunk is the next turn.
+				if tc.cancelBeforeRedux && entry.Message == "rebuild Store Factory applied to private build" {
+					cancel()
+				}
+				return nil
+			}))
 			var sent []store_pebble.Stage
-			err = buildRebuildStages(ctx, lease, zap.New(core), store_pebble.OpenBuild, rebuildTestLinkOptions(t),
+			err = buildRebuildStages(ctx, lease, logger, store_pebble.OpenBuild, rebuildTestLinkOptions(t),
 				func(tables store_pebble.StageTables) error {
 					sent = append(sent, tables.Witness.Stage)
 					return nil
 				})
-			require.ErrorIs(t, err, errRebuildBuildIncomplete)
 			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
+			if tc.cancelBeforeRedux {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildReduxThunk)
+				require.ErrorIs(t, err, context.Canceled)
+				refusal := buildRefusal(err)
+				require.Equal(t, uint8(61), refusal.Refusal)
+				var reply, acks bytes.Buffer
+				require.NoError(t, writeRebuildBuildReply(&reply, refusal))
+				err = receiveRebuildStages(t.Context(), lease, req, &reply, &acks,
+					func(context.Context, store_pebble.StageTables) error {
+						t.Fatal("a Redux Thunk refusal must not publish")
+						return nil
+					})
+				require.ErrorIs(t, err, ErrRebuildWorker)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildReduxThunk)
+				require.ErrorContains(t, err, context.Canceled.Error())
+				require.Empty(t, acks.Bytes())
+				return
+			}
+			require.ErrorIs(t, err, errRebuildBuildIncomplete)
 
 			const prefix, suffix = "rebuild ", " applied to private build"
 			var entries []observer.LoggedEntry
