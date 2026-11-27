@@ -43,42 +43,23 @@ func resolveFactoryChains(g graph.Store, cands *frameworkPassCandidates) int {
 		merged := append(append([]*graph.Edge(nil), cands.calls...), cands.refs...)
 		stream = frameworkEdgeSeq(merged)
 	}
+	lookup := factoryChainLookup{
+		nodes:    func(name string, _ func(*graph.Node) bool) []*graph.Node { return g.FindNodesByName(name) },
+		incoming: g.GetInEdges,
+		node:     g.GetNode,
+	}
 	resolved := 0
 	var batch []graph.EdgeReindex
 	for e := range stream {
-		if e == nil || e.Meta == nil {
+		expr, method := factoryChainCall(e)
+		if expr == "" || method == "" {
 			continue
 		}
-		if !graph.IsUnresolvedTarget(e.To) {
+		target, conformanceWalked := factoryChainTarget(lookup, e.From, expr, method)
+		if target == "" {
 			continue
 		}
-		expr, _ := e.Meta["receiver_expr"].(string)
-		if expr == "" {
-			continue
-		}
-		method := graph.UnresolvedName(e.To)
-		if i := strings.LastIndexByte(method, '.'); i >= 0 {
-			method = method[i+1:]
-		}
-		if method == "" {
-			continue
-		}
-		recvType := walkChainExprType(g, expr)
-		if recvType == "" {
-			continue
-		}
-		target, conformanceWalked := resolveMemberByTypeConformant(g, recvType, method)
-		if target == "" || target == e.From {
-			continue
-		}
-		oldTo := e.To
-		e.To = target
-		e.Origin = graph.OriginASTInferred
-		e.Meta["via"] = "factory_chain"
-		if conformanceWalked {
-			e.Meta["conformance_walked"] = true
-		}
-		batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		batch = append(batch, rebindFactoryChain(e, target, conformanceWalked))
 		resolved++
 	}
 	if len(batch) > 0 {
@@ -87,12 +68,56 @@ func resolveFactoryChains(g graph.Store, cands *frameworkPassCandidates) int {
 	return resolved
 }
 
+type factoryChainLookup struct {
+	nodes    func(name string, role func(*graph.Node) bool) []*graph.Node
+	incoming func(string) []*graph.Edge
+	node     func(string) *graph.Node
+}
+
+func factoryChainCall(e *graph.Edge) (expr, method string) {
+	if e == nil || !graph.IsUnresolvedTarget(e.To) {
+		return "", ""
+	}
+	expr, _ = e.Meta["receiver_expr"].(string)
+	if expr == "" {
+		return "", ""
+	}
+	method = graph.UnresolvedName(e.To)
+	if i := strings.LastIndexByte(method, '.'); i >= 0 {
+		method = method[i+1:]
+	}
+	return expr, method
+}
+
+func factoryChainTarget(g factoryChainLookup, from, expr, method string) (string, bool) {
+	recvType := walkChainExprType(g, expr)
+	if recvType == "" {
+		return "", false
+	}
+	target, conformanceWalked := resolveMemberByTypeConformant(g, recvType, method)
+	if target == "" || target == from {
+		return "", false
+	}
+	return target, conformanceWalked
+}
+
+func rebindFactoryChain(e *graph.Edge, target string, conformanceWalked bool) graph.EdgeReindex {
+	oldTo := e.To
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	e.Meta["via"] = "factory_chain"
+	if conformanceWalked {
+		e.Meta["conformance_walked"] = true
+	}
+	return graph.EdgeReindex{Edge: e, OldTo: oldTo}
+}
+
 // walkChainExprType returns the type a factory-chain receiver expression
 // evaluates to, walking the graph: the base segment's factory return type (or
 // the base itself when it names a known type), then each subsequent segment's
 // method return type (conformance-aware). Returns "" on the first hop it cannot
 // type.
-func walkChainExprType(g graph.Store, expr string) string {
+func walkChainExprType(g factoryChainLookup, expr string) string {
 	parts := strings.Split(stripChainArgs(strings.ReplaceAll(expr, "::", ".")), ".")
 	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
 		return ""
@@ -148,16 +173,20 @@ func stripChainArgs(expr string) string {
 // graphFactoryReturnType returns the declared return type of a free function /
 // constructor named name (the chain seed). A receiver-less declaration wins
 // over a same-named method; ambiguity among free functions drops.
-func graphFactoryReturnType(g graph.Store, name string) string {
+func graphFactoryReturnType(g factoryChainLookup, name string) string {
 	fnRT, methodRT := "", ""
-	for _, n := range g.FindNodesByName(name) {
-		if n == nil || (n.Kind != graph.KindFunction && n.Kind != graph.KindMethod) {
+	role := func(n *graph.Node) bool {
+		if n == nil || n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
+			return false
+		}
+		rt, _ := n.Meta["return_type"].(string)
+		return rt != ""
+	}
+	for _, n := range g.nodes(name, role) {
+		if !role(n) {
 			continue
 		}
 		rt, _ := n.Meta["return_type"].(string)
-		if rt == "" {
-			continue
-		}
 		if _, hasRecv := n.Meta["receiver"]; hasRecv {
 			methodRT = rt
 		} else {
@@ -174,9 +203,10 @@ func graphFactoryReturnType(g graph.Store, name string) string {
 }
 
 // graphHasType reports whether the graph holds a type/interface named name.
-func graphHasType(g graph.Store, name string) bool {
-	for _, n := range g.FindNodesByName(name) {
-		if n != nil && isTypeNodeKind(n.Kind) {
+func graphHasType(g factoryChainLookup, name string) bool {
+	role := func(n *graph.Node) bool { return n != nil && isTypeNodeKind(n.Kind) }
+	for _, n := range g.nodes(name, role) {
+		if role(n) {
 			return true
 		}
 	}
@@ -191,9 +221,23 @@ func isTypeNodeKind(k graph.NodeKind) bool {
 // typeName declares it nowhere — to the method on a unique implementor/subtype
 // of typeName (the conformance walk via implements/extends edges). The second
 // return reports whether a conformance hop was needed.
-func resolveMemberByTypeConformant(g graph.Store, typeName, member string) (string, bool) {
-	if direct := resolveMemberByType(g, typeName, member); direct != "" {
-		return direct, false
+func resolveMemberByTypeConformant(g factoryChainLookup, typeName, member string) (string, bool) {
+	if typeName != "" && member != "" {
+		role := func(n *graph.Node) bool { return factoryChainMethodRole(n, typeName, true) }
+		var direct string
+		for _, n := range g.nodes(member, role) {
+			if !role(n) {
+				continue
+			}
+			if direct != "" && direct != n.ID {
+				direct = ""
+				break
+			}
+			direct = n.ID
+		}
+		if direct != "" {
+			return direct, false
+		}
 	}
 	if n, walked := findMethodNodeConformant(g, typeName, member); n != nil && walked {
 		return n.ID, true
@@ -205,20 +249,21 @@ func resolveMemberByTypeConformant(g graph.Store, typeName, member string) (stri
 // or — via the implements/extends conformance walk — on a unique subtype /
 // implementor of typeName. The second return reports whether the conformance
 // walk supplied the match.
-func findMethodNodeConformant(g graph.Store, typeName, member string) (*graph.Node, bool) {
+func findMethodNodeConformant(g factoryChainLookup, typeName, member string) (*graph.Node, bool) {
 	if n := findMethodNodeByType(g, typeName, member); n != nil {
 		return n, false
 	}
 	var match *graph.Node
-	for _, tn := range g.FindNodesByName(typeName) {
-		if tn == nil || !isTypeNodeKind(tn.Kind) {
+	role := func(n *graph.Node) bool { return n != nil && isTypeNodeKind(n.Kind) }
+	for _, tn := range g.nodes(typeName, role) {
+		if !role(tn) {
 			continue
 		}
-		for _, ie := range g.GetInEdges(tn.ID) {
+		for _, ie := range g.incoming(tn.ID) {
 			if ie == nil || (ie.Kind != graph.EdgeImplements && ie.Kind != graph.EdgeExtends) {
 				continue
 			}
-			impl := g.GetNode(ie.From)
+			impl := g.node(ie.From)
 			if impl == nil || impl.Name == "" {
 				continue
 			}
@@ -235,13 +280,11 @@ func findMethodNodeConformant(g graph.Store, typeName, member string) (*graph.No
 
 // findMethodNodeByType returns the sole method named member whose
 // Meta["receiver"] is typeName, or nil when none or more than one exists.
-func findMethodNodeByType(g graph.Store, typeName, member string) *graph.Node {
+func findMethodNodeByType(g factoryChainLookup, typeName, member string) *graph.Node {
 	var match *graph.Node
-	for _, n := range g.FindNodesByName(member) {
-		if n == nil || (n.Kind != graph.KindMethod && n.Kind != graph.KindFunction) {
-			continue
-		}
-		if recv, _ := n.Meta["receiver"].(string); recv != typeName {
+	role := func(n *graph.Node) bool { return factoryChainMethodRole(n, typeName, false) }
+	for _, n := range g.nodes(member, role) {
+		if !role(n) {
 			continue
 		}
 		if match != nil && match.ID != n.ID {
@@ -250,4 +293,12 @@ func findMethodNodeByType(g graph.Store, typeName, member string) *graph.Node {
 		match = n
 	}
 	return match
+}
+
+func factoryChainMethodRole(n *graph.Node, typeName string, direct bool) bool {
+	if n == nil || n.Kind != graph.KindMethod && (direct || n.Kind != graph.KindFunction) {
+		return false
+	}
+	recv, _ := n.Meta["receiver"].(string)
+	return recv == typeName
 }
