@@ -12,12 +12,13 @@ import (
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
-// The inactive receipt embeds unmodified v2 bytes. Decoding the base has
+// ContractParseFactsFormat is part of the rebuild extractor recipe. The
+// receipt embeds unmodified v2 bytes. Decoding the base has
 // v2 semantics (including present-empty slices decoding as nil).
-const contractParseFactsFormat byte = 4
+const ContractParseFactsFormat byte = 4
 
-// EncodeContractParseFacts builds a candidate contract receipt. Active v2
-// writers still use EncodeParseFacts. The outer parse-store envelope owns the
+// EncodeContractParseFacts builds the rebuild contract receipt.
+// The outer parse-store envelope owns the
 // content/recipe key and payload digest; the receipt embeds the exact v2 bytes.
 func EncodeContractParseFacts(base ParseFacts, facts *contracts.FileFacts) ([]byte, error) {
 	if err := checkContractParseFacts(base, facts); err != nil {
@@ -31,7 +32,7 @@ func EncodeContractParseFacts(base ParseFacts, facts *contracts.FileFacts) ([]by
 }
 
 func encodeContractFactSuffix(v2 []byte, facts *contracts.FileFacts) ([]byte, error) {
-	e := contractFactsEncoder{buf: appendBytes([]byte{contractParseFactsFormat}, v2)}
+	e := contractFactsEncoder{buf: appendBytes([]byte{ContractParseFactsFormat}, v2)}
 	e.boolean(facts.ScanSkipped)
 	writeFactSlice(&e, facts.Records, writeFactRecord)
 	writeFactSlice(&e, facts.Questions, writeFactQuestion)
@@ -49,7 +50,7 @@ func encodeContractFactSuffix(v2 []byte, facts *contracts.FileFacts) ([]byte, er
 // DecodeContractParseFacts requires a complete contract receipt; v2 is not a
 // built-empty contract result. factBytes is the exact encoded contract suffix.
 func DecodeContractParseFacts(raw []byte) (base ParseFacts, facts *contracts.FileFacts, factBytes int, err error) {
-	if len(raw) == 0 || raw[0] != contractParseFactsFormat {
+	if len(raw) == 0 || raw[0] != ContractParseFactsFormat {
 		return ParseFacts{}, nil, 0, invalid("contract parse facts format")
 	}
 	d := recordCursor{buf: raw[1:]}

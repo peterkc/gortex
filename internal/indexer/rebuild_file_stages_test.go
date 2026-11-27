@@ -147,24 +147,22 @@ func TestRebuildFileStagesExtractorCensus(t *testing.T) {
 		require.NoError(t, err)
 		job.inputs = append(job.inputs, input)
 		if f.path == raw {
-			// With no CODEOWNERS, the canonical name's r2 recipe matches
-			// the old recipe for the raw name. Do not reuse that payload.
-			old := input
-			old.Path = key
-			legacyKey := input.parseKey(idx.rebuildExtractorRecipe(recipe, old))
-			require.NotEqual(t, legacyKey, input.parseKey(idx.rebuildExtractorRecipe(recipe, input)))
-			payload, err := store_pebble.EncodeParseFacts(store_pebble.ParseFacts{
+			// Keep the receipt path literal but use the recipe for the NFC
+			// spelling. The worker must not reuse this wrong-key payload.
+			canonical := input
+			canonical.Path = key
+			canonicalKey := input.parseKey(idx.rebuildExtractorRecipe(recipe, canonical))
+			require.NotEqual(t, canonicalKey, input.parseKey(idx.rebuildExtractorRecipe(recipe, input)))
+			payload := encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
 				File: graph.FileMetaRow{FilePath: raw}, EffectiveLanguage: "go",
 			})
-			require.NoError(t, err)
-			require.NoError(t, store.write(legacyKey, payload))
+			require.NoError(t, store.write(canonicalKey, payload))
 		}
 		if f.path == "empty.go" {
 			// A serialized successful receipt without even a file node.
-			payload, err := store_pebble.EncodeParseFacts(store_pebble.ParseFacts{
+			payload := encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
 				File: graph.FileMetaRow{FilePath: f.path, ContentHash: contentHashForSource(nil)}, EffectiveLanguage: "go",
 			})
-			require.NoError(t, err)
 			require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(recipe, input)), payload))
 		}
 	}
@@ -264,8 +262,7 @@ func TestRebuildFileStagesExtractorCensus(t *testing.T) {
 		if input.Path == raw {
 			payload, err := store.read(input.parseKey(idx.rebuildExtractorRecipe(recipe, input)))
 			require.NoError(t, err)
-			facts, err := store_pebble.DecodeParseFacts(payload)
-			require.NoError(t, err)
+			facts := decodeRebuildTestParseFacts(t, payload)
 			require.Equal(t, raw, facts.File.FilePath)
 			require.Contains(t, facts.Constants, graph.ConstantValueRow{FilePath: raw, NodeID: key + "::Label", Value: "orders"})
 		}
@@ -425,6 +422,149 @@ func TestRebuildFileStagesRefusesNFCPathCollision(t *testing.T) {
 			entries, err = os.ReadDir(store.dir)
 			require.NoError(t, err)
 			require.Empty(t, entries)
+		})
+	}
+}
+
+func TestRebuildFileStagesContractReceiptLifecycle(t *testing.T) {
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	const original = "package p\nfunc Original() {}\n"
+	const edited = "package p\nfunc Edited() {}\n"
+	for _, name := range []string{"a.go", "b.go"} {
+		writeFile(t, filepath.Join(root, name), original)
+	}
+	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+	recipe := rebuildDigest{1}
+	newWorker := func() *Indexer {
+		idx := newTestIndexer(graph.New())
+		idx.installRebuildParsePolicy(freezeRebuildParsePolicy(root, idx.config))
+		idx.SetRootPath(root)
+		t.Cleanup(idx.Close)
+		return idx
+	}
+	inputs := func(names ...string) []rebuildInput {
+		t.Helper()
+		var result []rebuildInput
+		for _, name := range names {
+			input, _, err := readRebuildInput(ctx, src, name, "go", 1024)
+			require.NoError(t, err)
+			result = append(result, input)
+		}
+		return result
+	}
+	build := func(idx *Indexer, admitted []rebuildInput) (rebuildParsedCounts, []store_pebble.Stage, error) {
+		t.Helper()
+		work := t.TempDir()
+		job := rebuildFileStages{
+			workDir:     work,
+			incarnation: rebuildTestIncarnation,
+			inputs:      admitted,
+			recipes:     map[string]rebuildDigest{"go": recipe},
+			witness: store_pebble.Witness{
+				Recipe:  store_pebble.HeadDigest{2},
+				Profile: store_pebble.FullProfile,
+				Stage:   store_pebble.StageManifest,
+			},
+		}
+		if inputRoot, err := rebuildInputRoot(admitted); err == nil {
+			digest, err := hex.DecodeString(inputRoot)
+			require.NoError(t, err)
+			job.witness.Input = store_pebble.HeadDigest(digest)
+		}
+		private, err := store_pebble.OpenBuild(filepath.Join(work, "working"), job.witness.Profile)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, private.Close()) }()
+		var offers []store_pebble.Stage
+		counts, err := idx.buildRebuildFileStages(ctx, src, store, private, job, func(tables store_pebble.StageTables) error {
+			offers = append(offers, tables.Witness.Stage)
+			return nil
+		})
+		return counts, offers, err
+	}
+	checkBuild := func(idx *Indexer, admitted []rebuildInput, parsed uint64) {
+		t.Helper()
+		before := parser.ParseCount()
+		counts, offers, err := build(idx, admitted)
+		require.NoError(t, err)
+		require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, offers)
+		require.Equal(t, parsed, counts.parsed)
+		require.Equal(t, uint64(len(admitted))-parsed, counts.reused)
+		require.Equal(t, before+parsed, parser.ParseCount())
+	}
+	idx := newWorker()
+	initial := inputs("a.go", "b.go")
+	legacyKey := initial[0].parseKey(idx.rebuildBaseExtractorRecipe(recipe, initial[0]))
+	v2, err := store_pebble.EncodeParseFacts(store_pebble.ParseFacts{
+		File: graph.FileMetaRow{FilePath: "a.go"}, EffectiveLanguage: "go",
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.write(legacyKey, v2))
+	checkBuild(idx, initial, 2)
+	entries, err := os.ReadDir(store.dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 3, "two new contract receipts and one untouched old entry")
+	for _, in := range initial {
+		payload, err := store.read(in.parseKey(idx.rebuildExtractorRecipe(recipe, in)))
+		require.NoError(t, err)
+		base, facts, _, err := store_pebble.DecodeContractParseFacts(payload)
+		require.NoError(t, err)
+		require.Equal(t, in.Path, base.File.FilePath)
+		require.Contains(t, facts.Handlers, in.Path+"::Original")
+	}
+	saved, err := store.read(legacyKey)
+	require.NoError(t, err)
+	require.Equal(t, v2, saved)
+	checkBuild(idx, initial, 0)
+	restarted := newWorker()
+	checkBuild(restarted, initial, 0)
+	writeFile(t, filepath.Join(root, "b.go"), edited)
+	checkBuild(restarted, inputs("a.go", "b.go"), 1)
+	require.NoError(t, os.Remove(filepath.Join(root, "b.go")))
+	checkBuild(restarted, inputs("a.go"), 0)
+	writeFile(t, filepath.Join(root, "b.go"), edited)
+	checkBuild(restarted, inputs("a.go", "b.go"), 0)
+
+	before := parser.ParseCount()
+	_, offers, err := build(restarted, []rebuildInput{initial[0], initial[0]})
+	require.ErrorContains(t, err, "duplicate build input path")
+	require.Empty(t, offers)
+	require.Equal(t, before, parser.ParseCount())
+
+	// An invalid current entry is not an old-key miss. The existing
+	// manifest offer precedes receipt loading; no file-graph offer follows.
+	badInput := inputs("a.go")[0]
+	badKey := badInput.parseKey(restarted.rebuildExtractorRecipe(recipe, badInput))
+	valid, err := store.read(badKey)
+	require.NoError(t, err)
+	for _, tc := range []string{"legacy payload", "truncated payload", "wrong key", "wrong digest"} {
+		t.Run(tc, func(t *testing.T) {
+			store = rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			var wire []byte
+			switch tc {
+			case "legacy payload":
+				header := makeRebuildParseEntryHeader(badKey, v2)
+				wire = append(header[:], v2...)
+			case "truncated payload":
+				short := valid[:len(valid)-1]
+				header := makeRebuildParseEntryHeader(badKey, short)
+				wire = append(header[:], short...)
+			case "wrong key":
+				header := makeRebuildParseEntryHeader(legacyKey, valid)
+				wire = append(header[:], valid...)
+			case "wrong digest":
+				header := makeRebuildParseEntryHeader(badKey, valid)
+				wire = append(header[:], valid...)
+				wire[len(wire)-1] ^= 1
+			}
+			require.NoError(t, os.WriteFile(store.entry(badKey), wire, 0o600))
+			_, offers, err := build(restarted, []rebuildInput{badInput})
+			require.ErrorIs(t, err, errParseEntryCorrupt)
+			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest}, offers)
+			require.Equal(t, before, parser.ParseCount())
+			saved, err := os.ReadFile(store.entry(badKey))
+			require.NoError(t, err)
+			require.Equal(t, wire, saved, "a current corrupt entry is never overwritten")
 		})
 	}
 }

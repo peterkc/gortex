@@ -46,12 +46,18 @@ type extractRequest struct {
 }
 
 // RebuildFileOptions carries the frozen inputs for the strict one-file worker.
-// The path and source stay in gob fields so arbitrary file bytes are preserved.
+// The request carries the path and prepared bytes separately.
 type RebuildFileOptions struct {
-	IndexConfigJSON []byte
-	Codeowners      []byte
-	Extractor       string
-	EntryLimit      int
+	IndexConfigJSON  []byte
+	Codeowners       []byte
+	Extractor        string
+	EntryLimit       int // Compact payload only, excluding the header.
+	AdmittedLanguage string
+	Kind             byte
+	Size             int64
+	Content          [32]byte
+	BaseRecipe       [32]byte
+	Raw              []byte
 }
 
 // extractResponse is the worker → parent reply for one request.
@@ -64,6 +70,7 @@ type extractResponse struct {
 	HasParseErr         bool
 	ConstValues         []parser.ConstValue
 	ParseErrorLocations []string
+	RebuildHeader       []byte
 	RebuildEntry        []byte
 	// Err is non-empty when the extractor returned an error or
 	// panicked. Panicked distinguishes a recovered Go panic (the
@@ -81,6 +88,7 @@ type Result struct {
 	HasParseErr         bool
 	ConstValues         []parser.ConstValue
 	ParseErrorLocations []string
+	RebuildHeader       []byte
 	RebuildEntry        []byte
 	// Crashed is true when the worker subprocess died or hung
 	// (SIGSEGV / OOM / kill / deadline). The file should be

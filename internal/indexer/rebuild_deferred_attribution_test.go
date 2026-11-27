@@ -66,8 +66,7 @@ func TestRebuildDeferredAttribution(t *testing.T) {
 		require.False(t, reused)
 		saved, err := cache.read(input.parseKey(idx.rebuildExtractorRecipe(recipe, input)))
 		require.NoError(t, err)
-		facts, err := store_pebble.DecodeParseFacts(saved)
-		require.NoError(t, err)
+		facts := decodeRebuildTestParseFacts(t, saved)
 		require.Equal(t, file.path, facts.File.FilePath)
 		require.Equal(t, file.language, facts.EffectiveLanguage)
 		receipts[i] = facts

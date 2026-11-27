@@ -62,8 +62,7 @@ func TestRebuildParsePolicyKeysUseFrozenEffectiveInputs(t *testing.T) {
 		key := input.parseKey(idx.rebuildExtractorRecipe(base, input))
 		raw, err := store.read(key)
 		require.NoError(t, err)
-		facts, err := store_pebble.DecodeParseFacts(raw)
-		require.NoError(t, err)
+		facts := decodeRebuildTestParseFacts(t, raw)
 		require.Positive(t, facts.File.NodeCount)
 		return facts
 	}

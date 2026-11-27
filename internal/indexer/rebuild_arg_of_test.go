@@ -48,11 +48,19 @@ func TestRebuildArgOfNativeOrder(t *testing.T) {
 				t.Fatalf("settled input has a pending resolver page: %v", edges)
 				return nil
 			}))
-			receipts := func(yield func(store_pebble.ParseFacts, error) bool) {
-				if yield(caller, nil) {
-					yield(callee, nil)
-				}
+			idx := newTestIndexer(graph.New())
+			t.Cleanup(idx.Close)
+			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			job := rebuildFileStages{recipes: map[string]rebuildDigest{"go": {1}, "typescript": {2}}}
+			census := &rebuildExtractorCensus{byPath: make(map[string]string)}
+			for _, base := range []store_pebble.ParseFacts{caller, callee} {
+				input := rebuildInput{Path: base.File.FilePath, Language: base.EffectiveLanguage}
+				job.inputs = append(job.inputs, input)
+				census.byPath[input.Path] = base.EffectiveLanguage
+				key := input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input))
+				require.NoError(t, store.write(key, encodeRebuildTestParseFacts(t, base)))
 			}
+			receipts := idx.rebuildDataflowReceipts(ctx, job, store, census)
 			require.NoError(t, runRebuildArgOf(ctx, build, receipts))
 			got := read()
 			require.ElementsMatch(t, locked, got, "all saved rows, including payloads and unchanged guards")

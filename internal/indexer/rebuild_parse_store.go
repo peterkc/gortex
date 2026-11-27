@@ -60,9 +60,8 @@ func (s rebuildParseStore) read(key rebuildDigest) (payload []byte, err error) {
 	if _, err := io.ReadFull(f, extra[:]); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%w: %x: trailing data or read error: %v", errParseEntryCorrupt, key, err)
 	}
-	digest := blake3.Sum256(payload)
-	if header[0] != parseEntryFormat || !bytes.Equal(header[1:33], key[:]) || !bytes.Equal(header[33:], digest[:]) {
-		return nil, fmt.Errorf("%w: %x", errParseEntryCorrupt, key)
+	if err := checkRebuildParseEntryHeader(key, header[:], payload); err != nil {
+		return nil, err
 	}
 	return payload, nil
 }
@@ -82,11 +81,7 @@ func (s rebuildParseStore) write(key rebuildDigest, payload []byte) (err error) 
 		return err
 	}
 	defer func() { err = errors.Join(err, os.Remove(f.Name())) }()
-	digest := blake3.Sum256(payload)
-	var header [parseEntryHeader]byte
-	header[0] = parseEntryFormat
-	copy(header[1:33], key[:])
-	copy(header[33:], digest[:])
+	header := makeRebuildParseEntryHeader(key, payload)
 	_, err = f.Write(header[:])
 	if err == nil {
 		_, err = f.Write(payload)
@@ -109,6 +104,27 @@ func (s rebuildParseStore) write(key rebuildDigest, payload []byte) (err error) 
 	}
 	if !bytes.Equal(prior, payload) {
 		return fmt.Errorf("%w: %x", errParseEntryConflict, key)
+	}
+	return nil
+}
+
+// The worker reply and the leased store use the same key and digest framing.
+func makeRebuildParseEntryHeader(key rebuildDigest, payload []byte) [parseEntryHeader]byte {
+	var header [parseEntryHeader]byte
+	header[0] = parseEntryFormat
+	copy(header[1:33], key[:])
+	digest := blake3.Sum256(payload)
+	copy(header[33:], digest[:])
+	return header
+}
+
+func checkRebuildParseEntryHeader(key rebuildDigest, header, payload []byte) error {
+	if len(header) != parseEntryHeader {
+		return fmt.Errorf("%w: %x", errParseEntryCorrupt, key)
+	}
+	want := makeRebuildParseEntryHeader(key, payload)
+	if !bytes.Equal(header, want[:]) {
+		return fmt.Errorf("%w: %x", errParseEntryCorrupt, key)
 	}
 	return nil
 }

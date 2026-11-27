@@ -25,7 +25,7 @@ func RunWorker(r io.Reader, w io.Writer) error {
 }
 
 // RebuildFileHandler produces a complete portable entry inside the worker.
-type RebuildFileHandler func(reg *parser.Registry, path string, ext parser.Extractor, content []byte, options parser.ExtractionOptions, frozen RebuildFileOptions) ([]byte, error)
+type RebuildFileHandler func(reg *parser.Registry, path string, ext parser.Extractor, prepared []byte, options parser.ExtractionOptions, frozen RebuildFileOptions) (header, entry []byte, err error)
 
 // RunWorkerWithRebuild serves the same protocol with an optional strict
 // rebuild handler. Ordinary requests never use it.
@@ -109,11 +109,11 @@ func serveWorker(reg *parser.Registry, r io.Reader, w io.Writer, rebuild ...Rebu
 			if len(rebuild) == 0 || rebuild[0] == nil || !req.FullFacts {
 				resp.Err = "crashpool: strict rebuild file handler unavailable"
 			} else {
-				entry, err := serveRebuildFile(reg, req, rebuild[0])
+				header, entry, err := serveRebuildFile(reg, req, rebuild[0])
 				if err != nil {
 					resp.Err = err.Error()
 				} else {
-					resp.RebuildEntry = entry
+					resp.RebuildHeader, resp.RebuildEntry = header, entry
 				}
 			}
 		} else {
@@ -125,22 +125,22 @@ func serveWorker(reg *parser.Registry, r io.Reader, w io.Writer, rebuild ...Rebu
 	}
 }
 
-func serveRebuildFile(reg *parser.Registry, req extractRequest, rebuild RebuildFileHandler) ([]byte, error) {
+func serveRebuildFile(reg *parser.Registry, req extractRequest, rebuild RebuildFileHandler) ([]byte, []byte, error) {
 	ext, ok := reg.GetByLanguage(req.Language)
 	if !ok || ext == nil {
-		return nil, fmt.Errorf("crashpool: no extractor for language %s", req.Language)
+		return nil, nil, fmt.Errorf("crashpool: no extractor for language %s", req.Language)
 	}
 	if actual := fmt.Sprintf("%T", ext); actual != req.RebuildFile.Extractor {
-		return nil, fmt.Errorf("crashpool: rebuild extractor differs: got %q, want %q", actual, req.RebuildFile.Extractor)
+		return nil, nil, fmt.Errorf("crashpool: rebuild extractor differs: got %q, want %q", actual, req.RebuildFile.Extractor)
 	}
-	entry, err := rebuild(reg, req.RelPath, ext, req.Content, parser.NewExtractionOptions(req.TemporalEnvHelpers), *req.RebuildFile)
+	header, entry, err := rebuild(reg, req.RelPath, ext, req.Content, parser.NewExtractionOptions(req.TemporalEnvHelpers), *req.RebuildFile)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(entry) == 0 || len(entry) > req.RebuildFile.EntryLimit {
-		return nil, fmt.Errorf("crashpool: rebuild entry has %d bytes, limit %d", len(entry), req.RebuildFile.EntryLimit)
+		return nil, nil, fmt.Errorf("crashpool: rebuild entry has %d bytes, limit %d", len(entry), req.RebuildFile.EntryLimit)
 	}
-	return entry, nil
+	return header, entry, nil
 }
 
 // serveOne runs one extraction under panic recovery. A Go panic in an

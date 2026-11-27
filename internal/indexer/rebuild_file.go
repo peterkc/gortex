@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
@@ -24,86 +23,54 @@ import (
 	"go.uber.org/zap"
 )
 
-// loadRebuildFile loads one immutable entry before touching the checkout. A
-// matching entry remains usable even if an edit replaced the frozen bytes.
-// Only a missing entry permits extraction; corruption refuses the build.
-func (idx *Indexer) loadRebuildFile(ctx context.Context, src source.ContentSource, store rebuildParseStore, input rebuildInput, recipe rebuildDigest, bounds rebuildTransformBounds) (facts store_pebble.ParseFacts, reused bool, err error) {
-	return idx.loadRebuildFileWith(ctx, src, store, input, recipe, bounds, store_pebble.DecodeParseFacts,
-		func(ctx context.Context, rel string, ext parser.Extractor, _, prepared []byte) (store_pebble.ParseFacts, []byte, error) {
-			facts, err := idx.extractPreparedRebuildFile(ctx, rel, ext, prepared)
-			return facts, nil, err
-		})
+// loadRebuildFile reads a checked contract receipt before touching the checkout.
+func (idx *Indexer) loadRebuildFile(ctx context.Context, src source.ContentSource, store rebuildParseStore, input rebuildInput, recipe rebuildDigest, bounds rebuildTransformBounds) (store_pebble.ParseFacts, bool, error) {
+	base, _, reused, err := idx.loadRebuildFileWithContractFacts(ctx, src, store, input, recipe, bounds)
+	return base, reused, err
 }
 
-// The candidate key is separate from v2. C1b-2 owns the active recipe and
-// pending-worker transport, including the rest of the contract policy binding.
-func rebuildContractCandidateRecipe(recipe rebuildDigest) rebuildDigest {
-	return blake3.Sum256(append([]byte("rebuild-contract-candidate/4\x00"), recipe[:]...))
-}
-
-// loadRebuildFileWithContractFacts is the inactive candidate receipt path.
 func (idx *Indexer) loadRebuildFileWithContractFacts(ctx context.Context, src source.ContentSource, store rebuildParseStore, input rebuildInput, recipe rebuildDigest, bounds rebuildTransformBounds) (store_pebble.ParseFacts, *contracts.FileFacts, bool, error) {
-	var facts *contracts.FileFacts
-	decode := func(payload []byte) (base store_pebble.ParseFacts, err error) {
-		base, facts, _, err = store_pebble.DecodeContractParseFacts(payload)
-		return base, err
-	}
-	base, reused, err := idx.loadRebuildFileWith(ctx, src, store, input, rebuildContractCandidateRecipe(recipe), bounds, decode,
-		func(ctx context.Context, rel string, ext parser.Extractor, raw, prepared []byte) (store_pebble.ParseFacts, []byte, error) {
-			base, captured, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, rel, ext, raw, prepared)
+	return idx.loadRebuildFileWith(ctx, src, store, input, recipe, bounds,
+		func(ctx context.Context, _ rebuildDigest, rel string, ext parser.Extractor, raw, prepared []byte) ([]byte, error) {
+			base, facts, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, rel, ext, raw, prepared)
 			if err != nil {
-				return store_pebble.ParseFacts{}, nil, err
+				return nil, err
 			}
-			payload, err := store_pebble.EncodeContractParseFacts(base, captured)
-			facts = captured
-			return base, payload, err
+			payload, err := store_pebble.EncodeContractParseFacts(base, facts)
+			if err != nil {
+				return nil, fmt.Errorf("encode parse facts for %s: %w", rel, err)
+			}
+			return payload, nil
 		})
-	if err != nil {
-		return store_pebble.ParseFacts{}, nil, false, err
-	}
-	return base, facts, reused, nil
 }
 
 // All receipt paths share the cache and the work around extraction. Only a
-// cache miss calls extract, after verifying the accepted bytes and transforming once.
+// missing current key permits extraction, after checking raw and transforming once.
 func (idx *Indexer) loadRebuildFileWith(ctx context.Context, src source.ContentSource, store rebuildParseStore, input rebuildInput, recipe rebuildDigest, bounds rebuildTransformBounds,
-	decode func([]byte) (store_pebble.ParseFacts, error),
-	extract func(context.Context, string, parser.Extractor, []byte, []byte) (store_pebble.ParseFacts, []byte, error),
-) (facts store_pebble.ParseFacts, reused bool, err error) {
+	extract func(context.Context, rebuildDigest, string, parser.Extractor, []byte, []byte) ([]byte, error),
+) (base store_pebble.ParseFacts, facts *contracts.FileFacts, reused bool, err error) {
 	if err := ctx.Err(); err != nil {
-		return facts, false, err
+		return base, nil, false, err
 	}
 	ext, _ := idx.registry.GetByLanguage(input.Language)
 	if ext == nil {
-		return facts, false, fmt.Errorf("no extractor for %s (%s)", input.Path, input.Language)
+		return base, nil, false, fmt.Errorf("no extractor for %s (%s)", input.Path, input.Language)
 	}
 	key := input.parseKey(idx.rebuildExtractorRecipe(recipe, input))
 	payload, err := store.read(key)
 	if err == nil {
-		cached, err := decode(payload)
-		if err != nil {
-			return facts, false, fmt.Errorf("%w: %s: %w", errParseEntryCorrupt, input.Path, err)
-		}
-		if cached.File.FilePath != input.Path {
-			return facts, false, fmt.Errorf("%w: %s: file identity differs", errParseEntryCorrupt, input.Path)
-		}
-		effective, _ := idx.registry.GetByLanguage(cached.EffectiveLanguage)
-		if cached.EffectiveLanguage == "" || effective == nil ||
-			(cached.EffectiveLanguage != input.Language && !possibleRebuildLanguageRefinement(input.Path, cached.EffectiveLanguage)) {
-			return facts, false, fmt.Errorf("%w: %s: invalid effective parse language %q for admitted language %q",
-				errParseEntryCorrupt, input.Path, cached.EffectiveLanguage, input.Language)
-		}
-		return cached, true, nil
+		base, facts, err := idx.decodeRebuildFileReceipt(input, payload)
+		return base, facts, err == nil, err
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return facts, false, err
+		return base, nil, false, err
 	}
 	if bounds.FileBytes > 0 && input.Size > int64(bounds.FileBytes) {
-		return facts, false, fmt.Errorf("%w: %s has %d bytes, limit %d", ErrBuildTransformBounds, input.Path, input.Size, bounds.FileBytes)
+		return base, nil, false, fmt.Errorf("%w: %s has %d bytes, limit %d", ErrBuildTransformBounds, input.Path, input.Size, bounds.FileBytes)
 	}
 	raw, err := readFrozenRebuildInput(ctx, src, input)
 	if err != nil {
-		return facts, false, err
+		return base, nil, false, err
 	}
 	rel := input.Path
 	// Match the native pre-transform probe, without consulting live source.
@@ -111,35 +78,59 @@ func (idx *Indexer) loadRebuildFileWith(ctx context.Context, src source.ContentS
 	if parser.ExtensionNeedsContentProbe(rel) {
 		if lang, ok := idx.registry.DetectLanguageContent(rel, raw); ok && lang != input.Language {
 			if !possibleRebuildLanguageRefinement(rel, lang) {
-				return facts, false, fmt.Errorf("%s: unexplained parse language change from %q to %q", rel, input.Language, lang)
+				return base, nil, false, fmt.Errorf("%s: unexplained parse language change from %q to %q", rel, input.Language, lang)
 			}
 			ext, _ = idx.registry.GetByLanguage(lang)
 		}
 	}
 	prepared, spilled, err := idx.transforms.runRebuild(ctx, pathkey.Normalize(rel), raw, bounds)
 	if err != nil {
-		return facts, false, err
+		return base, nil, false, err
 	}
 	if bounds.FileBytes > 0 && len(prepared) > bounds.FileBytes {
-		return facts, false, fmt.Errorf("%w: %s produced %d bytes, limit %d", ErrBuildTransformBounds, rel, len(prepared), bounds.FileBytes)
+		return base, nil, false, fmt.Errorf("%w: %s produced %d bytes, limit %d", ErrBuildTransformBounds, rel, len(prepared), bounds.FileBytes)
 	}
 	if spilled != 0 {
 		idx.logger.Debug("build command transform spilled", zap.String("file", rel), zap.Int64("spill_bytes", spilled))
 	}
-	facts, payload, err = extract(ctx, rel, ext, raw, prepared)
+	payload, err = extract(ctx, key, rel, ext, raw, prepared)
 	if err != nil {
-		return store_pebble.ParseFacts{}, false, err
+		return base, nil, false, err
 	}
-	if payload == nil {
-		payload, err = store_pebble.EncodeParseFacts(facts)
-		if err != nil {
-			return facts, false, fmt.Errorf("encode parse facts for %s: %w", input.Path, err)
-		}
+	if len(payload) > store.limit {
+		return base, nil, false, fmt.Errorf("%w: %x", errParseEntryTooLarge, key)
+	}
+	base, facts, err = idx.decodeRebuildFileReceipt(input, payload)
+	if err != nil {
+		return base, nil, false, err
+	}
+	if base.EffectiveLanguage != ext.Language() {
+		return store_pebble.ParseFacts{}, nil, false, fmt.Errorf("%w: %s: effective parse language differs", errParseEntryCorrupt, input.Path)
 	}
 	if err := ctx.Err(); err != nil {
-		return facts, false, err
+		return store_pebble.ParseFacts{}, nil, false, err
 	}
-	return facts, false, store.write(key, payload)
+	if err := store.write(key, payload); err != nil {
+		return store_pebble.ParseFacts{}, nil, false, err
+	}
+	return base, facts, false, nil
+}
+
+func (idx *Indexer) decodeRebuildFileReceipt(input rebuildInput, payload []byte) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
+	base, facts, _, err := store_pebble.DecodeContractParseFacts(payload)
+	if err != nil {
+		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: %s: %w", errParseEntryCorrupt, input.Path, err)
+	}
+	if base.File.FilePath != input.Path {
+		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: %s: file identity differs", errParseEntryCorrupt, input.Path)
+	}
+	effective, _ := idx.registry.GetByLanguage(base.EffectiveLanguage)
+	if base.EffectiveLanguage == "" || effective == nil ||
+		(base.EffectiveLanguage != input.Language && !possibleRebuildLanguageRefinement(input.Path, base.EffectiveLanguage)) {
+		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: %s: invalid effective parse language %q for admitted language %q",
+			errParseEntryCorrupt, input.Path, base.EffectiveLanguage, input.Language)
+	}
+	return base, facts, nil
 }
 
 // possibleRebuildLanguageRefinement checks the range of the pinned native
@@ -162,16 +153,8 @@ func possibleRebuildLanguageRefinement(path, lang string) bool {
 	}
 }
 
-// extractPreparedRebuildFile runs only inside the build worker or the strict
-// parse worker. The caller already selected the extractor from frozen input.
-func (idx *Indexer) extractPreparedRebuildFile(ctx context.Context, rel string, ext parser.Extractor, prepared []byte) (store_pebble.ParseFacts, error) {
-	return idx.extractPreparedRebuildFileInto(ctx, rel, ext, prepared, prepared, nil)
-}
-
-// extractPreparedRebuildFileWithContractFacts is the in-memory receipt seam.
-// C1b will persist these facts alongside ordinary parse facts. This uses the
-// same parse turn as the legacy writer. Only the two named transformed facts
-// need a raw parse here; neither needs a later source read or parser call.
+// extractPreparedRebuildFileWithContractFacts captures portable answers on the
+// file's parse turn. Only the named raw grammar facts can require a raw parse.
 func (idx *Indexer) extractPreparedRebuildFileWithContractFacts(ctx context.Context, rel string, ext parser.Extractor, raw, prepared []byte) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
 	var facts *contracts.FileFacts
 	out, err := idx.extractPreparedRebuildFileInto(ctx, rel, ext, raw, prepared, &facts)

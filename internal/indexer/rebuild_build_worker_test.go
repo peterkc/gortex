@@ -207,8 +207,7 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 				if tc.shadowed && path == "a.go" {
 					n.ID, n.FilePath, n.Kind, n.Meta = "b.go::F", "b.go", graph.KindVariable, nil
 				}
-				payload, err := store_pebble.EncodeParseFacts(rebuildCloneClaimFixture(path, n))
-				require.NoError(t, err)
+				payload := encodeRebuildTestParseFacts(t, rebuildCloneClaimFixture(path, n))
 				require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(req.Recipes["go"], input)), payload))
 			}
 			inputRoot, err := rebuildInputRoot(inputs)

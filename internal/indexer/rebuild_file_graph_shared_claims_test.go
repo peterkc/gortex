@@ -75,10 +75,9 @@ func TestRebuildFileGraphSharedClaims(t *testing.T) {
 				job.inputs = append(job.inputs, input)
 				row := graph.FileMetaRow{FilePath: f.path, ContentHash: "hash:" + f.path, Size: 1, NodeCount: len(f.nodes)}
 				meta = append(meta, row)
-				payload, err := store_pebble.EncodeParseFacts(store_pebble.ParseFacts{
+				payload := encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
 					File: row, Nodes: f.nodes, Edges: []*graph.Edge{f.site}, EffectiveLanguage: "go",
 				})
-				require.NoError(t, err)
 				require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(recipe, input)), payload))
 			}
 			root, err := rebuildInputRoot(job.inputs)
@@ -173,8 +172,7 @@ func TestRebuildFileGraphSharedClaimLifecycle(t *testing.T) {
 		}
 		f.File.NodeCount = len(f.Nodes)
 		in := rebuildInput{Path: path, Language: "go", Kind: merkle.RegularFile, Size: 1, Content: rebuildDigest{version}}
-		raw, err := store_pebble.EncodeParseFacts(f)
-		require.NoError(t, err)
+		raw := encodeRebuildTestParseFacts(t, f)
 		require.NoError(t, store.write(in.parseKey(idx.rebuildExtractorRecipe(recipe, in)), raw))
 		return saved{input: in, facts: f}
 	}

@@ -68,13 +68,11 @@ func TestRebuildTestSymbolsNativeFirstSiteOrder(t *testing.T) {
 	} {
 		file := &graph.Node{ID: f.path, Kind: graph.KindFile, Name: f.path, FilePath: f.path, Language: "go"}
 		decls := append([]*graph.Node{file}, f.nodes...)
-		payload, err := store_pebble.EncodeParseFacts(store_pebble.ParseFacts{
+		payload := encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
 			File:  graph.FileMetaRow{FilePath: f.path, NodeCount: len(decls)},
 			Nodes: decls, Edges: f.edges, EffectiveLanguage: "go",
 		})
-		require.NoError(t, err)
-		facts, err := store_pebble.DecodeParseFacts(payload)
-		require.NoError(t, err)
+		facts := decodeRebuildTestParseFacts(t, payload)
 		require.Equal(t, f.path, facts.File.FilePath)
 		require.Equal(t, "go", facts.EffectiveLanguage)
 		require.Equal(t, f.edges, facts.Edges, "exact From and recording site on %s", f.path)

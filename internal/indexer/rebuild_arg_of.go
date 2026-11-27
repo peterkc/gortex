@@ -37,7 +37,7 @@ func (idx *Indexer) rebuildDataflowReceipts(ctx context.Context, job rebuildFile
 				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: reload %q for dataflow lift: %w", errParseEntryCorrupt, input.Path, err))
 				return
 			}
-			facts, err := store_pebble.DecodeParseFacts(raw)
+			facts, _, _, err := store_pebble.DecodeContractParseFacts(raw)
 			if err != nil {
 				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: decode %q for dataflow lift: %w", errParseEntryCorrupt, input.Path, err))
 				return

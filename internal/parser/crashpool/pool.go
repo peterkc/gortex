@@ -242,6 +242,7 @@ func (p *Pool) submit(relPath, language string, content []byte, temporalEnvHelpe
 			HasParseErr:         resp.HasParseErr,
 			ConstValues:         resp.ConstValues,
 			ParseErrorLocations: resp.ParseErrorLocations,
+			RebuildHeader:       resp.RebuildHeader,
 			RebuildEntry:        resp.RebuildEntry,
 			Err:                 resp.Err,
 		}

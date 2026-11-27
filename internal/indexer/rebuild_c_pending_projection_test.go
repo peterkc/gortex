@@ -46,13 +46,11 @@ func goEntry() {
 		require.True(t, parsed.ParseChecked, file.path)
 		require.Zero(t, parsed.ParseErrors, file.path)
 		content := contentHashForSource(raw)
-		receipt, err := store_pebble.EncodeParseFacts(store_pebble.ParseFacts{
+		receipt := encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
 			File:  graph.FileMetaRow{FilePath: file.path, ContentHash: content, Size: len(raw), NodeCount: len(parsed.Nodes)},
 			Nodes: parsed.Nodes, Edges: parsed.Edges, EffectiveLanguage: file.extractor.Language(),
 		})
-		require.NoError(t, err)
-		facts, err := store_pebble.DecodeParseFacts(receipt)
-		require.NoError(t, err)
+		facts := decodeRebuildTestParseFacts(t, receipt)
 		require.Equal(t, file.path, facts.File.FilePath)
 		require.Equal(t, file.extractor.Language(), facts.EffectiveLanguage)
 		census.byPath[facts.File.FilePath] = facts.EffectiveLanguage

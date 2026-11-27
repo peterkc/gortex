@@ -53,12 +53,12 @@ func other(w Writer) {
 	entries, err := os.ReadDir(store.dir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "only the detached receipt is stored")
-	key := input.parseKey(idx.rebuildExtractorRecipe(rebuildContractCandidateRecipe(recipe), input))
+	key := input.parseKey(idx.rebuildExtractorRecipe(recipe, input))
 	wire, err := store.read(key)
 	require.NoError(t, err)
 	require.False(t, bytes.Contains(wire, []byte(raw)), "source bytes are not a receipt field")
 	_, err = store_pebble.DecodeParseFacts(wire)
-	require.Error(t, err, "active v2 cannot read the candidate")
+	require.Error(t, err, "a base-only reader cannot read the contract receipt")
 	g.AddBatch(base.Nodes, base.Edges)
 
 	registration := contracts.Contract{

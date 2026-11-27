@@ -3,12 +3,16 @@ package indexer
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"maps"
 	"os"
+	"slices"
 
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/codeowners"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/pathkey"
 )
@@ -59,10 +63,45 @@ func (idx *Indexer) installRebuildParsePolicy(policy rebuildParsePolicy) {
 	}
 }
 
-// rebuildExtractorRecipe binds the settings that apply during extraction.
-// CODEOWNERS is last-match-wins; the owner order is preserved. Only the Go
-// extractor reads the Temporal list. Clone scoring thresholds apply later.
+// Bump this for a change to detached fact capture that does not change the
+// binary layout or the shared native contract extraction policy.
+const rebuildContractCaptureVersion = 1
+
+// rebuildExtractorRecipe binds ordinary extraction and contract fact policy.
+// Include admissible refinement versions before looking up a receipt, when
+// the current bytes may no longer be available for a content probe.
 func (idx *Indexer) rebuildExtractorRecipe(base rebuildDigest, input rebuildInput) rebuildDigest {
+	ordinary := idx.rebuildBaseExtractorRecipe(base, input)
+	b := append([]byte("gortex/rebuild/contract-parse\x00"), ordinary[:]...)
+	b = append(b, store_pebble.ContractParseFactsFormat)
+	b = binary.AppendUvarint(b, rebuildContractCaptureVersion)
+	b = binary.AppendUvarint(b, postExtractionPolicyVersion)
+	b = binary.AppendUvarint(b, uint64(extractorVersionForLang(input.Language)))
+	if parser.ExtensionNeedsContentProbe(input.Path) {
+		for _, lang := range slices.Sorted(maps.Keys(extractorVersions)) {
+			if lang != input.Language && possibleRebuildLanguageRefinement(input.Path, lang) {
+				b = binary.AppendUvarint(b, uint64(len(lang)))
+				b = append(b, lang...)
+				b = binary.AppendUvarint(b, uint64(extractorVersionForLang(lang)))
+			}
+		}
+	}
+	b = binary.AppendUvarint(b, 0) // end refinement versions
+	b = binary.AppendUvarint(b, uint64(len(contractExtractionPolicyVersion)))
+	b = append(b, contractExtractionPolicyVersion...)
+	// Both inputs are plain typed data (strings, booleans and integers).
+	// The same effective event-bus override is used by contract capture.
+	aliases, _ := json.Marshal(idx.config.HTTPClientAliases)
+	boundaries, _ := json.Marshal(idx.eventBusBoundaries())
+	b = binary.AppendUvarint(b, uint64(len(aliases)))
+	b = append(b, aliases...)
+	b = append(b, boundaries...)
+	return blake3.Sum256(b)
+}
+
+// The ordinary recipe is also the prefix of the contract recipe. Keep the
+// last-match-wins CODEOWNERS order and the existing Go Temporal policy.
+func (idx *Indexer) rebuildBaseExtractorRecipe(base rebuildDigest, input rebuildInput) rebuildDigest {
 	graphPath := pathkey.Normalize(input.Path)
 	version := byte(4) // v4 binds effective clone extraction to the receipt.
 	if graphPath != input.Path {

@@ -122,11 +122,9 @@ func seedRebuildCloneInputReceipts(t *testing.T, build *store_pebble.BuildStore,
 	for _, f := range facts {
 		input := rebuildInput{Path: f.File.FilePath, Language: f.EffectiveLanguage}
 		recipe := idx.rebuildExtractorRecipe(job.recipes[input.Language], input)
-		raw, err := store_pebble.EncodeParseFacts(f)
-		require.NoError(t, err)
+		raw := encodeRebuildTestParseFacts(t, f)
 		require.NoError(t, store.write(input.parseKey(recipe), raw))
-		checked, err := store_pebble.DecodeParseFacts(raw)
-		require.NoError(t, err)
+		checked := decodeRebuildTestParseFacts(t, raw)
 		require.NoError(t, build.AddParsedFile("", checked))
 		job.inputs = append(job.inputs, input)
 		census.byPath[input.Path] = f.EffectiveLanguage

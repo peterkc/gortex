@@ -1,16 +1,20 @@
 package indexer
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/crashpool"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"go.uber.org/zap"
 )
@@ -33,12 +37,17 @@ func checkPendingRebuildFileNativeReceipt(t *testing.T, path, graphPath string) 
 	t.Setenv(crashWorkerEnv, "1") // TestMain runs the same entry point as __parse-worker.
 	content := []byte(`package sample
 const Label = "orders"
+func Handler(w Writer) {
+	WriteJSON (w, 200, "ok")
+}
 func Broken() { value := }
 func Again() { another := }
 `)
-	// The frozen key hashes the on-disk bytes, but both receipts describe
-	// the transformed bytes. The BOM exercises that distinction.
-	require.NoError(t, os.WriteFile(filepath.Join(root, path), append([]byte{0xef, 0xbb, 0xbf}, content...), 0o600))
+	// The BOM and literal rewrite change the prepared bytes. The spaced
+	// call is an AST-only fact, and its type must come from accepted raw bytes.
+	raw := append([]byte{0xef, 0xbb, 0xbf}, content...)
+	prepared := bytes.ReplaceAll(content, []byte(`"ok"`), []byte("42"))
+	require.NoError(t, os.WriteFile(filepath.Join(root, path), raw, 0o600))
 	input, _, err := readRebuildInput(ctx, src, path, "go", 1<<20)
 	require.NoError(t, err)
 
@@ -54,6 +63,7 @@ func Again() { another := }
 	idx.installRebuildParsePolicy(policy)
 	idx.SetRootPath(root)
 	t.Cleanup(idx.Close)
+	idx.transforms.transforms = append(idx.transforms.transforms, rebuildPendingGoTestTransform{})
 	require.NoError(t, os.WriteFile(owners, []byte("* @edited\n"), 0o600))
 
 	recipe := rebuildDigest{4}
@@ -61,19 +71,26 @@ func Again() { another := }
 	key := input.parseKey(idx.rebuildExtractorRecipe(recipe, input))
 	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 	nativeStore := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+	before := parser.ParseCount()
 	_, reused, err := idx.loadPendingRebuildFile(ctx, src, store, input, recipe, bounds, exe)
 	require.NoError(t, err)
 	require.False(t, reused)
+	require.Equal(t, before, parser.ParseCount(), "strict extraction stays in the child")
 	entry, err := store.read(key)
 	require.NoError(t, err)
-	facts, err := store_pebble.DecodeParseFacts(entry)
+	facts, captured, _, err := store_pebble.DecodeContractParseFacts(entry)
 	require.NoError(t, err)
+	handler := captured.Handlers[graphPath+"::Handler"]
+	require.NotContains(t, handler.Regex, "response_type")
+	require.Equal(t, "string", handler.AST["response_type"])
+	require.False(t, bytes.Contains(entry, raw), "raw bytes are not a receipt field")
+	require.False(t, bytes.Contains(entry, prepared), "prepared bytes are not a receipt field")
 	require.Positive(t, facts.File.NodeCount)
 	require.NotEmpty(t, facts.Edges)
 	require.NotEmpty(t, facts.Symbols)
 	require.Equal(t, "go", facts.EffectiveLanguage)
-	require.Equal(t, len(content), facts.File.Size)
-	require.Equal(t, contentHashForSource(content), facts.File.ContentHash)
+	require.Equal(t, len(prepared), facts.File.Size)
+	require.Equal(t, contentHashForSource(prepared), facts.File.ContentHash)
 	require.Equal(t, path, facts.File.FilePath)
 	require.Contains(t, facts.Constants, graph.ConstantValueRow{FilePath: path, NodeID: graphPath + "::Label", Value: "orders"})
 	var fileNode *graph.Node
@@ -97,7 +114,7 @@ func Again() { another := }
 	var locations []string
 	require.NoError(t, json.Unmarshal([]byte(facts.File.Errors), &locations))
 	require.Greater(t, len(locations), 1, "fixture must distinguish ordering of parse errors")
-	native, err := parser.Extract(goExtractor, graphPath, content, idx.extractionOptionsValue())
+	native, err := parser.Extract(goExtractor, graphPath, prepared, idx.extractionOptionsValue())
 	require.NoError(t, err)
 	t.Cleanup(native.ReleaseTree)
 	require.NotNil(t, native.Tree)
@@ -106,7 +123,7 @@ func Again() { another := }
 	// Rebuild the same raw relative name under another root. A relocated
 	// parse must produce the exact pending receipt without reading the edit.
 	otherRoot, otherSrc := rebuildInputFixture(t)
-	require.NoError(t, os.WriteFile(filepath.Join(otherRoot, path), append([]byte{0xef, 0xbb, 0xbf}, content...), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(otherRoot, path), raw, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte("package sample\nfunc Edited() {}\n"), 0o600))
 	_, reused, err = idx.loadRebuildFile(ctx, otherSrc, nativeStore, input, recipe, bounds)
 	require.NoError(t, err)
@@ -123,12 +140,15 @@ func Again() { another := }
 	require.Equal(t, []string{"team::frozen"}, savedOwners)
 
 	missingExe := filepath.Join(t.TempDir(), "missing-gortex")
-	before := parser.ParseCount()
+	before = parser.ParseCount()
 	cached, reused, err := idx.loadPendingRebuildFile(ctx, src, store, input, recipe, bounds, missingExe)
 	require.NoError(t, err, "matching cache hit must not read the edited input or spawn a parser")
 	require.True(t, reused)
 	require.Equal(t, facts, cached)
 	require.Equal(t, before, parser.ParseCount(), "pending reuse must not parse in the owner either")
+	entries, err := os.ReadDir(store.dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "the miss and reuse leave one immutable receipt")
 
 	miss := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 	got, reused, err := idx.loadPendingRebuildFile(ctx, src, miss, input, recipe, bounds, missingExe)
@@ -138,6 +158,15 @@ func Again() { another := }
 	require.Empty(t, got)
 	_, err = miss.read(key)
 	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+type rebuildPendingGoTestTransform struct{}
+
+func (rebuildPendingGoTestTransform) name() string        { return "test-rewrite-handler-response" }
+func (rebuildPendingGoTestTransform) matches(string) bool { return true }
+func (rebuildPendingGoTestTransform) asLanguage() string  { return "" }
+func (rebuildPendingGoTestTransform) apply(_ string, in []byte) ([]byte, error) {
+	return bytes.ReplaceAll(in, []byte(`"ok"`), []byte("42")), nil
 }
 
 func TestPendingRebuildFileRefusesWithoutSaving(t *testing.T) {
@@ -239,7 +268,7 @@ func TestPendingRebuildFileRequiresWorkerForGeneratedC(t *testing.T) {
 	require.False(t, reused)
 	entry, err := store.read(key)
 	require.NoError(t, err)
-	facts, err := store_pebble.DecodeParseFacts(entry)
+	facts, _, _, err := store_pebble.DecodeContractParseFacts(entry)
 	require.NoError(t, err)
 	require.Equal(t, contentHashForSource(content), facts.File.ContentHash)
 	require.Equal(t, 2, facts.File.NodeCount)
@@ -249,9 +278,10 @@ func TestPendingRebuildFileRequiresWorkerForGeneratedC(t *testing.T) {
 	// A frozen Git path need not be valid UTF-8, even if the host filesystem
 	// does not allow such names. Exercise the transport without a disk path.
 	input.Path = "vendor-\xff/parser.c"
-	entry, err = idx.submitPendingRebuildFile(ctx, input.Path, ext, content, idx.frozenRebuildParsePolicy.Load(), exe, store.limit)
+	key = input.parseKey(idx.rebuildExtractorRecipe(recipe, input))
+	entry, err = idx.submitPendingRebuildFile(ctx, input, recipe, key, ext, content, content, idx.frozenRebuildParsePolicy.Load(), exe, store.limit)
 	require.NoError(t, err)
-	facts, err = store_pebble.DecodeParseFacts(entry)
+	facts, _, _, err = store_pebble.DecodeContractParseFacts(entry)
 	require.NoError(t, err)
 	require.Equal(t, input.Path, facts.File.FilePath)
 	require.Equal(t, input.Path+"::tree_sitter_demo", facts.Nodes[1].ID)
@@ -311,7 +341,7 @@ func TestPendingRebuildFileEffectiveLanguage(t *testing.T) {
 			pendingEntry, err := pending.read(key)
 			require.NoError(t, err)
 			require.Equal(t, normalEntry, pendingEntry)
-			facts, err := store_pebble.DecodeParseFacts(pendingEntry)
+			facts, _, _, err := store_pebble.DecodeContractParseFacts(pendingEntry)
 			require.NoError(t, err)
 			require.Equal(t, tc.path, facts.File.FilePath)
 			require.Equal(t, tc.effective, facts.EffectiveLanguage)
@@ -343,6 +373,85 @@ func TestPendingRebuildFileEffectiveLanguage(t *testing.T) {
 				require.True(t, reused)
 				require.Equal(t, facts, cached)
 			}
+		})
+	}
+}
+
+func TestPendingRebuildFileChecksReply(t *testing.T) {
+	const path = "unit.go"
+	const language = "go"
+	key := rebuildDigest{1}
+	base := store_pebble.ParseFacts{
+		File:              graph.FileMetaRow{FilePath: path},
+		EffectiveLanguage: language,
+	}
+	facts := &contracts.FileFacts{
+		Shapes:   map[string]*contracts.Shape{},
+		Handlers: map[string]contracts.HandlerFacts{},
+	}
+	entry, err := store_pebble.EncodeContractParseFacts(base, facts)
+	require.NoError(t, err)
+	header := makeRebuildParseEntryHeader(key, entry)
+	limit := len(entry)
+	got, err := checkPendingRebuildReply(header[:], entry, key, path, language, limit)
+	require.NoError(t, err, "header does not count against the payload limit")
+	require.Equal(t, entry, got)
+
+	got, err = checkPendingRebuildReply(header[:], entry, key, path, language, limit-1)
+	require.ErrorIs(t, err, errParseEntryTooLarge)
+	require.Nil(t, got)
+	legacy, err := store_pebble.EncodeParseFacts(base)
+	require.NoError(t, err)
+	legacyHeader := makeRebuildParseEntryHeader(key, legacy)
+	for _, tc := range []struct {
+		name          string
+		header, entry []byte
+		key           rebuildDigest
+	}{
+		{"old reply", nil, legacy, key},
+		{"truncated header", header[:len(header)-1], entry, key},
+		{"truncated payload", header[:], entry[:len(entry)-1], key},
+		{"wrong key", header[:], entry, rebuildDigest{2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := checkPendingRebuildReply(tc.header, tc.entry, tc.key, path, language, limit)
+			require.ErrorIs(t, err, errParseEntryCorrupt)
+			require.Nil(t, got)
+		})
+	}
+	got, err = checkPendingRebuildReply(legacyHeader[:], legacy, key, path, language, limit)
+	require.ErrorIs(t, err, errParseEntryCorrupt)
+	require.ErrorContains(t, err, "decode parser worker entry")
+	require.Nil(t, got)
+	got, err = checkPendingRebuildReply(header[:], entry, key, "other.go", language, limit)
+	require.ErrorContains(t, err, "parser worker entry has a different file identity")
+	require.Nil(t, got)
+	got, err = checkPendingRebuildReply(header[:], entry, key, path, "cpp", limit)
+	require.ErrorContains(t, err, `parser worker effective language differs: got "go", want "cpp"`)
+	require.Nil(t, got)
+}
+
+func TestPendingRebuildFileChecksRawInput(t *testing.T) {
+	raw := []byte("package sample\nfunc Example() {}\n")
+	for _, tc := range []struct {
+		name    string
+		size    int64
+		content rebuildDigest
+	}{
+		{"size", int64(len(raw)) + 1, blake3.Sum256(raw)},
+		{"digest", int64(len(raw)), blake3.Sum256([]byte("other"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := parser.ParseCount()
+			header, entry, err := servePendingRebuildFile(nil, "file.go", nil, raw, parser.ExtractionOptions{}, crashpool.RebuildFileOptions{
+				Raw:     raw,
+				Size:    tc.size,
+				Content: tc.content,
+			})
+			require.ErrorIs(t, err, ErrBuildInputChanged)
+			require.Nil(t, header)
+			require.Nil(t, entry)
+			require.Equal(t, before, parser.ParseCount())
 		})
 	}
 }

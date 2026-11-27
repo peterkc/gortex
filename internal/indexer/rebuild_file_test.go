@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/parser"
@@ -48,8 +50,7 @@ func TestRebuildFileFactsRemainReachableAfterSourceEdit(t *testing.T) {
 	require.False(t, reused)
 	saved, err := store.read(parsedKey)
 	require.NoError(t, err)
-	facts, err := store_pebble.DecodeParseFacts(saved)
-	require.NoError(t, err)
+	facts := decodeRebuildTestParseFacts(t, saved)
 	require.Equal(t, parsedPath, facts.File.FilePath)
 	require.Equal(t, "go", facts.EffectiveLanguage)
 	require.Equal(t, len(old), facts.File.Size)
@@ -72,9 +73,7 @@ func TestRebuildFileFactsRemainReachableAfterSourceEdit(t *testing.T) {
 	cached, reused, err := idx.loadRebuildFile(ctx, src, store, parsed, recipe, rebuildTransformBounds{})
 	require.NoError(t, err)
 	require.True(t, reused)
-	cachedBytes, err := store_pebble.EncodeParseFacts(cached)
-	require.NoError(t, err)
-	require.Equal(t, saved, cachedBytes)
+	require.Equal(t, facts, cached)
 	_, reused, err = idx.loadRebuildFile(ctx, src, store, waiting, recipe, rebuildTransformBounds{})
 	require.ErrorIs(t, err, ErrBuildInputChanged)
 	require.False(t, reused)
@@ -180,7 +179,7 @@ func TestRebuildFileRefusesUnboundEffectiveLanguage(t *testing.T) {
 	require.NoError(t, store.write(oldKey, legacy))
 	require.NoError(t, os.WriteFile(file, []byte("namespace edited {}\n"), 0o600))
 	got, reused, err := idx.loadRebuildFile(ctx, src, store, input, recipe, rebuildTransformBounds{})
-	require.ErrorIs(t, err, ErrBuildInputChanged, "the old entry cannot stand in for a v2 receipt")
+	require.ErrorIs(t, err, ErrBuildInputChanged, "the old entry cannot stand in for a contract receipt")
 	require.Empty(t, got)
 	require.False(t, reused)
 	_, err = store.read(key)
@@ -195,10 +194,12 @@ func TestRebuildFileRefusesUnboundEffectiveLanguage(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
-			payload, err := store_pebble.EncodeParseFacts(store_pebble.ParseFacts{
-				File: graph.FileMetaRow{FilePath: path}, EffectiveLanguage: tc.language,
-			})
-			require.NoError(t, err)
+			payload := legacy
+			if tc.language != "" {
+				payload = encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
+					File: graph.FileMetaRow{FilePath: path}, EffectiveLanguage: tc.language,
+				})
+			}
 			require.NoError(t, store.write(key, payload))
 			got, reused, err := idx.loadRebuildFile(ctx, nil, store, input, recipe, rebuildTransformBounds{})
 			require.ErrorIs(t, err, errParseEntryCorrupt)
@@ -206,4 +207,60 @@ func TestRebuildFileRefusesUnboundEffectiveLanguage(t *testing.T) {
 			require.False(t, reused)
 		})
 	}
+}
+
+// Base-only extraction is an oracle for the unchanged embedded v2 bytes.
+func (idx *Indexer) extractPreparedRebuildFile(ctx context.Context, rel string, ext parser.Extractor, prepared []byte) (store_pebble.ParseFacts, error) {
+	return idx.extractPreparedRebuildFileInto(ctx, rel, ext, prepared, prepared, nil)
+}
+
+// Synthetic graph fixtures assert graph semantics; provide the same explicit
+// empty contract answers that capture would produce for those rows.
+func encodeRebuildTestParseFacts(t testing.TB, base store_pebble.ParseFacts) []byte {
+	t.Helper()
+	facts := &contracts.FileFacts{Shapes: make(map[string]*contracts.Shape), Handlers: make(map[string]contracts.HandlerFacts)}
+	for _, n := range base.Nodes {
+		switch n.Kind {
+		case graph.KindType, graph.KindInterface:
+			facts.Shapes[n.ID] = nil
+		case graph.KindFunction, graph.KindMethod:
+			h := contracts.HandlerFacts{Regex: make(map[string]any), AST: make(map[string]any)}
+			if strings.HasSuffix(n.FilePath, ".go") {
+				h.Bindings = make(map[string]contracts.Binding)
+			}
+			facts.Handlers[n.ID] = h
+		}
+	}
+	if contracts.RouterFactsRequired(base.File.FilePath, base.EffectiveLanguage, nil, nil) {
+		facts.Router = &contracts.RouterFacts{}
+	}
+	wire, err := store_pebble.EncodeContractParseFacts(base, facts)
+	require.NoError(t, err)
+	return wire
+}
+
+func decodeRebuildTestParseFacts(t testing.TB, payload []byte) store_pebble.ParseFacts {
+	t.Helper()
+	base, _, _, err := store_pebble.DecodeContractParseFacts(payload)
+	require.NoError(t, err)
+	return base
+}
+
+func TestRebuildContractRecipeBindsCapturePolicy(t *testing.T) {
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	t.Setenv("CODEGRAPH_EVENT_CONFIG", "")
+	t.Setenv("GORTEX_EVENT_BUS_DISABLE", "1")
+	input := rebuildInput{Path: "routes.go", Language: "go"}
+	base := rebuildDigest{1}
+	first := idx.rebuildExtractorRecipe(base, input)
+	require.NotEqual(t, idx.rebuildBaseExtractorRecipe(base, input), first)
+	require.NotEqual(t, idx.rebuildExtractorRecipe(rebuildDigest{2}, input), first)
+	idx.config.HTTPClientAliases = []string{"apiGet"}
+	withAliases := idx.rebuildExtractorRecipe(base, input)
+	require.NotEqual(t, first, withAliases)
+	idx.config.EventBus = []config.EventBusBoundarySpec{{Name: "bus", Callee: "publish"}}
+	require.Equal(t, withAliases, idx.rebuildExtractorRecipe(base, input), "a disabled provider does not affect capture")
+	t.Setenv("GORTEX_EVENT_BUS_DISABLE", "")
+	require.NotEqual(t, withAliases, idx.rebuildExtractorRecipe(base, input))
 }
