@@ -70,7 +70,7 @@ func (o *rebuildMemberOwners) elect(p *rebuildCallMoves, id string, lastCol byte
 }
 
 func (p *rebuildCallMoves) recordOwnerEdge(e *graph.Edge, admitted bool, order uint64, liveQuery func(*graph.Edge) bool,
-	owner func(*graph.Edge) (string, bool), lastCol byte, missing func(error) error,
+	owner func(*graph.Edge) (string, bool), lastCol byte, missing func(error) error, edge func([]byte) (*graph.Edge, error),
 ) error {
 	col := byte('r')
 	if e.Kind == graph.EdgeMemberOf {
@@ -82,7 +82,7 @@ func (p *rebuildCallMoves) recordOwnerEdge(e *graph.Edge, admitted bool, order u
 	if err != nil || len(claim) <= 1 {
 		return err
 	}
-	live, err := p.edge(claim[1:])
+	live, err := edge(claim[1:])
 	if err != nil || live == nil {
 		return missing(err)
 	}

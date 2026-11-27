@@ -326,7 +326,7 @@ func (p *rebuildLaravelEventPass) recordEdge(e *graph.Edge, admitted bool, order
 			return err
 		}
 		return invalid("Laravel receipt live edge missing")
-	})
+	}, p.edge)
 }
 
 // joinHandles elects the owner from MemberOf rows, not from a class node or

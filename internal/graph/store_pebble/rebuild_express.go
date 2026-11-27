@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"iter"
@@ -127,10 +128,19 @@ func (p *rebuildExpress) inputKey(live []byte) ([]byte, error) {
 }
 
 func (p *rebuildExpress) captureCalls(ctx context.Context) error {
-	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
+	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
 		kind, err := rebuildAttributionEdgeKind(r.key)
 		if err != nil || kind != graph.EdgeCalls {
 			return err
+		}
+		raw, err := rebuildReceiptKey(snap, r.key)
+		if err != nil && !errors.Is(err, ErrRebuildUnknownProvenance) {
+			return err
+		}
+		if raw != nil {
+			if err := p.claim(raw, r.key); err != nil {
+				return err
+			}
 		}
 		e, err := p.decodeKeyedEdge(r.key, r.value)
 		if err != nil {
@@ -143,13 +153,6 @@ func (p *rebuildExpress) captureCalls(ctx context.Context) error {
 		if err := p.input(r.key, r.value); err != nil {
 			return err
 		}
-		if raw, err := p.inputKey(r.key); err != nil {
-			return err
-		} else if raw != nil {
-			if err := p.claim(raw, r.key); err != nil {
-				return err
-			}
-		}
 		name, suffix := q.convention()
 		for _, name := range p.rules.Names(name, suffix) {
 			if err := p.put(p.key('q', name), nil); err != nil {
@@ -157,6 +160,12 @@ func (p *rebuildExpress) captureCalls(ctx context.Context) error {
 			}
 		}
 		if q.class != "" {
+			if err := p.put(p.key('c', q.class), nil); err != nil {
+				return err
+			}
+			if err := p.put(p.key('v', q.class), nil); err != nil {
+				return err
+			}
 			if err := p.put(p.key('w', q.method), nil); err != nil {
 				return err
 			}
@@ -165,7 +174,11 @@ func (p *rebuildExpress) captureCalls(ctx context.Context) error {
 		if err := p.put(p.key('n', e.From), []byte{rebuildCapabilityWanted}); err != nil {
 			return err
 		}
-		return p.put(append(p.column('h'), r.key...), nil)
+		raw, err = p.inputKey(r.key)
+		if err != nil {
+			return err
+		}
+		return p.put(append(p.column('h'), r.key...), raw)
 	})
 }
 
@@ -173,26 +186,30 @@ func expressMethodKind(kind graph.NodeKind) bool {
 	return kind == graph.KindMethod || kind == graph.KindFunction
 }
 
-func (p *rebuildExpress) nodeRoles(n *graph.Node, candidate, method byte) error {
+func (p *rebuildExpress) nodeRoles(n *graph.Node) (candidate, method bool, err error) {
 	if p.rules.Candidate(n) {
-		needed, err := p.present(p.key('q', n.Name))
+		candidate, err = p.present(p.key('q', n.Name))
 		if err != nil {
-			return err
-		}
-		if needed {
-			if err := p.put(p.key(candidate, n.Name, n.ID), appendKeyString(nil, n.FilePath)); err != nil {
-				return err
-			}
+			return false, false, err
 		}
 	}
-	if !expressMethodKind(n.Kind) {
-		return nil
+	if expressMethodKind(n.Kind) {
+		method, err = p.present(p.key('w', n.Name))
 	}
-	needed, err := p.present(p.key('w', n.Name))
-	if err != nil || !needed {
+	return candidate, method, err
+}
+
+func (p *rebuildExpress) saveCandidate(n *graph.Node, col byte) error {
+	class, err := p.present(p.key('c', n.Name))
+	if err != nil {
 		return err
 	}
-	return p.put(p.key(method, n.ID), keyStrings(nil, n.Name, n.FilePath))
+	if class {
+		if err := p.put(p.key('v', p.rules.SimpleName(n.ID)), nil); err != nil {
+			return err
+		}
+	}
+	return p.put(p.key(col, n.Name, n.ID), appendKeyString(nil, n.FilePath))
 }
 
 func (p *rebuildExpress) captureNodes(ctx context.Context) error {
@@ -201,14 +218,25 @@ func (p *rebuildExpress) captureNodes(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := p.nodeRoles(n, 'a', 'k'); err != nil {
+		candidate, method, err := p.nodeRoles(n)
+		if err != nil || !candidate && !method {
 			return err
 		}
-		if !expressMethodKind(n.Kind) {
+		if err := p.input(r.key, r.value); err != nil {
+			return err
+		}
+		if err := p.put(p.key('f', n.ID), nil); err != nil {
+			return err
+		}
+		if candidate {
+			if err := p.saveCandidate(n, 'a'); err != nil {
+				return err
+			}
+		}
+		if !method {
 			return nil
 		}
-		needed, err := p.present(p.key('k', n.ID))
-		if err != nil || !needed {
+		if err := p.put(p.key('k', n.ID), keyStrings(nil, n.Name, n.FilePath)); err != nil {
 			return err
 		}
 		return p.members(ctx, n.ID, func(r row, _ string) error {
@@ -254,7 +282,8 @@ func (p *rebuildExpress) record(ctx context.Context, receipts iter.Seq2[ParseFac
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if e.Kind == graph.EdgeCalls || e.Kind == graph.EdgeMemberOf {
+			switch e.Kind {
+			case graph.EdgeCalls, graph.EdgeMemberOf:
 				if err := p.recordEdge(e, facts.EffectiveLanguage != "" && e.FilePath == file, order); err != nil {
 					return err
 				}
@@ -266,48 +295,147 @@ func (p *rebuildExpress) record(ctx context.Context, receipts iter.Seq2[ParseFac
 }
 
 func (p *rebuildExpress) recordNode(raw *graph.Node, file, language string) error {
+	if language == "" || raw.FilePath != file {
+		return nil
+	}
 	caller := p.key('n', raw.ID)
 	state, err := rebuildScratchState(p.b.pending, caller, "express caller proof")
 	if err != nil {
 		return err
 	}
-	candidate, err := p.present(p.key('q', raw.Name))
+	candidate, method, err := p.nodeRoles(raw)
 	if err != nil {
 		return err
 	}
-	method, err := p.present(p.key('w', raw.Name))
-	if err != nil || state == 0 && !candidate && !method {
+	potential, err := p.present(p.key('f', raw.ID))
+	if err != nil || state == 0 && !candidate && !method && !potential {
 		return err
 	}
 	live, err := p.storeReceiptNode(raw.ID)
-	if err != nil {
+	if err != nil || live == nil {
 		return err
 	}
-	exact := language != "" && raw.Language != "" && sameRebuildLanguageMarker(raw, live, file)
 	if state != 0 {
-		if err := noteRebuildScratchState(p.put, caller, state, rebuildScratchProofBit(exact)); err != nil {
+		dir := p.rules.Directory(file)
+		if err := p.put(p.key('N', raw.ID), appendKeyString(nil, dir)); err != nil {
+			return err
+		}
+		if err := noteRebuildScratchState(p.put, caller, state, rebuildScratchProofBit(dir == p.rules.Directory(live.FilePath))); err != nil {
 			return err
 		}
 	}
-	if !exact {
+	if !candidate && !method && !potential {
 		return nil
 	}
-	return p.nodeRoles(raw, 'A', 'K')
+	// First and later receipts for the same known ID may contradict each
+	// other even if one copy exactly matches the graph.
+	key := p.key('d', raw.ID)
+	prior, err := p.get(key)
+	if err != nil {
+		return err
+	}
+	var role byte
+	if candidate {
+		role |= 1
+	}
+	if method {
+		role |= 2
+	}
+	shape := []byte{role}
+	if role != 0 {
+		shape = keyStrings(shape, raw.Name, file)
+	}
+	if bytes.Equal(prior, shape) {
+		return nil
+	}
+	if prior != nil {
+		if err := p.put(p.key('D', raw.ID), nil); err != nil {
+			return err
+		}
+		if prior[0]&1 != 0 {
+			oldName, _, err := readKeyString(prior[1:])
+			if err != nil {
+				return err
+			}
+			if err := p.b.pending.Delete(p.key('A', oldName, raw.ID), pebble.NoSync); err != nil {
+				return err
+			}
+		}
+		if prior[0]&2 != 0 && !method {
+			if err := p.b.pending.Delete(p.key('K', raw.ID), pebble.NoSync); err != nil {
+				return err
+			}
+		}
+	}
+	if err := p.put(key, shape); err != nil {
+		return err
+	}
+	if candidate {
+		if err := p.saveCandidate(raw, 'A'); err != nil {
+			return err
+		}
+	}
+	if method {
+		return p.put(p.key('K', raw.ID), keyStrings(nil, raw.Name, file))
+	}
+	return nil
 }
 
-func (p *rebuildExpress) recordEdge(e *graph.Edge, exact bool, order uint64) error {
-	return p.recordOwnerEdge(e, exact, order, func(live *graph.Edge) bool {
-		a, matched := p.query(e)
-		b, ok := p.query(live)
-		return matched && ok && a == b
-	}, p.rules.Owner, 'l', func(err error) error {
+func (p *rebuildExpress) recordEdge(e *graph.Edge, admitted bool, order uint64) error {
+	if e.Kind == graph.EdgeMemberOf {
+		return p.recordOwnerEdge(e, admitted, order, nil, p.rules.Owner, 'l',
+			func(err error) error { return errors.Join(err, invalid("express receipt live edge missing")) },
+			func(key []byte) (*graph.Edge, error) {
+				return pendingGet(p.b.pending, key, func(val []byte) (*graph.Edge, error) {
+					return guardLightEdge(row{key, val})
+				})
+			})
+	}
+	raw := pendingEdgeKey(e)
+	key := append(p.column('r'), raw...)
+	claim, err := p.marked(key)
+	if err != nil || len(claim) <= 1 || claim[0] != rebuildCapabilityWanted {
+		return err
+	}
+	old := claim[1:]
+	owned, err := p.get(append(p.column('h'), old...))
+	if err != nil || !bytes.Equal(owned, raw) {
+		return err
+	}
+	live, err := p.edge(old)
+	if err != nil || live == nil {
 		return errors.Join(err, invalid("express receipt live edge missing"))
-	})
+	}
+	a, matched := p.query(e)
+	b, ok := p.query(live)
+	if !matched || !ok || a != b {
+		if err := p.put(append(p.column('j'), old...), nil); err != nil {
+			return err
+		}
+		admitted = false
+	}
+	// SQLite admits the first duplicate edge key. Once compared, later
+	// receipts cannot silently replace its query or gain a second order slot.
+	if admitted {
+		if err := p.put(binary.BigEndian.AppendUint64(p.column('z'), order), raw); err != nil {
+			return err
+		}
+	}
+	return noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(admitted))
 }
 
 func (p *rebuildExpress) owner(ctx context.Context, id string) (string, bool, bool, error) {
 	var owners rebuildMemberOwners
 	err := p.members(ctx, id, func(r row, candidate string) error {
+		relevant, err := p.present(p.key('v', candidate))
+		if err != nil {
+			return err
+		}
+		if relevant {
+			if err := p.input(r.key, r.value); err != nil {
+				return err
+			}
+		}
 		owners.observe(candidate)
 		raw, err := p.inputKey(r.key)
 		if err != nil {
@@ -349,7 +477,10 @@ func (p *rebuildExpress) joinMembers(ctx context.Context) error {
 			return err
 		}
 		if uncertain {
-			return p.markOwners(ctx, id, name, raw)
+			if err := p.markOwners(ctx, id, 'x', r.value); err != nil {
+				return err
+			}
+			return p.markOwners(ctx, id, 'X', raw)
 		}
 		if class == "" {
 			return nil
@@ -357,14 +488,18 @@ func (p *rebuildExpress) joinMembers(ctx context.Context) error {
 		if err := p.put(p.key('b', class, name, id), appendKeyString(nil, file)); err != nil {
 			return err
 		}
-		if raw == nil || !exact {
+		if raw == nil {
 			return nil
 		}
 		name, file, err = decodeExpressMethod(raw)
 		if err != nil {
 			return err
 		}
-		return p.put(p.key('B', class, name, id), appendKeyString(nil, file))
+		col := byte('B')
+		if !exact {
+			col = 'X'
+		}
+		return p.put(p.key(col, class, name, id), appendKeyString(nil, file))
 	}); err != nil {
 		return err
 	}
@@ -378,34 +513,33 @@ func (p *rebuildExpress) joinMembers(ctx context.Context) error {
 		if err != nil || live {
 			return err
 		}
-		return p.markOwners(ctx, id, "", r.value)
+		return p.markOwners(ctx, id, 'X', r.value)
 	})
 }
 
-func (p *rebuildExpress) markOwners(ctx context.Context, id, liveName string, raw []byte) error {
-	var rawName string
-	if raw != nil {
-		var err error
-		rawName, _, err = decodeExpressMethod(raw)
-		if err != nil {
+func (p *rebuildExpress) markOwners(ctx context.Context, id string, col byte, method []byte) error {
+	if method == nil {
+		return nil
+	}
+	name, file, err := decodeExpressMethod(method)
+	if err != nil {
+		return err
+	}
+	return p.members(ctx, id, func(r row, class string) error {
+		relevant, err := p.present(p.key('v', class))
+		if err != nil || !relevant {
 			return err
 		}
-	}
-	return p.members(ctx, id, func(_ row, class string) error {
-		for _, name := range [...]string{liveName, rawName} {
-			if class != "" && name != "" {
-				if err := p.put(p.key('x', class, name), nil); err != nil {
-					return err
-				}
-			}
+		if err := p.input(r.key, r.value); err != nil {
+			return err
 		}
-		return nil
+		return p.put(p.key(col, class, name, id), appendKeyString(nil, file))
 	})
 }
 
-// Express convention only needs the three singleton tests the native tiers
-// consult. Candidate IDs are unique across the full and suffix-stripped names.
-func (p *rebuildExpress) convention(ctx context.Context, q rebuildExpressQuery, fromDir string, col byte) (string, string, error) {
+// Express tracks the four native convention branches without retaining the
+// candidate lists. IDs are unique across the full and suffix-stripped names.
+func (p *rebuildExpress) convention(ctx context.Context, q rebuildExpressQuery, fromDir string, col byte) (string, string, bool, error) {
 	type choice struct {
 		id, file string
 		count    int
@@ -442,40 +576,53 @@ func (p *rebuildExpress) convention(ctx context.Context, q rebuildExpressQuery, 
 			}
 			return nil
 		}); err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 	}
-	choices := [...]choice{sameDir, all}
-	if preferred.count != 0 {
-		choices = [...]choice{preferred, preferredSameDir}
-	}
-	for _, c := range choices {
-		if c.count == 1 {
-			return c.id, c.file, nil
+	switch preferred.count {
+	case 1:
+		return preferred.id, preferred.file, false, nil
+	case 2:
+		if preferredSameDir.count == 1 {
+			return preferredSameDir.id, preferredSameDir.file, true, nil
+		}
+	default:
+		if all.count == 1 {
+			return all.id, all.file, false, nil
+		}
+		if sameDir.count == 1 {
+			return sameDir.id, sameDir.file, true, nil
 		}
 	}
-	return "", "", nil
+	return "", "", false, nil
+}
+
+type rebuildExpressDecision struct {
+	target, classID, classFile string
+	local                      bool
 }
 
 // Native NodesByKinds reads the union in ascending ID order. In a repeated
 // method bucket the first ID in the chosen class file wins, not a singleton test.
-func (p *rebuildExpress) method(ctx context.Context, class, method, classID, classFile string, col byte) (string, bool, error) {
-	uncertain, err := p.present(p.key('x', class, method))
-	if err != nil || uncertain {
-		return "", uncertain, err
-	}
-	prefix := p.key(col, class, method)
+func (p *rebuildExpress) method(ctx context.Context, class, name, classID, classFile string, col, possible byte) (string, bool, bool, error) {
 	var first, inFile string
 	var count int
-	if err := p.visit(ctx, prefix, func(r row) error {
-		id, rest, err := readKeyString(r.key[len(prefix):])
-		if err != nil || id == "" || len(rest) != 0 {
-			return invalid("express method candidate")
-		}
-		file, rest, err := readKeyString(r.value)
-		if err != nil || len(rest) != 0 {
-			return invalid("express method file")
-		}
+	visit := func(col byte, visit func(id, file string)) error {
+		prefix := p.key(col, class, name)
+		return p.visit(ctx, prefix, func(r row) error {
+			id, rest, err := readKeyString(r.key[len(prefix):])
+			if err != nil || id == "" || len(rest) != 0 {
+				return invalid("express method candidate")
+			}
+			file, rest, err := readKeyString(r.value)
+			if err != nil || len(rest) != 0 {
+				return invalid("express method file")
+			}
+			visit(id, file)
+			return nil
+		})
+	}
+	if err := visit(col, func(id, file string) {
 		if first == "" {
 			first = id
 		}
@@ -483,30 +630,63 @@ func (p *rebuildExpress) method(ctx context.Context, class, method, classID, cla
 			inFile = id
 		}
 		count = min(2, count+1)
-		return nil
 	}); err != nil {
-		return "", false, err
+		return "", false, false, err
+	}
+	var uncertain, hasPossible bool
+	if err := visit(possible, func(id, file string) {
+		hasPossible = true
+		// A possible row only matters if it changes the singleton or the
+		// first matching ID. Adding several losing rows cannot change either.
+		uncertain = uncertain || count == 0 || count == 1 && inFile == "" ||
+			classID != "" && file == classFile && (inFile == "" || id < inFile)
+	}); err != nil {
+		return "", false, false, err
 	}
 	if count == 1 {
-		return first, false, nil
+		// If an unknown owner could add a row, the class-file match is
+		// the witness that a singleton would still win as a repeated pick.
+		return first, hasPossible && inFile != "", uncertain, nil
 	}
-	return inFile, false, nil
+	return inFile, count > 1, uncertain, nil
 }
 
-func (p *rebuildExpress) elect(ctx context.Context, q rebuildExpressQuery, fromDir string, proved bool) (string, bool, error) {
-	byName, byMethod := byte('a'), byte('b')
+func (p *rebuildExpress) elect(ctx context.Context, q rebuildExpressQuery, fromDir string, proved bool) (rebuildExpressDecision, bool, error) {
+	byName, byMethod, possible := byte('a'), byte('b'), byte('x')
 	if proved {
-		byName, byMethod = 'A', 'B'
+		byName, byMethod, possible = 'A', 'B', 'X'
 	}
-	id, file, err := p.convention(ctx, q, fromDir, byName)
+	id, file, local, err := p.convention(ctx, q, fromDir, byName)
 	if err != nil || q.class == "" {
-		return id, false, err
+		return rebuildExpressDecision{target: id, local: local}, false, err
 	}
 	class := q.class
 	if id != "" {
 		class = p.rules.SimpleName(id)
 	}
-	return p.method(ctx, class, q.method, id, file, byMethod)
+	target, repeated, uncertain, err := p.method(ctx, class, q.method, id, file, byMethod, possible)
+	decision := rebuildExpressDecision{target: target}
+	if target != "" && (repeated || class != q.class) {
+		decision.classID, decision.classFile, decision.local = id, file, local
+	}
+	return decision, uncertain, err
+}
+
+func (p *rebuildExpress) callerDirs(id string) (string, string, error) {
+	caller, err := p.storeReceiptNode(id)
+	if err != nil || caller == nil {
+		return "", "", err
+	}
+	live := p.rules.Directory(caller.FilePath)
+	raw, err := p.get(p.key('N', id))
+	if err != nil || raw == nil {
+		return live, live, err
+	}
+	dir, rest, err := readKeyString(raw)
+	if err != nil || len(rest) != 0 {
+		return "", "", invalid("express receipt directory")
+	}
+	return live, dir, nil
 }
 
 func (p *rebuildExpress) plan(ctx context.Context) error {
@@ -518,54 +698,66 @@ func (p *rebuildExpress) plan(ctx context.Context) error {
 		if err != nil || e == nil {
 			return errors.Join(err, invalid("express owned Call missing"))
 		}
-		q, _ := p.query(e)
-		caller, err := p.storeReceiptNode(e.From)
+		var claim []byte
+		if len(r.value) != 0 {
+			claim, err = p.marked(append(p.column('r'), r.value...))
+			if err != nil {
+				return err
+			}
+		}
+		changed, err := p.present(append(p.column('j'), old...))
 		if err != nil {
 			return err
 		}
-		var fromDir string
-		if caller != nil {
-			fromDir = p.rules.Directory(caller.FilePath)
-		}
-		target, uncertain, err := p.elect(ctx, q, fromDir, false)
-		if err != nil {
-			return err
-		}
-		if uncertain {
+		if changed {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil
 		}
-		if target == "" {
-			return nil
-		}
-		proved, uncertain, err := p.elect(ctx, q, fromDir, true)
+		q, _ := p.query(e)
+		liveDir, rawDir, err := p.callerDirs(e.From)
 		if err != nil {
 			return err
 		}
-		exact := target == proved && !uncertain
-		if caller != nil && fromDir != "" {
+		live, liveUncertain, err := p.elect(ctx, q, liveDir, false)
+		if err != nil {
+			return err
+		}
+		proved, rawUncertain, err := p.elect(ctx, q, rawDir, true)
+		if err != nil {
+			return err
+		}
+		if !liveUncertain && !rawUncertain && live.target == "" && proved.target == "" {
+			return nil
+		}
+		exact := live == proved && !liveUncertain && !rawUncertain
+		for _, id := range [...]string{live.classID, live.target} {
+			if id == "" {
+				continue
+			}
+			conflict, err := p.present(p.key('D', id))
+			if err != nil {
+				return err
+			}
+			exact = exact && !conflict
+		}
+		if live.local || proved.local {
+			key := pendingNodeKey(e.From)
+			if _, err := pendingGet(p.b.pending, key, func(val []byte) (bool, error) {
+				return true, p.input(key, val)
+			}); err != nil {
+				return err
+			}
 			state, err := rebuildScratchState(p.b.pending, p.key('n', e.From), "express caller proof")
 			if err != nil {
 				return err
 			}
 			exact = exact && state == rebuildScratchExact
 		}
-		raw, err := p.inputKey(old)
-		if err != nil {
-			return err
-		}
-		var claim []byte
-		if raw != nil {
-			claim, err = p.marked(append(p.column('r'), raw...))
-			if err != nil {
-				return err
-			}
-		}
 		if !exact || len(claim) <= 1 || claim[0] != rebuildScratchExact || !bytes.Equal(claim[1:], old) {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil
 		}
-		if !p.rules.Rebind(e, target) {
+		if !p.rules.Rebind(e, live.target) {
 			return invalid("express elected target did not rebind")
 		}
 		p.stats.Moves++
