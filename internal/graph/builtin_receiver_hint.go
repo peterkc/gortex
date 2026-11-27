@@ -11,7 +11,7 @@ type BuiltinReceiverHint struct {
 }
 
 func (e *Edge) SetBuiltinReceiverHint(h BuiltinReceiverHint) {
-	if e.Kind != EdgeCalls {
+	if e.Kind != EdgeCalls || h.Form == "unknown" {
 		return
 	}
 	if e.Meta == nil {

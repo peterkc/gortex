@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
 )
 
 // metaKeysRestatedOutsideTheFingerprint names every node or edge metadata key
@@ -21,6 +22,13 @@ var metaKeysRestatedOutsideTheFingerprint = map[string]string{
 	// when it binds a call, and no inert verdict touches them.
 	"builtin":      "resolver (go_builtins_attribution: pathless builtin stubs)",
 	"builtin_kind": "resolver (go_builtins_attribution: pathless builtin stubs)",
+	// Rebuild-only raw receiver facts and final settlement, never native edit-delta.
+	"platform_receiver_language": "rebuild receiver capture",
+	"platform_receiver_form":     "rebuild receiver capture",
+	"platform_receiver_family":   "rebuild receiver capture",
+	"platform_receiver_name":     "rebuild receiver capture",
+	"platform_receiver_module":   "rebuild receiver capture",
+	graph.MetaLinkStatus:         "rebuild platform Call settlement",
 	// The body's signature: the clone pass, or the delta's clone carry.
 	"clone_sig": "clone pass (finaliseCloneSignatures) / delta clone carry",
 	// Contract nodes and owner edges: the contract pass of every re-derived file.

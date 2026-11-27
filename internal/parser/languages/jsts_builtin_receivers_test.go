@@ -119,8 +119,13 @@ clean.slice(0);`,
 					copy.Meta = maps.Clone(edge.Meta)
 					copy.SetBuiltinReceiverHint(hint)
 					got, ok := copy.BuiltinReceiverHint()
-					require.True(t, ok)
-					require.Equal(t, hint, got)
+					if hint.Form == "unknown" {
+						require.False(t, ok)
+						require.Equal(t, edge.Meta, copy.Meta)
+					} else {
+						require.True(t, ok)
+						require.Equal(t, hint, got)
+					}
 				}
 				want = append(want, &copy)
 			}

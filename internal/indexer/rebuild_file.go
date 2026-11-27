@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -169,6 +170,33 @@ func possibleRebuildLanguageRefinements(path string) []string {
 	}
 }
 
+// Stamp the native-compatible graph without the rebuild-only receiver facts.
+// The projection shares the nodes (the fingerprint stamps belong on them) but
+// copies hinted edges, so the raw receipt retains the original evidence.
+func stampRebuildExtractionGraphFingerprint(result *parser.ExtractionResult) {
+	projection := parser.ExtractionResult{Nodes: result.Nodes, Edges: result.Edges}
+	copied := false
+	for i, edge := range result.Edges {
+		if edge == nil {
+			continue
+		}
+		if _, ok := edge.BuiltinReceiverHint(); !ok {
+			continue
+		}
+		if !copied {
+			projection.Edges = slices.Clone(result.Edges)
+			copied = true
+		}
+		copy := *edge
+		copy.Meta = maps.Clone(edge.Meta)
+		maps.DeleteFunc(copy.Meta, func(key string, _ any) bool {
+			return strings.HasPrefix(key, "platform_receiver_")
+		})
+		projection.Edges[i] = &copy
+	}
+	stampExtractionGraphFingerprint(&projection)
+}
+
 // extractPreparedRebuildFileWithContractFacts captures portable answers on the
 // file's parse turn. Only the named raw grammar facts can require a raw parse.
 func (idx *Indexer) extractPreparedRebuildFileWithContractFacts(ctx context.Context, rel string, ext parser.Extractor, raw, prepared []byte) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
@@ -204,7 +232,7 @@ func (idx *Indexer) extractPreparedRebuildFileInto(ctx context.Context, rel stri
 		if !extractionDispositionFor(result).omitSecondarySourceScans() {
 			idx.applyCoverageDomains(graphPath, lang, prepared, result)
 		}
-		stampExtractionGraphFingerprint(result)
+		stampRebuildExtractionGraphFingerprint(result)
 		idx.stampContractDependencyInputs(graphPath, lang, prepared, result)
 	}
 	// ParseFacts v2 stores the literal receipt origin in File.FilePath and

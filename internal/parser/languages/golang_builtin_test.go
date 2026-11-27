@@ -54,7 +54,11 @@ func ordinary(xs []int) int {
 			require.Equal(t, "unresolved::len", base.To)
 			want.Meta = maps.Clone(base.Meta)
 			want.SetBuiltinReceiverHint(graph.BuiltinReceiverHint{Language: "go", Form: form, Name: "len"})
-			assert.NotEqual(t, base.Meta, calls[i].Meta, "hint present only when opted in: %s", base.From)
+			if form == "unknown" {
+				assert.Equal(t, base.Meta, calls[i].Meta, "unknown hint must not be stamped: %s", base.From)
+			} else {
+				assert.NotEqual(t, base.Meta, calls[i].Meta, "hint present only when opted in: %s", base.From)
+			}
 		}
 		assert.Equal(t, &want, calls[i])
 	}
