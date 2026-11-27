@@ -212,34 +212,33 @@ func (v RebuildView) VisitEdges(ctx context.Context, yield func(*graph.Edge) err
 	})
 }
 
-// VisitDIContractEdges streams the two edge kinds used by the native DI
-// contract reader, with the source-repository check in the same snapshot.
+// VisitDIContractEdges streams live Provides and Consumes rows whose source
+// is in repo. The edge-kind index is built at seal, not in the working store.
 func (v RebuildView) VisitDIContractEdges(ctx context.Context, repo string, yield func(*graph.Edge) error) error {
-	for _, kind := range [...]graph.EdgeKind{graph.EdgeProvides, graph.EdgeConsumes} {
-		if err := v.visit(ctx, keyStrings([]byte{familyEdge, edgeKind}, string(kind)), func(snap *pebble.Snapshot, r row) error {
-			e, err := pendingGet(snap, r.value, decodeEdge)
-			if err != nil {
-				return err
-			}
-			if e == nil || e.Kind != kind || !bytes.Equal(r.value, pendingEdgeKey(e)) {
-				return invalid("working di contract edge identity")
-			}
-			n, err := pendingGet(snap, pendingNodeKey(e.From), decodeNodeLight)
-			if err != nil || n == nil {
-				return err
-			}
-			if n.ID != e.From {
-				return invalid("working di contract edge source identity")
-			}
-			if n.RepoPrefix != repo {
-				return nil
-			}
-			return yield(e)
-		}); err != nil {
+	return v.visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
+		kind, err := rebuildAttributionEdgeKind(r.key)
+		if err != nil || (kind != graph.EdgeProvides && kind != graph.EdgeConsumes) {
 			return err
 		}
-	}
-	return ctx.Err()
+		e, err := decodeEdge(r.value)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(r.key, pendingEdgeKey(e)) {
+			return invalid("working di contract edge identity")
+		}
+		n, err := pendingGet(snap, pendingNodeKey(e.From), decodeNodeLight)
+		if err != nil || n == nil {
+			return err
+		}
+		if n.ID != e.From {
+			return invalid("working di contract edge source identity")
+		}
+		if n.RepoPrefix != repo {
+			return nil
+		}
+		return yield(e)
+	})
 }
 
 // VisitLinkPendingPages streams the cold resolver frontier from one snapshot

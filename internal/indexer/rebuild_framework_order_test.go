@@ -148,7 +148,10 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 						func(_ string, mode fs.FileMode, _ rebuildGitMember, _ bool) (bool, error) {
 							return mode.IsRegular(), nil
 						}, emit)
-					return err
+					if err != nil {
+						return err
+					}
+					return emit(rebuildGoManifestSidecarRow(rebuildGoManifest{Path: "go.mod"}))
 				})
 				require.NoError(t, err)
 				req.Witness.FrozenInputs = store_pebble.HeadDigest(digest)
@@ -297,7 +300,10 @@ func TestRebuildBuildFrameworkCensusStaysFrozenAfterEvent(t *testing.T) {
 		if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceRegularFact, Path: []byte(file)}); err != nil {
 			return err
 		}
-		return emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")})
+		if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")}); err != nil {
+			return err
+		}
+		return emit(rebuildGoManifestSidecarRow(rebuildGoManifest{Path: "go.mod"}))
 	})
 	require.NoError(t, err)
 	req.Witness.FrozenInputs = store_pebble.HeadDigest(digest)

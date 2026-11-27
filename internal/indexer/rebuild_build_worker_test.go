@@ -223,7 +223,10 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 							return err
 						}
 					}
-					return emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")})
+					if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")}); err != nil {
+						return err
+					}
+					return emit(rebuildGoManifestSidecarRow(rebuildGoManifest{Path: "go.mod"}))
 				})
 				require.NoError(t, err)
 				req.Witness.FrozenInputs = store_pebble.HeadDigest(digest)
