@@ -112,19 +112,23 @@ func (DjangoDescriptorResolver) ResolveBatch(g graph.Store, edges []*graph.Edge)
 		if target == nil {
 			continue
 		}
-		oldTo := edge.To
-		edge.To = target.ID
-		edge.Origin = graph.OriginASTInferred
-		edge.Confidence = 0.7
-		edge.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.7)
-		StampSynthesized(edge, SynthDjangoDescriptor)
-		reindex = append(reindex, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
+		reindex = append(reindex, rebindDjangoDescriptor(edge, target.ID))
 		resolved[edge] = true
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func rebindDjangoDescriptor(edge *graph.Edge, target string) graph.EdgeReindex {
+	oldTo := edge.To
+	edge.To = target
+	edge.Origin = graph.OriginASTInferred
+	edge.Confidence = 0.7
+	edge.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.7)
+	StampSynthesized(edge, SynthDjangoDescriptor)
+	return graph.EdgeReindex{Edge: edge, OldTo: oldTo}
 }
 
 // djangoRefName extracts the bare attribute name from an unresolved target
