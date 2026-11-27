@@ -49,6 +49,10 @@ type rebuildFnPointerStage struct {
 	adds       uint64
 	cProved    bool
 	cOversized bool
+	alternate  bool
+	liveSeeded bool
+	rawSeeded  bool
+	rawMaySeed bool
 }
 
 func rebuildFnPointerStageColumns(b *BuildStore) rebuildCallMoves {
@@ -138,6 +142,9 @@ func (b *BuildStore) RebuildFnPointerStage(ctx context.Context, receipts iter.Se
 	if err := p.capture(ctx); err != nil {
 		return stats, err
 	}
+	if err := p.captureReceiptRoles(ctx, receipts); err != nil {
+		return stats, err
+	}
 	wanted, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('q'))
 	if err != nil || !wanted {
 		return stats, err
@@ -148,8 +155,8 @@ func (b *BuildStore) RebuildFnPointerStage(ctx context.Context, receipts iter.Se
 	if err := p.planRegistrations(ctx); err != nil {
 		return stats, err
 	}
-	seeded, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('y'))
-	if err != nil || !seeded {
+	p.liveSeeded, err = rebuildGuardHasPrefix(ctx, b.pending, p.column('y'))
+	if err != nil {
 		return p.result, err
 	}
 	if err := p.record(ctx, receipts); err != nil {
@@ -158,11 +165,23 @@ func (b *BuildStore) RebuildFnPointerStage(ctx context.Context, receipts iter.Se
 	if err := p.finishRegistrations(ctx); err != nil {
 		return stats, err
 	}
-	if err := p.propagate(ctx); err != nil {
-		return stats, err
+	if p.liveSeeded {
+		if err := p.propagate(ctx, 'X', 'y', 'U'); err != nil {
+			return stats, err
+		}
+	}
+	if p.alternate {
+		if err := p.planReceiptSlots(ctx); err != nil {
+			return stats, err
+		}
 	}
 	if err := p.planDispatch(ctx); err != nil {
 		return stats, err
+	}
+	if p.alternate {
+		if err := p.checkReceiptDispatch(ctx); err != nil {
+			return stats, err
+		}
 	}
 	if err := p.refused.err(); err != nil {
 		return stats, err
@@ -261,25 +280,40 @@ func fnPointerRegistrationCall(e *graph.Edge, name string) rebuildStoreDispatchC
 	return rebuildStoreDispatchCall{group: "fn", member: name, getter: binding}
 }
 
-func (p *rebuildFnPointerStage) planRegistrations(ctx context.Context) error {
-	prefix := p.column('h')
-	if err := p.visit(ctx, prefix, func(r row) error {
-		e, err := p.edge(r.key[len(prefix):])
+func (p *rebuildFnPointerStage) visitRegistrations(ctx context.Context, col byte, visit func([]byte, *graph.Edge) error) error {
+	prefix := p.column(col)
+	return p.visit(ctx, prefix, func(r row) error {
+		old := r.key[len(prefix):]
+		var e *graph.Edge
+		var err error
+		if col == 'A' {
+			e, err = decodeEdge(r.value)
+		} else {
+			e, err = p.edge(old)
+		}
 		if err != nil || e == nil {
 			return errors.Join(err, invalid("function pointer registration missing"))
 		}
-		_, _, name := p.decide.Registration(e)
-		if name == "" {
-			return nil
-		}
-		call := fnPointerRegistrationCall(e, name)
-		pick, err := p.elect(e.From, call, false)
-		if err != nil || !pick.getter {
+		return visit(old, e)
+	})
+}
+
+func (p *rebuildFnPointerStage) planRegistrations(ctx context.Context) error {
+	for _, col := range [...]byte{'h', 'A'} {
+		if err := p.visitRegistrations(ctx, col, func(_ []byte, e *graph.Edge) error {
+			_, _, name := p.decide.Registration(e)
+			if name == "" {
+				return nil
+			}
+			call := fnPointerRegistrationCall(e, name)
+			pick, err := p.elect(e.From, call, false)
+			if err != nil || !pick.getter {
+				return err
+			}
+			return p.want(p.key('b', call.getter))
+		}); err != nil {
 			return err
 		}
-		return p.want(p.key('b', call.getter))
-	}); err != nil {
-		return err
 	}
 	getters, err := rebuildGuardHasPrefix(ctx, p.b.pending, p.column('b'))
 	if err != nil {
@@ -290,46 +324,46 @@ func (p *rebuildFnPointerStage) planRegistrations(ctx context.Context) error {
 			return err
 		}
 	}
-	return p.visit(ctx, prefix, func(r row) error {
-		old := r.key[len(prefix):]
-		e, err := p.edge(old)
-		if err != nil || e == nil {
-			return errors.Join(err, invalid("function pointer registration missing"))
-		}
-		slot, _, name := p.decide.Registration(e)
-		if name == "" {
-			return nil
-		}
-		call := fnPointerRegistrationCall(e, name)
-		pick, err := p.elect(e.From, call, true)
-		if err != nil {
-			return err
-		}
-		if err := p.want(p.key('u', call.group, call.member)); err != nil {
-			return err
-		}
-		if pick.getter {
-			if err := p.want(p.key('v', call.getter)); err != nil {
+	for _, col := range [...]byte{'h', 'A'} {
+		if err := p.visitRegistrations(ctx, col, func(old []byte, e *graph.Edge) error {
+			slot, _, name := p.decide.Registration(e)
+			if name == "" {
+				return nil
+			}
+			call := fnPointerRegistrationCall(e, name)
+			pick, err := p.elect(e.From, call, true)
+			if err != nil {
 				return err
 			}
-		}
-		if pick.caller != nil {
-			if err := p.want(p.key('n', pick.caller.ID)); err != nil {
+			if err := p.want(p.key('u', call.group, call.member)); err != nil {
 				return err
 			}
-		}
-		if err := p.wantCandidateBuckets(pick.buckets); err != nil || pick.target == "" {
+			if pick.getter {
+				if err := p.want(p.key('v', call.getter)); err != nil {
+					return err
+				}
+			}
+			if pick.caller != nil {
+				if err := p.want(p.key('n', pick.caller.ID)); err != nil {
+					return err
+				}
+			}
+			if err := p.wantCandidateBuckets(pick.buckets); err != nil || pick.target == "" || col == 'A' {
+				return err
+			}
+			if err := p.put(p.key('y', slot, pick.target), nil); err != nil {
+				return err
+			}
+			if !p.decide.BindRef(e, pick.target) {
+				return nil
+			}
+			p.result.RefMoves++
+			return p.stage(old, e)
+		}); err != nil {
 			return err
 		}
-		if err := p.put(p.key('y', slot, pick.target), nil); err != nil {
-			return err
-		}
-		if !p.decide.BindRef(e, pick.target) {
-			return nil
-		}
-		p.result.RefMoves++
-		return p.stage(old, e)
-	})
+	}
+	return nil
 }
 
 func (p *rebuildFnPointerStage) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
@@ -494,8 +528,17 @@ func (p *rebuildFnPointerStage) finishRegistrations(ctx context.Context) error {
 					return err
 				}
 			} else if slot != source {
-				if _, err := p.noteDependency(slot, old); err != nil {
+				alt, err := p.present(append(p.column('A'), old...))
+				if err != nil {
 					return err
+				}
+				if !alt {
+					p.alternate = true
+					if name != "" {
+						if _, err := p.noteDependency('U', slot); err != nil {
+							return err
+						}
+					}
 				}
 			}
 		}
@@ -503,22 +546,22 @@ func (p *rebuildFnPointerStage) finishRegistrations(ctx context.Context) error {
 			return nil
 		}
 		tuple := appendKeyLine(p.key('X', e.From, string(e.Kind), e.To, e.FilePath), e.Line)
-		return p.put(tuple, keyStrings(nil, slot, source))
+		return p.put(tuple, keyStrings([]byte{1}, slot, source))
 	})
 }
 
-// Keep one unproved input per slot. Preserve the first exact key for errors.
-func (p *rebuildFnPointerStage) noteDependency(slot string, old []byte) (bool, error) {
-	key := p.key('U', slot)
-	prior, err := p.get(key)
-	if err != nil || prior != nil && bytes.Compare(prior, old) <= 0 {
+// Track reachability of unknown inputs, not their unrelated row identities.
+func (p *rebuildFnPointerStage) noteDependency(col byte, slot string) (bool, error) {
+	key := p.key(col, slot)
+	seen, err := p.present(key)
+	if err != nil || seen {
 		return false, err
 	}
-	return true, p.put(key, old)
+	return true, p.put(key, nil)
 }
 
-func (p *rebuildFnPointerStage) members(ctx context.Context, slot string, visit func(string) error) error {
-	prefix := p.key('y', slot)
+func (p *rebuildFnPointerStage) members(ctx context.Context, col byte, slot string, visit func(string) error) error {
+	prefix := p.key(col, slot)
 	return p.visit(ctx, prefix, func(r row) error {
 		id, rest, err := readKeyString(r.key[len(prefix):])
 		if err != nil || id == "" || len(rest) != 0 {
@@ -528,12 +571,15 @@ func (p *rebuildFnPointerStage) members(ctx context.Context, slot string, visit 
 	})
 }
 
-func (p *rebuildFnPointerStage) propagate(ctx context.Context) error {
+func (p *rebuildFnPointerStage) propagate(ctx context.Context, copies, members, unknown byte) error {
 	live := true
 	for range p.decide.Sweeps {
 		changed, proofChanged := false, false
-		err := p.visit(ctx, p.column('X'), func(r row) error {
-			to, rest, err := readKeyString(r.value)
+		err := p.visit(ctx, p.column(copies), func(r row) error {
+			if len(r.value) == 0 || r.value[0] > 1 {
+				return invalid("function pointer copy proof")
+			}
+			to, rest, err := readKeyString(r.value[1:])
 			if err != nil {
 				return err
 			}
@@ -541,22 +587,40 @@ func (p *rebuildFnPointerStage) propagate(ctx context.Context) error {
 			if err != nil || len(rest) != 0 {
 				return invalid("function pointer copy tuple")
 			}
-			input, err := p.get(p.key('U', from))
+			unknownInput, err := p.present(p.key(unknown, from))
 			if err != nil {
 				return err
 			}
-			if input != nil {
-				changedSlot, err := p.noteDependency(to, input)
+			exact := r.value[0] != 0
+			if unknownInput {
+				changedSlot, err := p.noteDependency(unknown, to)
 				if err != nil {
 					return err
 				}
 				proofChanged = proofChanged || changedSlot
 			}
+			if members == 'Y' {
+				possible := func(id string) error {
+					key := p.key('T', to, id)
+					seen, err := p.present(key)
+					if err != nil || seen {
+						return err
+					}
+					proofChanged = true
+					return p.put(key, nil)
+				}
+				if err := p.members(ctx, 'T', from, possible); err != nil {
+					return err
+				}
+				if !exact {
+					return p.members(ctx, members, from, possible)
+				}
+			}
 			if !live {
 				return nil
 			}
-			return p.members(ctx, from, func(id string) error {
-				key := p.key('y', to, id)
+			return p.members(ctx, members, from, func(id string) error {
+				key := p.key(members, to, id)
 				seen, err := p.present(key)
 				if err != nil || seen {
 					return err
@@ -569,7 +633,9 @@ func (p *rebuildFnPointerStage) propagate(ctx context.Context) error {
 			return err
 		}
 		if live {
-			p.result.Sweeps++
+			if members == 'y' {
+				p.result.Sweeps++
+			}
 			live = changed
 		}
 		// Proof can still move during unused sweeps if an unproved
@@ -581,9 +647,9 @@ func (p *rebuildFnPointerStage) propagate(ctx context.Context) error {
 	return nil
 }
 
-func (p *rebuildFnPointerStage) dispatchTargets(ctx context.Context, st, field string) ([]string, error) {
+func (p *rebuildFnPointerStage) dispatchTargets(ctx context.Context, col byte, st, field string) ([]string, error) {
 	var ids []string
-	err := p.members(ctx, st+"\x00"+field, func(id string) error {
+	err := p.members(ctx, col, st+"\x00"+field, func(id string) error {
 		if len(ids) < p.decide.Cap {
 			ids = append(ids, id)
 		}
@@ -593,6 +659,9 @@ func (p *rebuildFnPointerStage) dispatchTargets(ctx context.Context, st, field s
 }
 
 func (p *rebuildFnPointerStage) planDispatch(ctx context.Context) error {
+	if !p.liveSeeded {
+		return nil
+	}
 	prefix := p.calls.column('h')
 	if err := p.visit(ctx, prefix, func(r row) error {
 		old := r.key[len(prefix):]
@@ -601,7 +670,7 @@ func (p *rebuildFnPointerStage) planDispatch(ctx context.Context) error {
 			return errors.Join(err, invalid("function pointer call missing"))
 		}
 		st, field, _ := p.decide.Dispatch(e)
-		ids, err := p.dispatchTargets(ctx, st, field)
+		ids, err := p.dispatchTargets(ctx, 'y', st, field)
 		if err != nil {
 			return err
 		}
@@ -664,27 +733,13 @@ func (p *rebuildFnPointerStage) checkDispatchRefusals(ctx context.Context) error
 			return errors.Join(err, invalid("function pointer call missing"))
 		}
 		st, field, _ := p.decide.Dispatch(e)
-		ids, err := p.dispatchTargets(ctx, st, field)
+		ids, err := p.dispatchTargets(ctx, 'y', st, field)
 		if err != nil || len(ids) <= 1 {
 			return err
 		}
 		for _, target := range ids[1:] {
 			e.To = target
-			key := pendingEdgeKey(e)
-			occupied, err := p.calls.present(key)
-			if err != nil {
-				return err
-			}
-			if occupied {
-				vacated, err := p.calls.present(append(p.calls.column('m'), key...))
-				if err != nil {
-					return err
-				}
-				if !vacated {
-					continue
-				}
-			}
-			if err := p.refuseOutput(e); err != nil {
+			if err := p.refuseFanout(e); err != nil {
 				return err
 			}
 		}
@@ -727,7 +782,7 @@ func (p *rebuildFnPointerStage) orderDispatch(ctx context.Context) error {
 			return errors.Join(err, invalid("function pointer fanout source missing"))
 		}
 		st, field, _ := p.decide.Dispatch(e)
-		ids, err := p.dispatchTargets(ctx, st, field)
+		ids, err := p.dispatchTargets(ctx, 'y', st, field)
 		if err != nil {
 			return err
 		}
