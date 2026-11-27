@@ -223,19 +223,8 @@ func isTypeNodeKind(k graph.NodeKind) bool {
 // return reports whether a conformance hop was needed.
 func resolveMemberByTypeConformant(g factoryChainLookup, typeName, member string) (string, bool) {
 	if typeName != "" && member != "" {
-		role := func(n *graph.Node) bool { return factoryChainMethodRole(n, typeName, true) }
-		var direct string
-		for _, n := range g.nodes(member, role) {
-			if !role(n) {
-				continue
-			}
-			if direct != "" && direct != n.ID {
-				direct = ""
-				break
-			}
-			direct = n.ID
-		}
-		if direct != "" {
+		role := func(n *graph.Node) bool { return n != nil && n.Kind == graph.KindMethod && factoryChainMethodRole(n, typeName) }
+		if direct := uniqueMemberByType(g.nodes(member, role), typeName); direct != "" {
 			return direct, false
 		}
 	}
@@ -282,7 +271,7 @@ func findMethodNodeConformant(g factoryChainLookup, typeName, member string) (*g
 // Meta["receiver"] is typeName, or nil when none or more than one exists.
 func findMethodNodeByType(g factoryChainLookup, typeName, member string) *graph.Node {
 	var match *graph.Node
-	role := func(n *graph.Node) bool { return factoryChainMethodRole(n, typeName, false) }
+	role := func(n *graph.Node) bool { return factoryChainMethodRole(n, typeName) }
 	for _, n := range g.nodes(member, role) {
 		if !role(n) {
 			continue
@@ -295,8 +284,8 @@ func findMethodNodeByType(g factoryChainLookup, typeName, member string) *graph.
 	return match
 }
 
-func factoryChainMethodRole(n *graph.Node, typeName string, direct bool) bool {
-	if n == nil || n.Kind != graph.KindMethod && (direct || n.Kind != graph.KindFunction) {
+func factoryChainMethodRole(n *graph.Node, typeName string) bool {
+	if n == nil || n.Kind != graph.KindMethod && n.Kind != graph.KindFunction {
 		return false
 	}
 	recv, _ := n.Meta["receiver"].(string)

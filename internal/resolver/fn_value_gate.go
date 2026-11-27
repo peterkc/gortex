@@ -452,21 +452,18 @@ func isFileLocalLinkage(n *graph.Node) bool {
 	return v
 }
 
-// resolveMemberByType binds member to a uniquely-named method of typeName
-// (matched via Meta["receiver"]), or "" when none or more than one matches.
-// Shared scope rule for `Foo::bar`-style references and self-member resolution.
-func resolveMemberByType(g graph.Store, typeName, member string) string {
-	return resolveMemberByTypeMemo(g, typeName, member, nil)
-}
-
-// resolveMemberByTypeMemo is resolveMemberByType with a shared per-pass
-// FindNodesByName memo (nil disables memoization).
+// resolveMemberByTypeMemo finds a unique method of typeName by receiver.
+// A nil memo disables memoization.
 func resolveMemberByTypeMemo(g graph.Store, typeName, member string, memo map[string][]*graph.Node) string {
 	if typeName == "" || member == "" {
 		return ""
 	}
+	return uniqueMemberByType(findNodesByNameMemo(g, member, memo), typeName)
+}
+
+func uniqueMemberByType(nodes []*graph.Node, typeName string) string {
 	match := ""
-	for _, n := range findNodesByNameMemo(g, member, memo) {
+	for _, n := range nodes {
 		if n == nil || n.Kind != graph.KindMethod {
 			continue
 		}

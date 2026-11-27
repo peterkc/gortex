@@ -108,3 +108,19 @@ func TestResolveFactoryChains_DoesNotOverrideResolved(t *testing.T) {
 	assert.Equal(t, 0, ResolveFactoryChains(g))
 	assert.Equal(t, "lsp.go::Other.Run", e.To, "resolved edge is not overridden")
 }
+
+func TestResolveFactoryChains_DirectTargetMustBeMethod(t *testing.T) {
+	g := graph.New()
+	g.AddNode(fn("make.go::New", "New", "make.go", "Widget"))
+	n := method("widget.go::Run", "Run", "widget.go", "Widget", "")
+	n.Kind = graph.KindFunction
+	g.AddNode(n)
+	e := &graph.Edge{
+		From: "main.go::main", To: "unresolved::*.Run", Kind: graph.EdgeCalls,
+		FilePath: "main.go", Meta: map[string]any{"receiver_expr": "New()"},
+	}
+	g.AddEdge(e)
+
+	assert.Zero(t, ResolveFactoryChains(g))
+	assert.Equal(t, "unresolved::*.Run", e.To)
+}

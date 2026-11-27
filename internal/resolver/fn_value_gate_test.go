@@ -257,7 +257,7 @@ func TestResolveMemberByType(t *testing.T) {
 	g := graph.New()
 	g.AddNode(&graph.Node{ID: "a::Foo.m", Kind: graph.KindMethod, Name: "m", Meta: map[string]any{"receiver": "Foo"}})
 	g.AddNode(&graph.Node{ID: "a::Bar.m", Kind: graph.KindMethod, Name: "m", Meta: map[string]any{"receiver": "Bar"}})
-	assert.Equal(t, "a::Foo.m", resolveMemberByType(g, "Foo", "m"))
-	assert.Equal(t, "a::Bar.m", resolveMemberByType(g, "Bar", "m"))
-	assert.Equal(t, "", resolveMemberByType(g, "Baz", "m"), "unknown type does not bind")
+	assert.Equal(t, "a::Foo.m", resolveMemberByTypeMemo(g, "Foo", "m", nil))
+	assert.Equal(t, "a::Bar.m", resolveMemberByTypeMemo(g, "Bar", "m", nil))
+	assert.Equal(t, "", resolveMemberByTypeMemo(g, "Baz", "m", nil), "unknown type does not bind")
 }
