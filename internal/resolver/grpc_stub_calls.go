@@ -121,42 +121,44 @@ func resolveGRPCStubCalls(g graph.Store, cands *frameworkPassCandidates) int {
 		}
 		handlerID, origin, conf := idx.lookup(s.service, s.method, callerRepo)
 
-		want := handlerID
-		if want == "" {
-			want = grpcStubPlaceholder(s.service, s.method)
-		}
-		if e.To == want {
-			if handlerID != "" {
-				resolved++
-			}
-			continue
-		}
-
-		oldTo := e.To
-		e.To = want
 		if handlerID != "" {
-			e.Origin = origin
-			e.Confidence = conf
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, conf)
-			e.Meta["grpc_resolution"] = origin
-			StampSynthesized(e, SynthGRPCStub)
 			resolved++
-		} else {
-			// Re-orphaned (handler removed since the last pass): drop the
-			// resolution-tier metadata so the edge reads as a plain
-			// unresolved placeholder again.
-			e.Origin = ""
-			e.Confidence = 0
-			e.ConfidenceLabel = ""
-			delete(e.Meta, "grpc_resolution")
-			UnstampSynthesized(e)
 		}
-		reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		oldTo := e.To
+		if rebindGRPCStub(e, s.service, s.method, handlerID, origin, conf) {
+			reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		}
 	}
 	if len(reindexBatch) > 0 {
 		g.ReindexEdges(reindexBatch)
 	}
 	return resolved
+}
+
+func rebindGRPCStub(e *graph.Edge, service, method, handler, origin string, confidence float64) bool {
+	want := handler
+	if want == "" {
+		want = grpcStubPlaceholder(service, method)
+	}
+	if e.To == want {
+		return false
+	}
+	e.To = want
+	if handler != "" {
+		e.Origin = origin
+		e.Confidence = confidence
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, confidence)
+		e.Meta["grpc_resolution"] = origin
+		StampSynthesized(e, SynthGRPCStub)
+	} else {
+		// Reset to a plain placeholder when the prior handler vanishes.
+		e.Origin = ""
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		delete(e.Meta, "grpc_resolution")
+		UnstampSynthesized(e)
+	}
+	return true
 }
 
 // grpcStubPlaceholder is the canonical placeholder target for an
