@@ -39,6 +39,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Expo module bridge", "edges", 1},
 		{"Fabric", "edges", 2},
 		{"MyBatis", "moves", 1},
+		{"SQL callsite", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name  string
@@ -63,6 +64,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				ProvidersOff: true,
 				Recipes: map[string]rebuildDigest{
 					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1}, "kotlin": {1}, "mybatis": {1},
+					"sql": {1},
 				},
 				Policy:  freezeRebuildParsePolicy(root, cfg),
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
@@ -275,6 +277,98 @@ func TestRebuildBuildFrameworkCensusStaysFrozenAfterEvent(t *testing.T) {
 	require.Empty(t, logs.FilterMessage("rebuild Flutter setState applied to private build").All())
 }
 
+func TestRebuildSQLCallsiteFrozenGate(t *testing.T) {
+	configured, err := resolver.NewFrameworkSynthesizerSelection([]string{resolver.SynthSQLCallsite})
+	require.NoError(t, err)
+	disabled, err := resolver.NewFrameworkSynthesizerSelection([]string{})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name     string
+		late     string
+		sqlKind  graph.NodeKind
+		selected bool
+		wantMove bool
+	}{
+		{name: "python alone satisfies the caller group", sqlKind: graph.KindFunction, selected: true, wantMove: true},
+		{name: "SQL absent at freeze", late: "sql", sqlKind: graph.KindFunction, selected: true},
+		{name: "caller group absent at freeze", late: "python", sqlKind: graph.KindFunction, selected: true},
+		{name: "disabled", sqlKind: graph.KindFunction},
+		{name: "SQL language but no function", sqlKind: graph.KindType, selected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, b.Close()) })
+			const name = "load_calendar"
+			sql := &graph.Node{ID: "calendar.sql::" + name, FilePath: "calendar.sql", Language: "sql", Kind: tc.sqlKind, Name: name}
+			caller := &graph.Node{ID: "calendar.py::load", FilePath: "calendar.py", Language: "python", Kind: graph.KindFunction, Name: "load"}
+			call := &graph.Edge{From: caller.ID, To: "unresolved::sqlfn::" + name, FilePath: caller.FilePath, Kind: graph.EdgeCalls, Line: 2,
+				Meta: map[string]any{"via": "sql.callsite", "sql_function": name}}
+			facts := []store_pebble.ParseFacts{
+				{EffectiveLanguage: "sql", File: graph.FileMetaRow{FilePath: sql.FilePath, NodeCount: 1}, Nodes: []*graph.Node{sql}},
+				{EffectiveLanguage: "python", File: graph.FileMetaRow{FilePath: caller.FilePath, NodeCount: 1}, Nodes: []*graph.Node{caller}, Edges: []*graph.Edge{call}},
+			}
+			for _, f := range facts {
+				if f.EffectiveLanguage != tc.late {
+					require.NoError(t, b.AddParsedFile("repo", f))
+				}
+			}
+			selection := disabled
+			if tc.selected {
+				selection = configured
+			}
+			frozen, err := resolver.FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
+			require.NoError(t, err)
+			if !tc.selected || tc.late != "" {
+				require.Equal(t, disabled, frozen)
+			} else {
+				require.Equal(t, configured, frozen)
+			}
+			if tc.late != "" {
+				for _, f := range facts {
+					if f.EffectiveLanguage == tc.late {
+						require.NoError(t, b.AddParsedFile("repo", f))
+					}
+				}
+				late, err := resolver.FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
+				require.NoError(t, err)
+				require.Equal(t, configured, late, "a live recheck would admit SQL callsites")
+			}
+			readCalls := func() []*graph.Edge {
+				var calls []*graph.Edge
+				require.NoError(t, b.RebuildView().VisitEdges(ctx, func(e *graph.Edge) error {
+					calls = append(calls, e)
+					return nil
+				}))
+				return calls
+			}
+			before := readCalls()
+			require.Len(t, before, 1)
+			require.Equal(t, call.To, before[0].To)
+			stats, err := resolver.RunRebuildSQLCallsites(ctx, b, func(yield func(store_pebble.ParseFacts, error) bool) {
+				require.True(t, tc.wantMove, "unchanged SQL callsites must not replay receipts")
+				for _, f := range facts {
+					if !yield(f, nil) {
+						return
+					}
+				}
+			}, frozen)
+			require.NoError(t, err)
+			after := readCalls()
+			if tc.wantMove {
+				require.Equal(t, store_pebble.RebuildSQLCallsiteStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+				require.Len(t, after, 1)
+				require.Equal(t, sql.ID, after[0].To)
+				require.Equal(t, resolver.SynthSQLCallsite, after[0].Meta[resolver.MetaSynthesizedBy])
+			} else {
+				require.Zero(t, stats)
+				require.Equal(t, before, after)
+			}
+		})
+	}
+}
+
 func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	node := func(file, lang, name string, kind graph.NodeKind, line int) *graph.Node {
 		return &graph.Node{
@@ -323,6 +417,8 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	manager.Meta = map[string]any{"fabric_component": "RCTClockView", "fabric_native": "java"}
 
 	const app, ts = "app.ts", "typescript"
+	const sqlFunction = "load_calendar"
+	sql := node("calendar.sql", "sql", sqlFunction, graph.KindFunction, 1)
 	setup := node(app, ts, "setup", graph.KindFunction, 2)
 	subscribe := node(app, ts, "subscribe", graph.KindMethod, 6)
 	notify := node(app, ts, "notify", graph.KindMethod, 9)
@@ -345,6 +441,8 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		edge(setup, callback.ID, graph.EdgeReferences, 3, nil),
 		edge(show, "unresolved::rn::"+module+"::"+method, graph.EdgeCalls, 21,
 			map[string]any{"via": "rn.native", "rn_module": module, "rn_method": method}),
+		edge(show, "unresolved::sqlfn::"+sqlFunction, graph.EdgeCalls, 22,
+			map[string]any{"via": "sql.callsite", "sql_function": sqlFunction}),
 	)
 
 	const rpc = "rpc.go"
@@ -410,5 +508,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		appFacts, grpcFacts, widgetFacts, temporalFacts,
 		receipt([]*graph.Node{expect}),
 		receipt([]*graph.Node{actual}),
+		receipt([]*graph.Node{sql}),
 	}
 }

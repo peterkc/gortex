@@ -149,8 +149,14 @@ func receiveRebuildStages(
 			if (cause == store_pebble.ErrRebuildMyBatisOrder) != (r.MyBatisOrder > 0) {
 				return fmt.Errorf("%w: invalid MyBatis move order count", errRebuildBuildWire)
 			}
+			if (cause == store_pebble.ErrRebuildSQLCallsiteOrder) != (r.SQLCallsiteOrder > 0) {
+				return fmt.Errorf("%w: invalid SQL callsite move order count", errRebuildBuildWire)
+			}
 			if r.MyBatisOrder != 0 {
 				return fmt.Errorf("%w: %w: mybatis_order=%d: %s", ErrRebuildWorker, cause, r.MyBatisOrder, r.Detail)
+			}
+			if r.SQLCallsiteOrder != 0 {
+				return fmt.Errorf("%w: %w: sql_callsite_order=%d: %s", ErrRebuildWorker, cause, r.SQLCallsiteOrder, r.Detail)
 			}
 			if r.AttributionChains != 0 {
 				return fmt.Errorf("%w: %w: attribution_chains=%d: %s", ErrRebuildWorker, cause, r.AttributionChains, r.Detail)
@@ -168,6 +174,9 @@ func receiveRebuildStages(
 		}
 		if r.MyBatisOrder != 0 {
 			return fmt.Errorf("%w: MyBatis move order count on a stage offer", errRebuildBuildWire)
+		}
+		if r.SQLCallsiteOrder != 0 {
+			return fmt.Errorf("%w: SQL callsite move order count on a stage offer", errRebuildBuildWire)
 		}
 		if next > store_pebble.StageSearch || r.Witness.Stage != next {
 			return fmt.Errorf("%w: expected %s, got %s", store_pebble.ErrStageOrder, next, r.Witness.Stage)
@@ -554,6 +563,15 @@ func buildRebuildStages(
 			logger.Info("rebuild MyBatis applied to private build",
 				zap.Uint64("stubs", mybatis.Stubs), zap.Uint64("resolved", mybatis.Resolved),
 				zap.Uint64("moves", mybatis.Moves))
+		}
+		sqlCallsite, err := resolver.RunRebuildSQLCallsites(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if sqlCallsite.Stubs != 0 {
+			logger.Info("rebuild SQL callsite applied to private build",
+				zap.Uint64("stubs", sqlCallsite.Stubs), zap.Uint64("resolved", sqlCallsite.Resolved),
+				zap.Uint64("moves", sqlCallsite.Moves))
 		}
 	}
 	// The supported tails only changed private scratch. Relation projection
