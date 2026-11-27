@@ -512,8 +512,11 @@ func (p *rebuildObjectRegistryPass) recordNode(ctx context.Context, raw *graph.N
 	if err != nil {
 		return err
 	}
-	getter, err := p.get(getterKey)
-	if err != nil || (caller == 0 && candidate == nil && getter == nil) {
+	var wanted, files []byte
+	if rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name) {
+		wanted, files = p.key('v', raw.Name), p.key('t', raw.Name)
+	}
+	if err := p.recordStoreGetter(getterKey, wanted, files, raw, file, lang); err != nil || (caller == 0 && candidate == nil) {
 		return err
 	}
 	live, err := p.node(raw.ID)
@@ -552,20 +555,7 @@ func (p *rebuildObjectRegistryPass) recordNode(ctx context.Context, raw *graph.N
 			return err
 		}
 	}
-	if getter == nil {
-		return nil
-	}
-	state, err := p.state(getter[1:])
-	if err != nil || state == 0 {
-		return err
-	}
-	role := rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name) && bytes.Equal(getter[1:], p.key('v', raw.Name))
-	if role {
-		if err := p.noteGetterFileChange(getter[1:], state, raw, live, file, lang); err != nil {
-			return err
-		}
-	}
-	return noteRebuildScratchPayload(p.put, getterKey, getter, rebuildScratchProofBit(admitted && role && raw.FilePath == live.FilePath))
+	return nil
 }
 
 func (p *rebuildObjectRegistryPass) noteCandidateChange(cohort []byte, raw, live *graph.Node) error {

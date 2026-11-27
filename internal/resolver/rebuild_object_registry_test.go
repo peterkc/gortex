@@ -521,7 +521,7 @@ func TestRebuildObjectRegistryGetterProof(t *testing.T) {
 	remoteFacts := rebuildEventFacts(remote, "javascript", []*graph.Node{peer}, other)
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
 	require.NoError(t, err)
-	for _, mode := range []string{"undeciding", "winner", "moved", "same as caller"} {
+	for _, mode := range []string{"undeciding", "winner", "moved", "same as caller", "receipt-only getter", "unused receipt-only getter"} {
 		t.Run(mode, func(t *testing.T) {
 			getter := &graph.Node{ID: "useStore", Name: "useStore", Kind: graph.KindVariable, FilePath: absent, Language: "javascript"}
 			input := []store_pebble.ParseFacts{facts, remoteFacts}
@@ -532,6 +532,17 @@ func TestRebuildObjectRegistryGetterProof(t *testing.T) {
 				decl.Nodes = []*graph.Node{peer, getter}
 				decl.File.NodeCount = len(decl.Nodes)
 				input[1] = decl
+			case "receipt-only getter", "unused receipt-only getter":
+				getter.Kind = graph.KindMethod
+				if mode == "receipt-only getter" {
+					getter.FilePath = remote
+					decl := remoteFacts
+					decl.Nodes = []*graph.Node{peer, getter}
+					decl.File.NodeCount = len(decl.Nodes)
+					input[1] = decl
+				} else {
+					input = append(input, rebuildEventFacts(absent, "javascript", []*graph.Node{getter}))
+				}
 			case "same as caller":
 				getter.FilePath = file
 				decl := facts
@@ -547,10 +558,18 @@ func TestRebuildObjectRegistryGetterProof(t *testing.T) {
 				raw.FilePath = remote
 				proof = append(proof, rebuildEventFacts(remote, "javascript", []*graph.Node{&raw}))
 			}
+			if mode == "receipt-only getter" || mode == "unused receipt-only getter" {
+				raw := *getter
+				raw.Kind = graph.KindVariable
+				if mode == "unused receipt-only getter" {
+					raw.Name = "useOtherStore"
+				}
+				proof = append(proof, rebuildEventFacts(raw.FilePath, "javascript", []*graph.Node{&raw}))
+			}
 			private := openRebuildGRPCBuild(t, input...)
 			before := rebuildEventSavedRows(t, private)
 			stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(proof...), selection)
-			if mode == "winner" || mode == "moved" {
+			if mode == "winner" || mode == "moved" || mode == "receipt-only getter" {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, private))
