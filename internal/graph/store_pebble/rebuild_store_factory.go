@@ -73,9 +73,6 @@ func (b *BuildStore) RebuildStoreFactory(ctx context.Context, receipts iter.Seq2
 	if err != nil || !haveActions {
 		return stats, err
 	}
-	if err := p.collectGetters(ctx); err != nil {
-		return stats, err
-	}
 	if err := p.plan(ctx); err != nil || p.stats.Moves == 0 {
 		return p.stats, err
 	}
@@ -86,10 +83,10 @@ func (b *BuildStore) RebuildStoreFactory(ctx context.Context, receipts iter.Seq2
 	return p.stats, err
 }
 
-// b: binding has an action; c/g: action/getter proof with affected key by ID.
+// b: needed getter bindings; c/g: action/getter proof with affected key by ID.
 // a/w: global/workspace action singleton; f/s: their file singletons.
 // t: live getter files, x: exact getter files. u/v: affected action/getter proof.
-// n: affected caller proof; p: election witnesses; r: raw-key claims;
+// l: deferred Calls; n: affected caller proof; p: election witnesses; r: raw-key claims;
 // m: new payload by old key; o: raw receipt key in move order.
 func rebuildStoreFactoryKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildStoreFactoryPrefix), col), fields...)
@@ -156,9 +153,6 @@ func (p *rebuildStoreFactoryPass) collect(ctx context.Context) (bool, error) {
 			return err
 		}
 		haveActions = true
-		if err := p.put(rebuildStoreFactoryKey('b', binding), nil); err != nil {
-			return err
-		}
 		cohort := rebuildStoreFactoryKey('u', binding, member)
 		if err := p.put(rebuildStoreFactoryKey('c', n.ID), append([]byte{rebuildCapabilityWanted}, cohort...)); err != nil {
 			return err
@@ -226,7 +220,7 @@ type rebuildStoreFactoryElection struct {
 	getter bool // the filtered cohort needs the getter/fallback decision
 }
 
-func (p *rebuildStoreFactoryPass) elect(from, binding, member string) (pick rebuildStoreFactoryElection, err error) {
+func (p *rebuildStoreFactoryPass) elect(from, binding, member string, resolveGetter bool) (pick rebuildStoreFactoryElection, err error) {
 	scoped := rebuildStoreFactoryKey('a', binding, member)
 	id, seen, err := p.unique(scoped)
 	pick.seen = seen
@@ -250,6 +244,10 @@ func (p *rebuildStoreFactoryPass) elect(from, binding, member string) (pick rebu
 		}
 		callerFile = pick.caller.FilePath
 	}
+	if !resolveGetter && seen && id == "" {
+		pick.getter = true
+		return pick, nil
+	}
 	pick.rebuildStoreCandidatePick, err = pickRebuildStoreCandidate(p.unique, scoped, id, seen, func() (string, error) {
 		pick.getter = true
 		file, _, err := p.unique(rebuildStoreFactoryKey('t', binding))
@@ -264,7 +262,8 @@ func (p *rebuildStoreFactoryPass) elect(from, binding, member string) (pick rebu
 }
 
 func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
-	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
+	deferred := false
+	if err := p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
 		kind, err := rebuildAttributionEdgeKind(r.key)
 		if err != nil || kind != graph.EdgeCalls {
 			return err
@@ -293,43 +292,77 @@ func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
 				return err
 			}
 		}
-		pick, err := p.elect(e.From, binding, member)
+		pick, err := p.elect(e.From, binding, member, false)
 		if err != nil {
 			return err
 		}
-		if pick.target != "" {
-			p.stats.Resolved++
+		if !pick.getter {
+			return p.planCall(r.key, e, binding, member, pick)
 		}
-		if !p.rules.Rebind(e, member, pick.target, pick.target != "") {
-			return nil
-		}
-		if pick.seen {
-			if err := p.want(rebuildStoreFactoryKey('u', binding, member)); err != nil {
-				return err
-			}
-		}
-		if !pick.nonempty {
-			p.needsAnchor = true
-		}
-		if pick.getter {
-			if err := p.want(rebuildStoreFactoryKey('v', binding)); err != nil {
-				return err
-			}
-		}
-		if pick.caller != nil {
-			if err := p.want(rebuildStoreFactoryKey('n', pick.caller.ID)); err != nil {
-				return err
-			}
-		}
-		if err := p.wantCandidateBuckets(pick.buckets); err != nil {
+		// Only a many-candidate scoped election consults the getter.
+		deferred = true
+		if err := p.put(rebuildStoreFactoryKey('b', binding), nil); err != nil {
 			return err
 		}
-		if err := p.stage(r.key, e); err != nil {
+		return p.put(append(rebuildStoreFactoryKey('l'), r.key...), nil)
+	}); err != nil || !deferred {
+		return err
+	}
+	if err := p.collectGetters(ctx); err != nil {
+		return err
+	}
+	prefix := rebuildStoreFactoryKey('l')
+	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		old := r.key[len(prefix):]
+		e, err := p.edge(old)
+		if err != nil {
 			return err
 		}
-		p.stats.Moves++
-		return nil
+		if e == nil {
+			return invalid("Store Factory deferred Call missing")
+		}
+		binding, member := p.rules.Stub(e)
+		pick, err := p.elect(e.From, binding, member, true)
+		if err != nil {
+			return err
+		}
+		return p.planCall(old, e, binding, member, pick)
 	})
+}
+
+func (p *rebuildStoreFactoryPass) planCall(old []byte, e *graph.Edge, binding, member string, pick rebuildStoreFactoryElection) error {
+	if pick.target != "" {
+		p.stats.Resolved++
+	}
+	if !p.rules.Rebind(e, member, pick.target, pick.target != "") {
+		return nil
+	}
+	if pick.seen {
+		if err := p.want(rebuildStoreFactoryKey('u', binding, member)); err != nil {
+			return err
+		}
+	}
+	if !pick.nonempty {
+		p.needsAnchor = true
+	}
+	if pick.getter {
+		if err := p.want(rebuildStoreFactoryKey('v', binding)); err != nil {
+			return err
+		}
+	}
+	if pick.caller != nil {
+		if err := p.want(rebuildStoreFactoryKey('n', pick.caller.ID)); err != nil {
+			return err
+		}
+	}
+	if err := p.wantCandidateBuckets(pick.buckets); err != nil {
+		return err
+	}
+	if err := p.stage(old, e); err != nil {
+		return err
+	}
+	p.stats.Moves++
+	return nil
 }
 
 func (p *rebuildStoreFactoryPass) want(key []byte) error {
@@ -524,7 +557,7 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 		return false, err
 	}
 	binding, member := p.rules.Stub(e)
-	pick, err := p.elect(e.From, binding, member)
+	pick, err := p.elect(e.From, binding, member, true)
 	if err != nil {
 		return false, err
 	}

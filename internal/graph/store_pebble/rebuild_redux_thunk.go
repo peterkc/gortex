@@ -217,7 +217,7 @@ type rebuildReduxThunkPick struct {
 	getter  bool                           // a pool consulted the getter
 }
 
-func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string) (pick rebuildReduxThunkPick, err error) {
+func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string, resolveGetter bool) (pick rebuildReduxThunkPick, err error) {
 	var caller *graph.Node
 	var haveCaller bool
 	var getterFile string
@@ -250,6 +250,10 @@ func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string) (pi
 				return pick, err
 			}
 			callerFile = caller.FilePath
+		}
+		if !resolveGetter && binding != "" && seen && id == "" {
+			pick.getter = true
+			return pick, nil
 		}
 		chosen, err := pickRebuildStoreCandidate(p.unique, scoped, id, seen, func() (string, error) {
 			if binding != "" && !pick.getter {
@@ -309,11 +313,14 @@ func (p *rebuildReduxThunkPass) plan(ctx context.Context) error {
 			}
 		}
 		binding, _ := e.Meta["store_binding"].(string)
-		if binding == "" {
-			return p.planCall(r.key, e, callee, binding)
+		pick, err := p.elect(e, callee, binding, false)
+		if err != nil {
+			return err
 		}
-		// Extracted stubs have no binding. Only an explicit optional
-		// binding needs a deferred Call key and the getter census.
+		if !pick.getter {
+			return p.planCall(r.key, e, callee, binding, pick)
+		}
+		// Only a many-candidate pool with a binding consults the getter.
 		deferred = true
 		if err := p.put(keyStrings(p.column('b'), binding), nil); err != nil {
 			return err
@@ -336,15 +343,16 @@ func (p *rebuildReduxThunkPass) plan(ctx context.Context) error {
 			return invalid("Redux Thunk deferred Call missing")
 		}
 		binding, _ := e.Meta["store_binding"].(string)
-		return p.planCall(old, e, p.rules.Stub(e), binding)
+		callee := p.rules.Stub(e)
+		pick, err := p.elect(e, callee, binding, true)
+		if err != nil {
+			return err
+		}
+		return p.planCall(old, e, callee, binding, pick)
 	})
 }
 
-func (p *rebuildReduxThunkPass) planCall(old []byte, e *graph.Edge, callee, binding string) error {
-	pick, err := p.elect(e, callee, binding)
-	if err != nil {
-		return err
-	}
+func (p *rebuildReduxThunkPass) planCall(old []byte, e *graph.Edge, callee, binding string, pick rebuildReduxThunkPick) error {
 	if pick.target != "" {
 		p.stats.Resolved++
 	}
@@ -577,7 +585,7 @@ func (p *rebuildReduxThunkPass) proved(old []byte, e *graph.Edge, anchor bool) (
 		return false, err
 	}
 	binding, _ := e.Meta["store_binding"].(string)
-	pick, err := p.elect(e, p.rules.Stub(e), binding)
+	pick, err := p.elect(e, p.rules.Stub(e), binding, true)
 	if err != nil {
 		return false, err
 	}

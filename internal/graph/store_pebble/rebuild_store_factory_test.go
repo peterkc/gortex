@@ -62,7 +62,6 @@ func TestRebuildStoreFactoryRowCaps(t *testing.T) {
 	large := strings.Repeat("x", rebuildStoreFactoryRowBytes)
 	for _, tc := range []struct{ name, row string }{
 		{"action", "node row"},
-		{"getter", "node row"},
 		{"caller", "node row"},
 		{"unrelated node", ""},
 		{"owned Call", "edge row"},
@@ -85,11 +84,9 @@ func TestRebuildStoreFactoryRowCaps(t *testing.T) {
 			default:
 				node := action
 				switch tc.name {
-				case "getter", "unrelated node":
+				case "unrelated node":
 					node = storeFactoryTestGetter("getter", "store.ts")
-					if tc.name == "unrelated node" {
-						node.Name = "unrelated"
-					}
+					node.Name = "unrelated"
 				case "caller":
 					node = storeFactoryTestCaller()
 					b.AddEdge(call)
@@ -671,6 +668,61 @@ func TestRebuildStoreFactoryAndReduxThunkAnchorProof(t *testing.T) {
 					require.Equal(t, rebuildEdgeCustody{raw: old}, custody)
 				})
 			}
+		})
+	}
+}
+
+func TestRebuildStoreFactoryAndReduxThunkGetterCensus(t *testing.T) {
+	for _, redux := range []bool{false, true} {
+		stage, stageErr := "Store Factory", ErrRebuildStoreFactory
+		if redux {
+			stage, stageErr = "Redux Thunk", ErrRebuildReduxThunk
+		}
+		t.Run(stage, func(t *testing.T) {
+			caller := storeFactoryTestCaller()
+			winner := storeFactoryTestAction("app.ts::reset", caller.FilePath, caller.WorkspaceID)
+			peer := storeFactoryTestAction("peer.ts::reset", "peer.ts", "foreign")
+			call := storeFactoryTestCall(winner.ID, 2)
+			if redux {
+				call.Meta["via"] = "redux-thunk"
+				call.Meta["thunk_dispatch"] = storeFactoryTestMember
+				winner.Meta["redux_thunk"] = storeFactoryTestMember
+				peer.Meta["redux_thunk"] = storeFactoryTestMember
+			}
+			getter := storeFactoryTestGetter("peer.ts::getter", peer.FilePath)
+			getter.Meta["large"] = strings.Repeat("x", rebuildStoreFactoryRowBytes)
+			b, _ := seedSyntheticCustody(t, producerProofFacts(caller), producerProofFacts(winner),
+				producerProofFacts(peer), producerProofFacts(getter))
+			check := func(stubs uint64, consulted bool) {
+				t.Helper()
+				before := rebuildFrameworkCustodyRows(t, b)
+				receipts := func(func(ParseFacts, error) bool) { t.Fatal("unexpected receipt scan") }
+				var err error
+				if redux {
+					var stats RebuildReduxThunkStats
+					stats, err = b.RebuildReduxThunk(t.Context(), receipts, reduxThunkStoreTestRules())
+					require.Equal(t, RebuildReduxThunkStats{Stubs: stubs, Resolved: stubs}, stats)
+				} else {
+					var stats RebuildStoreFactoryStats
+					stats, err = b.RebuildStoreFactory(t.Context(), receipts, storeFactoryTestRules())
+					require.Equal(t, RebuildStoreFactoryStats{Stubs: stubs, Resolved: stubs}, stats)
+				}
+				if consulted {
+					require.ErrorIs(t, err, stageErr)
+					require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+					require.ErrorContains(t, err, stage+" node row")
+				} else {
+					require.NoError(t, err)
+				}
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			}
+			check(0, false) // no Call
+			b.AddEdge(call)
+			check(1, false) // one candidate after workspace filtering
+			localPeer := *peer
+			localPeer.WorkspaceID = caller.WorkspaceID
+			b.AddNode(&localPeer)
+			check(0, true) // the consulted getter hits the cap; refused stats are zero
 		})
 	}
 }
