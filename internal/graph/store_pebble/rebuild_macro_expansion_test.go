@@ -29,8 +29,9 @@ func TestRebuildMacroExpansionProposalWinnerAndCustody(t *testing.T) {
 		},
 	})
 	rules := RebuildMacroExpansionRules{
-		Macro: func(n *graph.Node) bool { return n.Kind == graph.KindMacro },
-		Body:  func(e *graph.Edge) string { return e.To },
+		CFamily: func(lang string) bool { return lang == language },
+		Macro:   func(n *graph.Node) bool { return n.Kind == graph.KindMacro },
+		Body:    func(e *graph.Edge) string { return e.To },
 		MayAdd: func(existing *graph.Edge) bool {
 			return existing == nil || existing.Meta["macro"] != nil
 		},

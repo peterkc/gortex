@@ -21,10 +21,11 @@ var rebuildMacroExpansionPrefix = []byte{'g', 'q', 'X'}
 
 // RebuildMacroExpansionRules supplies the native macro roles and Call payload.
 type RebuildMacroExpansionRules struct {
-	Macro  func(*graph.Node) bool
-	Body   func(*graph.Edge) string
-	MayAdd func(*graph.Edge) bool
-	Add    func(caller, callee, file string, line int, name string) *graph.Edge
+	CFamily func(string) bool
+	Macro   func(*graph.Node) bool
+	Body    func(*graph.Edge) string
+	MayAdd  func(*graph.Edge) bool
+	Add     func(caller, callee, file string, line int, name string) *graph.Edge
 }
 
 // RebuildMacroExpansionStats distinguishes native owned proposals from new rows.
@@ -34,8 +35,9 @@ type RebuildMacroExpansionStats struct {
 
 type rebuildMacroExpansion struct {
 	rebuildCallMoves
-	rules RebuildMacroExpansionRules
-	stats RebuildMacroExpansionStats
+	rules   RebuildMacroExpansionRules
+	stats   RebuildMacroExpansionStats
+	cProved bool
 }
 
 func rebuildMacroExpansionScratch(b *BuildStore) rebuildCallMoves {
@@ -127,7 +129,7 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(p.prefix, prefixEnd(p.prefix), pebble.NoSync))
 	}()
-	if rules.Macro == nil || rules.Body == nil || rules.MayAdd == nil || rules.Add == nil || receipts == nil {
+	if rules.CFamily == nil || rules.Macro == nil || rules.Body == nil || rules.MayAdd == nil || rules.Add == nil || receipts == nil {
 		return stats, invalid("macro expansion inputs")
 	}
 	uses, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('i'))
@@ -148,6 +150,9 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 	}
 	if err := p.prove(ctx); err != nil {
 		return stats, err
+	}
+	if !p.cProved {
+		return stats, fmt.Errorf("%w: macro expansion lacks a C-family receipt", ErrRebuildUnknownProvenance)
 	}
 	return p.stats, p.write(ctx)
 }
@@ -354,6 +359,13 @@ func (p *rebuildMacroExpansion) record(ctx context.Context, receipts iter.Seq2[P
 		for _, n := range facts.Nodes {
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			if !p.cProved && p.rules.CFamily(n.Language) {
+				proved, err := p.b.rebuildReceiptLanguageMarker(n, file)
+				if err != nil {
+					return err
+				}
+				p.cProved = proved
 			}
 			if err := p.recordNode(ctx, n, file, language); err != nil {
 				return err

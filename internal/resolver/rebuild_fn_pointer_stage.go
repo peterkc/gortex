@@ -29,6 +29,7 @@ func RunRebuildFnPointerStage(ctx context.Context, b *store_pebble.BuildStore, r
 		return store_pebble.RebuildFnPointerStageStats{}, nil
 	}
 	return b.RebuildFnPointerStage(ctx, receipts, store_pebble.RebuildFnPointerStageRules{
+		CFamily:      rebuildCFamilyLanguage,
 		Registration: fnPtrRegistration,
 		Dispatch:     func(e *graph.Edge) (string, string, bool) { return fnPtrSlot(e, fnPtrDispatchVia) },
 		Callable:     fnPtrCallable,

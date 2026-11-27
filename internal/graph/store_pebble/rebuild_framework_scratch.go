@@ -25,6 +25,12 @@ func sameRebuildLanguageMarker(raw, live *graph.Node, file string) bool {
 	return live != nil && live.ID == raw.ID && raw.FilePath == file && live.FilePath == file && live.Language == raw.Language
 }
 
+// rebuildReceiptLanguageMarker proves a live census label from its file receipt.
+func (b *BuildStore) rebuildReceiptLanguageMarker(raw *graph.Node, file string) (bool, error) {
+	live, err := pendingGet(b.pending, pendingNodeKey(raw.ID), decodeNodeLight)
+	return sameRebuildLanguageMarker(raw, live, file), err
+}
+
 func rebuildScratchState(db pebble.Reader, key []byte, malformed string) (byte, error) {
 	return pendingGet(db, key, func(raw []byte) (byte, error) {
 		if len(raw) != 1 {

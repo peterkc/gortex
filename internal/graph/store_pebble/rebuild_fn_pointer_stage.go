@@ -23,6 +23,7 @@ const rebuildFnPointerRowBytes = 16 << 20
 
 // RebuildFnPointerStageRules supplies the native registration and dispatch decisions.
 type RebuildFnPointerStageRules struct {
+	CFamily      func(string) bool
 	Registration func(*graph.Edge) (slot, source, name string)
 	Dispatch     func(*graph.Edge) (st, field string, ok bool)
 	Callable     func(*graph.Node) bool
@@ -47,6 +48,7 @@ type rebuildFnPointerStage struct {
 	refused      rebuildScratchRefusals
 	dependencies rebuildScratchRefusals
 	adds         uint64
+	cProved      bool
 }
 
 func rebuildFnPointerStageColumns(b *BuildStore) rebuildCallMoves {
@@ -105,7 +107,7 @@ func (b *BuildStore) RebuildFnPointerStage(ctx context.Context, receipts iter.Se
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(cols.prefix, prefixEnd(cols.prefix), pebble.NoSync))
 	}()
-	if rules.Registration == nil || rules.Dispatch == nil || rules.Callable == nil || rules.Getter == nil ||
+	if rules.CFamily == nil || rules.Registration == nil || rules.Dispatch == nil || rules.Callable == nil || rules.Getter == nil ||
 		rules.BindRef == nil || rules.BindCall == nil || rules.Fanout == nil || rules.Sweeps < 1 || rules.Cap < 1 || receipts == nil {
 		return stats, invalid("function pointer stage inputs")
 	}
@@ -329,6 +331,13 @@ func (p *rebuildFnPointerStage) record(ctx context.Context, receipts iter.Seq2[P
 		for _, n := range facts.Nodes {
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			if !p.cProved && p.decide.CFamily(n.Language) {
+				proved, err := p.b.rebuildReceiptLanguageMarker(n, file)
+				if err != nil {
+					return err
+				}
+				p.cProved = proved
 			}
 			if err := p.recordNode(n, file, lang); err != nil {
 				return err
@@ -649,6 +658,9 @@ func (p *rebuildFnPointerStage) prepareFanout(ctx context.Context, path string) 
 func (p *rebuildFnPointerStage) write(ctx context.Context) (err error) {
 	if p.result.RefMoves == 0 && p.result.CallMoves == 0 && p.result.Adds == 0 {
 		return nil
+	}
+	if !p.cProved {
+		return fmt.Errorf("%w: function pointer lacks a C-family receipt", ErrRebuildUnknownProvenance)
 	}
 	if err := p.orderDispatch(ctx); err != nil {
 		return err

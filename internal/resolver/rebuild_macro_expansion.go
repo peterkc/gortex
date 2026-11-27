@@ -23,9 +23,14 @@ func RunRebuildMacroExpansion(ctx context.Context, b *store_pebble.BuildStore, r
 		return store_pebble.RebuildMacroExpansionStats{}, nil
 	}
 	return b.RebuildMacroExpansion(ctx, receipts, store_pebble.RebuildMacroExpansionRules{
-		Macro:  functionLikeMacro,
-		Body:   macroBodyCallee,
-		MayAdd: macroExpansionMayAdd,
-		Add:    macroExpansionEdge,
+		CFamily: rebuildCFamilyLanguage,
+		Macro:   functionLikeMacro,
+		Body:    macroBodyCallee,
+		MayAdd:  macroExpansionMayAdd,
+		Add:     macroExpansionEdge,
 	})
+}
+
+func rebuildCFamilyLanguage(language string) bool {
+	return frameworkLanguageFamily(language) == "c"
 }
