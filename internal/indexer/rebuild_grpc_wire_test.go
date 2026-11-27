@@ -33,6 +33,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"fabric", store_pebble.ErrRebuildFabric, 54},
 		{"mybatis", store_pebble.ErrRebuildMyBatis, 56},
 		{"sql callsite", store_pebble.ErrRebuildSQLCallsite, 58},
+		{"store factory", store_pebble.ErrRebuildStoreFactory, 60},
 		{"redux thunk", store_pebble.ErrRebuildReduxThunk, 61},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
