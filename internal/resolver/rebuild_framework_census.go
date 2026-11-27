@@ -23,7 +23,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 		SynthReactNative, SynthReactNativePair, SynthObserverChannel, SynthClosureCollection,
 		SynthReactSetState, SynthFlutterSetState, SynthKMPExpectActual, SynthExpoModules, SynthFabric, SynthMyBatis,
 		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthNgRxEffect,
-		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery,
+		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery, SynthSpringEvent,
 	} {
 		if selection.allows(name) {
 			frozen.names[name] = struct{}{}
@@ -68,10 +68,11 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 	_, rtk := frozen.names[SynthRTKQuery]
 	_, vuex := frozen.names[SynthVuexDispatch]
 	_, celery := frozen.names[SynthCelery]
-	if redux || ngrx || rtk || vuex || celery {
-		edges.via = make(map[string]bool, 5)
+	_, spring := frozen.names[SynthSpringEvent]
+	if redux || ngrx || rtk || vuex || celery || spring {
+		edges.via = make(map[string]bool, 6)
 	}
-	if grpc || temporal || react || flutter || redux || ngrx || registry || rtk || vuex || celery {
+	if grpc || temporal || react || flutter || redux || ngrx || registry || rtk || vuex || celery || spring {
 		if err := view.VisitFrameworkGateEdges(ctx, temporal, func(e graph.FrameworkCensusEdge) error {
 			if e.Kind == graph.EdgeCalls {
 				via := (redux && e.Via == reduxThunkVia) || (ngrx && e.Via == ngrxEffectVia) ||
@@ -83,7 +84,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 				if e.Oversized && (via || setState || grpcStub || temporalVia || objectRegistry) {
 					return fmt.Errorf("%w: framework census edge", store_pebble.ErrRebuildLinkInputSize)
 				}
-				if via {
+				if via || (spring && e.Via == springEventVia) {
 					edges.via[e.Via] = true
 				}
 				edges.objectRegistryValue = edges.objectRegistryValue || objectRegistry

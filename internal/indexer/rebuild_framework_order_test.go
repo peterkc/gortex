@@ -48,6 +48,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Object Registry", "moves", 1},
 		{"Vuex Dispatch", "moves", 1},
 		{"Celery", "moves", 1},
+		{"Spring events", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -596,6 +597,13 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		edge(caller, caller.ID, graph.EdgeCalls, 3, map[string]any{"via": "celery-dispatch", "celery_task": task.Name}),
 	)
 
+	const springFile = "Publisher.java"
+	publisher := node(springFile, "java", "publish", graph.KindMethod, 1)
+	listener := node(springFile, "java", "listen", graph.KindMethod, 4)
+	listener.Meta = map[string]any{"spring_listener_type": "ClockTick"}
+	springFacts := receipt([]*graph.Node{publisher, listener}, edge(publisher, publisher.ID, graph.EdgeCalls, 2,
+		map[string]any{"via": "spring-event", "spring_event_type": "ClockTick"}))
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -606,6 +614,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
-		celeryFacts,
+		celeryFacts, springFacts,
 	}
 }

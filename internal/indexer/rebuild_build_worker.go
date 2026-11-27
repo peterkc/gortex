@@ -620,6 +620,15 @@ func buildRebuildStages(
 				zap.Uint64("stubs", celery.Stubs), zap.Uint64("resolved", celery.Resolved),
 				zap.Uint64("moves", celery.Moves))
 		}
+		spring, err := resolver.RunRebuildSpringEvents(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if spring.Stubs != 0 {
+			logger.Info("rebuild Spring events applied to private build",
+				zap.Uint64("stubs", spring.Stubs), zap.Uint64("resolved", spring.Resolved),
+				zap.Uint64("moves", spring.Moves), zap.Uint64("adds", spring.Adds))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
