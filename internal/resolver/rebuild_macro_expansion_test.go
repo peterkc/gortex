@@ -299,3 +299,60 @@ func TestRebuildMacroExpansionProvesAmbiguity(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildMacroExpansionProvesFirstAndLastProposal(t *testing.T) {
+	const file, lang = "proposals.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	callee := rebuildEventNode(file, "work", lang, "")
+	nodes := []*graph.Node{caller, callee}
+	var edges, uses []*graph.Edge
+	for _, name := range []string{"FIRST", "MIDDLE", "WINNER"} {
+		n := &graph.Node{ID: file + "::" + name, Name: name, Kind: graph.KindMacro, FilePath: file, Language: lang,
+			Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
+		nodes = append(nodes, n)
+		body := &graph.Edge{From: n.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+		use := &graph.Edge{From: caller.ID, To: n.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 5}
+		edges = append(edges, body, use)
+		uses = append(uses, use)
+	}
+	facts := rebuildEventFacts(file, lang, nodes, edges...)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	add := macroExpansionEdge(caller.ID, callee.ID, file, 5, "WINNER")
+	for _, tc := range []struct {
+		name   string
+		omit   []*graph.Edge
+		refuse bool
+	}{
+		{"middle proposal", []*graph.Edge{uses[1]}, false},
+		{"first proposal", []*graph.Edge{uses[0]}, true},
+		{"last proposal", []*graph.Edge{uses[2]}, true},
+		{"both deciding proposals", []*graph.Edge{uses[0], uses[2]}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, native := openRebuildEventStores(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(t.Context(), b, frozen))
+			receipt := facts
+			receipt.Edges = slices.DeleteFunc(slices.Clone(edges), func(e *graph.Edge) bool { return slices.Contains(tc.omit, e) })
+			stats, err := RunRebuildMacroExpansion(t.Context(), b, rebuildGRPCReceipts(receipt), frozen)
+			if tc.refuse {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(add)}, refused)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildMacroExpansionStats{Sites: 3, Owned: 3, Adds: 1}, stats)
+			report := RunFrameworkSynthesizersWithSelection(native, selection)
+			require.NoError(t, report.Err)
+			want := rebuildEventSQLiteRows(native)
+			require.Contains(t, want.edges, add)
+			require.Equal(t, want, rebuildEventSavedRows(t, b))
+		})
+	}
+}

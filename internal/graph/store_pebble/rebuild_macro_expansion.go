@@ -168,6 +168,9 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 			return stats, err
 		}
 	}
+	if err := p.wantFinalProof(ctx); err != nil {
+		return stats, err
+	}
 	if err := p.record(ctx, receipts); err != nil {
 		return stats, err
 	}
@@ -349,31 +352,48 @@ func (p *rebuildMacroExpansion) plan(ctx context.Context) error {
 			if existing != nil {
 				return nil // native AddBatch preserves an occupied macro key too
 			}
-			if err := p.wantOutputProof(n, callee, old); err != nil {
-				return err
-			}
-			return p.offer(add, key)
+			return p.offer(add, key, keyStrings(nil, string(old), n.ID, callee))
 		})
 	})
 }
 
-func (p *rebuildMacroExpansion) wantOutputProof(n *graph.Node, callee string, old []byte) error {
-	if err := p.put(p.key('m', n.ID), []byte{rebuildCapabilityWanted}); err != nil {
-		return err
+// Each saved identity needs its first position and last payload, not the
+// proposals between them. Collect receipt demands after both are known.
+func (p *rebuildMacroExpansion) wantFinalProof(ctx context.Context) error {
+	for _, col := range []byte{'p', 'P'} {
+		if err := p.visit(ctx, p.column(col), func(r row) error {
+			_, rest, err := readKeyString(r.value)
+			if err != nil {
+				return err
+			}
+			id, _, err := readKeyString(rest)
+			if err != nil {
+				return err
+			}
+			n, err := p.macro(id)
+			if err != nil || n == nil {
+				return errors.Join(err, invalid("macro expansion proof declaration missing"))
+			}
+			if err := p.put(p.key('m', n.ID), []byte{rebuildCapabilityWanted}); err != nil {
+				return err
+			}
+			return p.put(p.key('q', n.RepoPrefix, n.Name), nil)
+		}); err != nil {
+			return err
+		}
 	}
-	if err := p.put(p.key('q', n.RepoPrefix, n.Name), nil); err != nil {
-		return err
-	}
-	return p.put(p.key('p', string(old), n.ID, callee), nil)
+	return nil
 }
 
-func (p *rebuildMacroExpansion) offer(add *graph.Edge, key []byte) error {
+func (p *rebuildMacroExpansion) offer(add *graph.Edge, key, proof []byte) error {
 	ordinalKey := append(p.column('d'), key...)
 	ordinal, err := p.get(ordinalKey)
 	if err != nil {
 		return err
 	}
+	col := byte('P')
 	if ordinal == nil {
+		col = 'p'
 		ordinal = binary.BigEndian.AppendUint64(nil, p.stats.Adds)
 		if err := p.put(ordinalKey, ordinal); err != nil {
 			return err
@@ -385,6 +405,9 @@ func (p *rebuildMacroExpansion) offer(add *graph.Edge, key []byte) error {
 		return err
 	}
 	if err := p.input(key, value); err != nil {
+		return err
+	}
+	if err := p.put(append(p.column(col), key...), proof); err != nil {
 		return err
 	}
 	return p.put(append(p.column('o'), ordinal...), value)
@@ -637,41 +660,62 @@ func (p *rebuildMacroExpansion) prove(ctx context.Context) error {
 	}
 	prefix := p.column('p')
 	if err := p.visit(ctx, prefix, func(r row) error {
-		old, rest, err := readKeyString(r.key[len(prefix):])
+		key := r.key[len(prefix):]
+		alreadyRefused, err := p.present(append(rawOnly, key...))
+		if err != nil || alreadyRefused {
+			return err
+		}
+		first, err := p.proposalProved(r.value)
 		if err != nil {
 			return err
 		}
-		macro, rest, err := readKeyString(rest)
+		last, err := p.get(append(p.column('P'), key...))
 		if err != nil {
 			return err
 		}
-		callee, rest, err := readKeyString(rest)
-		if err != nil || len(rest) != 0 {
-			return invalid("macro expansion output proof key")
-		}
-		e, err := p.edge([]byte(old))
-		if err != nil || e == nil {
-			return errors.Join(err, invalid("macro expansion proof use missing"))
-		}
-		n, err := p.macro(macro)
-		if err != nil || n == nil {
-			return errors.Join(err, invalid("macro expansion proof declaration missing"))
-		}
-		ok, err := p.outputProved(e, n, callee, []byte(old))
-		if err == nil && !ok {
-			add := p.rules.Add(e.From, callee, e.FilePath, e.Line, n.Name)
-			key := pendingEdgeKey(add)
-			alreadyRefused, err := p.present(append(rawOnly, key...))
-			if err != nil || alreadyRefused {
+		lastProved := true
+		if last != nil {
+			lastProved, err = p.proposalProved(last)
+			if err != nil {
 				return err
 			}
-			refused.add(graph.EdgeIdentityFor(add), key)
+		}
+		if first && lastProved {
+			return nil
+		}
+		id, err := decodeLinkRecorder(key)
+		if err == nil {
+			refused.add(id, bytes.Clone(key))
 		}
 		return err
 	}); err != nil {
 		return err
 	}
 	return refused.err()
+}
+
+func (p *rebuildMacroExpansion) proposalProved(proof []byte) (bool, error) {
+	old, rest, err := readKeyString(proof)
+	if err != nil {
+		return false, err
+	}
+	macro, rest, err := readKeyString(rest)
+	if err != nil {
+		return false, err
+	}
+	callee, rest, err := readKeyString(rest)
+	if err != nil || len(rest) != 0 {
+		return false, invalid("macro expansion output proof")
+	}
+	e, err := p.edge([]byte(old))
+	if err != nil || e == nil {
+		return false, errors.Join(err, invalid("macro expansion proof use missing"))
+	}
+	n, err := p.macro(macro)
+	if err != nil || n == nil {
+		return false, errors.Join(err, invalid("macro expansion proof declaration missing"))
+	}
+	return p.outputProved(e, n, callee, []byte(old))
 }
 
 func (p *rebuildMacroExpansion) outputProved(e *graph.Edge, n *graph.Node, callee string, old []byte) (bool, error) {
