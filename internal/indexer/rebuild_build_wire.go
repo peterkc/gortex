@@ -202,6 +202,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildCSharpIfaceDispatch,
 	store_pebble.ErrRebuildEFCoreModels,
 	store_pebble.ErrRebuildMacroExpansion,
+	store_pebble.ErrRebuildGinMiddleware,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

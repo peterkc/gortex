@@ -58,6 +58,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Laravel event", "moves", 1},
 		{"function pointer", "moves", 1},
 		{"macro expansion", "adds", 1},
+		{"Gin middleware", "offers", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -696,6 +697,13 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		edge(macroCaller, "unresolved::"+macroDefinition.Name, graph.EdgeCalls, 8, nil),
 	)
 
+	const ginFile = "routes.go"
+	ginDispatch := node(ginFile, "go", "ginDispatch", graph.KindMethod, 1)
+	ginDispatch.Meta = map[string]any{"gin_dispatcher": true}
+	ginHandler := node(ginFile, "go", "ginHandler", graph.KindFunction, 4)
+	ginHandler.Meta = map[string]any{"gin_handlers": []string{ginHandler.Name}}
+	ginFacts := receipt([]*graph.Node{ginDispatch, ginHandler})
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -706,6 +714,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
-		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts,
+		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts,
 	}
 }
