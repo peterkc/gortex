@@ -164,9 +164,10 @@ func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
 			earlyRegister := rebuildClosureCollectionNode(earlyFile, "register", language, rebuildCCAppend, "alpha")
 			lateDispatch := rebuildClosureCollectionNode(lateFile, "dispatch", language, rebuildCCDispatch, "zeta")
 			lateRegister := rebuildClosureCollectionNode(lateFile, "register", language, rebuildCCAppend, "zeta")
-			if mode == "different non-strings" {
+			switch mode {
+			case "different non-strings":
 				lateRegister.Meta[rebuildCCDispatch] = []string{"zeta"}
-			} else if mode == "nil versus absent" {
+			case "nil versus absent":
 				lateRegister.Meta[rebuildCCDispatch] = nil
 			}
 			proof, b, native := openRebuildObserverStores(t, nil,
