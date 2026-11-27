@@ -265,12 +265,14 @@ func TestRebuildCSharpIfaceDispatchParentNodeCap(t *testing.T) {
 	}
 	padding := strings.Repeat("x", 16<<20)
 	for _, tc := range []struct {
-		name   string
-		large  *graph.Node
-		refuse bool
+		name      string
+		large     *graph.Node
+		refuse    bool
+		ambiguous bool
 	}{
-		{"same repository", iface, true},
-		{"other repository", foreign, false},
+		{"same repository", iface, true, false},
+		{"other repository", foreign, false, false},
+		{"ambiguous name", iface, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			build := openRebuildGRPCBuild(t, facts...)
@@ -279,8 +281,15 @@ func TestRebuildCSharpIfaceDispatchParentNodeCap(t *testing.T) {
 			large := *tc.large
 			large.Meta = map[string]any{"padding": padding}
 			build.AddNode(&large)
+			receipts := facts
+			if tc.ambiguous {
+				second := *foreign
+				second.RepoPrefix = ""
+				build.AddNode(&second)
+				receipts = []store_pebble.ParseFacts{facts[0], rebuildEventFacts(second.FilePath, second.Language, []*graph.Node{&second})}
+			}
 			before := rebuildEventSavedRows(t, build).edges
-			adds, err := RunRebuildCSharpIfaceDispatch(t.Context(), build, rebuildGRPCReceipts(facts...), frozen)
+			adds, err := RunRebuildCSharpIfaceDispatch(t.Context(), build, rebuildGRPCReceipts(receipts...), frozen)
 			after := rebuildEventSavedRows(t, build).edges
 			if tc.refuse {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildCSharpIfaceDispatch)
@@ -291,6 +300,11 @@ func TestRebuildCSharpIfaceDispatchParentNodeCap(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			if tc.ambiguous {
+				require.Zero(t, adds)
+				require.Equal(t, before, after)
+				return
+			}
 			require.EqualValues(t, 1, adds)
 			require.Contains(t, after, csharpIfaceDispatchEdge(call, method.ID, iface.ID, 1))
 		})

@@ -229,10 +229,12 @@ func (p *rebuildCSharpDI) captureCandidates(ctx context.Context) error {
 			if err != nil || bound {
 				return err
 			}
-			// Only the declarations of an offering registration need
-			// the row cap. The source supplies just its repository.
-			for _, id := range [...]string{impl.ID, iface.ID} {
-				if _, err := p.node(id, true); err != nil {
+			// Only name-selected declarations need the full row cap.
+			if _, err := p.node(impl.ID, true); err != nil {
+				return err
+			}
+			if graph.IsUnresolvedTarget(e.To) {
+				if _, err := p.node(iface.ID, true); err != nil {
 					return err
 				}
 			}
@@ -281,7 +283,7 @@ func (p *rebuildCSharpDI) record(ctx context.Context, receipts iter.Seq2[ParseFa
 			if !wanted && !sourceWanted {
 				continue
 			}
-			live, err := p.node(n.ID, wanted)
+			live, err := p.node(n.ID, false)
 			if err != nil {
 				return err
 			}
@@ -394,7 +396,7 @@ func (p *rebuildCSharpDI) plan(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		iface, err := p.node(ifaceID, true)
+		iface, err := p.node(ifaceID, false)
 		if err != nil || iface == nil {
 			return errors.Join(err, invalid("C# DI interface disappeared"))
 		}

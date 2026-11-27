@@ -228,7 +228,7 @@ func TestRebuildCSharpDIIfacesNodeRowCaps(t *testing.T) {
 	}{
 		{"registration source", reg, iface.ID, false},
 		{"implementation", impl, iface.ID, true},
-		{"resolved interface", iface, iface.ID, true},
+		{"resolved interface", iface, iface.ID, false},
 		{"named interface", iface, "unresolved::IService", true},
 		{"foreign implementation", &foreign, iface.ID, false},
 	} {

@@ -340,15 +340,6 @@ func (p *rebuildCSharpIface) resolveParents(ctx context.Context, child, name str
 		if !p.rules.Candidate(n, from.RepoPrefix) {
 			return nil
 		}
-		key := pendingNodeKey(n.ID)
-		if _, err := pendingGet(p.b.pending, key, func(value []byte) (bool, error) {
-			if len(key)+len(value) > p.rowBytes {
-				return false, fmt.Errorf("%w: csharp interface dispatch parent node", ErrRebuildLinkInputSize)
-			}
-			return true, nil
-		}); err != nil {
-			return err
-		}
 		if exact {
 			chosen = n.ID
 			count++
@@ -391,6 +382,15 @@ func (p *rebuildCSharpIface) resolveParents(ctx context.Context, child, name str
 	if !p.replay {
 		if count != 1 {
 			return nil
+		}
+		key := pendingNodeKey(chosen)
+		if _, err := pendingGet(p.b.pending, key, func(value []byte) (bool, error) {
+			if len(key)+len(value) > p.rowBytes {
+				return false, fmt.Errorf("%w: csharp interface dispatch parent node", ErrRebuildLinkInputSize)
+			}
+			return true, nil
+		}); err != nil {
+			return err
 		}
 		exact, err := p.present(rebuildIfaceRawNodeKey(chosen))
 		if err != nil {
