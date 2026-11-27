@@ -967,16 +967,12 @@ func recordFrameworkNodeCandidates(markers map[string]int, n *graph.Node, family
 		}
 	}
 
-	observerRole := uint8(0)
-	if (n.Kind == graph.KindMethod || n.Kind == graph.KindFunction) && n.Name != "" {
-		if observerRegistrarRe.MatchString(n.Name) {
-			markers[frameworkMarkerObserverRegistrar]++
-			observerRole |= frameworkObserverRegistrarRole
-		}
-		if observerDispatcherRe.MatchString(n.Name) {
-			markers[frameworkMarkerObserverDispatcher]++
-			observerRole |= frameworkObserverDispatcherRole
-		}
+	observerRole := frameworkObserverRole(n)
+	if observerRole&frameworkObserverRegistrarRole != 0 {
+		markers[frameworkMarkerObserverRegistrar]++
+	}
+	if observerRole&frameworkObserverDispatcherRole != 0 {
+		markers[frameworkMarkerObserverDispatcher]++
 	}
 	if n.Kind == graph.KindMethod {
 		switch n.Name {
@@ -1006,6 +1002,20 @@ func recordFrameworkNodeCandidates(markers map[string]int, n *graph.Node, family
 		markers[SynthVaporResolve]++
 	}
 	return observerRole
+}
+
+func frameworkObserverRole(n *graph.Node) uint8 {
+	if (n.Kind != graph.KindMethod && n.Kind != graph.KindFunction) || n.Name == "" {
+		return 0
+	}
+	var role uint8
+	if observerRegistrarRe.MatchString(n.Name) {
+		role |= frameworkObserverRegistrarRole
+	}
+	if observerDispatcherRe.MatchString(n.Name) {
+		role |= frameworkObserverDispatcherRole
+	}
+	return role
 }
 
 func frameworkLanguageFamily(language string) string {
