@@ -522,19 +522,20 @@ func TestRebuildObjectRegistryGetterProof(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			getter := &graph.Node{ID: "useStore", Name: "useStore", Kind: graph.KindVariable, FilePath: absent, Language: "javascript"}
 			input := []store_pebble.ParseFacts{facts, remoteFacts}
-			if mode == "winner" {
+			switch mode {
+			case "winner":
 				getter.FilePath = remote
 				decl := remoteFacts
 				decl.Nodes = []*graph.Node{peer, getter}
 				decl.File.NodeCount = len(decl.Nodes)
 				input[1] = decl
-			} else if mode == "same as caller" {
+			case "same as caller":
 				getter.FilePath = file
 				decl := facts
 				decl.Nodes = []*graph.Node{caller, local, getter}
 				decl.File.NodeCount = len(decl.Nodes)
 				input[0] = decl
-			} else {
+			default:
 				input = append(input, rebuildEventFacts(absent, "javascript", []*graph.Node{getter}))
 			}
 			proof := []store_pebble.ParseFacts{facts, remoteFacts}
