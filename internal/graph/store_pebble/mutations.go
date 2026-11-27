@@ -48,6 +48,10 @@ func (b *BuildStore) AddEdge(e *graph.Edge) {
 }
 
 func (b *BuildStore) addEdge(e *graph.Edge) error {
+	return b.addEdgeWithCustody(e, rebuildEdgeCustody{})
+}
+
+func (b *BuildStore) addEdgeWithCustody(e *graph.Edge, custody rebuildEdgeCustody) error {
 	if e == nil || graph.StructuralEdgeTargetInvalid(e.Kind, e.To) {
 		return nil
 	}
@@ -55,7 +59,7 @@ func (b *BuildStore) addEdge(e *graph.Edge) error {
 	if err != nil {
 		return err
 	}
-	if err := b.putEdge(e); err != nil {
+	if err := b.writePendingEdge(e, custody, old != nil); err != nil {
 		return err
 	}
 	if old != nil && old.Origin != e.Origin {
@@ -216,8 +220,8 @@ func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, captur
 	// First free every moving stored identity. A stationary destination
 	// preserves its row, and the first claimant wins any free destination.
 	type claim struct {
-		edge     *graph.Edge
-		recorder []byte
+		edge    *graph.Edge
+		custody rebuildEdgeCustody
 	}
 	var candidates []claim
 	created := make(map[string]int, len(batch))
@@ -239,7 +243,7 @@ func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, captur
 			from.FilePath, from.Line = r.OldFilePath, r.OldLine
 		}
 		oldKey, key := pendingEdgeKey(&from), pendingEdgeKey(e)
-		var recorder []byte
+		var custody rebuildEdgeCustody
 		old, err := b.pendingEdge(oldKey)
 		if err != nil {
 			return err
@@ -249,7 +253,7 @@ func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, captur
 				continue
 			}
 			if index, ok := created[string(oldKey)]; ok {
-				recorder = candidates[index].recorder
+				custody = candidates[index].custody
 				candidates[index] = claim{}
 				delete(created, string(oldKey))
 			} else if r.RefreshIdentity {
@@ -261,12 +265,16 @@ func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, captur
 			}
 			continue
 		} else {
-			recorder, err = readLinkRecorder(b.pending, oldKey)
+			custody, err = readRebuildEdgeCustody(b.pending, oldKey)
 			if err != nil {
 				return err
 			}
-			if recorder == nil && capture {
-				recorder = oldKey
+			if custody.raw == nil && custody.proof == 0 {
+				if capture {
+					custody.raw = oldKey
+				} else if rebuildObserverInputKind(e.Kind) {
+					custody.proof = rebuildProofUntrackedMove
+				}
 			}
 			if err := b.deleteEdge(oldKey, old); err != nil {
 				return err
@@ -281,7 +289,7 @@ func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, captur
 		if _, ok := created[string(key)]; !ok {
 			created[string(key)] = len(candidates)
 		}
-		candidates = append(candidates, claim{edge: e, recorder: recorder})
+		candidates = append(candidates, claim{edge: e, custody: custody})
 	}
 	for _, c := range candidates {
 		e := c.edge
@@ -293,7 +301,7 @@ func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, captur
 			return err
 		}
 		if old == nil {
-			if err := b.putEdgeWithLinkRecorder(e, c.recorder); err != nil {
+			if err := b.putEdgeWithCustody(e, c.custody); err != nil {
 				return err
 			}
 		}

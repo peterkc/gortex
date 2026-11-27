@@ -155,21 +155,25 @@ func (b *BuildStore) writeNode(n *graph.Node) error {
 }
 
 func (b *BuildStore) putEdge(e *graph.Edge) error {
-	return b.writePendingEdge(e, nil, false)
+	return b.writePendingEdge(e, rebuildEdgeCustody{}, false)
 }
 
-func (b *BuildStore) putEdgeWithLinkRecorder(e *graph.Edge, recorder []byte) error {
-	return b.writePendingEdge(e, recorder, false)
+func (b *BuildStore) putEdgeWithCustody(e *graph.Edge, custody rebuildEdgeCustody) error {
+	return b.writePendingEdge(e, custody, false)
 }
 
 // clearRecorder lets a payload replacement invalidate the old key's
 // recorder when the incoming row has no lineage. Same-key stamps leave it.
-func (b *BuildStore) writePendingEdge(e *graph.Edge, recorder []byte, clearRecorder bool) error {
+func (b *BuildStore) writePendingEdge(e *graph.Edge, custody rebuildEdgeCustody, clearRecorder bool) error {
 	if graph.IsProxyID(e.From) || graph.IsProxyID(e.To) {
 		return invalid("proxy edge cannot be published")
 	}
 	key := pendingEdgeKey(e)
 	raw, err := encodeEdge(e)
+	if err != nil {
+		return err
+	}
+	recorder, err := custody.encode(raw)
 	if err != nil {
 		return err
 	}

@@ -217,7 +217,7 @@ func (p *rebuildSwiftObjCPass) visit(ctx context.Context, yield func(*graph.Edge
 
 func (p *rebuildSwiftObjCPass) apply(ctx context.Context) error {
 	return p.visit(ctx, func(e *graph.Edge) error {
-		if err := p.b.putEdge(e); err != nil {
+		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofSwiftObjC}); err != nil {
 			return err
 		}
 		p.stats.Edges++

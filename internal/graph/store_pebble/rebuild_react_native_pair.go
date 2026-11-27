@@ -283,7 +283,7 @@ func (p *rebuildRNPairPass) visit(ctx context.Context, yield func(*graph.Edge) e
 
 func (p *rebuildRNPairPass) apply(ctx context.Context) error {
 	return p.visit(ctx, func(e *graph.Edge) error {
-		if err := p.b.putEdge(e); err != nil {
+		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofRNPair}); err != nil {
 			return err
 		}
 		p.stats.Edges++

@@ -321,11 +321,16 @@ func (b *BuildStore) rebuildGuardReindex(ctx context.Context, moves []graph.Edge
 				}
 				continue
 			}
-			recorder, err := readLinkRecorder(recorders, []byte(origins[after]))
+			origin := origins[after]
+			custody, err := readRebuildEdgeCustody(recorders, []byte(origin))
 			if err != nil {
 				return err
 			}
-			if err := b.writePendingEdge(after, recorder, before != nil); err != nil {
+			// An untracked revert is not a stationary receipt at its new key.
+			if origin != key && custody.raw == nil && custody.proof == 0 && rebuildObserverInputKind(after.Kind) {
+				custody.proof = rebuildProofUntrackedMove
+			}
+			if err := b.writePendingEdge(after, custody, before != nil); err != nil {
 				return err
 			}
 		}

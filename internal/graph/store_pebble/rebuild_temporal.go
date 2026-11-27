@@ -322,17 +322,19 @@ func (p *RebuildTemporalPass) QueueMove(ctx context.Context, oldTo string, e *gr
 	p.moves++
 	key := binary.BigEndian.AppendUint64(rebuildTemporalKey('m'), ordinal)
 	oldKey := pendingEdgeKey(&old)
-	// A staged wrapper is a new payload even if its old key shadows a
-	// durable call. Only a durable move can inherit that call's recorder.
+	// A staged wrapper can shadow a durable call, but it cannot inherit
+	// that call's custody. The stage proves the wrapper's trigger and
+	// declarations before the queued effect can reach the writer.
+	custody := rebuildEdgeCustody{proof: rebuildProofTemporalSynthetic}
 	if !staged {
-		recorder, err := readLinkRecorder(p.build.pending, oldKey)
+		custody, err = readRebuildEdgeCustody(p.build.pending, oldKey)
 		if err != nil {
 			return err
 		}
-		if len(recorder) != 0 {
-			if err := p.put(ctx, rebuildTemporalMoveRecorderKey(ordinal), recorder); err != nil {
-				return err
-			}
+	}
+	if saved := rebuildMoveCustodyBytes(custody); len(saved) != 0 {
+		if err := p.put(ctx, rebuildTemporalMoveCustodyKey(ordinal), saved); err != nil {
+			return err
 		}
 	}
 	return p.put(ctx, key, append(appendKeyString(nil, string(oldKey)), raw...))
@@ -397,14 +399,23 @@ func (p *RebuildTemporalPass) apply(ctx context.Context) error {
 					return err
 				}
 			}
-			key := rebuildTemporalMoveRecorderKey(ordinal)
-			recorder, err := pendingGet(p.build.pending, key, func(raw []byte) ([]byte, error) {
-				return bytes.Clone(raw), rebuildTemporalInput(key, raw)
+			key := rebuildTemporalMoveCustodyKey(ordinal)
+			custody, err := pendingGet(p.build.pending, key, func(raw []byte) (rebuildEdgeCustody, error) {
+				if err := rebuildTemporalInput(key, raw); err != nil {
+					return rebuildEdgeCustody{}, err
+				}
+				return decodeRebuildMoveCustody(raw)
 			})
 			if err != nil {
 				return err
 			}
-			if err := p.insertIfAbsent(e, recorder); err != nil {
+			// Only the inherited raw recorder used the direct writer before
+			// custody. Do not bypass the add gate for the exact-key fallback.
+			inheritedRaw := len(custody.raw) != 0
+			if !inheritedRaw && custody.proof == 0 {
+				custody.raw = old
+			}
+			if err := p.insertIfAbsent(e, custody, inheritedRaw); err != nil {
 				return err
 			}
 		}
@@ -416,11 +427,13 @@ func (p *RebuildTemporalPass) apply(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		return p.insertIfAbsent(e, nil)
+		// Both wrapper and cross-language additions enter from the proved
+		// reducer paths, not from tags on the final edge.
+		return p.insertIfAbsent(e, rebuildEdgeCustody{proof: rebuildProofTemporalSynthetic}, false)
 	})
 }
 
-func rebuildTemporalMoveRecorderKey(ordinal uint64) []byte {
+func rebuildTemporalMoveCustodyKey(ordinal uint64) []byte {
 	return binary.BigEndian.AppendUint64(rebuildTemporalKey('l'), ordinal)
 }
 
@@ -451,15 +464,15 @@ func (p *RebuildTemporalPass) deleteIfPresent(key []byte) error {
 	return p.build.deleteEdge(key, e)
 }
 
-func (p *RebuildTemporalPass) insertIfAbsent(e *graph.Edge, recorder []byte) error {
+func (p *RebuildTemporalPass) insertIfAbsent(e *graph.Edge, custody rebuildEdgeCustody, inheritedRaw bool) error {
 	prior, err := p.edge(p.build.pending, pendingEdgeKey(e))
 	if err != nil || prior != nil {
 		return err
 	}
-	if len(recorder) != 0 {
-		return p.build.putEdgeWithLinkRecorder(e, recorder)
+	if inheritedRaw {
+		return p.build.putEdgeWithCustody(e, custody)
 	}
-	return p.build.addEdge(e)
+	return p.build.addEdgeWithCustody(e, custody)
 }
 
 // Prove roles and changed calls using the original exact row, not the

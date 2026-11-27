@@ -436,7 +436,7 @@ func (p *rebuildEventChannel) apply(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := p.b.putEdge(e); err != nil {
+		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofEventChannel}); err != nil {
 			return err
 		}
 		p.stats.Pairs++

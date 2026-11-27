@@ -167,14 +167,16 @@ func (b *BuildStore) rebuildCapabilities(ctx context.Context, receipts iter.Seq2
 				}
 				written[mechanism] = true
 			}
-			return b.addEdge(e)
+			return b.addEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofDirect})
 		}); err != nil {
 			return err
 		}
 		if stats.Emitted == 0 {
 			return nil
 		}
-		return s.visitReceiver(ctx, func(e *graph.Edge, _ string) error { return b.addEdge(e) })
+		return s.visitReceiver(ctx, func(e *graph.Edge, _ string) error {
+			return b.addEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofReceiver})
+		})
 	})
 }
 

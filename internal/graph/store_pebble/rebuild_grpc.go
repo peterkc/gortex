@@ -510,12 +510,25 @@ func (p *rebuildGRPC) apply(ctx context.Context) error {
 			if e == nil {
 				return invalid("gRPC move has no exact old row")
 			}
+			custody, err := readRebuildEdgeCustody(p.b.pending, key)
+			if err != nil {
+				return err
+			}
+			// Copy only inherited custody before deleteEdge removes it. The
+			// exact old key proved by this turn is already in the move row.
+			if saved := rebuildMoveCustodyBytes(custody); len(saved) != 0 {
+				// Pebble bounds this copy with its existing scratch memtables.
+				// An existing key needs no new cap for the scratch address.
+				if err := p.b.pending.Set(rebuildGRPCMoveCustodyKey(r.key), saved, pebble.NoSync); err != nil {
+					return err
+				}
+			}
 			return p.b.deleteEdge(key, e)
 		}); err != nil {
 			return err
 		}
 		if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-			_, _, e, err := rebuildGRPCMove(r.value)
+			old, _, e, err := rebuildGRPCMove(r.value)
 			if err != nil {
 				return err
 			}
@@ -523,12 +536,42 @@ func (p *rebuildGRPC) apply(ctx context.Context) error {
 			if err != nil || prior != nil {
 				return err
 			}
-			return p.b.addEdge(e)
+			custody, err := pendingGet(p.b.pending, rebuildGRPCMoveCustodyKey(r.key), decodeRebuildMoveCustody)
+			if err != nil {
+				return err
+			}
+			if len(custody.raw) == 0 && custody.proof == 0 {
+				custody.raw = []byte(old)
+			}
+			return p.b.addEdgeWithCustody(e, custody)
 		}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func rebuildGRPCMoveCustodyKey(move []byte) []byte {
+	key := bytes.Clone(move)
+	key[2] = 'l'
+	return key
+}
+
+// Only a checked custody value or a stage proof constant enters move scratch.
+// A raw out-key is at least two bytes; a synthetic proof is one byte. The
+// eventual writer binds that proof to the new winner's encoded edge.
+func rebuildMoveCustodyBytes(custody rebuildEdgeCustody) []byte {
+	if custody.proof != 0 {
+		return []byte{byte(custody.proof)}
+	}
+	return custody.raw
+}
+
+func decodeRebuildMoveCustody(value []byte) (rebuildEdgeCustody, error) {
+	if len(value) == 1 {
+		return rebuildEdgeCustody{proof: rebuildEdgeProof(value[0])}, nil
+	}
+	return rebuildEdgeCustody{raw: bytes.Clone(value)}, nil
 }
 
 func rebuildGRPCMove(value []byte) (string, string, *graph.Edge, error) {

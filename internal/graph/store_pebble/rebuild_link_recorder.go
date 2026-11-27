@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -10,32 +11,100 @@ import (
 )
 
 // This family lives only in the private build. Indexed by winning live key,
-// it records the original complete key without changing the saved edge row.
+// it records the original complete receipt key or the producer proof without
+// changing the saved edge row.
 var rebuildLinkRecorderPrefix = []byte{'g', 'Z'}
 
 func rebuildLinkRecorderKey(live []byte) []byte {
 	return append(bytes.Clone(rebuildLinkRecorderPrefix), live...)
 }
 
-func readLinkRecorder(reader pebble.Reader, live []byte) ([]byte, error) {
-	return pendingGet(reader, rebuildLinkRecorderKey(live), func(raw []byte) ([]byte, error) {
-		if len(raw) < 2 || raw[0] != familyEdge || raw[1] != edgeOut {
-			return nil, invalid("link recorder identity")
+// Each code identifies a producer and the proof that admitted its row.
+type rebuildEdgeProof byte
+
+const (
+	// Exact source recorder and endpoint declarations.
+	rebuildProofDirect rebuildEdgeProof = iota + 1
+	// Checked receiver Call and field ownership.
+	rebuildProofReceiver
+	// Wrapper trigger or cross-language role proof.
+	rebuildProofTemporalSynthetic
+	// Emits/ListensOn, transport, and declaration proof.
+	rebuildProofEventChannel
+	// Declarations and selector/protocol metadata.
+	rebuildProofSwiftObjC
+	// First source recorder and declaration proof.
+	rebuildProofRNBridge
+	// Declarations and export metadata.
+	rebuildProofRNPair
+	// A move without a recorder is not a stationary receipt or a proof.
+	rebuildProofUntrackedMove
+)
+
+type rebuildEdgeCustody struct {
+	raw   []byte
+	proof rebuildEdgeProof
+}
+
+const rebuildEdgeProofFormat byte = 1
+
+func rebuildObserverInputKind(kind graph.EdgeKind) bool {
+	switch kind {
+	case graph.EdgeAccessesField, graph.EdgeCalls, graph.EdgeReads, graph.EdgeReferences:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c rebuildEdgeCustody) encode(edge []byte) ([]byte, error) {
+	if c.proof == 0 {
+		return c.raw, nil
+	}
+	if c.proof > rebuildProofUntrackedMove || len(c.raw) != 0 {
+		return nil, invalid("edge custody proof")
+	}
+	digest := sha256.Sum256(edge)
+	return append([]byte{rebuildEdgeProofFormat, byte(c.proof)}, digest[:]...), nil
+}
+
+func readRebuildEdgeCustody(reader pebble.Reader, live []byte) (rebuildEdgeCustody, error) {
+	return pendingGet(reader, rebuildLinkRecorderKey(live), func(raw []byte) (rebuildEdgeCustody, error) {
+		if len(raw) >= 2 && raw[0] == familyEdge && raw[1] == edgeOut {
+			return rebuildEdgeCustody{raw: bytes.Clone(raw)}, nil
 		}
-		return bytes.Clone(raw), nil
+		if len(raw) != 2+sha256.Size || raw[0] != rebuildEdgeProofFormat || raw[1] == 0 || rebuildEdgeProof(raw[1]) > rebuildProofUntrackedMove {
+			return rebuildEdgeCustody{}, invalid("edge custody format")
+		}
+		match, err := pendingGet(reader, live, func(edge []byte) (bool, error) {
+			digest := sha256.Sum256(edge)
+			return bytes.Equal(digest[:], raw[2:]), nil
+		})
+		if err != nil {
+			return rebuildEdgeCustody{}, err
+		}
+		if !match {
+			id, err := decodeLinkRecorder(live)
+			if err != nil {
+				return rebuildEdgeCustody{}, err
+			}
+			return rebuildEdgeCustody{}, &RebuildUnknownProvenanceError{Count: 1, First: id}
+		}
+		return rebuildEdgeCustody{proof: rebuildEdgeProof(raw[1])}, nil
 	})
 }
 
 // OriginalLinkRecorder returns the raw identity for an installed move. An
-// unmoved row has no link; its exact current key can be checked in receipts.
+// synthetic or stationary row has no original move link. This method does not
+// distinguish those cases; use custody when an absent link is not enough.
 func (v RebuildView) OriginalLinkRecorder(ctx context.Context, live graph.EdgeIdentity) (raw graph.EdgeIdentity, found bool, err error) {
 	key := pendingEdgeKey(&graph.Edge{From: live.From, To: live.To, Kind: live.Kind, FilePath: live.FilePath, Line: live.Line})
 	err = v.read(ctx, func(snap *pebble.Snapshot) error {
-		encoded, err := readLinkRecorder(snap, key)
-		if err != nil || encoded == nil {
+		custody, err := readRebuildEdgeCustody(snap, key)
+		if err != nil || custody.raw == nil {
 			return err
 		}
-		raw, err = decodeLinkRecorder(encoded)
+		raw, err = decodeLinkRecorder(custody.raw)
 		found = err == nil
 		return err
 	})

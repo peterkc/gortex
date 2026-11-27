@@ -154,11 +154,16 @@ func (p *rebuildReactNativeBridge) capture(ctx context.Context, inFamily func(st
 			return err
 		}
 		live := pendingEdgeKey(e)
-		raw, err := readLinkRecorder(p.b.pending, live)
+		custody, err := readRebuildEdgeCustody(p.b.pending, live)
 		if err != nil {
 			return err
 		}
+		raw := custody.raw
 		if raw == nil {
+			// Synthetic and untracked moves have no raw receipt ordinal.
+			if custody.proof != 0 {
+				return &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(e)}
+			}
 			raw = live
 		}
 		key := rebuildRNRecorder(raw, mod, method)
@@ -390,7 +395,7 @@ func (p *rebuildReactNativeBridge) visit(ctx context.Context, yield func(*graph.
 
 func (p *rebuildReactNativeBridge) apply(ctx context.Context) error {
 	return p.visit(ctx, func(e *graph.Edge) error {
-		if err := p.b.putEdge(e); err != nil {
+		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofRNBridge}); err != nil {
 			return err
 		}
 		p.stats.Edges++
