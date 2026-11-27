@@ -425,3 +425,61 @@ func TestRebuildMyBatisCandidateCohortProof(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildMyBatisCollectsOnlyLiveJoins(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	old := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
+	// Two distinct live stubs request the same cohort.
+	otherSite := *old
+	otherSite.Line++
+	xml := myBatisTestXML(t, "local", old)
+	xml.Edges = append(xml.Edges, &otherSite)
+	require.NoError(t, b.AddParsedFile("local", xml))
+	local := myBatisTestMethod(t, b, "local").Nodes[0]
+	remote := myBatisTestMethod(t, b, "remote").Nodes[0]
+	const unusedFile = "local/OtherMapper.java"
+	unused := &graph.Node{ID: unusedFile + "::OtherMapper.find", Name: "find", Kind: graph.KindMethod,
+		FilePath: unusedFile, Language: "java", Meta: map[string]any{"receiver": "OtherMapper"}}
+	require.NoError(t, b.AddParsedFile("local", myBatisTestQualifiedFacts(t, "local", unused)))
+
+	ctx := t.Context()
+	p := rebuildMyBatisPass{b: b}
+	rules := rebuildMyBatisRules{
+		stub: func(e *graph.Edge) (string, string) {
+			ns, _ := e.Meta["mybatis_namespace"].(string)
+			stmt, _ := e.Meta["mybatis_statement"].(string)
+			return ns, stmt
+		},
+		join: func(ns, stmt string) string { return ns + "." + stmt },
+	}
+	require.NoError(t, p.capture(ctx, rules))
+	require.EqualValues(t, 2, p.stats.Stubs)
+	require.NoError(t, p.collect(ctx, func(n *graph.Node) string {
+		receiver, _ := n.Meta["receiver"].(string)
+		return rules.join(receiver, n.Name)
+	}))
+
+	const join = "UserMapper.find"
+	byColumn := func(col byte) []string {
+		var keys []string
+		require.NoError(t, pendingVisit(ctx, b.pending, rebuildMyBatisKey(col), func(r row) error {
+			keys = append(keys, string(r.key))
+			return nil
+		}))
+		return keys
+	}
+	require.Equal(t, []string{string(rebuildMyBatisKey('j', join))}, byColumn('j'))
+	require.ElementsMatch(t, []string{
+		string(rebuildMyBatisKey('c', join, local.ID)),
+		string(rebuildMyBatisKey('c', join, remote.ID)),
+	}, byColumn('c'))
+	require.ElementsMatch(t, []string{
+		string(rebuildMyBatisKey('e', join, "")),
+		string(rebuildMyBatisKey('e', join, "local")),
+		string(rebuildMyBatisKey('e', join, "remote")),
+	}, byColumn('e'))
+	require.ElementsMatch(t, []string{
+		string(rebuildMyBatisKey('n', local.ID)),
+		string(rebuildMyBatisKey('n', remote.ID)),
+	}, byColumn('n'))
+}

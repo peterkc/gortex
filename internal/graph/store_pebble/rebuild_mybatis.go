@@ -78,6 +78,9 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 	}()
 	p := rebuildMyBatisPass{b: b}
 	rules := rebuildMyBatisRules{methodKey: methodKey, stub: stub, join: join, rebind: rebind}
+	if err := p.capture(ctx, rules); err != nil || p.stats.Stubs == 0 {
+		return p.stats, err
+	}
 	if err := p.collect(ctx, methodKey); err != nil {
 		return stats, err
 	}
@@ -94,6 +97,7 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 	return p.stats, err
 }
 
+// s: live mapper stub by old out-key; j: join named by a live stub.
 // c: candidate by cohort and ID; e: election aggregate by cohort and repo
 // (empty repo is workspace); n: node proof by ID; u: affected cohort proof.
 // m: new payload by old out-key; d: destinations seen; x: conflicting outputs;
@@ -129,6 +133,10 @@ func (p *rebuildMyBatisPass) collect(ctx context.Context, methodKey func(*graph.
 		join := methodKey(n)
 		if join == "" {
 			return nil
+		}
+		wanted, err := p.present(rebuildMyBatisKey('j', join))
+		if err != nil || !wanted {
+			return err
 		}
 		if err := p.put(rebuildMyBatisKey('c', join, n.ID), []byte(n.ID)); err != nil {
 			return err
@@ -190,7 +198,7 @@ func (p *rebuildMyBatisPass) elect(join, from string) (method string, caller *gr
 	return method, caller, err
 }
 
-func (p *rebuildMyBatisPass) plan(ctx context.Context, rules rebuildMyBatisRules) error {
+func (p *rebuildMyBatisPass) capture(ctx context.Context, rules rebuildMyBatisRules) error {
 	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
 		kind, err := rebuildAttributionEdgeKind(r.key)
 		if err != nil || kind != graph.EdgeCalls {
@@ -223,6 +231,34 @@ func (p *rebuildMyBatisPass) plan(ctx context.Context, rules rebuildMyBatisRules
 				return err
 			}
 		}
+		if join := rules.join(ns, stmt); join != "" {
+			key := rebuildMyBatisKey('j', join)
+			found, err := p.present(key)
+			if err != nil {
+				return err
+			}
+			if !found {
+				if err := p.put(key, nil); err != nil {
+					return err
+				}
+			}
+		}
+		return p.put(append(rebuildMyBatisKey('s'), r.key...), nil)
+	})
+}
+
+func (p *rebuildMyBatisPass) plan(ctx context.Context, rules rebuildMyBatisRules) error {
+	prefix := rebuildMyBatisKey('s')
+	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		old := r.key[len(prefix):]
+		e, err := p.edge(old)
+		if err != nil {
+			return err
+		}
+		if e == nil {
+			return invalid("MyBatis census lost a live stub")
+		}
+		ns, stmt := rules.stub(e)
 		join := rules.join(ns, stmt)
 		method, caller, err := p.elect(join, e.From)
 		if err != nil {
@@ -244,7 +280,7 @@ func (p *rebuildMyBatisPass) plan(ctx context.Context, rules rebuildMyBatisRules
 				return err
 			}
 		}
-		return p.stage(r.key, e)
+		return p.stage(old, e)
 	})
 }
 
