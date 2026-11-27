@@ -46,6 +46,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Redux Thunk", "moves", 1},
 		{"Object Registry", "moves", 1},
 		{"Vuex Dispatch", "moves", 1},
+		{"Celery", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -73,7 +74,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				ProvidersOff: true,
 				Recipes: map[string]rebuildDigest{
 					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1}, "kotlin": {1}, "mybatis": {1},
-					"sql": {1},
+					"sql": {1}, "python": {1},
 				},
 				Policy:  freezeRebuildParsePolicy(root, cfg),
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
@@ -554,6 +555,14 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	actual := node("platform.kt", "kotlin", expect.Name, graph.KindFunction, 2)
 	actual.Meta = map[string]any{"kmp_role": "actual"}
 
+	const py = "tasks.py"
+	task := node(py, "python", "mail", graph.KindFunction, 1)
+	task.Meta = map[string]any{"celery_task": task.Name}
+	caller := node(py, "python", "dispatch", graph.KindFunction, 2)
+	celeryFacts := receipt([]*graph.Node{task, caller},
+		edge(caller, caller.ID, graph.EdgeCalls, 3, map[string]any{"via": "celery-dispatch", "celery_task": task.Name}),
+	)
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -564,5 +573,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
+		celeryFacts,
 	}
 }

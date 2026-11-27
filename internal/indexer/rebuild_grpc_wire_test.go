@@ -38,6 +38,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"object registry", store_pebble.ErrRebuildObjectRegistry, 63},
 		{"RTK Query", store_pebble.ErrRebuildRTKQuery, 64},
 		{"Vuex Dispatch", store_pebble.ErrRebuildVuexDispatch, 65},
+		{"Celery", store_pebble.ErrRebuildCelery, 66},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {

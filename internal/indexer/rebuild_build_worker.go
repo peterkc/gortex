@@ -602,6 +602,15 @@ func buildRebuildStages(
 				zap.Uint64("stubs", vuexDispatch.Stubs), zap.Uint64("resolved", vuexDispatch.Resolved),
 				zap.Uint64("moves", vuexDispatch.Moves))
 		}
+		celery, err := resolver.RunRebuildCelery(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if celery.Stubs != 0 {
+			logger.Info("rebuild Celery applied to private build",
+				zap.Uint64("stubs", celery.Stubs), zap.Uint64("resolved", celery.Resolved),
+				zap.Uint64("moves", celery.Moves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
