@@ -65,7 +65,7 @@ func (b *BuildStore) RebuildReduxThunk(ctx context.Context, receipts iter.Seq2[P
 	}()
 	p := rebuildReduxThunkPass{
 		rebuildCallMoves: rebuildCallMoves{
-			b: b, prefix: prefix, rowBytes: rebuildReduxThunkRowBytes, label: "Redux Thunk", edgeRow: "edge row",
+			b: b, prefix: prefix, rowBytes: rebuildReduxThunkRowBytes, label: "Redux Thunk", inputRow: "edge row",
 		},
 		rules: rules,
 	}
@@ -296,7 +296,7 @@ func (p *rebuildReduxThunkPass) plan(ctx context.Context) error {
 		if err != nil || kind != graph.EdgeCalls {
 			return err
 		}
-		e, err := p.decodeEdge(r.key, r.value)
+		e, err := p.decodeKeyedEdge(r.key, r.value)
 		if err != nil {
 			return err
 		}
@@ -304,7 +304,7 @@ func (p *rebuildReduxThunkPass) plan(ctx context.Context) error {
 		if callee == "" {
 			return nil
 		}
-		if err := p.edgeInput(r.key, r.value); err != nil {
+		if err := p.input(r.key, r.value); err != nil {
 			return err
 		}
 		p.stats.Stubs++

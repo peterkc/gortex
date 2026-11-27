@@ -16,7 +16,7 @@ type rebuildCallMoves struct {
 	prefix   []byte
 	rowBytes int
 	label    string
-	edgeRow  string
+	inputRow string
 	ordered  uint64
 }
 
@@ -94,14 +94,14 @@ func (p *rebuildCallMoves) visitWindow(ctx context.Context, ordinal uint64, visi
 	})
 }
 
-func (p *rebuildCallMoves) edgeInput(key, val []byte) error {
+func (p *rebuildCallMoves) input(key, val []byte) error {
 	if len(key)+len(val) > p.rowBytes {
-		return fmt.Errorf("%w: %s %s", ErrRebuildLinkInputSize, p.label, p.edgeRow)
+		return fmt.Errorf("%w: %s %s", ErrRebuildLinkInputSize, p.label, p.inputRow)
 	}
 	return nil
 }
 
-func (p *rebuildCallMoves) decodeEdge(key, val []byte) (*graph.Edge, error) {
+func (p *rebuildCallMoves) decodeKeyedEdge(key, val []byte) (*graph.Edge, error) {
 	e, err := decodeEdge(val)
 	if err == nil && !bytes.Equal(key, pendingEdgeKey(e)) {
 		return nil, invalid(p.label + " edge does not match key")
@@ -111,10 +111,10 @@ func (p *rebuildCallMoves) decodeEdge(key, val []byte) (*graph.Edge, error) {
 
 func (p *rebuildCallMoves) edge(key []byte) (*graph.Edge, error) {
 	return pendingGet(p.b.pending, key, func(val []byte) (*graph.Edge, error) {
-		if err := p.edgeInput(key, val); err != nil {
+		if err := p.input(key, val); err != nil {
 			return nil, err
 		}
-		return p.decodeEdge(key, val)
+		return p.decodeKeyedEdge(key, val)
 	})
 }
 

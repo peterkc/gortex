@@ -37,7 +37,7 @@ type rebuildSQLCallsitePass struct {
 func newRebuildSQLCallsitePass(b *BuildStore, fn func(*graph.Edge) string, rebind func(*graph.Edge, string, string, bool) bool) rebuildSQLCallsitePass {
 	return rebuildSQLCallsitePass{
 		rebuildCallMoves: rebuildCallMoves{
-			b: b, prefix: rebuildSQLCallsitePrefix, rowBytes: rebuildSQLCallsiteRowBytes, label: "SQL callsite", edgeRow: "edge row",
+			b: b, prefix: rebuildSQLCallsitePrefix, rowBytes: rebuildSQLCallsiteRowBytes, label: "SQL callsite", inputRow: "edge row",
 		},
 		fn: fn, rebind: rebind,
 	}
@@ -189,7 +189,7 @@ func (p *rebuildSQLCallsitePass) plan(ctx context.Context) error {
 		if err != nil || kind != graph.EdgeCalls {
 			return err
 		}
-		e, err := p.decodeEdge(r.key, r.value)
+		e, err := p.decodeKeyedEdge(r.key, r.value)
 		if err != nil {
 			return err
 		}
@@ -197,7 +197,7 @@ func (p *rebuildSQLCallsitePass) plan(ctx context.Context) error {
 		if name == "" {
 			return nil
 		}
-		if err := p.edgeInput(r.key, r.value); err != nil {
+		if err := p.input(r.key, r.value); err != nil {
 			return err
 		}
 		p.stats.Stubs++

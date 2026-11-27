@@ -31,7 +31,7 @@ type rebuildMyBatisPass struct {
 func newRebuildMyBatisPass(b *BuildStore) rebuildMyBatisPass {
 	return rebuildMyBatisPass{
 		rebuildCallMoves: rebuildCallMoves{
-			b: b, prefix: rebuildMyBatisPrefix, rowBytes: rebuildMyBatisRowBytes, label: "MyBatis", edgeRow: "input row",
+			b: b, prefix: rebuildMyBatisPrefix, rowBytes: rebuildMyBatisRowBytes, label: "MyBatis", inputRow: "input row",
 		},
 	}
 }
@@ -99,20 +99,13 @@ func rebuildMyBatisKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildMyBatisPrefix), col), fields...)
 }
 
-func rebuildMyBatisInput(key, val []byte) error {
-	if len(key)+len(val) > rebuildMyBatisRowBytes {
-		return fmt.Errorf("%w: MyBatis input row", ErrRebuildLinkInputSize)
-	}
-	return nil
-}
-
 func (p *rebuildMyBatisPass) collect(ctx context.Context, methodKey func(*graph.Node) string) error {
 	return p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
 		light, err := checkedRebuildLightNode(r, "MyBatis")
 		if err != nil || light.Kind != graph.KindMethod || light.Language != "java" {
 			return err
 		}
-		if err := rebuildMyBatisInput(r.key, r.value); err != nil {
+		if err := p.input(r.key, r.value); err != nil {
 			return err
 		}
 		n, err := decodeNode(r.value)
@@ -229,7 +222,7 @@ func (p *rebuildMyBatisPass) capture(ctx context.Context, rules RebuildMyBatisRu
 		if ns == "" || stmt == "" {
 			return nil
 		}
-		if err := rebuildMyBatisInput(r.key, r.value); err != nil {
+		if err := p.input(r.key, r.value); err != nil {
 			return err
 		}
 		p.stats.Stubs++
@@ -313,7 +306,7 @@ func (p *rebuildMyBatisPass) claimRecorder(raw, old []byte) error {
 func (p *rebuildMyBatisPass) node(id string) (*graph.Node, error) {
 	key := pendingNodeKey(id)
 	return pendingGet(p.b.pending, key, func(val []byte) (*graph.Node, error) {
-		if err := rebuildMyBatisInput(key, val); err != nil {
+		if err := p.input(key, val); err != nil {
 			return nil, err
 		}
 		n, err := decodeNode(val)
