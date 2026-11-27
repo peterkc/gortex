@@ -845,9 +845,10 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	const valuePath = "value_harness.go"
 	valueReader := node(valuePath, "go", "readHarnessLimit", graph.KindFunction, 2)
 	valueTarget := node(valuePath, "go", "HARNESS_LIMIT", graph.KindConstant, 1)
-	valueFacts := receipt([]*graph.Node{valueReader, valueTarget},
-		edge(valueReader, "unresolved::valueref::"+valueTarget.Name, graph.EdgeReads, 3,
-			map[string]any{"via": "value_ref_candidate", "name": valueTarget.Name}))
+	valueRead := edge(valueReader, "unresolved::valueref::"+valueTarget.Name, graph.EdgeReads, 3,
+		map[string]any{"via": "value_ref_candidate", "name": valueTarget.Name})
+	valueRead.Origin = graph.OriginSpeculative
+	valueFacts := receipt([]*graph.Node{valueReader, valueTarget}, valueRead)
 
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
