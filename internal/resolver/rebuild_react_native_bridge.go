@@ -11,9 +11,8 @@ import (
 
 // RunRebuildReactNativeBridge executes framework position five after the
 // private Swift/ObjC bridge and before native-implementation pairing.
-// It consumes live rn.native markers. Main currently refuses the ordinary
-// JS/TS unresolved::rn::<module>::<method> target as a non-bare call,
-// so direct bridge fixtures do not prove that extractor-to-main path.
+// It consumes live rn.native markers, including extractor targets retained
+// after main's checked full-name miss.
 func RunRebuildReactNativeBridge(ctx context.Context, b *store_pebble.BuildStore, receipts iter.Seq2[store_pebble.ParseFacts, error],
 	selection FrameworkSynthesizerSelection, spillAt int,
 ) (store_pebble.RebuildReactNativeBridgeStats, error) {

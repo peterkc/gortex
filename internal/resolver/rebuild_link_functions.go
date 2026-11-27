@@ -33,7 +33,10 @@ func prepareRebuildFunction(ctx context.Context, f *rebuildLinkFrontier, edge *g
 			!strings.ContainsAny(name, `.\:`) && target == "valueref::"+name:
 			checkedMiss = "value-ref"
 		default:
-			checkedMiss = rebuildGoFullNameMissFamily(edge, target)
+			checkedMiss = rebuildFrameworkFullNameMissFamily(edge, target)
+			if checkedMiss == "" {
+				checkedMiss = rebuildGoFullNameMissFamily(edge, target)
+			}
 		}
 		if checkedMiss == "" {
 			return rebuildMainQuery{}, fmt.Errorf("%w: non-bare call %q in %q", errRebuildMainRule, target, edge.FilePath)
@@ -228,6 +231,51 @@ func rebuildGoFullNameMissFamily(edge *graph.Edge, target string) string {
 		if edge.Origin == graph.OriginASTInferred && strings.Contains(target, ".") &&
 			!strings.ContainsAny(target, `\:`) && strings.TrimSpace(target) == target {
 			return "channel expression"
+		}
+	}
+	return ""
+}
+
+// Native main uses the full name for these placeholders. Their ordinary
+// miss must keep the original row for the graph-wide framework pass, but a
+// real name candidate still requires its own binding rule.
+func rebuildFrameworkFullNameMissFamily(edge *graph.Edge, target string) string {
+	if edge.Meta["resolution"] == "using_static" || csharpLocalShadowed(edge) {
+		return ""
+	}
+	if edge.Kind == graph.EdgeCalls && isJSTSPath(edge.FilePath) && edge.Meta["via"] == rnNativeVia {
+		module, _ := edge.Meta["rn_module"].(string)
+		method, _ := edge.Meta["rn_method"].(string)
+		if module != "" && method != "" && target == "rn::"+module+"::"+method {
+			return "React Native bridge"
+		}
+	}
+	goFile, javaFile := strings.HasSuffix(edge.FilePath, ".go"), strings.HasSuffix(edge.FilePath, ".java")
+	if !goFile && !javaFile {
+		return ""
+	}
+	kind, _ := edge.Meta["temporal_kind"].(string)
+	name, _ := edge.Meta["temporal_name"].(string)
+	if edge.Kind == graph.EdgeCalls && name != "" && target == "temporal::"+kind+"::"+name {
+		switch edge.Meta["via"] {
+		case "temporal.stub":
+			if kind == "workflow" || (goFile && kind == "activity") {
+				return "Temporal dispatch"
+			}
+		case "temporal.start":
+			if javaFile && kind == "workflow" {
+				return "Temporal start"
+			}
+		}
+	}
+	// Go emits a separate same-target Spawn with mode but without the
+	// Call's Temporal metadata. Native applies the same full-name lookup.
+	if goFile && edge.Kind == graph.EdgeSpawns && edge.Origin == graph.OriginASTResolved && edge.Meta["mode"] == "goroutine" {
+		if name, ok := strings.CutPrefix(target, "temporal::workflow::"); ok && name != "" {
+			return "Temporal spawn"
+		}
+		if name, ok := strings.CutPrefix(target, "temporal::activity::"); ok && name != "" {
+			return "Temporal spawn"
 		}
 	}
 	return ""

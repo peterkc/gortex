@@ -446,3 +446,103 @@ func TestRebuildFunctionGoFullNameRefusesOtherRows(t *testing.T) {
 		})
 	}
 }
+
+// Temporal dispatch targets, including a goroutine's separate Spawn, use
+// native main's exact full-name miss, not a framework-prefix exemption.
+func TestRebuildFunctionTemporalDispatchFullNameMiss(t *testing.T) {
+	const file = "src/workflow.go"
+	facts, err := languages.NewGoExtractor().Extract(file, []byte(`package sample
+import "go.temporal.io/sdk/workflow"
+func Run(ctx workflow.Context) {
+    go workflow.ExecuteActivity(ctx, "Charge", 1)
+}
+`))
+	require.NoError(t, err)
+	defer facts.ReleaseTree()
+	const target = "temporal::activity::Charge"
+	var selected []*graph.Edge
+	for _, e := range facts.Edges {
+		if e.To == "unresolved::"+target {
+			selected = append(selected, cloneFrameworkEdge(e))
+		}
+	}
+	require.Len(t, selected, 2)
+	require.ElementsMatch(t, []graph.EdgeKind{graph.EdgeCalls, graph.EdgeSpawns}, []graph.EdgeKind{selected[0].Kind, selected[1].Kind})
+	for _, tc := range []struct {
+		name string
+		edge *graph.Edge
+		lang string
+	}{
+		{name: "Go call or spawn", edge: selected[0], lang: "go"},
+		{name: "Go companion", edge: selected[1], lang: "go"},
+		{name: "Java stub", lang: "java", edge: &graph.Edge{From: "java-caller", To: "unresolved::temporal::workflow::charge.task", Kind: graph.EdgeCalls, FilePath: "src/Tasks.java", Line: 4,
+			Meta: map[string]any{"via": "temporal.stub", "temporal_kind": "workflow", "temporal_name": "charge.task", "cross_language": true}}},
+		{name: "Java start", lang: "java", edge: &graph.Edge{From: "java-caller", To: "unresolved::temporal::workflow::charge.task", Kind: graph.EdgeCalls, FilePath: "src/Tasks.java", Line: 5,
+			Meta: map[string]any{"via": "temporal.start", "temporal_kind": "workflow", "temporal_name": "charge.task"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := tc.edge
+			name := graph.UnresolvedName(row.To)
+			for _, hit := range []bool{false, true} {
+				t.Run(fmt.Sprintf("hit=%v", hit), func(t *testing.T) {
+					caller := &graph.Node{ID: row.From, Name: "Run", FilePath: row.FilePath, Language: tc.lang, Kind: graph.KindFunction, RepoPrefix: "repo"}
+					nodes := []*graph.Node{caller,
+						{ID: "suffix", Name: "Charge", Language: tc.lang, FilePath: row.FilePath, RepoPrefix: "repo", Kind: graph.KindFunction},
+						{ID: "other-repo", Name: name, Language: tc.lang, FilePath: row.FilePath, RepoPrefix: "other", Kind: graph.KindFunction},
+					}
+					if hit {
+						nodes = append(nodes, &graph.Node{ID: "hit", Name: name, Language: tc.lang, FilePath: row.FilePath, RepoPrefix: "repo", Kind: graph.KindFunction})
+					}
+					g := graph.New()
+					g.AddBatch(nodes, []*graph.Edge{row})
+					native := New(g)
+					native.bulkMode = true
+					require.NoError(t, native.warmLookupCache([]*graph.Edge{row}))
+					defer native.clearLookupCache()
+					want := cloneFrameworkEdge(row)
+					_, changed := native.resolveEdge(want, &ResolveStats{})
+					require.Equal(t, hit, changed)
+					if hit {
+						require.Equal(t, "hit", want.To)
+					} else {
+						require.Equal(t, row, want)
+					}
+					ctx, build, opts := frontierFixture(t, 0)
+					opts.SpillBytes = 1
+					build.AddBatch(nodes, []*graph.Edge{row})
+					before := rebuildFnPointerSaved(t, build)
+					err := runRebuildLinkFrontier(ctx, build, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+						moves, err := reduceRebuildMainPage(ctx, f, page)
+						require.Empty(t, moves)
+						return err
+					})
+					if hit {
+						require.ErrorIs(t, err, errRebuildMainRule)
+						require.ErrorContains(t, err, "non-bare Temporal")
+					} else {
+						require.NoError(t, err)
+					}
+					require.Equal(t, before, rebuildFnPointerSaved(t, build))
+				})
+			}
+		})
+	}
+}
+
+func TestRebuildFunctionFrameworkMarkersRefuseOtherRows(t *testing.T) {
+	call := &graph.Edge{From: "caller", To: "unresolved::temporal::activity::Charge", FilePath: "caller.go", Kind: graph.EdgeCalls,
+		Meta: map[string]any{"via": "temporal.stub", "temporal_kind": "activity", "temporal_name": "Charge"}}
+	for _, mutate := range []func(*graph.Edge){
+		func(e *graph.Edge) { e.Kind = graph.EdgeReads },
+		func(e *graph.Edge) { e.FilePath = "caller.ts" },
+		func(e *graph.Edge) { e.To += "::other" },
+		func(e *graph.Edge) { delete(e.Meta, "via") },
+		func(e *graph.Edge) { e.Meta["temporal_kind"] = "register_activity" },
+	} {
+		e := cloneFrameworkEdge(call)
+		mutate(e)
+		before := cloneFrameworkEdge(e)
+		require.ErrorIs(t, resolveRebuildFunction(t.Context(), nil, e, graph.UnresolvedName(e.To)), errRebuildMainRule)
+		require.Equal(t, before, e)
+	}
+}
