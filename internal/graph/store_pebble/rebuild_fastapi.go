@@ -343,7 +343,7 @@ func (p *rebuildConventionPass) recordEdge(raw *graph.Edge, file string) error {
 	}
 	live, err := p.edge(claim[1:])
 	if err != nil || live == nil {
-		return errors.Join(err, invalid(p.label + " receipt has no live edge"))
+		return errors.Join(err, invalid(p.label+" receipt has no live edge"))
 	}
 	rawVia, _ := raw.Meta["via"].(string)
 	liveVia, _ := live.Meta["via"].(string)
@@ -360,11 +360,11 @@ func (p *rebuildConventionPass) prove(ctx context.Context) error {
 		old := r.key[len(prefix):]
 		e, err := p.edge(old)
 		if err != nil || e == nil {
-			return errors.Join(err, invalid(p.label + " site disappeared"))
+			return errors.Join(err, invalid(p.label+" site disappeared"))
 		}
 		source, err := p.source(e.From)
 		if err != nil || source == nil {
-			return errors.Join(err, invalid(p.label + " source disappeared"))
+			return errors.Join(err, invalid(p.label+" source disappeared"))
 		}
 		via, _ := e.Meta["via"].(string)
 		names, dirs := p.rules.Shape(e.To, via)
