@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"strings"
 
@@ -19,6 +20,8 @@ type RebuildMainInputs struct {
 	// SelectCallers must return an order-preserving subset of each pending
 	// page. The page and its edges are borrowed: do not modify or retain them.
 	SelectCallers func([]*graph.Edge) ([]*graph.Edge, error)
+	// Receipts replays assembled edges in frozen order for Go receiver repair.
+	Receipts iter.Seq2[store_pebble.ParseFacts, error]
 	// PathAlias maps a caller path and module to a graph stem. RewriteNpm
 	// maps a caller path and raw import payload to a new payload. An empty
 	// result with no error means a proved miss. Both are required at use.
@@ -149,7 +152,7 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 	if !hadPending {
 		return nil
 	}
-	if _, err := build.RebuildGoMethodReceivers(ctx); err != nil {
+	if _, err := build.RebuildGoMethodReceivers(ctx, in.Receipts); err != nil {
 		return err
 	}
 	if _, err := build.RebuildBareNameScope(ctx); err != nil {

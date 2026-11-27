@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"strings"
 	"unicode/utf8"
 
@@ -15,7 +16,7 @@ import (
 // RebuildGoMethodReceivers repairs cross-file Go member_of targets in the
 // private graph. Run after main and its guard, before attribution or derived
 // reads. The coordinator owns the store serially and discards it on error.
-func (b *BuildStore) RebuildGoMethodReceivers(ctx context.Context) (moved int, err error) {
+func (b *BuildStore) RebuildGoMethodReceivers(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) (moved int, err error) {
 	const maxPageBytes = 16 << 20
 	view := b.RebuildView()
 	if err := view.mutationError(); err != nil {
@@ -37,7 +38,7 @@ func (b *BuildStore) RebuildGoMethodReceivers(ctx context.Context) (moved int, e
 		}
 	}()
 	key := func(repo, dir, name string) []byte {
-		return keyStrings(bytes.Clone(prefix), repo, dir, name)
+		return keyStrings([]byte{'g', 'r', 't'}, repo, dir, name)
 	}
 	haveTypes := false
 	if err := view.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
@@ -71,21 +72,8 @@ func (b *BuildStore) RebuildGoMethodReceivers(ctx context.Context) (moved int, e
 		return 0, err
 	}
 
-	var page []graph.EdgeReindex
-	pageBytes := 0
-	apply := func() error {
-		if len(page) == 0 {
-			return nil
-		}
-		if err := b.ApplyLinkReindexes(ctx, page); err != nil {
-			return err
-		}
-		moved += len(page)
-		clear(page)
-		page = page[:0]
-		pageBytes = 0
-		return nil
-	}
+	planned := []byte{'g', 'r', 'm'}
+	haveMoves := false
 	edges := []byte{familyEdge, edgeOut}
 	if err := view.visit(ctx, edges, func(snap *pebble.Snapshot, r row) error {
 		_, rest, err := readKeyString(r.key[len(edges):]) // from
@@ -132,29 +120,104 @@ func (b *BuildStore) RebuildGoMethodReceivers(ctx context.Context) (moved int, e
 		if graph.StructuralEdgeTargetInvalid(graph.EdgeMemberOf, to) {
 			return invalid("Go receiver destination is not a structural endpoint")
 		}
-		cost := len(r.key) + len(r.value) + len(to)
-		if cost > maxPageBytes {
+		if len(r.key)+len(r.value)+len(to) > maxPageBytes {
 			return fmt.Errorf("%w: Go receiver move", ErrRebuildLinkInputSize)
 		}
-		if len(page) == rebuildLinkPendingRows || cost > maxPageBytes-pageBytes {
-			if err := apply(); err != nil {
+		haveMoves = true
+		return b.pending.Set(append(bytes.Clone(planned), r.key...), []byte(to), pebble.NoSync)
+	}); err != nil || !haveMoves {
+		return 0, err
+	}
+
+	var page []graph.EdgeReindex
+	pageBytes := 0
+	apply := func() error {
+		if len(page) == 0 {
+			return nil
+		}
+		if err := b.withWrites(func() error {
+			if err := ctx.Err(); err != nil {
 				return err
 			}
+			if err := b.reindexChunkWithRecorders(page, true); err != nil {
+				return err
+			}
+			return ctx.Err()
+		}); err != nil {
+			return fmt.Errorf("%w: apply resolver page: %w", ErrRebuildLink, err)
 		}
-		e, err = decodeEdge(r.value)
+		moved += len(page)
+		clear(page)
+		page = page[:0]
+		pageBytes = 0
+		return nil
+	}
+	queue := func(old []byte, to string) error {
+		found, err := pendingGet(b.pending, old, func(raw []byte) (bool, error) {
+			cost := len(old) + len(raw) + len(to)
+			if len(page) == rebuildLinkPendingRows || cost > maxPageBytes-pageBytes {
+				if err := apply(); err != nil {
+					return false, err
+				}
+			}
+			e, err := decodeEdge(raw)
+			if err != nil {
+				return false, err
+			}
+			from := e.To
+			e.To = to
+			page = append(page, graph.EdgeReindex{Edge: e, OldTo: from})
+			pageBytes += cost
+			return true, nil
+		})
 		if err != nil {
 			return err
 		}
-		e.To = to
-		page = append(page, graph.EdgeReindex{Edge: e, OldTo: oldTo})
-		pageBytes += cost
+		if !found {
+			return invalid("Go receiver move has no saved old edge")
+		}
 		return nil
+	}
+	// Real type targets never move. A stationary row keeps its payload; for
+	// a free key the first claimant wins, even across pages. Consume each
+	// planned old key at its first receipt, matching SQLite's lowest rowid.
+	if receipts != nil {
+		for facts, err := range receipts {
+			if err != nil {
+				return 0, err
+			}
+			for _, e := range facts.Edges {
+				if err := ctx.Err(); err != nil {
+					return 0, err
+				}
+				if e == nil || e.Kind != graph.EdgeMemberOf {
+					continue
+				}
+				old := pendingEdgeKey(e)
+				key := append(bytes.Clone(planned), old...)
+				to, err := pendingGet(b.pending, key, func(raw []byte) (string, error) { return string(raw), nil })
+				if err != nil {
+					return 0, err
+				}
+				if to == "" {
+					continue
+				}
+				if err := queue(old, to); err != nil {
+					return 0, err
+				}
+				if err := b.pending.Delete(key, pebble.NoSync); err != nil {
+					return 0, err
+				}
+			}
+		}
+	}
+	// Non-frozen callers can still supply private rows directly. Keep those
+	// moves after the receipt-backed claims and in complete old-key order.
+	if err := pendingVisit(ctx, b.pending, planned, func(r row) error {
+		return queue(r.key[len(planned):], string(r.value))
 	}); err != nil {
 		return 0, err
 	}
-	// Primary keys already impose the complete old-key order. Identical
-	// old keys have just one saved payload. Real type targets never move,
-	// so an earlier claimant is stationary for each subsequent page.
 	err = apply()
 	return moved, err
 }

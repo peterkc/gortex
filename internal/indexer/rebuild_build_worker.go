@@ -357,7 +357,7 @@ func buildRebuildStages(
 	}
 	// Deferred file imports stay off. Like native cold materialization,
 	// this pass is independent of whether main had a pending frontier.
-	receipts := idx.rebuildDataflowReceipts(ctx, job, store, counts.census)
+	receipts := counts.census.receipts
 	if err := runRebuildArgOf(ctx, private, receipts); err != nil {
 		return err
 	}

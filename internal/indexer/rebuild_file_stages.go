@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"os"
 	"path"
@@ -51,6 +52,7 @@ type rebuildExtractorCensus struct {
 	byID     map[string]uint64
 
 	originByGraphPath map[string]string // exact graph key → literal path; stubs have no receipt in byPath
+	receipts          iter.Seq2[store_pebble.ParseFacts, error]
 }
 
 // selectPendingCallers selects a main-link page before starting workers or
@@ -198,6 +200,7 @@ func (idx *Indexer) buildRebuildFileStages(
 	// parse store refuses different bytes at an existing immutable key.
 	// Later passes also use these same checked receipt keys, not the source.
 	receipts := idx.rebuildDataflowReceipts(ctx, job, store, &census)
+	census.receipts = receipts
 	counts.claims, err = private.ReduceRebuildSharedClaims(ctx, rebuildCloneClaimBytes, receipts,
 		func(keep func(string, uint64) (bool, error)) error {
 			var ordinal uint64

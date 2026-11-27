@@ -89,6 +89,7 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 	opts.ScratchParent = lease
 	return resolver.RunRebuildMain(ctx, build, opts, resolver.RebuildMainInputs{
 		SelectCallers:            census.selectPendingCallers,
+		Receipts:                 census.receipts,
 		DependencyContractsReady: dependencyContractsReady,
 		SkipPlaceholderSources:   skipPlaceholderSources,
 		PathAlias: func(file, spec string) (string, error) {

@@ -35,18 +35,28 @@ func (*T) Stationary() {}
 	require.NotNil(t, stationaryOld)
 	require.Equal(t, file+"::T", multi.To)
 	require.Equal(t, file+"::U", sole.To)
+	i := slices.IndexFunc(out.Nodes, func(n *graph.Node) bool { return n.ID == multi.From })
+	require.GreaterOrEqual(t, i, 0)
+	caller := out.Nodes[i]
 
 	// Post-parse replay witness: a configured plugin parsing another file can
 	// supply this From, To, kind, Go source site and metadata. Its old key is
 	// distinct but rebinding either row yields the same complete saved key.
 	plugin := &graph.Edge{From: multi.From, To: "pkg/a-replay.go::T", Kind: multi.Kind, FilePath: multi.FilePath, Line: multi.Line,
 		Meta: map[string]any{"producer": "plugin"}}
+	// The competing owner records a smaller line between the two collision
+	// claims. SetState must still see the retained claim before this owner.
+	other := &graph.Edge{From: multi.From, To: targetU, Kind: multi.Kind, FilePath: file, Line: multi.Line - 1}
+	render := &graph.Node{ID: types + "::T.render", Name: "render", Kind: graph.KindMethod, FilePath: types, Language: "go", StartLine: 5}
+	renderMember := &graph.Edge{From: render.ID, To: targetT, Kind: graph.EdgeMemberOf, FilePath: types, Line: render.StartLine}
+	gate := &graph.Edge{From: multi.From, To: "unresolved::setState", Kind: graph.EdgeCalls, FilePath: file, Line: multi.Line}
 	stationary := *stationaryOld
 	stationary.To, stationary.Confidence, stationary.Origin = targetT, 0.75, "stationary"
 	stationary.Meta = map[string]any{"payload": "preserve canonical row"}
 	ambiguous := &graph.Edge{From: "amb/m.go::T.M", To: "amb/m.go::T", Kind: graph.EdgeMemberOf, FilePath: "amb/m.go", Line: 2}
 	foreign := &graph.Edge{From: "pkg/view.ts::T.M", To: "pkg/view.ts::T", Kind: graph.EdgeMemberOf, FilePath: "pkg/view.ts", Line: 2}
 	nodes := append(out.Nodes,
+		render,
 		&graph.Node{ID: targetT, Name: "T", Kind: graph.KindType, FilePath: types, Language: "go"},
 		&graph.Node{ID: targetU, Name: "U", Kind: graph.KindType, FilePath: types, Language: "go"},
 		// An existing non-type target must not protect the sole mover.
@@ -56,20 +66,13 @@ func (*T) Stationary() {}
 		&graph.Node{ID: "amb/b.go::T", Name: "T", Kind: graph.KindType, FilePath: "amb/b.go", Language: "go"},
 		&graph.Node{ID: foreign.From, Name: "M", Kind: graph.KindMethod, FilePath: foreign.FilePath, Language: "typescript"},
 	)
-	arrival := []*graph.Edge{multi, plugin, sole, stationaryOld, &stationary, ambiguous, foreign}
+	arrival := []*graph.Edge{multi, other, plugin, sole, stationaryOld, &stationary, ambiguous, foreign, renderMember, gate}
 	reversed := slices.Clone(arrival)
 	slices.Reverse(reversed)
-	ordered := slices.Clone(arrival)
-	slices.SortFunc(ordered, compareRebuildImportEdges)
-
+	require.Negative(t, compareRebuildImportEdges(plugin, multi))
 	const moved = 4 // both collision claims, the sole move, and the claim lost to a stationary row
-	orderedRows, orderedCount := rebuildNativeReceiverReplay(t, nodes, ordered)
-	require.Equal(t, moved, orderedCount)
-	movedPlugin, movedSole := *plugin, *sole
-	movedPlugin.To, movedSole.To = targetT, targetU
-	want := []*graph.Edge{&movedPlugin, &movedSole, &stationary, ambiguous, foreign}
-	slices.SortFunc(want, compareRebuildImportEdges)
-	require.Equal(t, want, orderedRows)
+	movedSole := *sole
+	movedSole.To = targetU
 
 	for _, tc := range []struct {
 		name  string
@@ -86,7 +89,7 @@ func (*T) Stationary() {}
 			require.Equal(t, moved, rawCount)
 			winner := *tc.first
 			winner.To = targetT
-			rawWant := []*graph.Edge{&winner, &movedSole, &stationary, ambiguous, foreign}
+			rawWant := []*graph.Edge{&winner, &movedSole, &stationary, ambiguous, foreign, other, renderMember, gate}
 			slices.SortFunc(rawWant, compareRebuildImportEdges)
 			require.Equal(t, rawWant, raw)
 
@@ -95,14 +98,32 @@ func (*T) Stationary() {}
 			before := slices.Clone(tc.input)
 			slices.SortFunc(before, compareRebuildImportEdges)
 			require.Equal(t, before, rebuildFnPointerSaved(t, build))
-			gotCount, err := build.RebuildGoMethodReceivers(ctx)
+			// A repeated receipt key cannot claim twice or replace its first position.
+			receipts := rebuildGRPCReceipts(
+				store_pebble.ParseFacts{Edges: tc.input[:1]},
+				store_pebble.ParseFacts{Edges: tc.input},
+			)
+			gotCount, err := build.RebuildGoMethodReceivers(ctx, receipts)
 			require.NoError(t, err)
-			require.Equal(t, orderedCount, gotCount)
-			require.Equal(t, orderedRows, rebuildFnPointerSaved(t, build))
-			gotCount, err = build.RebuildGoMethodReceivers(ctx)
+			require.Equal(t, rawCount, gotCount)
+			require.Equal(t, raw, rebuildFnPointerSaved(t, build))
+			gotCount, err = build.RebuildGoMethodReceivers(ctx, receipts)
 			require.NoError(t, err)
 			require.Zero(t, gotCount)
-			require.Equal(t, orderedRows, rebuildFnPointerSaved(t, build))
+			require.Equal(t, raw, rebuildFnPointerSaved(t, build))
+
+			// Keep the caller's receipt order, with a separate recording file
+			// for render. This checks lineage after repair, not SQLite's
+			// planner-dependent first-owner scan.
+			callerEdges := slices.DeleteFunc(slices.Clone(tc.input), func(e *graph.Edge) bool { return e.FilePath != file })
+			setStateReceipts := rebuildGRPCReceipts(
+				rebuildEventFacts(file, "go", out.Nodes, callerEdges...),
+				rebuildEventFacts(types, "go", []*graph.Node{render}, renderMember),
+			)
+			stats, err := RunRebuildReactSetState(ctx, build, setStateReceipts, rebuildReactSetStateSelection(t))
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), stats.Edges)
+			require.Contains(t, rebuildFnPointerSaved(t, build), rebuildReactSetStateOutput(multi.From, render.ID, targetT, file, caller.StartLine))
 		})
 	}
 }
