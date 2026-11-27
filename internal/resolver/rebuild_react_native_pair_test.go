@@ -44,10 +44,22 @@ func TestRebuildReactNativeNativePairingSQLiteOracle(t *testing.T) {
 				Line: ios[0].StartLine, Confidence: 0.9, Origin: graph.OriginASTInferred,
 				Meta: map[string]any{"fixture": "stationary"},
 			}
+			// Each empty key has a matching declaration on the opposite platform.
+			// A one-sided decoy would not pair even if the empty-key check failed.
+			objcNodes := []*graph.Node{
+				ios[0],
+				rebuildRNPairMethod(ios[0].FilePath, ios[0].Language, "EmptyModule", "", "open", 37),
+				rebuildRNPairMethod(ios[0].FilePath, ios[0].Language, "EmptyMethod", module, "", 41),
+			}
+			javaNodes := []*graph.Node{
+				android[0], wrongModule, wrongMethod, wrongKind,
+				rebuildRNPairMethod(android[0].FilePath, android[0].Language, "EmptyModule", "", "open", 37),
+				rebuildRNPairMethod(android[0].FilePath, android[0].Language, "EmptyMethod", module, "", 41),
+			}
 			facts := []store_pebble.ParseFacts{
-				rebuildEventFacts(ios[0].FilePath, ios[0].Language, ios[:1], stationary),
+				rebuildEventFacts(ios[0].FilePath, ios[0].Language, objcNodes, stationary),
 				rebuildEventFacts(ios[1].FilePath, ios[1].Language, ios[1:]),
-				rebuildEventFacts(android[0].FilePath, android[0].Language, []*graph.Node{android[0], wrongModule, wrongMethod, wrongKind}),
+				rebuildEventFacts(android[0].FilePath, android[0].Language, javaNodes),
 				rebuildEventFacts(android[1].FilePath, android[1].Language, android[1:]),
 				rebuildEventFacts(wrongPlatform.FilePath, wrongPlatform.Language, []*graph.Node{wrongPlatform}),
 			}
@@ -88,7 +100,8 @@ func TestRebuildReactNativeNativePairingSQLiteOracle(t *testing.T) {
 					for _, wantNew := range []uint64{7, 0} {
 						stats, err := RunRebuildReactNativeNativePairing(t.Context(), private, rebuildGRPCReceipts(ordered...), selection, tc.spillAt)
 						require.NoError(t, err)
-						if wantNew != 0 {
+						if wantNew != 0 || tc.spillAt == 1 {
+							// The one-byte replay still spills candidate postings, even with no new edges.
 							require.Positive(t, stats.SpillBytes)
 						}
 						require.Equal(t, wantNew, stats.Edges)
@@ -121,28 +134,101 @@ func TestRebuildReactNativeNativePairingRejectsUnprovedDeclaration(t *testing.T)
 	}
 	native := openRebuildTemporalOracle(t, facts...)
 	before := rebuildEventSQLiteRows(native)
+	t.Run("pairing not selected", func(t *testing.T) {
+		excluded, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
+		require.NoError(t, err)
+		report := RunFrameworkSynthesizersWithSelection(native, excluded)
+		require.NoError(t, report.Err)
+		require.Zero(t, report.Total)
+		require.Equal(t, before, rebuildEventSQLiteRows(native))
+
+		private := openRebuildGRPCBuild(t, facts...)
+		stats, err := RunRebuildReactNativeNativePairing(t.Context(), private, rebuildGRPCReceipts(facts...), excluded, 1)
+		require.NoError(t, err)
+		require.Zero(t, stats)
+		require.Equal(t, before, rebuildEventSavedRows(t, private))
+	})
+
 	report := RunFrameworkSynthesizersWithSelection(native, selection)
 	require.NoError(t, report.Err)
 	require.Equal(t, 2, report.Total)
 	want := rebuildEventSQLiteRows(native)
-	require.Contains(t, want.edges, rebuildRNPairExpectedEdge(apple, target, "Calendar", "android"))
+	toAndroid := rebuildRNPairExpectedEdge(apple, target, "Calendar", "android")
+	toIOS := rebuildRNPairExpectedEdge(target, apple, "Calendar", "ios")
+	require.Contains(t, want.edges, toAndroid)
+	require.Contains(t, want.edges, toIOS)
 
-	for _, mode := range []string{"complete", "missing target", "changed target line"} {
+	for _, mode := range []string{
+		"complete",
+		"missing target",
+		"missing both endpoints",
+		"stationary first direction",
+		"changed target ID",
+		"changed receipt language",
+		"changed target language",
+		"changed receipt file",
+		"changed target file",
+		"changed target kind",
+		"changed target name",
+		"changed target line",
+		"changed target repo prefix",
+		"changed target module",
+		"changed target method",
+	} {
 		t.Run(mode, func(t *testing.T) {
-			private := openRebuildGRPCBuild(t, facts...)
-			require.Equal(t, before, rebuildEventSavedRows(t, private))
+			prior := before
+			live := facts
+			count := uint64(2)
+			// Calendar.java sorts before Calendar.m; the separate Battery pair is proved.
+			first := toIOS
+			if mode == "stationary first direction" {
+				live = slices.Clone(facts)
+				prior.edges = []*graph.Edge{toIOS}
+				live[3].Edges = prior.edges
+				count, first = 1, toAndroid
+			}
+			private := openRebuildGRPCBuild(t, live...)
+			require.Equal(t, prior, rebuildEventSavedRows(t, private))
+
 			proof := slices.Clone(facts)
 			java := &proof[3]
+			*java = roundTripRebuildRNBridgeFacts(t, *java)
+			wrong := java.Nodes[0]
 			switch mode {
-			case "missing target":
+			case "missing target", "missing both endpoints", "stationary first direction":
 				java.Nodes = java.Nodes[1:]
 				java.File.NodeCount = len(java.Nodes)
+				if mode == "missing both endpoints" {
+					proof[2].Nodes = nil
+					proof[2].File.NodeCount = 0
+				}
+			case "changed target ID":
+				wrong.ID += ".other"
+			case "changed receipt language":
+				java.EffectiveLanguage = "kotlin"
+			case "changed target language":
+				// Keep the receipt consistent so this checks the live language.
+				wrong.Language = "kotlin"
+				java.EffectiveLanguage = wrong.Language
+			case "changed receipt file":
+				java.File.FilePath = "other/Calendar.java"
+			case "changed target file":
+				wrong.FilePath = "other/Calendar.java"
+				java.File.FilePath = wrong.FilePath
+			case "changed target kind":
+				wrong.Kind = graph.KindFunction
+			case "changed target name":
+				wrong.Name = "DifferentName"
 			case "changed target line":
-				wrong := *java.Nodes[0]
-				wrong.StartLine++ // Same declaration ID and RN key; changes a portable field used by the reverse edge.
-				java.Nodes = []*graph.Node{&wrong, java.Nodes[1]}
+				wrong.StartLine++
+			case "changed target repo prefix":
+				// The wire codec rejects RepoPrefix; exercise the direct stage input.
+				wrong.RepoPrefix = "other"
+			case "changed target module":
+				wrong.Meta["rn_module"] = "Contacts"
+			case "changed target method":
+				wrong.Meta["rn_method"] = "close"
 			}
-			*java = roundTripRebuildRNBridgeFacts(t, *java)
 			stats, err := RunRebuildReactNativeNativePairing(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
 			if mode == "complete" {
 				require.NoError(t, err)
@@ -151,8 +237,12 @@ func TestRebuildReactNativeNativePairingRejectsUnprovedDeclaration(t *testing.T)
 				return
 			}
 			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, count, refused.Count)
+			require.Equal(t, graph.EdgeIdentityFor(first), refused.First)
 			require.Zero(t, stats)
-			require.Equal(t, before, rebuildEventSavedRows(t, private))
+			require.Equal(t, prior, rebuildEventSavedRows(t, private))
 		})
 	}
 }

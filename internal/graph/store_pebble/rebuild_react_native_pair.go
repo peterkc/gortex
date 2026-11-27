@@ -22,8 +22,8 @@ type RebuildReactNativeNativePairingStats struct {
 }
 
 // RebuildReactNativeNativePairing streams opposite-platform method pairs.
-// Existing SQLite keys remain stationary. Prove both declarations before
-// installing any new edge.
+// For SQLite parity, preserve existing durable keys. Prove both declarations
+// before installing any new edge.
 func (b *BuildStore) RebuildReactNativeNativePairing(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
 	platform func(string) string, makeEdge func(*graph.Node, *graph.Node, string, string) *graph.Edge,
 ) (stats RebuildReactNativeNativePairingStats, err error) {
@@ -51,7 +51,7 @@ func (b *BuildStore) RebuildReactNativeNativePairing(ctx context.Context, receip
 		return stats, err
 	}
 	if !p.changed {
-		return stats, nil
+		return p.stats, nil
 	}
 	if err := p.prove(ctx, receipts); err != nil {
 		return stats, err
@@ -96,22 +96,38 @@ func (p *rebuildRNPairPass) pair(ctx context.Context, platform func(string) stri
 ) error {
 	view := p.b.RebuildView()
 	var ios, android bool
-	if err := view.VisitNodes(ctx, func(n *graph.Node) error {
-		module, method := rebuildRNNames(n.Meta)
-		if n.Kind != graph.KindMethod || n.ID == "" || module == "" || method == "" {
+	// The node key starts with ID, not language. Scan only the node prefix
+	// and defer metadata decoding until the row is a native method candidate.
+	if err := view.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
+		light, err := decodeNodeLight(r.value)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(r.key, pendingNodeKey(light.ID)) {
+			return invalid("working node ID does not match key")
+		}
+		if light.Kind != graph.KindMethod || light.ID == "" {
 			return nil
 		}
 		var col byte
-		switch platform(n.Language) {
+		switch platform(light.Language) {
 		case "ios":
-			ios = true
 			col = 'i'
 		case "android":
-			android = true
 			col = 'a'
 		default:
 			return nil
 		}
+		n, err := decodeNode(r.value)
+		if err != nil {
+			return err
+		}
+		module, method := rebuildRNNames(n.Meta)
+		if module == "" || method == "" {
+			return nil
+		}
+		ios = ios || col == 'i'
+		android = android || col == 'a'
 		return p.put(rebuildRNPairKey(col, module, method, n.ID), nil)
 	}); err != nil || !ios || !android {
 		return err
