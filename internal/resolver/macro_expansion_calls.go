@@ -95,10 +95,7 @@ func resolveMacroExpansionCalls(g graph.Store, cands *frameworkPassCandidates) i
 	var macros []*graph.Node
 	var macroIDs []string
 	for _, n := range macroNodes {
-		if n == nil || n.Meta == nil || n.Name == "" {
-			continue
-		}
-		if k, _ := n.Meta["macro_kind"].(string); k != macroFunctionKindMeta {
+		if !functionLikeMacro(n) {
 			continue
 		}
 		macros = append(macros, n)
@@ -219,29 +216,11 @@ func resolveMacroExpansionCalls(g graph.Store, cands *frameworkPassCandidates) i
 			if callee == s.caller {
 				continue
 			}
-			edge := &graph.Edge{
-				From:            s.caller,
-				To:              callee,
-				Kind:            graph.EdgeCalls,
-				FilePath:        s.file,
-				Line:            s.line,
-				Confidence:      ConfidenceHeuristic,
-				ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceHeuristic),
-				Origin:          graph.OriginASTInferred,
-				Meta: map[string]any{
-					"via":             macroExpansionVia,
-					"macro":           s.entry.node.Name,
-					MetaSynthesizedBy: SynthMacroExpansion,
-					MetaProvenance:    ProvenanceHeuristic,
-				},
-			}
+			edge := macroExpansionEdge(s.caller, callee, s.file, s.line, s.entry.node.Name)
 			key := graph.EdgeIdentityFor(edge)
-			if existing := existingCalls[key]; existing != nil {
-				if v, _ := existing.Meta["via"].(string); v != macroExpansionVia {
-					// A real edge already occupies this exact identity
-					// slot — never overwrite or downgrade it.
-					continue
-				}
+			if !macroExpansionMayAdd(existingCalls[key]) {
+				// A real edge already occupies this identity. Leave it alone.
+				continue
 			}
 			g.AddEdge(edge)
 			existingCalls[key] = edge
@@ -251,6 +230,48 @@ func resolveMacroExpansionCalls(g graph.Store, cands *frameworkPassCandidates) i
 	return owned
 }
 
+func functionLikeMacro(n *graph.Node) bool {
+	if n == nil || n.Name == "" {
+		return false
+	}
+	kind, _ := n.Meta["macro_kind"].(string)
+	return kind == macroFunctionKindMeta
+}
+
+func macroBodyCallee(e *graph.Edge) string {
+	if e == nil || e.Kind != graph.EdgeCalls {
+		return ""
+	}
+	return e.To
+}
+
+func macroExpansionMayAdd(existing *graph.Edge) bool {
+	if existing == nil {
+		return true
+	}
+	via, _ := existing.Meta["via"].(string)
+	return via == macroExpansionVia
+}
+
+func macroExpansionEdge(caller, callee, file string, line int, name string) *graph.Edge {
+	return &graph.Edge{
+		From:            caller,
+		To:              callee,
+		Kind:            graph.EdgeCalls,
+		FilePath:        file,
+		Line:            line,
+		Confidence:      ConfidenceHeuristic,
+		ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceHeuristic),
+		Origin:          graph.OriginASTInferred,
+		Meta: map[string]any{
+			"via":             macroExpansionVia,
+			"macro":           name,
+			MetaSynthesizedBy: SynthMacroExpansion,
+			MetaProvenance:    ProvenanceHeuristic,
+		},
+	}
+}
+
 // macroBodyCallees returns the distinct call targets a macro node's body
 // recovered — the `To` of each EdgeCalls out-edge the extractor emitted
 // from the macro node — in stable order.
@@ -258,14 +279,12 @@ func macroBodyCallees(edges []*graph.Edge) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, e := range edges {
-		if e == nil || e.Kind != graph.EdgeCalls || e.To == "" {
+		callee := macroBodyCallee(e)
+		if callee == "" || seen[callee] {
 			continue
 		}
-		if seen[e.To] {
-			continue
-		}
-		seen[e.To] = true
-		out = append(out, e.To)
+		seen[callee] = true
+		out = append(out, callee)
 	}
 	sort.Strings(out)
 	return out
