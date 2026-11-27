@@ -937,7 +937,7 @@ func recordFrameworkNodeCandidates(markers map[string]int, n *graph.Node, family
 		if n.Kind == graph.KindInterface {
 			markers[SynthCSharpIfaceDispatch]++
 		}
-	case "kotlin":
+	case graph.KMPKotlinLanguage:
 		markers[SynthKMPExpectActual]++
 	}
 	if n.Kind == graph.KindMacro {

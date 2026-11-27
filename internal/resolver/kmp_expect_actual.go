@@ -35,20 +35,13 @@ func ResolveKMPExpectActual(g graph.Store) int {
 	}
 	expects := map[key][]*graph.Node{}
 	actuals := map[key][]*graph.Node{}
-	for _, n := range nodesByKindsOrAll(g,
-		graph.KindFunction,
-		graph.KindMethod,
-		graph.KindType,
-		graph.KindInterface,
-	) {
-		if n == nil || n.Meta == nil || n.Name == "" {
-			continue
-		}
-		k := key{n.Name, n.Kind}
-		switch role, _ := n.Meta["kmp_role"].(string); role {
+	for _, n := range nodesByKindsOrAll(g, graph.KMPExpectActualKinds()...) {
+		switch graph.KMPExpectActualRole(n) {
 		case "expect":
+			k := key{n.Name, n.Kind}
 			expects[k] = append(expects[k], n)
 		case "actual":
+			k := key{n.Name, n.Kind}
 			actuals[k] = append(actuals[k], n)
 		}
 	}

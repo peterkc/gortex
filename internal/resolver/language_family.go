@@ -8,7 +8,7 @@ import "github.com/zzet/gortex/internal/graph"
 // no multi-language family, so any cross-language bind for it is coincidental.
 func languageFamily(lang string) string {
 	switch lang {
-	case "java", "kotlin", "scala":
+	case "java", graph.KMPKotlinLanguage, "scala":
 		return "jvm"
 	case "swift", "objc", "objective-c", "objectivec":
 		return "apple"
