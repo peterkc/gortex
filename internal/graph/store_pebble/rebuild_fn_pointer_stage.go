@@ -102,7 +102,9 @@ func (b *BuildStore) RebuildFnPointerStage(ctx context.Context, receipts iter.Se
 	if !frozen {
 		return stats, invalid("function pointer census missing")
 	}
-	defer func() { err = errors.Join(err, b.pending.DeleteRange(cols.prefix, prefixEnd(cols.prefix), pebble.NoSync)) }()
+	defer func() {
+		err = errors.Join(err, b.pending.DeleteRange(cols.prefix, prefixEnd(cols.prefix), pebble.NoSync))
+	}()
 	if rules.Registration == nil || rules.Dispatch == nil || rules.Callable == nil || rules.Getter == nil ||
 		rules.BindRef == nil || rules.BindCall == nil || rules.Fanout == nil || rules.Sweeps < 1 || rules.Cap < 1 || receipts == nil {
 		return stats, invalid("function pointer stage inputs")
