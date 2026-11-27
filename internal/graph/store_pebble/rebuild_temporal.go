@@ -240,7 +240,7 @@ func (p *RebuildTemporalPass) IndexInputs(ctx context.Context, receipts iter.Seq
 	}
 	wrapperCall := func(e *graph.Edge) bool {
 		_, hasArgs := e.Meta["arg_names"]
-		return wrappers && e.Kind == graph.EdgeCalls && hasArgs
+		return wrappers && e.Kind == graph.EdgeCalls && e.From != "" && hasArgs
 	}
 	if err := p.indexInputOrder(ctx, receipts, func(e *graph.Edge) bool {
 		candidate, _, _ := classify(e)
@@ -282,15 +282,11 @@ func (p *RebuildTemporalPass) indexInputOrder(ctx context.Context, receipts iter
 		if err != nil {
 			return err
 		}
-		if facts.EffectiveLanguage == "" {
-			continue
-		}
-		file := pathkey.Normalize(facts.File.FilePath)
 		for _, e := range facts.Edges {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if (e.Kind != graph.EdgeCalls && e.Kind != graph.EdgeAnnotated) || e.FilePath != file || !candidate(e) {
+			if (e.Kind != graph.EdgeCalls && e.Kind != graph.EdgeAnnotated) || !candidate(e) {
 				continue
 			}
 			key := append(rebuildTemporalKey('o'), pendingEdgeKey(e)...)
@@ -520,7 +516,7 @@ func (p *RebuildTemporalPass) apply(ctx context.Context) error {
 	// Native slices mutations (not inputs) into windows of 5,000. Record
 	// which old keys were present at the window start. Temporal can move a
 	// staged-only wrapper; an absent old key can cancel an earlier insert.
-	const window = 5000
+	const window = graph.SQLiteReindexChunkSize
 	for start := uint64(0); start < p.moves; start += window {
 		stop := min(start+window, p.moves)
 		var present [window]bool

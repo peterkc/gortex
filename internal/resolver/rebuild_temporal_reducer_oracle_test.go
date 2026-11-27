@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -130,20 +131,30 @@ func TestRebuildTemporalSQLiteOracleMoveReceiptOrder(t *testing.T) {
 	}
 	// The last receipt registration supplies the node role. Both stubs
 	// move within one native window, where the first receipt mover wins.
-	facts := rebuildEventFacts(file, "go", []*graph.Node{
-		{ID: caller, Name: "Run", Kind: graph.KindFunction, Language: "go", FilePath: file},
-		{ID: setup, Name: "setup", Kind: graph.KindFunction, Language: "go", FilePath: file},
-		{ID: handler, Name: "ChargeCard", Kind: graph.KindFunction, Language: "go", FilePath: file},
-	}, register("ZCharge", 6), register("ACharge", 5),
-		rebuildTemporalOracleStub(file, caller, "ZCharge"), rebuildTemporalOracleStub(file, caller, "ACharge"))
-	native := runRebuildTemporalReducerOracle(t, 1, facts)
-	provider := native.GetNode(handler)
-	require.NotNil(t, provider)
-	require.Equal(t, "ACharge", provider.Meta["temporal_name"])
-	calls := native.GetOutEdges(caller)
-	require.Len(t, calls, 1)
-	require.Equal(t, handler, calls[0].To)
-	require.Equal(t, "ZCharge", calls[0].Meta["temporal_name"])
+	for _, reversed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reversed=%t", reversed), func(t *testing.T) {
+			facts := rebuildEventFacts(file, "go", []*graph.Node{
+				{ID: caller, Name: "Run", Kind: graph.KindFunction, Language: "go", FilePath: file},
+				{ID: setup, Name: "setup", Kind: graph.KindFunction, Language: "go", FilePath: file},
+				{ID: handler, Name: "ChargeCard", Kind: graph.KindFunction, Language: "go", FilePath: file},
+			}, register("ZCharge", 6), register("ACharge", 5),
+				rebuildTemporalOracleStub(file, caller, "ZCharge"), rebuildTemporalOracleStub(file, caller, "ACharge"))
+			winner, last := "ZCharge", "ACharge"
+			if reversed {
+				facts.Edges[0], facts.Edges[1] = facts.Edges[1], facts.Edges[0]
+				facts.Edges[2], facts.Edges[3] = facts.Edges[3], facts.Edges[2]
+				winner, last = last, winner
+			}
+			native := runRebuildTemporalReducerOracle(t, 1, facts)
+			provider := native.GetNode(handler)
+			require.NotNil(t, provider)
+			require.Equal(t, last, provider.Meta["temporal_name"])
+			calls := native.GetOutEdges(caller)
+			require.Len(t, calls, 1)
+			require.Equal(t, handler, calls[0].To)
+			require.Equal(t, winner, calls[0].Meta["temporal_name"])
+		})
+	}
 }
 
 func TestRebuildTemporalSQLiteOracleJavaInterfaces(t *testing.T) {

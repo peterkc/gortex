@@ -19,8 +19,6 @@ var ErrRebuildGRPC = errors.New("pebble rebuild gRPC stage failed")
 var rebuildGRPCPrefix = []byte{'g', 'r'}
 
 // SQLite elects destinations in windows of 5,000 moves, not inputs.
-const rebuildGRPCWindow = 5000
-
 const rebuildGRPCRowLimit = 16 << 20
 
 // RebuildGRPCStats reports candidates and mutations in the first registry turn.
@@ -507,7 +505,7 @@ func (p *rebuildGRPC) reduce(ctx context.Context, rebind func(e *graph.Edge, ser
 		if err := p.wantProvenance(e, old, handler); err != nil {
 			return err
 		}
-		group := p.stats.Moves / rebuildGRPCWindow
+		group := p.stats.Moves / graph.SQLiteReindexChunkSize
 		key := binary.BigEndian.AppendUint64(rebuildGRPCMoveKey(group), p.stats.Moves)
 		p.stats.Moves++
 		value, err := encodeEdge(e)
@@ -523,7 +521,7 @@ func rebuildGRPCMoveKey(group uint64) []byte {
 }
 
 func (p *rebuildGRPC) apply(ctx context.Context) error {
-	for group := range 1 + (p.stats.Moves-1)/rebuildGRPCWindow {
+	for group := range 1 + (p.stats.Moves-1)/graph.SQLiteReindexChunkSize {
 		prefix := rebuildGRPCMoveKey(group)
 		// Read the immutable move window twice. Removing all old keys first
 		// distinguishes stationary destinations from moving siblings.

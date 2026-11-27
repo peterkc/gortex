@@ -136,11 +136,22 @@ func TestRebuildTemporalSQLiteOracleWrapperReceiptOrder(t *testing.T) {
 		Meta: map[string]any{"arg_names": []string{"Loser", "Winner"}}}
 	otherCall := *firstCall
 	otherCall.Line = 50
-	facts := rebuildEventFacts(file, "go", nodes, first, other, firstCall, &otherCall)
-	native := runRebuildTemporalReducerOracle(t, 1, facts)
-	calls := native.GetOutEdges(caller)
-	require.Len(t, calls, 3) // Two ordinary calls and one wrapper stub.
-	require.True(t, native.EdgeExists(caller, temporalStubPlaceholder("activity", "Winner"), graph.EdgeCalls, file, 90))
+	for _, reversed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reversed=%t", reversed), func(t *testing.T) {
+			edges := []*graph.Edge{first, other, firstCall, &otherCall}
+			name, line := "Winner", firstCall.Line
+			if reversed {
+				edges[0], edges[1] = edges[1], edges[0]
+				edges[2], edges[3] = edges[3], edges[2]
+				name, line = "Loser", otherCall.Line
+			}
+			facts := rebuildEventFacts(file, "go", nodes, edges...)
+			native := runRebuildTemporalReducerOracle(t, 1, facts)
+			calls := native.GetOutEdges(caller)
+			require.Len(t, calls, 3) // Two ordinary calls and one wrapper stub.
+			require.True(t, native.EdgeExists(caller, temporalStubPlaceholder("activity", name), graph.EdgeCalls, file, line))
+		})
+	}
 }
 
 func TestRebuildTemporalSQLiteOracleWrapperSlotOverwrite(t *testing.T) {
@@ -169,17 +180,65 @@ func TestRebuildTemporalSQLiteOracleWrapperSlotOverwrite(t *testing.T) {
 		Meta: map[string]any{"arg_names": []string{"Choice"}}}
 	aCall := &graph.Edge{From: caller, To: a, Kind: graph.EdgeCalls, FilePath: file, Line: 20,
 		Meta: map[string]any{"arg_names": []string{"scope::Choice"}}}
-	facts := rebuildEventFacts(file, "go", nodes, zSeed, aSeed, zCall, aCall)
-	native := runRebuildTemporalReducerOracle(t, 1, facts)
-	calls := native.GetOutEdges(caller)
-	require.Len(t, calls, 3)
-	for _, e := range calls {
-		if e.To == temporalStubPlaceholder("activity", "scope::Choice") {
-			require.Equal(t, "AWrap", e.Meta["temporal_via_wrapper"])
-			return
-		}
+	for _, reversed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reversed=%t", reversed), func(t *testing.T) {
+			edges := []*graph.Edge{zSeed, aSeed, zCall, aCall}
+			last := "AWrap"
+			if reversed {
+				edges[2], edges[3] = edges[3], edges[2]
+				last = "ZWrap"
+			}
+			facts := rebuildEventFacts(file, "go", nodes, edges...)
+			native := runRebuildTemporalReducerOracle(t, 1, facts)
+			calls := native.GetOutEdges(caller)
+			require.Len(t, calls, 3)
+			for _, e := range calls {
+				if e.To == temporalStubPlaceholder("activity", "scope::Choice") {
+					require.Equal(t, last, e.Meta["temporal_via_wrapper"])
+					return
+				}
+			}
+			t.Fatal("missing shared wrapper slot")
+		})
 	}
-	t.Fatal("missing shared wrapper slot")
+}
+
+func TestRebuildTemporalSQLiteOracleUntrackedWrapperTail(t *testing.T) {
+	const file = "wf/tail.go"
+	const wrapper, caller, other = file + "::Wrap", file + "::Caller", file + "::Other"
+	seed := rebuildTemporalOracleStub(file, wrapper, "activityName")
+	seed.Meta["temporal_name_param"] = "activityName"
+	nodes := []*graph.Node{
+		{ID: wrapper, Name: "Wrap", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		{ID: caller, Name: "Caller", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		{ID: other, Name: "Other", Kind: graph.KindFunction, Language: "go", FilePath: file},
+		rebuildTemporalOracleWrapperParam(file, wrapper, 0),
+	}
+	tracked := &graph.Edge{From: caller, To: wrapper, Kind: graph.EdgeCalls, FilePath: file, Line: 20,
+		Meta: map[string]any{"arg_names": []string{"Known"}}}
+	untracked := *tracked
+	untracked.To, untracked.Line = other, 10
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthTemporalStub})
+	require.NoError(t, err)
+	for _, reversed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reversed=%t", reversed), func(t *testing.T) {
+			edges := []*graph.Edge{seed, tracked}
+			if reversed {
+				edges[0], edges[1] = edges[1], edges[0]
+			}
+			facts := rebuildEventFacts(file, "go", nodes, edges...)
+			b, native := openRebuildEventStores(t, facts)
+			// arg_names admits this ordinary Call to the wrapper census, but
+			// it has no raw lineage and its target is not a wrapper.
+			b.AddEdge(&untracked)
+			require.NoError(t, native.AddBatchChecked(nil, []*graph.Edge{&untracked}))
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
+			require.True(t, native.EdgeExists(caller, temporalStubPlaceholder("activity", "Known"), graph.EdgeCalls, file, tracked.Line))
+			_, err := RunRebuildTemporal(t.Context(), b, rebuildGRPCReceipts(facts), selection, 1)
+			require.NoError(t, err)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		})
+	}
 }
 
 func TestRebuildTemporalSQLiteOracleWrapperShadowsBase(t *testing.T) {

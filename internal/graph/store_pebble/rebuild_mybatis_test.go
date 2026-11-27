@@ -16,6 +16,34 @@ const (
 	myBatisTestLocal     = "local/UserMapper.java::UserMapper.find"
 )
 
+func TestRebuildMyBatisDuplicateMoverReceipt(t *testing.T) {
+	for _, firstTo := range []string{"stale::z", "stale::a"} {
+		t.Run(firstTo, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			first := myBatisTestStub(firstTo, "find")
+			secondTo := "stale::a"
+			if firstTo == secondTo {
+				secondTo = "stale::z"
+			}
+			second := myBatisTestStub(secondTo, "find")
+			first.Meta["winner"] = firstTo
+			xml := myBatisTestXML(t, "local", first)
+			xml.Edges = append(xml.Edges, second)
+			require.NoError(t, b.AddParsedFile("local", xml))
+			method := myBatisTestMethod(t, b, "local")
+			raw := xml.Edges[0]
+			xml.Edges = []*graph.Edge{raw, raw, second}
+			stats, err := runTestRebuildMyBatis(t, b, xml, method)
+			require.NoError(t, err)
+			require.Equal(t, RebuildMyBatisStats{Stubs: 2, Resolved: 2, Moves: 2}, stats)
+			requireRebuildMyBatisMove(t, b, raw, raw, myBatisTestLocal)
+			saved, err := b.pendingEdge(pendingEdgeKey(second))
+			require.NoError(t, err)
+			require.Nil(t, saved)
+		})
+	}
+}
+
 func TestRebuildMyBatisCallerReceiptForAmbiguousWorkspace(t *testing.T) {
 	for _, tc := range []struct {
 		name, callerRepo, target string

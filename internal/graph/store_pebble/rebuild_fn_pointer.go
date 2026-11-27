@@ -268,7 +268,7 @@ func (p *RebuildFnPointerPass) Apply(ctx context.Context) (FnPointerSpill, error
 func (p *RebuildFnPointerPass) applyMoves(ctx context.Context, column byte) error {
 	// SQLite frees moving identities before choosing first winners in each
 	// 5,000-move window. BuildStore's public method re-chunks at 256.
-	const nativeChunk = 5000
+	const nativeChunk = graph.SQLiteReindexChunkSize
 	var batch []graph.EdgeReindex
 	if err := p.visitMoves(ctx, column, func(r row) error {
 		oldTo, rest, err := readKeyString(r.value)

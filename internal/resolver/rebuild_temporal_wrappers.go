@@ -79,12 +79,6 @@ func (p *rebuildTemporal) indexWrappers(ordinal *uint64) error {
 func (p *rebuildTemporal) wrapperSweep(round string) (bool, error) {
 	var pending uint64
 	err := p.s.VisitWrapperCalls(p.ctx, func(call *graph.Edge) error {
-		if call == nil || call.From == "" {
-			return nil
-		}
-		if _, ok := call.Meta["arg_names"]; !ok {
-			return nil
-		}
 		// A staged wrapper shadows the full base identity in the mux
 		// caller scan. It never has arg_names, so it never enters this join.
 		if _, staged, err := p.s.Get(p.ctx, 'H', temporalWrapperKey(call)...); err != nil || staged {

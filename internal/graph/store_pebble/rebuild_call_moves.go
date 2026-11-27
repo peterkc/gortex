@@ -53,7 +53,9 @@ func (p *rebuildCallMoves) moves(ctx context.Context, yield func([]byte, *graph.
 
 // noteReceipt updates a raw-key claim and indexes the first exact receipt for an
 // actual mover. Frozen receipt order matches SQLite rowid order only for
-// rows inserted and retained in that order. Stationary calls take no slot.
+// rows inserted and retained in that order. Native UPDATE keeps an earlier
+// move's rowid, delete+insert appends it, and the in-memory shadow sorts
+// batches. Stationary calls take no slot.
 func (p *rebuildCallMoves) noteReceipt(key, claim []byte, exact bool) error {
 	if exact && claim[0] == rebuildCapabilityWanted {
 		moving, err := p.present(append(p.column('m'), claim[1:]...))

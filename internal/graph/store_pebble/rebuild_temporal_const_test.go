@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -104,6 +105,68 @@ func TestRebuildTemporalConstRefusesErrorsAndCleansScratch(t *testing.T) {
 				require.ErrorIs(t, err, ErrRebuildTemporalConst)
 				require.Zero(t, consumes)
 			}
+			assertNoTemporalConstScratch(t, b)
+		})
+	}
+}
+
+func TestRebuildTemporalConstDiscoveryOrdinals(t *testing.T) {
+	const file, literal = "aliases.go", "registered"
+	// The nine-hop chain is in descending name order. Two seeds reach
+	// the literal in eight discovery rounds. Swapping only those seeds
+	// can carry its value one additional hop in the eighth collapse sweep.
+	names := []string{"Z", "Y", "X", "W", "V", "U", "T", "S", "R", "Literal"}
+	for _, reversed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reversed=%t", reversed), func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			var nodes []*graph.Node
+			aliases := make(map[string]string, len(names)-1)
+			for i, name := range names {
+				nodes = append(nodes, &graph.Node{ID: file + "::" + name, Kind: graph.KindConstant, Name: name, FilePath: file})
+				if i+1 < len(names) {
+					aliases[name] = names[i+1]
+				}
+			}
+			b.AddBatch(nodes, nil)
+			first, second := names[0], names[1]
+			if reversed {
+				first, second = second, first
+			}
+			ctx := t.Context()
+			stats, err := b.RebuildView().WithTemporalConstDeref(ctx, func(yield func(string) error) error {
+				if err := yield(first); err != nil {
+					return err
+				}
+				return yield(second)
+			}, func(n *graph.Node) TemporalConstCandidate {
+				if n.Name == "Literal" {
+					return TemporalConstCandidate{JavaLiteral: literal}
+				}
+				return TemporalConstCandidate{Alias: aliases[n.Name]}
+			}, func(values *TemporalConstDeref) error {
+				pass := temporalConstPass{view: b.RebuildView()}
+				var aliasOrder []string
+				require.NoError(t, pass.visit(ctx, temporalConstAlias, func(name, _ string) error {
+					aliasOrder = append(aliasOrder, name)
+					return nil
+				}))
+				require.Equal(t, append([]string{first, second}, names[2:len(names)-1]...), aliasOrder)
+				got, err := values.Value(ctx, "Y")
+				require.NoError(t, err)
+				require.Equal(t, literal, got)
+				got, err = values.Value(ctx, "Z")
+				require.NoError(t, err)
+				if reversed {
+					require.Equal(t, literal, got)
+				} else {
+					require.Empty(t, got)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			require.Equal(t, len(names), stats.Names)
+			require.Equal(t, 8, stats.DiscoveryPasses)
+			require.Equal(t, 8, stats.CollapsePasses)
 			assertNoTemporalConstScratch(t, b)
 		})
 	}

@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"cmp"
+	"fmt"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -128,17 +129,34 @@ func TestRebuildEventChannelFirstNonemptyTransport(t *testing.T) {
 		rebuildEventSite(emitter, topic, graph.EdgeEmits, 6, "socketio"),
 		rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, "kafka"),
 		rebuildEventSite(listener, topic, graph.EdgeListensOn, 8, "kafka"))
-	b, native := openRebuildEventStores(t, facts)
-	require.Equal(t, 1, ResolveEventChannelCalls(native))
-	call := synthEventEdge(native, emitter.ID, listener.ID)
-	require.NotNil(t, call)
-	require.Equal(t, 2, call.Line)
-	require.Equal(t, "socketio", call.Meta["event_transport"])
+	for _, reversed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reversed=%t", reversed), func(t *testing.T) {
+			input := facts
+			input.Edges = slices.Clone(facts.Edges)
+			transport := "socketio"
+			if reversed {
+				input.Edges[1], input.Edges[2] = input.Edges[2], input.Edges[1]
+				transport = "kafka" // This native transport is not joined.
+			}
+			b, native := openRebuildEventStores(t, input)
+			pairs := ResolveEventChannelCalls(native)
+			call := synthEventEdge(native, emitter.ID, listener.ID)
+			if transport == "kafka" {
+				require.Zero(t, pairs)
+				require.Nil(t, call)
+			} else {
+				require.Equal(t, 1, pairs)
+				require.NotNil(t, call)
+				require.Equal(t, 2, call.Line)
+				require.Equal(t, transport, call.Meta["event_transport"])
+			}
 
-	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), AllFrameworkSynthesizers())
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), stats.Pairs)
-	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(input), AllFrameworkSynthesizers())
+			require.NoError(t, err)
+			require.EqualValues(t, pairs, stats.Pairs)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		})
+	}
 }
 
 func TestRebuildEventChannelRawSiteCaps(t *testing.T) {
@@ -172,7 +190,12 @@ func TestRebuildEventChannelRawSiteCaps(t *testing.T) {
 			}, sites...)
 			b, native := openRebuildEventStores(t, facts)
 			require.Equal(t, tc.pairs, ResolveEventChannelCalls(native))
-			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), AllFrameworkSynthesizers())
+			receipt := facts
+			if tc.name == "emitter at cap" {
+				// A repeated receipt must not consume a seventh emit slot.
+				receipt.Edges = slices.Insert(slices.Clone(facts.Edges), 1, facts.Edges[0])
+			}
+			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(receipt), AllFrameworkSynthesizers())
 			require.NoError(t, err)
 			require.Equal(t, uint64(tc.pairs), stats.Pairs)
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
@@ -317,17 +340,64 @@ func TestRebuildEventChannelTiedLineUsesReceiptOrder(t *testing.T) {
 		}, rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, transport),
 			rebuildEventSite(listener, topic, graph.EdgeListensOn, 8, transport)),
 	}
-	b, native := openRebuildEventStores(t, facts...)
-	require.Equal(t, 1, ResolveEventChannelCalls(native))
-	call := synthEventEdge(native, emitter.ID, listener.ID)
-	require.NotNil(t, call)
-	require.Equal(t, firstSite, call.FilePath)
-	require.Equal(t, 4, call.Line)
+	for _, reversed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reversed=%t", reversed), func(t *testing.T) {
+			input := slices.Clone(facts)
+			wantFile := firstSite
+			if reversed {
+				slices.Reverse(input)
+				wantFile = file
+			}
+			b, native := openRebuildEventStores(t, input...)
+			require.Equal(t, 1, ResolveEventChannelCalls(native))
+			call := synthEventEdge(native, emitter.ID, listener.ID)
+			require.NotNil(t, call)
+			require.Equal(t, wantFile, call.FilePath)
+			require.Equal(t, 4, call.Line)
 
-	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts...), AllFrameworkSynthesizers())
-	require.NoError(t, err)
-	require.EqualValues(t, 1, stats.Pairs)
-	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(input...), AllFrameworkSynthesizers())
+			require.NoError(t, err)
+			require.EqualValues(t, 1, stats.Pairs)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildEventChannelOrdersBeforeProof(t *testing.T) {
+	const file, firstFile, language = "a.ts", "z.ts", "typescript"
+	const topic, transport = "event::pubsub::eventemitter::tick", "eventemitter"
+	emitter := rebuildEventNode(file, "emit", language, "")
+	listener := rebuildEventNode(file, "listen", language, "")
+	first := rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, transport)
+	first.FilePath = firstFile
+	early := rebuildEventFacts(firstFile, language, nil, first)
+	late := rebuildEventFacts(file, language, []*graph.Node{
+		emitter, listener, rebuildEventTopic(file, language, topic, "tick", transport),
+	}, rebuildEventSite(emitter, topic, graph.EdgeEmits, 4, transport),
+		rebuildEventSite(listener, topic, graph.EdgeListensOn, 8, transport))
+	for _, defect := range []string{"no receipt language", "outside receipt file"} {
+		t.Run(defect, func(t *testing.T) {
+			b, native := openRebuildEventStores(t, early, late)
+			before := rebuildEventSavedRows(t, b)
+			require.Equal(t, 1, ResolveEventChannelCalls(native))
+			winner := synthEventEdge(native, emitter.ID, listener.ID)
+			require.NotNil(t, winner)
+			require.Equal(t, firstFile, winner.FilePath)
+			bad := early
+			if defect == "no receipt language" {
+				bad.EffectiveLanguage = ""
+			} else {
+				bad.File.FilePath = "different.ts"
+			}
+			stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(bad, late), AllFrameworkSynthesizers())
+			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, graph.EdgeIdentityFor(winner), refused.First)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
 }
 
 func TestRebuildEventChannelRejectsUnprovedWinner(t *testing.T) {

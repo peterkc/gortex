@@ -135,9 +135,6 @@ func receiveRebuildStages(
 		if err != nil {
 			return fmt.Errorf("%w: read stage: %w", ErrRebuildWorker, err)
 		}
-		if r.MyBatisOrder != 0 || r.SQLCallsiteOrder != 0 || r.StoreFactoryOrder != 0 {
-			return fmt.Errorf("%w: retired move order count", errRebuildBuildWire)
-		}
 		if r.Refusal != 0 {
 			if int(r.Refusal) > len(rebuildFailureKinds) || r.Witness.Stage != 0 || len(r.Files) != 0 {
 				return fmt.Errorf("%w: malformed refusal", errRebuildBuildWire)

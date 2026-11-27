@@ -9,6 +9,7 @@ import (
 
 // SQLiteReindexChunkSize is the direct SQLite ReindexEdges transaction size.
 // Private rebuilds that replay SQLite moves use the same window boundary.
+// store_sqlite also uses its reindexChunkSize alias for six other batch writers.
 const SQLiteReindexChunkSize = 5000
 
 // EdgeReindex is the per-edge payload for ReindexEdges. Edge points

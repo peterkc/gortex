@@ -181,16 +181,9 @@ func (p *rebuildEventChannel) order(ctx context.Context, receipts iter.Seq2[Pars
 		if err != nil {
 			return err
 		}
-		if facts.EffectiveLanguage == "" {
-			continue
-		}
-		file := pathkey.Normalize(facts.File.FilePath)
 		for _, e := range facts.Edges {
 			if err := ctx.Err(); err != nil {
 				return err
-			}
-			if e.FilePath != file {
-				continue
 			}
 			var col byte
 			switch e.Kind {

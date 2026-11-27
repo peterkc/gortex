@@ -43,6 +43,7 @@ func TestRebuildEventChannelRejectsInvalidScratch(t *testing.T) {
 		})
 	}
 
+	// The turn must not read or replace scratch owned by another pass.
 	key := eventScratch('t', "occupied")
 	require.NoError(t, b.pending.Set(key, []byte("owner"), pebble.NoSync))
 	stats, err := run([]string{prefix})
@@ -83,6 +84,43 @@ func TestRebuildEventChannelRejectsInvalidScratch(t *testing.T) {
 	busy, err = rebuildGuardHasPrefix(ctx, b.pending, keyStrings([]byte{familyEdge, edgeOut}, "a", string(graph.EdgeCalls)))
 	require.NoError(t, err)
 	require.False(t, busy)
+}
+
+func TestRebuildEventChannelSkipsReceiptsWithoutBothSides(t *testing.T) {
+	const prefix, file = "event::emitter::", "bus.ts"
+	const topic = prefix + "bus::tick"
+	for _, kind := range []graph.EdgeKind{graph.EdgeEmits, graph.EdgeListensOn} {
+		t.Run(string(kind), func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			b.AddNode(&graph.Node{ID: topic, Kind: graph.KindEvent, FilePath: file})
+			b.AddEdge(&graph.Edge{From: "site", To: topic, Kind: kind, FilePath: file, Line: 1})
+			stats, err := b.RebuildEventChannel(t.Context(), func(func(ParseFacts, error) bool) {
+				t.Fatal("read receipts without both sides")
+			}, []string{prefix}, func(string, string) (string, int) {
+				t.Fatal("elected without both sides")
+				return "", 0
+			}, func(string, string, *graph.Edge, *graph.Edge) *graph.Edge {
+				t.Fatal("synthesized without both sides")
+				return nil
+			})
+			require.NoError(t, err)
+			require.Zero(t, stats)
+		})
+	}
+}
+
+func TestRebuildEventChannelShortSiteKey(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	const topic = "event::emitter::bus::tick"
+	p := rebuildEventChannel{b: b}
+	key := append(eventScratch('e', topic), make([]byte, 8)...)
+	require.NoError(t, p.put(key, nil))
+	err := p.sites(t.Context(), 'e', topic, func(*graph.Edge) error {
+		t.Fatal("visited an edge without a scratch identity")
+		return nil
+	})
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "event channel site key")
 }
 
 func TestRebuildEventChannelTopicGateChecksOnlyMatchingRows(t *testing.T) {

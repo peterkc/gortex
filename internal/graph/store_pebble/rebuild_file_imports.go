@@ -319,7 +319,7 @@ func (p *fileImportPass) apply(ctx context.Context, stream *fileImportMoves) err
 	prefix := stream.prefix
 	// Pinned SQLite frees all moving identities in a 5,000-row window
 	// before any claim. BuildStore.ReindexEdges instead chunks at 256.
-	const nativeChunk = 5000
+	const nativeChunk = graph.SQLiteReindexChunkSize
 	var moves []graph.EdgeReindex
 	if err := stream.visit(ctx, p.dir, func(r row) error {
 		oldTo, raw, err := readKeyString(r.value)

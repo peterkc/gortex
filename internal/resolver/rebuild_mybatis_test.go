@@ -198,7 +198,7 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 		firstOld, firstStatement   string
 		secondOld, secondStatement string
 		incumbent                  string
-		split                      bool
+		fillers                    int
 		want, reversedWant         map[string]string
 	}{
 		{name: "commuting", firstOld: "stale::alpha", firstStatement: alpha, secondOld: "stale::beta", secondStatement: beta,
@@ -215,8 +215,12 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 			incumbent: betaTarget, want: map[string]string{alphaTarget: "left", betaTarget: "incumbent"}},
 		{name: "cycle", firstOld: alphaTarget, firstStatement: beta, secondOld: betaTarget, secondStatement: alpha,
 			want: map[string]string{betaTarget: "left", alphaTarget: "right"}},
+		{name: "full window chain", firstOld: "stale::alpha", firstStatement: alpha, secondOld: alphaTarget, secondStatement: beta,
+			fillers: graph.SQLiteReindexChunkSize - 2, want: map[string]string{alphaTarget: "left", betaTarget: "right"}},
+		{name: "unresolved to occupied", firstOld: "unresolved::alpha", firstStatement: alpha, secondOld: "unresolved::beta", secondStatement: beta,
+			incumbent: alphaTarget, want: map[string]string{alphaTarget: "incumbent", betaTarget: "right"}},
 		{name: "split chain", firstOld: "stale::alpha", firstStatement: alpha, secondOld: alphaTarget, secondStatement: beta,
-			split: true, want: map[string]string{betaTarget: "right"}, reversedWant: map[string]string{alphaTarget: "left", betaTarget: "right"}},
+			fillers: graph.SQLiteReindexChunkSize - 1, want: map[string]string{betaTarget: "right"}, reversedWant: map[string]string{alphaTarget: "left", betaTarget: "right"}},
 	} {
 		for _, reversed := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/reversed=%t", tc.name, reversed), func(t *testing.T) {
@@ -230,8 +234,8 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 					}
 				}
 				calls := []*graph.Edge{first}
-				if tc.split {
-					for i := 1; i < graph.SQLiteReindexChunkSize; i++ {
+				if tc.fillers > 0 {
+					for i := 1; i <= tc.fillers; i++ {
 						filler := stub("stale::filler", alpha, "filler")
 						filler.Line += i
 						calls = append(calls, filler)
@@ -239,12 +243,12 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 				}
 				calls = append(calls, second)
 				moves, resolved := len(calls), len(calls)
-				if tc.split {
+				if tc.fillers > 0 {
 					// This marked Call is already at its target. It must not
 					// advance the move window even though it has an exact receipt.
 					stationary := stub(alphaTarget, alpha, "stationary")
 					stationary.Line += graph.SQLiteReindexChunkSize
-					calls = append([]*graph.Edge{stationary}, calls...)
+					calls = slices.Insert(calls, 1, stationary)
 					resolved++
 				}
 				if tc.incumbent != "" {

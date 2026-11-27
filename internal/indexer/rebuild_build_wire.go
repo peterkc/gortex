@@ -150,9 +150,6 @@ type rebuildBuildReply struct {
 	Detail            string
 	AttributionChains uint64 // present only on a refused attribution pass
 	UnknownProvenance uint64 // present only on a refused provenance check
-	MyBatisOrder      uint64 // retired code 55; reject a legacy nonzero count
-	SQLCallsiteOrder  uint64 // retired code 57; reject a legacy nonzero count
-	StoreFactoryOrder uint64 // retired code 59; reject a legacy nonzero count
 }
 
 var rebuildFailureKinds = [...]error{
@@ -206,7 +203,7 @@ func buildRefusal(err error) rebuildBuildReply {
 		r.Detail = r.Detail[:limit]
 	}
 	for i, kind := range rebuildFailureKinds[1:] {
-		if kind != nil && errors.Is(err, kind) {
+		if errors.Is(err, kind) {
 			r.Refusal = uint8(i + 2)
 			// The view wraps reducer errors as well as read failures.
 			// Keep its code only when there is no more specific cause.
