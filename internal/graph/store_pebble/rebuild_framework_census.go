@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -72,40 +73,70 @@ func (v RebuildView) VisitFrameworkGateEdges(ctx context.Context, annotations bo
 func (v RebuildView) HasFrameworkAccessRoles(ctx context.Context, want uint8, role func(*graph.Node) uint8) (bool, error) {
 	var field string
 	var seen uint8
-	err := v.visit(ctx, []byte{familyEdge, edgeIn}, func(snap *pebble.Snapshot, r row) error {
-		if seen == want {
+	err := v.read(ctx, func(snap *pebble.Snapshot) (err error) {
+		if want == 0 {
 			return nil
 		}
-		kind, err := rebuildAttributionEdgeKind(r.value)
-		if err != nil || kind != graph.EdgeAccessesField {
-			return err
-		}
-		if len(r.key)+len(r.value) > rebuildFrameworkGateRowBytes {
-			return fmt.Errorf("%w: framework census access", ErrRebuildLinkInputSize)
-		}
-		id, err := decodeLinkRecorder(r.value)
-		if err != nil || id.From == "" || id.To == "" {
-			return err
-		}
-		to, primary, err := readKeyString(r.key[2:])
+		prefix := []byte{familyEdge, edgeIn}
+		it, err := snap.NewIterWithContext(ctx, &pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 		if err != nil {
 			return err
 		}
-		if to != id.To || !bytes.Equal(primary, r.value) {
-			return invalid("framework census access identity")
+		defer func() { err = errors.Join(err, it.Close()) }()
+		for ok := it.First(); ok; ok = it.Next() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			value, err := it.ValueAndErr()
+			if err != nil {
+				return err
+			}
+			if err := v.mutationError(); err != nil {
+				return err
+			}
+			kind, err := rebuildAttributionEdgeKind(value)
+			if err != nil {
+				return err
+			}
+			if kind != graph.EdgeAccessesField {
+				continue
+			}
+			if len(it.Key())+len(value) > rebuildFrameworkGateRowBytes {
+				return fmt.Errorf("%w: framework census access", ErrRebuildLinkInputSize)
+			}
+			id, err := decodeLinkRecorder(value)
+			if err != nil {
+				return err
+			}
+			if id.From == "" || id.To == "" {
+				continue
+			}
+			to, primary, err := readKeyString(it.Key()[2:])
+			if err != nil {
+				return err
+			}
+			if to != id.To || !bytes.Equal(primary, value) {
+				return invalid("framework census access identity")
+			}
+			if to != field {
+				field, seen = to, 0
+			}
+			n, err := pendingGet(snap, pendingNodeKey(id.From), rebuildFrameworkGateNode)
+			if err != nil {
+				return err
+			}
+			if n == nil {
+				continue
+			}
+			if n.ID != id.From {
+				return invalid("framework census access source identity")
+			}
+			seen |= role(n)
+			if seen == want {
+				break
+			}
 		}
-		if to != field {
-			field, seen = to, 0
-		}
-		n, err := pendingGet(snap, pendingNodeKey(id.From), rebuildFrameworkGateNode)
-		if err != nil || n == nil {
-			return err
-		}
-		if n.ID != id.From {
-			return invalid("framework census access source identity")
-		}
-		seen |= role(n)
-		return nil
+		return it.Error()
 	})
 	return seen == want, err
 }

@@ -92,18 +92,7 @@ func completeRebuildObserverGate(ctx context.Context, view store_pebble.RebuildV
 		return nil
 	}
 	both := frameworkObserverRegistrarRole | frameworkObserverDispatcherRole
-	found, err := view.HasFrameworkAccessRoles(ctx, both, func(n *graph.Node) uint8 {
-		var role uint8
-		if (n.Kind == graph.KindMethod || n.Kind == graph.KindFunction) && n.Name != "" {
-			if observerRegistrarRe.MatchString(n.Name) {
-				role |= frameworkObserverRegistrarRole
-			}
-			if observerDispatcherRe.MatchString(n.Name) {
-				role |= frameworkObserverDispatcherRole
-			}
-		}
-		return role
-	})
+	found, err := view.HasFrameworkAccessRoles(ctx, both, frameworkObserverRole)
 	if found {
 		markers[SynthObserverChannel]++
 	}

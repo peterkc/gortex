@@ -428,6 +428,8 @@ func buildRebuildStages(
 			zap.Uint64("claim_scratch_bytes", stats.Signatures.Claims.ScratchBytes),
 			zap.Uint64("claim_observed_pending_flush_bytes", stats.Signatures.Claims.SpillBytes),
 			zap.Uint64("claim_peak_row_bytes", stats.Signatures.Claims.PeakRowBytes))
+		// Positions 1–12 preserve node Language, Kind and Name used by the live
+		// KMP and RN/Expo gates. Temporal can stamp node metadata.
 		selection, err := resolver.FreezeRebuildFrameworkSelection(ctx, private.RebuildView(), idx.frameworkSynthesizerSelection())
 		if err != nil {
 			return err

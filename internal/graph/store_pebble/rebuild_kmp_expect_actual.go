@@ -258,14 +258,18 @@ func (p *rebuildKMPPass) noteReceipt(raw *graph.Node, file, language string) err
 	if err != nil || (state == 0 && markerState == 0) {
 		return err
 	}
-	live, err := p.b.pendingNode(raw.ID)
+	decode := decodeNodeLight
+	if state != 0 {
+		decode = decodeNode
+	}
+	live, err := pendingGet(p.b.pending, pendingNodeKey(raw.ID), decode)
 	if err != nil {
 		return err
 	}
-	proved := language != "" && language == raw.Language && raw.FilePath == file && sameRebuildKMPInput(raw, live)
+	attributed := language != "" && language == raw.Language && raw.FilePath == file
 	if state != 0 {
 		roleProved := false
-		if proved {
+		if attributed && sameRebuildKMPInput(raw, live) {
 			role, _ := raw.Meta["kmp_role"].(string)
 			currentRole, _ := live.Meta["kmp_role"].(string)
 			roleProved = role == currentRole
@@ -275,6 +279,7 @@ func (p *rebuildKMPPass) noteReceipt(raw *graph.Node, file, language string) err
 		}
 	}
 	if markerState != 0 {
+		proved := attributed && live != nil && live.ID == raw.ID && live.Language == raw.Language && live.FilePath == file
 		return noteRebuildScratchState(p.put, marker, markerState, rebuildScratchProofBit(proved))
 	}
 	return nil

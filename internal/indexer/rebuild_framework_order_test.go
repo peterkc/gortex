@@ -11,7 +11,9 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/resolver"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -135,6 +137,142 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRebuildBuildFrameworkCensusStaysFrozenAfterEvent(t *testing.T) {
+	const (
+		file         = "widget.ts"
+		lang         = "typescript"
+		owner        = file + "::Widget"
+		caller       = owner + ".refresh"
+		listener     = owner + ".setState"
+		topic        = "event::pubsub::eventemitter::change"
+		transport    = "eventemitter"
+		emitLine     = 11
+		cloneMessage = "rebuild clone relations applied to private build"
+		eventMessage = "rebuild event channel applied to private build"
+	)
+	nodes := []*graph.Node{
+		{ID: owner, Name: "Widget", Kind: graph.KindType, FilePath: file, Language: lang, StartLine: 1, EndLine: 50},
+		{ID: topic, Name: "change", Kind: graph.KindEvent, FilePath: file, Language: lang,
+			Meta: map[string]any{"transport": transport, "event_kind": "pubsub"}},
+	}
+	eventMeta := map[string]any{"transport": transport}
+	edges := []*graph.Edge{
+		{From: caller, To: topic, Kind: graph.EdgeEmits, FilePath: file, Line: emitLine, Meta: eventMeta},
+		{From: listener, To: topic, Kind: graph.EdgeListensOn, FilePath: file, Line: 21, Meta: eventMeta},
+	}
+	for i, name := range []string{"refresh", "setState", "render", "build"} {
+		id, line := owner+"."+name, (i+1)*10
+		nodes = append(nodes, &graph.Node{ID: id, Name: name, Kind: graph.KindMethod, FilePath: file, Language: lang, StartLine: line, EndLine: line + 2})
+		edges = append(edges, &graph.Edge{From: id, To: owner, Kind: graph.EdgeMemberOf, FilePath: file, Line: line})
+	}
+	facts := store_pebble.ParseFacts{
+		EffectiveLanguage: lang, File: graph.FileMetaRow{FilePath: file, NodeCount: len(nodes)}, Nodes: nodes, Edges: edges,
+	}
+
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	lease := t.TempDir()
+	cfg := config.Default().Index
+	off := false
+	cfg.Coverage.Modules.Enabled, cfg.Coverage.Clones.Enabled = &off, &off
+	passes := []string{resolver.SynthEventChannel, resolver.SynthReactSetState, resolver.SynthFlutterSetState}
+	cfg.FrameworkSynthesizers = &passes
+	wantLate, err := resolver.NewFrameworkSynthesizerSelection(passes)
+	require.NoError(t, err)
+	req := rebuildBuildRequest{
+		Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
+		BaseRecipe: store_pebble.HeadDigest{1}, ProvidersOff: true, Recipes: map[string]rebuildDigest{lang: {1}},
+		Policy: freezeRebuildParsePolicy(root, cfg), Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
+		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile},
+	}
+	// Only the checked cached receipt carries the framework facts.
+	require.NoError(t, os.WriteFile(filepath.Join(root, file), []byte("// cached receipt fixture\n"), 0o600))
+	input, _, err := readRebuildInput(ctx, src, file, lang, 1024)
+	require.NoError(t, err)
+	idx := &Indexer{config: cfg}
+	idx.installRebuildParsePolicy(req.Policy)
+	store := rebuildParseStore{dir: req.ParseDir, limit: req.ParseLimit}
+	key := input.parseKey(idx.rebuildExtractorRecipe(req.Recipes[lang], input))
+	require.NoError(t, store.write(key, encodeRebuildTestParseFacts(t, facts)))
+	inputs := []rebuildInput{input}
+	inputRoot, err := rebuildInputRoot(inputs)
+	require.NoError(t, err)
+	rootBytes, err := hex.DecodeString(inputRoot)
+	require.NoError(t, err)
+	req.Witness.Input = store_pebble.HeadDigest(rootBytes)
+	digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
+		if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceRegularFact, Path: []byte(file)}); err != nil {
+			return err
+		}
+		return emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")})
+	})
+	require.NoError(t, err)
+	req.Witness.FrozenInputs = store_pebble.HeadDigest(digest)
+	req.Witness.Recipe = req.projectRecipe(cfg.Coverage.ClonesThreshold())
+	require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, inputs))
+
+	var private *store_pebble.BuildStore
+	openBuild := func(path string, profile store_pebble.Profile) (*store_pebble.BuildStore, error) {
+		var err error
+		private, err = store_pebble.OpenBuild(path, profile)
+		return private, err
+	}
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core, zap.Hooks(func(entry zapcore.Entry) error {
+		if entry.Message != cloneMessage && entry.Message != eventMessage {
+			return nil
+		}
+		view := private.RebuildView()
+		var calls []*graph.Edge
+		require.NoError(t, view.VisitEdges(ctx, func(e *graph.Edge) error {
+			if e.Kind == graph.EdgeCalls {
+				calls = append(calls, e)
+			}
+			return nil
+		}))
+		if entry.Message == cloneMessage {
+			require.Empty(t, calls, "before the worker freezes the census")
+			return nil
+		}
+		require.Equal(t, []*graph.Edge{{
+			From:            caller,
+			To:              listener,
+			Kind:            graph.EdgeCalls,
+			FilePath:        file,
+			Line:            emitLine,
+			Confidence:      0.5,
+			ConfidenceLabel: "INFERRED",
+			Origin:          graph.OriginASTInferred,
+			Meta: map[string]any{
+				"via":             "event.channel",
+				"event_topic":     "change",
+				"event_transport": transport,
+				"synthesized_by":  resolver.SynthEventChannel,
+				"provenance":      resolver.ProvenanceHeuristic,
+			},
+		}}, calls)
+		// A fresh census here would admit both lifecycle passes. This read
+		// does not change the selection the worker already froze.
+		late, err := resolver.FreezeRebuildFrameworkSelection(ctx, view, wantLate)
+		require.NoError(t, err)
+		require.Equal(t, wantLate, late, "the Event Call must make both lifecycle passes eligible for a late census")
+		return nil
+	}))
+	var sent []store_pebble.Stage
+	err = buildRebuildStages(ctx, lease, logger, openBuild, rebuildTestLinkOptions(t), func(tables store_pebble.StageTables) error {
+		sent = append(sent, tables.Witness.Stage)
+		return nil
+	})
+	require.ErrorIs(t, err, errRebuildBuildIncomplete)
+	require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
+	require.Equal(t, 1, logs.FilterMessage(cloneMessage).Len())
+	event := logs.FilterMessage(eventMessage).All()
+	require.Len(t, event, 1)
+	require.EqualValues(t, 1, event[0].ContextMap()["pairs"])
+	require.Empty(t, logs.FilterMessage("rebuild React setState applied to private build").All())
+	require.Empty(t, logs.FilterMessage("rebuild Flutter setState applied to private build").All())
 }
 
 func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {

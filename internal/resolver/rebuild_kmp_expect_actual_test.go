@@ -256,15 +256,19 @@ func TestRebuildKMPExpectActualNeedsProvedKotlinMarker(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, frozen.allows(SynthKMPExpectActual))
 
-	decoy := *marker
-	decoy.Language = "java"
-	claim := rebuildEventFacts(decoy.FilePath, decoy.Language, []*graph.Node{&decoy})
-	claim = roundTripRebuildRNBridgeFacts(t, claim)
-	for _, proof := range [][]store_pebble.ParseFacts{
-		facts[:2],
-		{facts[0], facts[1], facts[2], claim},
-		{claim, facts[2], facts[0], facts[1]},
-	} {
+	wrongLanguage, wrongFile := *marker, *marker
+	wrongLanguage.Language = "java"
+	wrongFile.FilePath = "other.kt"
+	proofs := [][]store_pebble.ParseFacts{facts[:2]}
+	for _, decoy := range []*graph.Node{&wrongLanguage, &wrongFile} {
+		claim := rebuildEventFacts(decoy.FilePath, decoy.Language, []*graph.Node{decoy})
+		claim = roundTripRebuildRNBridgeFacts(t, claim)
+		proofs = append(proofs,
+			[]store_pebble.ParseFacts{facts[0], facts[1], facts[2], claim},
+			[]store_pebble.ParseFacts{claim, facts[2], facts[0], facts[1]},
+		)
+	}
+	for _, proof := range proofs {
 		stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(proof...), frozen, 1)
 		require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 		var refused *store_pebble.RebuildUnknownProvenanceError
@@ -279,7 +283,13 @@ func TestRebuildKMPExpectActualNeedsProvedKotlinMarker(t *testing.T) {
 	report := RunFrameworkSynthesizersWithSelection(native, selection)
 	require.NoError(t, report.Err)
 	require.Equal(t, 1, report.Total)
-	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1)
+	// The marker only admits KMP; its Kind, Name and StartLine do not
+	// identify a declaration used by the join.
+	markerClaim := *marker
+	markerClaim.Kind, markerClaim.Name, markerClaim.StartLine = graph.KindFile, "other", 2
+	proof := rebuildEventFacts(markerClaim.FilePath, markerClaim.Language, []*graph.Node{&markerClaim})
+	proof = roundTripRebuildRNBridgeFacts(t, proof)
+	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts[0], facts[1], proof), frozen, 1)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, stats.Edges)
 	want := rebuildEventSQLiteRows(native)

@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -146,4 +147,88 @@ func TestRebuildFrameworkCensusObserverRolesShareTarget(t *testing.T) {
 	next, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 	require.NoError(t, err)
 	require.True(t, next.allows(SynthObserverChannel))
+}
+
+func TestRebuildFrameworkCensusTemporalJavaAnnotation(t *testing.T) {
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthTemporalStub})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		annotation string
+		want       bool
+	}{
+		{annotation: "WorkflowMethod", want: true},
+		{annotation: "Deprecated", want: false},
+	} {
+		t.Run(tc.annotation, func(t *testing.T) {
+			const file, language = "Workflow.java", "java"
+			method := rebuildEventNode(file, "run", language, "")
+			method.Kind = graph.KindMethod
+			annotation := &graph.Node{
+				ID: "annotation::java::" + tc.annotation, Name: tc.annotation,
+				Kind: graph.KindType, FilePath: file, Language: language,
+				Meta: map[string]any{"kind": "annotation", "synthetic": true},
+			}
+			edge := &graph.Edge{
+				From:     method.ID,
+				To:       annotation.ID,
+				Kind:     graph.EdgeAnnotated,
+				FilePath: file,
+				Line:     2,
+				Origin:   graph.OriginASTResolved,
+			}
+			b, native := openRebuildEventStores(t, rebuildEventFacts(file, language, []*graph.Node{method, annotation}, edge))
+			saved := rebuildEventSavedRows(t, b)
+			require.Len(t, saved.nodes, 2)
+			require.Equal(t, []*graph.Edge{edge}, saved.edges, "annotation is the only edge; there is no Temporal call")
+
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, frozen.allows(SynthTemporalStub), "rebuild census")
+			summary := summarizeFrameworkCandidates(native, nil)
+			require.Equal(t, tc.want, shouldRunFrameworkSynthesizer(synthFunc{name: SynthTemporalStub}, nil, summary), "native census")
+		})
+	}
+}
+
+func TestRebuildFrameworkCensusObserverRoleOverflow(t *testing.T) {
+	selection := rebuildObserverSelection(t)
+	for _, tc := range []struct {
+		name  string
+		roles int
+		want  bool
+	}{
+		{name: "4096 roles", roles: 4096, want: false},
+		{name: "4097 roles", roles: 4097, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const file, language = "observer.go", "go"
+			first := rebuildEventNode(file, "first", language, "")
+			second := rebuildEventNode(file, "second", language, "")
+			registrar := rebuildEventNode(file, "subscribe", language, "")
+			dispatcher := rebuildEventNode(file, "notify", language, "")
+			first.Kind, second.Kind = graph.KindField, graph.KindField
+			registrar.Kind, dispatcher.Kind = graph.KindMethod, graph.KindMethod
+			nodes := []*graph.Node{first, second, registrar, dispatcher}
+			// Reuse the method name on distinct receivers so the limit counts IDs, not names.
+			for i := range tc.roles - 2 {
+				method := rebuildEventNode(file, fmt.Sprintf("Subscriber%d.subscribe", i), language, "")
+				method.Name, method.Kind = "subscribe", graph.KindMethod
+				nodes = append(nodes, method)
+			}
+			edges := []*graph.Edge{
+				rebuildObserverEdge(registrar, first, graph.EdgeAccessesField, 3),
+				rebuildObserverEdge(dispatcher, second, graph.EdgeAccessesField, 7),
+			}
+			b, native := openRebuildEventStores(t, rebuildEventFacts(file, language, nodes, edges...))
+			saved := rebuildEventSavedRows(t, b)
+			require.Len(t, saved.nodes, tc.roles+2)
+			require.ElementsMatch(t, edges, saved.edges, "the two accesses must target different fields")
+
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, frozen.allows(SynthObserverChannel), "rebuild census")
+			summary := summarizeFrameworkCandidates(native, nil)
+			require.Equal(t, tc.want, shouldRunFrameworkSynthesizer(synthFunc{name: SynthObserverChannel}, nil, summary), "native census")
+		})
+	}
 }
