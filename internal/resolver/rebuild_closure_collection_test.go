@@ -132,8 +132,32 @@ func TestRebuildClosureCollectionRawRoleCaps(t *testing.T) {
 	}
 }
 
+func TestRebuildClosureCollectionSkipsReceiptsWithoutRegistrars(t *testing.T) {
+	for _, name := range []string{"no roles", "dispatcher only"} {
+		t.Run(name, func(t *testing.T) {
+			const file, language = "bus.swift", "swift"
+			dispatch := rebuildClosureCollectionNode(file, "dispatch", language, rebuildCCDispatch, "listeners")
+			if name == "no roles" {
+				dispatch.Meta = nil
+			}
+			_, b, native := openRebuildObserverStores(t, nil, rebuildEventFacts(file, language, []*graph.Node{dispatch}))
+			selection := rebuildClosureCollectionSelection(t)
+			report := RunFrameworkSynthesizersWithSelection(native, selection)
+			require.NoError(t, report.Err)
+			require.Zero(t, report.Total)
+			receipts := func(func(store_pebble.ParseFacts, error) bool) {
+				t.Fatal("replayed receipts without a registrar")
+			}
+			stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, selection, 1)
+			require.NoError(t, err)
+			require.Zero(t, stats.Edges)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
 func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
-	for _, mode := range []string{"complete", "missing", "changed field", "absent versus empty", "absent versus non-string", "different non-strings"} {
+	for _, mode := range []string{"complete", "missing", "changed field", "absent versus nil", "nil versus absent", "absent versus empty", "absent versus non-string", "different non-strings"} {
 		t.Run(mode, func(t *testing.T) {
 			const earlyFile, lateFile, language = "early.swift", "late.swift", "swift"
 			earlyDispatch := rebuildClosureCollectionNode(earlyFile, "dispatch", language, rebuildCCDispatch, "alpha")
@@ -142,6 +166,8 @@ func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
 			lateRegister := rebuildClosureCollectionNode(lateFile, "register", language, rebuildCCAppend, "zeta")
 			if mode == "different non-strings" {
 				lateRegister.Meta[rebuildCCDispatch] = []string{"zeta"}
+			} else if mode == "nil versus absent" {
+				lateRegister.Meta[rebuildCCDispatch] = nil
 			}
 			proof, b, native := openRebuildObserverStores(t, nil,
 				rebuildEventFacts(earlyFile, language, []*graph.Node{earlyDispatch, earlyRegister}),
@@ -160,6 +186,12 @@ func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
 				proof[1].File.NodeCount = 1
 			case "changed field":
 				proof[1].Nodes[1].Meta[rebuildCCAppend] = "different"
+			case "absent versus nil":
+				proof[1].Nodes[1].Meta[rebuildCCDispatch] = nil
+			case "nil versus absent":
+				_, present := proof[1].Nodes[1].Meta[rebuildCCDispatch]
+				require.True(t, present)
+				delete(proof[1].Nodes[1].Meta, rebuildCCDispatch)
 			case "absent versus empty":
 				proof[1].Nodes[1].Meta[rebuildCCDispatch] = ""
 			case "absent versus non-string":

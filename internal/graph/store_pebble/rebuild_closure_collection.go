@@ -23,8 +23,9 @@ type RebuildClosureCollectionStats struct {
 }
 
 // RebuildClosureCollection streams the native callable field join. Both
-// raw role counts precede the workspace and self filters. Preserve SQLite
-// durable keys and prove the counted declarations before installing new calls.
+// raw role counts precede the workspace and self filters. Prove counted
+// declarations even if a populated field cannot emit calls. Preserve SQLite
+// durable keys when installing calls.
 func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
 	maxFanout int, sameBoundary func(*graph.Node, *graph.Node) bool, makeEdge func(*graph.Node, *graph.Node, string) *graph.Edge,
 ) (stats RebuildClosureCollectionStats, err error) {
@@ -123,6 +124,12 @@ func (p *rebuildClosurePass) pair(ctx context.Context, maxFanout int,
 	return pendingVisit(ctx, p.b.pending, rebuildClosureKey('f'), func(r row) error {
 		field, _, err := readKeyString(r.key[3:])
 		if err != nil {
+			return err
+		}
+		// An empty registrar bucket rules out the field without needing
+		// dispatcher proof. Keep the proof order for populated buckets.
+		found, err := rebuildGuardHasPrefix(ctx, p.b.pending, rebuildClosureKey('r', field))
+		if err != nil || !found {
 			return err
 		}
 		for _, col := range [...]byte{'d', 'r'} {
