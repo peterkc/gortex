@@ -250,6 +250,12 @@ func rebuildFrameworkFullNameMissFamily(edge *graph.Edge, target string) string 
 			return "React Native bridge"
 		}
 	}
+	if edge.Kind == graph.EdgeCalls && isJSTSPath(edge.FilePath) && edge.Meta["via"] == sqlCallsiteVia {
+		name, _ := edge.Meta["sql_function"].(string)
+		if name != "" && target == strings.TrimPrefix(sqlCallPrefix, unresolvedPrefix)+name {
+			return "SQL callsite"
+		}
+	}
 	goFile, javaFile := strings.HasSuffix(edge.FilePath, ".go"), strings.HasSuffix(edge.FilePath, ".java")
 	if !goFile && !javaFile {
 		return ""

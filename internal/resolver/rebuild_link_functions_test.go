@@ -12,6 +12,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 )
 
@@ -582,11 +583,18 @@ func TestRebuildFunctionFrameworkMarkersRefuseOtherRows(t *testing.T) {
 		Origin: graph.OriginASTResolved, Meta: map[string]any{"mode": "goroutine"}}
 	rn := &graph.Edge{From: "caller", To: "unresolved::rn::Calendar::open", FilePath: "caller.ts", Kind: graph.EdgeCalls,
 		Meta: map[string]any{"via": rnNativeVia, "rn_module": "Calendar", "rn_method": "open"}}
+	sql := &graph.Edge{From: "caller", To: "unresolved::sqlfn::charge", FilePath: "caller.ts", Kind: graph.EdgeCalls,
+		Meta: map[string]any{"via": sqlCallsiteVia, "sql_function": "charge"}}
 	for _, tc := range []struct {
 		name   string
 		edge   *graph.Edge
 		mutate func(*graph.Edge)
 	}{
+		{"SQL marker not a call", sql, func(e *graph.Edge) { e.Kind = graph.EdgeReads }},
+		{"SQL marker outside JS and TS", sql, func(e *graph.Edge) { e.FilePath = "caller.py" }},
+		{"SQL marker wrong target", sql, func(e *graph.Edge) { e.To += "::other" }},
+		{"SQL marker missing via", sql, func(e *graph.Edge) { delete(e.Meta, "via") }},
+		{"SQL marker empty name", sql, func(e *graph.Edge) { e.Meta["sql_function"] = ""; e.To = "unresolved::sqlfn::" }},
 		{"activity stub not a call", activity, func(e *graph.Edge) { e.Kind = graph.EdgeReads }},
 		{"activity stub outside Go and Java", activity, func(e *graph.Edge) { e.FilePath = "caller.ts" }},
 		{"activity stub in Java", activity, func(e *graph.Edge) { e.FilePath = "caller.java" }},
@@ -612,6 +620,75 @@ func TestRebuildFunctionFrameworkMarkersRefuseOtherRows(t *testing.T) {
 			before := cloneFrameworkEdge(e)
 			require.ErrorIs(t, resolveRebuildFunction(t.Context(), nil, e, graph.UnresolvedName(e.To)), errRebuildMainRule)
 			require.Equal(t, before, e)
+		})
+	}
+}
+
+func TestRebuildFunctionSQLCallsiteFullNameMiss(t *testing.T) {
+	const target = "unresolved::sqlfn::charge"
+	for _, tc := range []struct {
+		file, lang string
+		extractor  parser.Extractor
+	}{
+		{"src/rpc.js", "javascript", languages.NewJavaScriptExtractor()},
+		{"src/rpc.ts", "typescript", languages.NewTypeScriptExtractor()},
+	} {
+		t.Run(tc.lang, func(t *testing.T) {
+			facts := rebuildRNSourceFacts(t, tc.extractor, tc.file, `export function run(client) {
+    client.rpc("charge");
+}`)
+			var row *graph.Edge
+			for _, e := range facts.Edges {
+				if e.Kind == graph.EdgeCalls && e.To == target {
+					require.Nil(t, row)
+					row = e
+				}
+			}
+			require.NotNil(t, row)
+			name := graph.UnresolvedName(row.To)
+			for _, hit := range []bool{false, true} {
+				t.Run(fmt.Sprintf("hit=%v", hit), func(t *testing.T) {
+					nodes := []*graph.Node{
+						{ID: row.From, Name: "run", FilePath: tc.file, Language: tc.lang, Kind: graph.KindFunction, RepoPrefix: "repo"},
+						{ID: "suffix", Name: "charge", FilePath: tc.file, Language: tc.lang, Kind: graph.KindFunction, RepoPrefix: "repo"},
+						{ID: "other-repo", Name: name, FilePath: tc.file, Language: tc.lang, Kind: graph.KindFunction, RepoPrefix: "other"},
+					}
+					if hit {
+						nodes = append(nodes, &graph.Node{ID: "hit", Name: name, FilePath: tc.file, Language: tc.lang, Kind: graph.KindFunction, RepoPrefix: "repo"})
+					}
+					g := graph.New()
+					g.AddBatch(nodes, []*graph.Edge{row})
+					native := New(g)
+					native.bulkMode = true
+					require.NoError(t, native.warmLookupCache([]*graph.Edge{row}))
+					defer native.clearLookupCache()
+					want := cloneFrameworkEdge(row)
+					_, changed := native.resolveEdge(want, &ResolveStats{})
+					require.Equal(t, hit, changed)
+					if hit {
+						require.Equal(t, "hit", want.To)
+					} else {
+						require.Equal(t, row, want)
+					}
+
+					ctx, build, opts := frontierFixture(t, 0)
+					opts.SpillBytes = 1
+					build.AddBatch(nodes, []*graph.Edge{row})
+					before := rebuildFnPointerSaved(t, build)
+					err := runRebuildLinkFrontier(ctx, build, opts, nil, func(f *rebuildLinkFrontier, page []*graph.Edge) error {
+						moves, err := reduceRebuildMainPage(ctx, f, page)
+						require.Empty(t, moves)
+						return err
+					})
+					if hit {
+						require.ErrorIs(t, err, errRebuildMainRule)
+						require.ErrorContains(t, err, "non-bare SQL callsite")
+					} else {
+						require.NoError(t, err)
+					}
+					require.Equal(t, before, rebuildFnPointerSaved(t, build))
+				})
+			}
 		})
 	}
 }
