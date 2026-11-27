@@ -352,8 +352,10 @@ func buildRebuildStages(
 	if err := runRebuildFrozenMain(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, counts.census, link, req.SkipPlaceholderSources); err != nil {
 		return err
 	}
-	// Deferred file imports stay off. Like native cold materialization,
-	// this pass is independent of whether main had a pending frontier.
+	// Rebuild leaves deferred-language file imports off. Native cold
+	// materialization runs that turn before frameworks.
+	// As in native cold materialization, dataflow runs even if main had
+	// no pending frontier.
 	receipts := counts.census.receipts
 	if err := runRebuildArgOf(ctx, private, receipts); err != nil {
 		return err
