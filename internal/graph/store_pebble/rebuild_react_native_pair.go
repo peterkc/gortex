@@ -23,7 +23,7 @@ type RebuildReactNativeNativePairingStats struct {
 
 // RebuildReactNativeNativePairing streams opposite-platform method pairs.
 // For SQLite parity, preserve existing durable keys. Prove both declarations
-// before installing any new edge.
+// before installing any new edge. makeEdge uses only node fields outside Meta.
 func (b *BuildStore) RebuildReactNativeNativePairing(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	platform func(string) string, makeEdge func(*graph.Node, *graph.Node, string, string) *graph.Edge,
 ) (stats RebuildReactNativeNativePairingStats, err error) {
@@ -132,42 +132,43 @@ func (p *rebuildRNPairPass) pair(ctx context.Context, platform func(string) stri
 		if err != nil || !found {
 			return err
 		}
-		ios, err := p.candidate(ctx, tail)
+		ios, iosLarge, err := p.candidate(ctx, tail)
 		if err != nil {
 			return err
 		}
 		return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-			android, err := p.candidate(ctx, r.key[len(prefix):])
+			android, androidLarge, err := p.candidate(ctx, r.key[len(prefix):])
 			if err != nil {
 				return err
 			}
 			if ios.ID == android.ID {
 				return nil
 			}
-			if err := p.propose(makeEdge(ios, android, module, method)); err != nil {
+			tooLarge := iosLarge || androidLarge
+			if err := p.propose(makeEdge(ios, android, module, method), tooLarge); err != nil {
 				return err
 			}
-			return p.propose(makeEdge(android, ios, module, method))
+			return p.propose(makeEdge(android, ios, module, method), tooLarge)
 		})
 	})
 }
 
-func (p *rebuildRNPairPass) candidate(ctx context.Context, key []byte) (*graph.Node, error) {
+func (p *rebuildRNPairPass) candidate(ctx context.Context, key []byte) (*graph.Node, bool, error) {
 	id, tail, err := readKeyString(key)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if len(tail) != 0 {
-		return nil, invalid("React Native pairing candidate key")
+		return nil, false, invalid("React Native pairing candidate key")
 	}
-	n, err := p.b.rebuildNativeBridgeNode(ctx, id, "React Native native pairing")
+	n, tooLarge, err := p.b.rebuildNativeBridgeLightNode(ctx, id, "React Native native pairing")
 	if err == nil && n == nil {
 		err = invalid("React Native pairing lost a method")
 	}
-	return n, err
+	return n, tooLarge, err
 }
 
-func (p *rebuildRNPairPass) propose(e *graph.Edge) error {
+func (p *rebuildRNPairPass) propose(e *graph.Edge, tooLarge bool) error {
 	key := pendingEdgeKey(e)
 	prior, err := p.b.pendingEdge(key)
 	if err != nil || prior != nil {
@@ -178,6 +179,9 @@ func (p *rebuildRNPairPass) propose(e *graph.Edge) error {
 	if err != nil || exists {
 		// Repeated complete keys have identical payload.
 		return err
+	}
+	if tooLarge {
+		return rebuildNativeBridgeNodeSizeError("React Native native pairing")
 	}
 	raw, err := encodeEdge(e)
 	if err != nil {

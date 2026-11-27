@@ -101,7 +101,7 @@ func TestRebuildReactNativeNativePairingProvesNativeMetadata(t *testing.T) {
 				// demand directly to isolate receipt proof from pair selection.
 				before := rebuildFrameworkCustodyRows(t, b)
 				p := rebuildRNPairPass{b: b}
-				require.NoError(t, p.propose(e))
+				require.NoError(t, p.propose(e, false))
 				err := p.prove(t.Context(), receipts)
 				if tc.refuse {
 					requireProducerProofRefusal(t, b, err, RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(e)})

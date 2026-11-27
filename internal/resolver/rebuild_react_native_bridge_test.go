@@ -136,6 +136,55 @@ func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
 	}
 }
 
+func TestRebuildReactNativeBridgeStationaryMethodRowCap(t *testing.T) {
+	const module, method = "Calendar", "open"
+	caller := &graph.Node{ID: "app.ts::show", Name: "show", Kind: graph.KindFunction, FilePath: "app.ts", Language: "typescript"}
+	ios := rebuildRNPairMethod("Calendar.swift", "swift", "Open", module, method, 3)
+	android := rebuildRNPairMethod("Calendar.java", "java", "Open", module, method, 7)
+	for _, n := range []*graph.Node{ios, android} {
+		n.Meta["expo_module"], n.Meta["expo_method"] = module, method
+	}
+	first := &graph.Edge{From: caller.ID, To: "unresolved::Calendar.open", Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: 30,
+		Meta: map[string]any{"via": rnNativeVia, "rn_module": module, "rn_method": method}}
+	later := *first
+	later.Line = 4
+	incumbent := &graph.Edge{From: caller.ID, To: ios.ID, Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: first.Line,
+		Origin: graph.OriginASTInferred, Meta: map[string]any{"fixture": "stationary"}}
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(caller.FilePath, caller.Language, []*graph.Node{caller}, first, &later, incumbent),
+		rebuildEventFacts(ios.FilePath, ios.Language, []*graph.Node{ios}),
+		rebuildEventFacts(android.FilePath, android.Language, []*graph.Node{android}),
+	}
+	large := *ios
+	large.Meta = maps.Clone(ios.Meta)
+	large.Meta["padding"] = strings.Repeat("x", 16<<20)
+	for _, stage := range []string{SynthReactNative, SynthExpoModules} {
+		t.Run(stage, func(t *testing.T) {
+			b, native := openRebuildEventStores(t, facts...)
+			b.AddNode(&large)
+			selected, err := NewFrameworkSynthesizerSelection([]string{stage})
+			require.NoError(t, err)
+			ctx := t.Context()
+			selection, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.True(t, selection.allows(stage))
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selected).Err)
+			want := rebuildEventSQLiteRows(native).edges
+			require.Len(t, want, 4)
+			require.Contains(t, want, incumbent)
+			require.True(t, native.EdgeExists(caller.ID, android.ID, graph.EdgeCalls, first.FilePath, first.Line))
+			run := RunRebuildReactNativeBridge
+			if stage == SynthExpoModules {
+				run = RunRebuildExpoModuleBridge
+			}
+			stats, err := run(ctx, b, rebuildGRPCReceipts(facts...), selection)
+			require.NoError(t, err)
+			require.EqualValues(t, 1, stats.Edges)
+			require.Equal(t, want, rebuildEventSavedRows(t, b).edges)
+		})
+	}
+}
+
 func TestRebuildReactNativeBridgeRejectsMissingFirstSite(t *testing.T) {
 	facts := rebuildRNBridgeFacts(t, "Calendar")
 	private := openRebuildRNBridgePrivate(t, facts)

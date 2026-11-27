@@ -109,6 +109,62 @@ func TestRebuildReactNativeNativePairingSQLiteOracle(t *testing.T) {
 	}
 }
 
+func TestRebuildReactNativeNativePairingStationaryMethodRowCap(t *testing.T) {
+	const module, method = "Calendar", "open"
+	ios := rebuildRNPairMethod("Calendar.swift", "swift", "Open", module, method, 3)
+	android := rebuildRNPairMethod("Calendar.java", "java", "Open", module, method, 7)
+	forward := rnNativePairEdge(ios, android, module, method)
+	reverse := rnNativePairEdge(android, ios, module, method)
+	forward.Meta, reverse.Meta = map[string]any{"fixture": "ios incumbent"}, map[string]any{"fixture": "android incumbent"}
+	padding := strings.Repeat("x", 16<<20)
+	for _, tc := range []struct {
+		name          string
+		oversized     *graph.Node
+		occupyReverse bool
+	}{
+		{name: "stationary on iOS", oversized: ios, occupyReverse: true},
+		{name: "stationary on Android", oversized: android, occupyReverse: true},
+		{name: "missing reverse", oversized: android},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			apple := rebuildEventFacts(ios.FilePath, ios.Language, []*graph.Node{ios}, forward)
+			jvm := rebuildEventFacts(android.FilePath, android.Language, []*graph.Node{android})
+			if tc.occupyReverse {
+				jvm.Edges = []*graph.Edge{reverse}
+			}
+			b, native := openRebuildEventStores(t, apple, jvm)
+			large := *tc.oversized
+			large.Meta = map[string]any{"rn_module": module, "rn_method": method, "padding": padding}
+			b.AddNode(&large)
+			selected, err := NewFrameworkSynthesizerSelection([]string{SynthReactNativePair})
+			require.NoError(t, err)
+			ctx := t.Context()
+			selection, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.True(t, selection.allows(SynthReactNativePair))
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selected).Err)
+			want := rebuildEventSQLiteRows(native).edges
+			require.Len(t, want, 2)
+			require.Contains(t, want, forward)
+			noReceipts := func(func(store_pebble.ParseFacts, error) bool) {
+				t.Fatal("stationary pairs do not need receipts; new pairs must check size before proof")
+			}
+			stats, err := RunRebuildReactNativeNativePairing(ctx, b, noReceipts, selection)
+			require.Zero(t, stats)
+			got := rebuildEventSavedRows(t, b).edges
+			if tc.occupyReverse {
+				require.NoError(t, err)
+				require.Contains(t, want, reverse)
+				require.Equal(t, want, got)
+				return
+			}
+			require.ErrorIs(t, err, store_pebble.ErrRebuildReactNativeNativePairing)
+			require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+			require.Equal(t, []*graph.Edge{forward}, got)
+		})
+	}
+}
+
 func TestRebuildReactNativeNativePairingRejectsUnprovedDeclaration(t *testing.T) {
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNativePair})
 	require.NoError(t, err)

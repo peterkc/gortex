@@ -27,6 +27,7 @@ type RebuildReactNativeBridgeStats struct {
 
 // RebuildReactNativeBridge joins live markers and methods at the fifth
 // framework turn. Frozen receipt order elects the first site per output pair.
+// buildCall uses only node fields outside Meta.
 func (b *BuildStore) RebuildReactNativeBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	inFamily func(string) bool, isCall func(*graph.Edge) bool, buildCall func(*graph.Edge, *graph.Node) *graph.Edge,
 ) (RebuildReactNativeBridgeStats, error) {
@@ -55,6 +56,7 @@ type RebuildExpoModuleBridgeStats = RebuildReactNativeBridgeStats
 // RebuildExpoModuleBridge joins live RN call markers to Expo declarations.
 // The family census applies to the whole pass, not individual endpoints.
 // The resolver supplies one required bit per native registry family group.
+// buildCall uses only node fields outside Meta.
 func (b *BuildStore) RebuildExpoModuleBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	required uint8, family func(string) uint8, isCall func(*graph.Edge) bool, buildCall func(*graph.Edge, *graph.Node) *graph.Edge,
 ) (RebuildExpoModuleBridgeStats, error) {
@@ -206,7 +208,26 @@ func checkedRebuildLightNode(r row, label string) (*graph.Node, error) {
 	return n, err
 }
 
-// rebuildNativeBridgeNode bounds exact node reads once a Call or pair reaches them.
+// rebuildNativeBridgeLightNode reads the fields needed to compute an output
+// key without rejecting a candidate that may not need an exact read.
+func (b *BuildStore) rebuildNativeBridgeLightNode(ctx context.Context, id, label string) (*graph.Node, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	key := pendingNodeKey(id)
+	var tooLarge bool
+	n, err := pendingGet(b.pending, key, func(raw []byte) (*graph.Node, error) {
+		tooLarge = len(key)+len(raw) > 16<<20
+		return checkedRebuildLightNode(row{key, raw}, label)
+	})
+	return n, tooLarge, err
+}
+
+func rebuildNativeBridgeNodeSizeError(label string) error {
+	return fmt.Errorf("%w: %s node row", ErrRebuildLinkInputSize, label)
+}
+
+// rebuildNativeBridgeNode bounds reads that need the full node row.
 func (b *BuildStore) rebuildNativeBridgeNode(ctx context.Context, id, label string) (*graph.Node, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -214,7 +235,7 @@ func (b *BuildStore) rebuildNativeBridgeNode(ctx context.Context, id, label stri
 	key := pendingNodeKey(id)
 	return pendingGet(b.pending, key, func(raw []byte) (*graph.Node, error) {
 		if len(key)+len(raw) > 16<<20 {
-			return nil, fmt.Errorf("%w: %s node row", ErrRebuildLinkInputSize, label)
+			return nil, rebuildNativeBridgeNodeSizeError(label)
 		}
 		n, err := decodeNode(raw)
 		if err == nil && n.ID != id {
@@ -486,7 +507,7 @@ func (p *rebuildReactNativeBridge) elect(ctx context.Context, buildCall func(*gr
 				return err
 			}
 			key := rebuildRNKey('w', e.From, id)
-			native, err := p.b.rebuildNativeBridgeNode(ctx, id, p.policy.label)
+			native, tooLarge, err := p.b.rebuildNativeBridgeLightNode(ctx, id, p.policy.label)
 			if err != nil {
 				return err
 			}
@@ -501,6 +522,9 @@ func (p *rebuildReactNativeBridge) elect(ctx context.Context, buildCall func(*gr
 			if old != nil {
 				// Stationary still consumes the first-site pair.
 				return p.put(key, []byte{0})
+			}
+			if tooLarge {
+				return rebuildNativeBridgeNodeSizeError(p.policy.label)
 			}
 			encoded, err := encodeEdge(out)
 			if err != nil {
