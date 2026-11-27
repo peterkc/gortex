@@ -75,7 +75,7 @@ func (p *rebuildFnPointerStage) captureReceiptRole(raw *graph.Edge) error {
 		liveSlot, liveSource, liveName := p.decide.Registration(live)
 		if source == "" && name == "" && liveSource == "" && liveName == "" ||
 			slot == liveSlot && source == liveSource && name == liveName &&
-			(name == "" || fnPointerRegistrationCall(raw, name) == fnPointerRegistrationCall(live, liveName)) {
+				(name == "" || fnPointerRegistrationCall(raw, name) == fnPointerRegistrationCall(live, liveName)) {
 			return nil
 		}
 		if name != "" {

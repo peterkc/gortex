@@ -42,7 +42,7 @@ func TestRebuildFileGraphRejectsExplicitBuiltinReceipt(t *testing.T) {
 	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 	prepared := []byte("x")
 	payload := encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
-		File: graph.FileMetaRow{FilePath: file, Size: len(prepared), ContentHash: contentHashForSource(prepared), NodeCount: 2},
+		File:  graph.FileMetaRow{FilePath: file, Size: len(prepared), ContentHash: contentHashForSource(prepared), NodeCount: 2},
 		Nodes: []*graph.Node{symbol, builtin}, EffectiveLanguage: "go",
 	})
 	key := input.parseKey(idx.rebuildExtractorRecipe(recipe, input))

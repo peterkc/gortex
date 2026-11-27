@@ -34,9 +34,9 @@ func TestRebuildGodotStageBoundaries(t *testing.T) {
 				unrelated.Meta = map[string]any{"large": large}
 			}
 			facts := []ParseFacts{
-				ParseFacts{File: graph.FileMetaRow{FilePath: source}, EffectiveLanguage: language, Nodes: []*graph.Node{alias}, Edges: []*graph.Edge{call}},
-				ParseFacts{File: graph.FileMetaRow{FilePath: script}, EffectiveLanguage: language, Nodes: []*graph.Node{file, member}},
-				ParseFacts{File: graph.FileMetaRow{FilePath: unrelated.FilePath}, EffectiveLanguage: language, Nodes: []*graph.Node{unrelated}},
+				{File: graph.FileMetaRow{FilePath: source}, EffectiveLanguage: language, Nodes: []*graph.Node{alias}, Edges: []*graph.Edge{call}},
+				{File: graph.FileMetaRow{FilePath: script}, EffectiveLanguage: language, Nodes: []*graph.Node{file, member}},
+				{File: graph.FileMetaRow{FilePath: unrelated.FilePath}, EffectiveLanguage: language, Nodes: []*graph.Node{unrelated}},
 			}
 			b, receipts := seedSyntheticCustody(t, facts...)
 			prefix := rebuildGodotPreloadAliasPrefix

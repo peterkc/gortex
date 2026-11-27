@@ -4,7 +4,7 @@ package graph
 type LinkStatus string
 
 const (
-	MetaLinkStatus             = "link_status"
+	MetaLinkStatus                        = "link_status"
 	LinkStatusResolved         LinkStatus = "resolved"
 	LinkStatusPlatform         LinkStatus = "platform"
 	LinkStatusProbablePlatform LinkStatus = "probable-platform"
