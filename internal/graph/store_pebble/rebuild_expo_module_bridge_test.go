@@ -63,6 +63,76 @@ func TestRebuildExpoModuleBridgeCensusAndCustody(t *testing.T) {
 	requireSyntheticCustody(t, b, map[graph.EdgeIdentity]rebuildEdgeProof{graph.EdgeIdentityFor(want): rebuildProofExpoModules})
 }
 
+func TestRebuildExpoModuleBridgeRejectsLostMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lost bool
+	}{
+		{name: "intact marker"},
+		{name: "last raw row hides marker", lost: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := &graph.Node{ID: "app.ts::open", Kind: graph.KindFunction, Name: "open", FilePath: "app.ts", Language: "typescript"}
+			target := &graph.Node{
+				ID: "Widget.swift::open", Kind: graph.KindMethod, Name: "open", FilePath: "Widget.swift", Language: "swift",
+				Meta: map[string]any{"expo_module": "Widget", "expo_method": "open"},
+			}
+			marker := &graph.Edge{
+				From: caller.ID, To: "unresolved::rn::Widget::open", Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: 21,
+				Meta: map[string]any{"via": "rn.native", "rn_module": "Widget", "rn_method": "open"},
+			}
+			edges := []*graph.Edge{marker}
+			if tc.lost {
+				last := *marker
+				last.Meta = nil
+				edges = append(edges, &last)
+			}
+			b, receipts := seedSyntheticCustody(t,
+				ParseFacts{EffectiveLanguage: caller.Language, File: graph.FileMetaRow{FilePath: caller.FilePath},
+					Nodes: []*graph.Node{caller}, Edges: edges},
+				ParseFacts{EffectiveLanguage: target.Language, File: graph.FileMetaRow{FilePath: target.FilePath}, Nodes: []*graph.Node{target}},
+			)
+			stored, err := b.pendingEdge(pendingEdgeKey(marker))
+			require.NoError(t, err)
+			require.Equal(t, edges[len(edges)-1], stored)
+			before := rebuildFrameworkCustodyRows(t, b)
+			want := graph.EdgeIdentity{From: caller.ID, To: target.ID, Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: marker.Line}
+			family := func(language string) uint8 {
+				switch language {
+				case "typescript":
+					return 1
+				case "swift":
+					return 2
+				default:
+					return 0
+				}
+			}
+			offers := 0
+			stats, err := b.RebuildExpoModuleBridge(t.Context(), receipts, 1, 3, family,
+				func(e *graph.Edge) bool { return e.Kind == graph.EdgeCalls && e.Meta["via"] == "rn.native" },
+				func(e *graph.Edge, n *graph.Node) *graph.Edge {
+					offers++
+					return &graph.Edge{From: e.From, To: n.ID, Kind: graph.EdgeCalls, FilePath: e.FilePath, Line: e.Line}
+				},
+			)
+			if tc.lost {
+				var refusal *RebuildUnknownProvenanceError
+				require.ErrorIs(t, err, ErrRebuildExpoModuleBridge)
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: want}, refusal)
+				require.Zero(t, stats)
+				require.Zero(t, offers)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), stats.Edges)
+			require.Equal(t, 1, offers)
+			requireSyntheticCustody(t, b, map[graph.EdgeIdentity]rebuildEdgeProof{want: rebuildProofExpoModules})
+		})
+	}
+}
+
 func TestRebuildReactNativeBridgeRejectsNilFamilyAdapter(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	receipts := func(func(ParseFacts, error) bool) { t.Fatal("must not read receipts") }

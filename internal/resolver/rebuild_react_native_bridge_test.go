@@ -286,8 +286,17 @@ function show() {
 					if liveLanguage != caller.Language {
 						require.ErrorIs(t, err, tc.stage)
 						require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+						var refusal *store_pebble.RebuildUnknownProvenanceError
+						require.ErrorAs(t, err, &refusal)
+						first := graph.EdgeIdentityFor(marker)
+						first.To = target.ID
+						require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: first}, refusal)
 						require.Zero(t, stats)
 						require.Equal(t, before, rebuildEventSavedRows(t, private))
+						// No refused output may leave a raw recorder or orphaned producer proof.
+						_, found, err := private.RebuildView().OriginalLinkRecorder(t.Context(), first)
+						require.NoError(t, err)
+						require.False(t, found)
 						return
 					}
 					require.NoError(t, err)
