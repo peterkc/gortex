@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"reflect"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
@@ -23,7 +24,7 @@ type RebuildClosureCollectionStats struct {
 
 // RebuildClosureCollection streams the native callable field join. Both
 // raw role counts precede the workspace and self filters. Preserve SQLite
-// durable keys and prove the declarations before installing new calls.
+// durable keys and prove the counted declarations before installing new calls.
 func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
 	maxFanout int, sameBoundary func(*graph.Node, *graph.Node) bool, makeEdge func(*graph.Node, *graph.Node, string) *graph.Edge,
 ) (stats RebuildClosureCollectionStats, err error) {
@@ -50,11 +51,13 @@ func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter
 	if err := p.pair(ctx, maxFanout, sameBoundary, makeEdge); err != nil {
 		return stats, err
 	}
+	if p.wants {
+		if err := p.prove(ctx, receipts); err != nil {
+			return stats, err
+		}
+	}
 	if !p.changed {
 		return p.stats, nil
-	}
-	if err := p.prove(ctx, receipts); err != nil {
-		return stats, err
 	}
 	err = b.withWrites(func() error { return p.apply(ctx) })
 	return p.stats, err
@@ -65,6 +68,7 @@ type rebuildClosurePass struct {
 	spillAt  int
 	buffered int
 	changed  bool
+	wants    bool
 	stats    RebuildClosureCollectionStats
 }
 
@@ -123,9 +127,9 @@ func (p *rebuildClosurePass) pair(ctx context.Context, maxFanout int,
 		}
 		for _, col := range [...]byte{'d', 'r'} {
 			count := 0
-			if err := pendingVisit(ctx, p.b.pending, rebuildClosureKey(col, field), func(row) error {
+			if err := p.visitRoleIDs(ctx, col, field, func(id string) error {
 				count++
-				return nil
+				return p.wantNode(id)
 			}); err != nil || count == 0 || count > maxFanout {
 				return err
 			}
@@ -147,7 +151,7 @@ func closureFields(meta map[string]any) (dispatch, appendField string) {
 	return dispatch, appendField
 }
 
-func (p *rebuildClosurePass) visitRole(ctx context.Context, col byte, field string, yield func(*graph.Node) error) error {
+func (p *rebuildClosurePass) visitRoleIDs(ctx context.Context, col byte, field string, yield func(string) error) error {
 	prefix := rebuildClosureKey(col, field)
 	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 		id, tail, err := readKeyString(r.key[len(prefix):])
@@ -157,6 +161,12 @@ func (p *rebuildClosurePass) visitRole(ctx context.Context, col byte, field stri
 		if len(tail) != 0 {
 			return invalid("closure collection role key")
 		}
+		return yield(id)
+	})
+}
+
+func (p *rebuildClosurePass) visitRole(ctx context.Context, col byte, field string, yield func(*graph.Node) error) error {
+	return p.visitRoleIDs(ctx, col, field, func(id string) error {
 		n, err := p.b.RebuildView().Node(ctx, id)
 		if err != nil {
 			return err
@@ -184,14 +194,19 @@ func (p *rebuildClosurePass) propose(e *graph.Edge) error {
 	if err != nil {
 		return err
 	}
-	if err := p.put(rebuildClosureKey('n', e.From), []byte{rebuildCapabilityWanted}); err != nil {
+	if err := p.wantNode(e.From); err != nil {
 		return err
 	}
-	if err := p.put(rebuildClosureKey('n', e.To), []byte{rebuildCapabilityWanted}); err != nil {
+	if err := p.wantNode(e.To); err != nil {
 		return err
 	}
 	p.changed = true
 	return p.put(proposal, raw)
+}
+
+func (p *rebuildClosurePass) wantNode(id string) error {
+	p.wants = true
+	return p.put(rebuildClosureKey('n', id), []byte{rebuildCapabilityWanted})
 }
 
 func (p *rebuildClosurePass) state(key []byte) (byte, error) {
@@ -226,10 +241,40 @@ func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[Parse
 	}); err != nil {
 		return err
 	}
-	return proveRebuildScratchEndpoints(ctx, p.visit, func(id string) (bool, error) {
+	if err := proveRebuildScratchEndpoints(ctx, p.visit, func(id string) (bool, error) {
 		state, err := p.state(rebuildClosureKey('n', id))
 		return state == rebuildScratchExact, err
-	}, nil)
+	}, nil); err != nil {
+		return err
+	}
+	// A counted declaration may have no proposed call to name, for example
+	// when its field is over cap. Report the unproved declaration in that case.
+	prefix := rebuildClosureKey('n')
+	var refused rebuildScratchRefusals
+	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		if len(r.value) != 1 {
+			return invalid("closure collection proof state")
+		}
+		if r.value[0] == rebuildScratchExact {
+			return nil
+		}
+		id, _, err := readKeyString(r.key[len(prefix):])
+		if err != nil {
+			return err
+		}
+		n, err := p.b.RebuildView().Node(ctx, id)
+		if err != nil {
+			return err
+		}
+		if n == nil {
+			return invalid("closure collection lost a role")
+		}
+		refused.add(graph.EdgeIdentity{From: n.ID, FilePath: n.FilePath}, nil)
+		return nil
+	}); err != nil {
+		return err
+	}
+	return refused.err()
 }
 
 func sameRebuildClosureInput(raw, live *graph.Node) bool {
@@ -237,9 +282,14 @@ func sameRebuildClosureInput(raw, live *graph.Node) bool {
 		live.Name != raw.Name || live.FilePath != raw.FilePath || live.StartLine != raw.StartLine || live.RepoPrefix != raw.RepoPrefix {
 		return false
 	}
-	rawDispatch, rawAppend := closureFields(raw.Meta)
-	liveDispatch, liveAppend := closureFields(live.Meta)
-	return rawDispatch == liveDispatch && rawAppend == liveAppend
+	for _, role := range [...]string{"cc_dispatch_field", "cc_append_field"} {
+		value, present := raw.Meta[role]
+		current, found := live.Meta[role]
+		if present != found || !reflect.DeepEqual(value, current) {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *rebuildClosurePass) visit(ctx context.Context, yield func(*graph.Edge) error) error {

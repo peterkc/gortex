@@ -116,19 +116,33 @@ func TestRebuildClosureCollectionRawRoleCaps(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, uint64(wantCount), stats.Edges)
 				require.Equal(t, want, rebuildEventSavedRows(t, b))
+				if raw > 8 {
+					// The foreign row cannot pair, but its count turns
+					// off a field that would otherwise have valid pairs.
+					proof[1].Nodes = nil
+					proof[1].File.NodeCount = 0
+					stats, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
+					require.ErrorIs(t, err, store_pebble.ErrRebuildClosureCollection)
+					require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+					require.Zero(t, stats)
+					require.Equal(t, want, rebuildEventSavedRows(t, b))
+				}
 			})
 		}
 	}
 }
 
 func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
-	for _, mode := range []string{"complete", "missing", "changed field"} {
+	for _, mode := range []string{"complete", "missing", "changed field", "absent versus empty", "absent versus non-string", "different non-strings"} {
 		t.Run(mode, func(t *testing.T) {
 			const earlyFile, lateFile, language = "early.swift", "late.swift", "swift"
 			earlyDispatch := rebuildClosureCollectionNode(earlyFile, "dispatch", language, rebuildCCDispatch, "alpha")
 			earlyRegister := rebuildClosureCollectionNode(earlyFile, "register", language, rebuildCCAppend, "alpha")
 			lateDispatch := rebuildClosureCollectionNode(lateFile, "dispatch", language, rebuildCCDispatch, "zeta")
 			lateRegister := rebuildClosureCollectionNode(lateFile, "register", language, rebuildCCAppend, "zeta")
+			if mode == "different non-strings" {
+				lateRegister.Meta[rebuildCCDispatch] = []string{"zeta"}
+			}
 			proof, b, native := openRebuildObserverStores(t, nil,
 				rebuildEventFacts(earlyFile, language, []*graph.Node{earlyDispatch, earlyRegister}),
 				rebuildEventFacts(lateFile, language, []*graph.Node{lateDispatch, lateRegister}),
@@ -146,6 +160,12 @@ func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
 				proof[1].File.NodeCount = 1
 			case "changed field":
 				proof[1].Nodes[1].Meta[rebuildCCAppend] = "different"
+			case "absent versus empty":
+				proof[1].Nodes[1].Meta[rebuildCCDispatch] = ""
+			case "absent versus non-string":
+				proof[1].Nodes[1].Meta[rebuildCCDispatch] = true
+			case "different non-strings":
+				proof[1].Nodes[1].Meta[rebuildCCDispatch] = []string{"other"}
 			}
 			stats, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
 			if mode == "complete" {
