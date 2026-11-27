@@ -16,12 +16,6 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
-func rebuildReceiverRules() store_pebble.ReceiverMutationRules {
-	return store_pebble.ReceiverMutationRules{
-		OwnerKey: receiverOwnerKey, BareCallName: bareCallName, IsStdlibMutator: isStdlibMutator,
-	}
-}
-
 func rebuildReceiverFixture(sites int) ([]*graph.Node, []*graph.Edge) {
 	method := func(id, name string) *graph.Node {
 		return &graph.Node{ID: id, Name: name, Kind: graph.KindMethod, Meta: map[string]any{"receiver": "T"}}

@@ -381,9 +381,19 @@ func buildRebuildStages(
 	if err := runRebuildTestSymbols(ctx, private, receipts); err != nil {
 		return err
 	}
-	if err := runRebuildDirectCapabilities(ctx, private, receipts); err != nil {
+	// The hierarchy entry-point predecessor stamps only C# type metadata;
+	// neither capability election reads it.
+	capability, err := private.RebuildCapabilities(ctx, receipts, processExecMechanism, rebuildProcessImport,
+		rebuildReceiverRules(), 1<<20)
+	if err != nil {
 		return err
 	}
+	logger.Info("rebuild capabilities applied to private build",
+		zap.Uint64("receiver_facts", capability.Facts),
+		zap.Uint64("receiver_rounds", capability.Rounds),
+		zap.Uint64("receiver_round_bound", capability.RoundBound),
+		zap.Uint64("receiver_claims", capability.Emitted),
+		zap.Uint64("receiver_spill_bytes", capability.SpillBytes))
 	if exactCheckout {
 		namespace, err := openRebuildResolverNamespace(ctx, lease, rebuildDigest(req.Witness.FrozenInputs))
 		if err != nil {

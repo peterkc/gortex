@@ -44,6 +44,16 @@ type ReceiverMutationStats struct {
 // capability reducer must give a direct row priority at a shared identity.
 func (v RebuildView) VisitReceiverMutations(ctx context.Context, scratchParent string, spillAt int,
 	rules ReceiverMutationRules, yield func(*graph.Edge) error,
+) (ReceiverMutationStats, error) {
+	var emit func(*graph.Edge, string) error
+	if yield != nil {
+		emit = func(e *graph.Edge, _ string) error { return yield(e) }
+	}
+	return v.visitReceiverMutations(ctx, scratchParent, spillAt, rules, nil, emit)
+}
+
+func (v RebuildView) visitReceiverMutations(ctx context.Context, scratchParent string, spillAt int,
+	rules ReceiverMutationRules, masks func(*graph.Edge) (bool, error), yield func(*graph.Edge, string) error,
 ) (stats ReceiverMutationStats, err error) {
 	defer func() {
 		if err != nil {
@@ -91,7 +101,7 @@ func (v RebuildView) VisitReceiverMutations(ctx context.Context, scratchParent s
 		}
 		facts = next
 		if count == stats.Facts {
-			err = pass.emit(ctx, facts, calls, yield)
+			err = pass.emit(ctx, facts, calls, masks, yield)
 			return stats, err
 		}
 		if count >= stats.RoundBound {
@@ -610,25 +620,47 @@ func (p receiverPass) round(ctx context.Context, facts, calls receiverTable) (re
 	return p.table(ctx, runs, true)
 }
 
-func (p receiverPass) emit(ctx context.Context, facts, calls receiverTable, yield func(*graph.Edge) error) error {
+func (p receiverPass) emit(ctx context.Context, facts, calls receiverTable,
+	masks func(*graph.Edge) (bool, error), yield func(*graph.Edge, string) error,
+) error {
 	claims, identities := p.runs("claims"), p.runs("identities")
 	if err := p.visitMatches(ctx, facts, calls, func(c rebuildReceiverCall, fieldID string, site uint64) error {
-		if c.via == "" {
-			// Native capability add would share the direct row's pair key
-			// even across sites. The indirect-only sink cannot arbitrate it.
-			return fmt.Errorf("%w: empty via requires the direct capability reducer", ErrReceiverMutationInput)
-		}
 		e := graph.Edge{From: c.from, To: fieldID, Kind: graph.EdgeAccessesField, FilePath: c.file, Line: c.line,
 			Origin: graph.OriginASTInferred, Meta: map[string]any{"access": "write", "indirect": true, "via": c.via}}
+		if c.via == "" {
+			// An empty via competes for the direct pair before site collapse.
+			if masks == nil {
+				return fmt.Errorf("%w: empty via requires the direct capability reducer", ErrReceiverMutationInput)
+			}
+			masked, err := masks(&e)
+			if err != nil || masked {
+				return err
+			}
+		}
 		value, err := encodeEdge(&e)
 		if err != nil {
 			return err
 		}
 		// Use the projected scanner's exact claim key. The site suffix
 		// keeps the first call in native order even when runs overlap.
+		if masks != nil {
+			value = append(appendKeyString(nil, c.to), value...)
+		}
 		return addReceiverProposal(claims, appendKeyString(nil, c.from+"\x00"+fieldID+"\x00"+c.via), value, site)
 	}); err != nil {
 		return err
+	}
+	decode := func(value []byte) (string, *graph.Edge, error) {
+		var callee string
+		if masks != nil {
+			var err error
+			callee, value, err = readKeyString(value)
+			if err != nil {
+				return "", nil, err
+			}
+		}
+		e, err := decodeEdge(value)
+		return callee, e, err
 	}
 	var last []byte
 	if err := p.merge(ctx, claims, func(r row) error {
@@ -637,7 +669,7 @@ func (p receiverPass) emit(ctx context.Context, facts, calls receiverTable, yiel
 			return nil
 		}
 		last = append(last[:0], key...)
-		e, err := decodeEdge(r.value)
+		_, e, err := decode(r.value)
 		if err != nil {
 			return err
 		}
@@ -657,7 +689,7 @@ func (p receiverPass) emit(ctx context.Context, facts, calls receiverTable, yiel
 		return addReceiverRow(ordered, winner.key, winner.value)
 	}
 	if err := p.merge(ctx, identities, func(r row) error {
-		e, err := decodeEdge(r.value)
+		_, e, err := decode(r.value)
 		if err != nil {
 			return err
 		}
@@ -685,11 +717,17 @@ func (p receiverPass) emit(ctx context.Context, facts, calls receiverTable, yiel
 		return err
 	}
 	return p.merge(ctx, ordered, func(r row) error {
-		e, err := decodeEdge(r.value)
+		callee, e, err := decode(r.value)
 		if err != nil {
 			return err
 		}
-		if err := yield(e); err != nil {
+		if masks != nil {
+			masked, err := masks(e)
+			if err != nil || masked {
+				return err
+			}
+		}
+		if err := yield(e, callee); err != nil {
 			return err
 		}
 		p.stats.Emitted++

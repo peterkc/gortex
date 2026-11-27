@@ -1,10 +1,13 @@
 package store_pebble
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"iter"
+	"path/filepath"
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -19,24 +22,56 @@ const rebuildCapabilityRowLimit = 16 << 20
 // as a filter. Refuse before writing if any winner's proof is missing.
 func (b *BuildStore) RebuildDirectCapabilities(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	processMechanism func(string) string, processImport func(string, string) (path, symbol string),
-) (err error) {
+) error {
+	_, err := b.rebuildCapabilities(ctx, receipts, processMechanism, processImport, nil, 0)
+	return err
+}
+
+// RebuildCapabilities elects and proves both sets of winners before writing
+// the combined native capability stage to the private graph.
+func (b *BuildStore) RebuildCapabilities(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
+	processMechanism func(string) string, processImport func(string, string) (path, symbol string),
+	rules ReceiverMutationRules, spillAt int,
+) (ReceiverMutationStats, error) {
+	return b.rebuildCapabilities(ctx, receipts, processMechanism, processImport, &rules, spillAt)
+}
+
+func (b *BuildStore) rebuildCapabilities(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
+	processMechanism func(string) string, processImport func(string, string) (path, symbol string),
+	rules *ReceiverMutationRules, spillAt int,
+) (stats ReceiverMutationStats, err error) {
 	prefix := []byte{'g', 'c'}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, prefix)
 	if err != nil {
-		return err
+		return stats, err
 	}
 	if occupied {
-		return invalid("direct capability scratch range occupied")
+		return stats, invalid("direct capability scratch range occupied")
 	}
-	defer func() { err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync)) }()
+	defer func() {
+		err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
+		if err != nil {
+			stats = ReceiverMutationStats{}
+		}
+	}()
 	s := rebuildCapabilityScratch{db: b.pending}
 	if err := s.elect(ctx, b.RebuildView(), processMechanism); err != nil {
-		return err
+		return stats, err
 	}
-	winners := []byte{'g', 'c', 'w'}
+	winners := rebuildCapabilityKey('w')
 	hasWinners, err := rebuildGuardHasPrefix(ctx, b.pending, winners)
-	if err != nil || !hasWinners {
-		return err
+	if err != nil {
+		return stats, err
+	}
+	if rules != nil {
+		stats, err = b.RebuildView().visitReceiverMutations(ctx, filepath.Join(b.scratchParent, "pending"), spillAt,
+			*rules, s.masksReceiver, s.receiverSink())
+		if err != nil {
+			return stats, err
+		}
+	}
+	if !hasWinners && stats.Emitted == 0 {
+		return stats, nil
 	}
 	visit := func(visit func(*graph.Edge) error) error {
 		return pendingVisit(ctx, b.pending, winners, func(r row) error {
@@ -62,20 +97,19 @@ func (b *BuildStore) RebuildDirectCapabilities(ctx context.Context, receipts ite
 		}
 		return nil
 	}); err != nil {
-		return err
+		return stats, err
 	}
 	for facts, err := range receipts {
 		if err != nil {
-			return err
+			return stats, err
 		}
-		if err := s.record(ctx, facts, processImport); err != nil {
-			return err
+		if err := s.record(ctx, facts, processImport, stats.Emitted != 0); err != nil {
+			return stats, err
 		}
 	}
 	var first *graph.Edge
 	var count uint64
-	if err := visit(func(e *graph.Edge) error {
-		proved, err := s.proves(e, processImport)
+	check := func(e *graph.Edge, proved bool, err error) error {
 		if err != nil || proved {
 			return err
 		}
@@ -84,16 +118,58 @@ func (b *BuildStore) RebuildDirectCapabilities(ctx context.Context, receipts ite
 		}
 		count++
 		return nil
+	}
+	if err := visit(func(e *graph.Edge) error {
+		proved, err := s.proves(e, processImport)
+		return check(e, proved, err)
 	}); err != nil {
-		return err
+		return stats, err
+	}
+	if stats.Emitted != 0 {
+		if err := s.visitReceiver(ctx, func(e *graph.Edge, callKey string) error {
+			proved, err := s.provesReceiver(e, []byte(callKey))
+			return check(e, proved, err)
+		}); err != nil {
+			return stats, err
+		}
 	}
 	if count != 0 {
-		return &RebuildUnknownProvenanceError{Count: count, First: graph.EdgeIdentityFor(first)}
+		return stats, &RebuildUnknownProvenanceError{Count: count, First: graph.EdgeIdentityFor(first)}
 	}
-	return b.withWrites(func() error {
+	writeDirect := visit
+	if rules != nil && hasWinners {
+		ordered := rebuildCapabilityKey('d')
+		if err := visit(func(e *graph.Edge) error {
+			n, err := s.node(e.From, decodeNodeLight)
+			if err != nil {
+				return err
+			}
+			if n == nil {
+				return invalid("proved direct capability has no live source")
+			}
+			key := appendKeyLine(keyStrings(bytes.Clone(ordered), n.RepoPrefix, e.From, e.To, string(e.Kind), e.FilePath), e.Line)
+			value, err := encodeEdge(e)
+			if err != nil {
+				return err
+			}
+			return s.put(key, value)
+		}); err != nil {
+			return stats, err
+		}
+		writeDirect = func(write func(*graph.Edge) error) error {
+			return pendingVisit(ctx, s.db, ordered, func(r row) error {
+				e, err := decodeEdgeLight(r.value)
+				if err != nil {
+					return err
+				}
+				return write(e)
+			})
+		}
+	}
+	return stats, b.withWrites(func() error {
 		// The native matcher returns one of a fixed set of mechanisms.
 		written := make(map[string]bool)
-		return visit(func(input *graph.Edge) error {
+		if err := writeDirect(func(input *graph.Edge) error {
 			e, mechanism := rebuildDirectCapability(input, processMechanism)
 			if mechanism != "" && !written[mechanism] {
 				n := &graph.Node{ID: e.To, Kind: graph.KindString, Name: mechanism,
@@ -104,7 +180,13 @@ func (b *BuildStore) RebuildDirectCapabilities(ctx context.Context, receipts ite
 				written[mechanism] = true
 			}
 			return b.addEdge(e)
-		})
+		}); err != nil {
+			return err
+		}
+		if stats.Emitted == 0 {
+			return nil
+		}
+		return s.visitReceiver(ctx, func(e *graph.Edge, _ string) error { return b.addEdge(e) })
 	})
 }
 
@@ -167,6 +249,114 @@ func (s rebuildCapabilityScratch) note(k []byte, proved bool) error {
 	return s.put(k, []byte{prior | bit})
 }
 
+// masksReceiver applies the cross-site pair priority only to empty-via
+// claims. Other claims lose only at the same saved identity.
+func (s rebuildCapabilityScratch) masksReceiver(e *graph.Edge) (bool, error) {
+	key := rebuildCapabilityKey('w', e.From, e.To, string(e.Kind))
+	direct, err := pendingGet(s.db, key, decodeEdgeLight)
+	if err != nil || direct == nil {
+		return false, err
+	}
+	via, _ := e.Meta["via"].(string)
+	return via == "" || (direct.FilePath == e.FilePath && direct.Line == e.Line), nil
+}
+
+func rebuildCapabilityReceiverTags(e *graph.Edge) (string, bool) {
+	field, _ := e.Meta["recv_field"].(string)
+	self, _ := e.Meta["recv_self"].(bool)
+	return field, self
+}
+
+func rebuildCapabilityReceiverRecorder(e *graph.Edge, exact bool) []byte {
+	key := rebuildCapabilityRecorder(e, exact)
+	if exact {
+		key[2] = 'b'
+	} else {
+		key[2] = 'm'
+	}
+	field, self := rebuildCapabilityReceiverTags(e)
+	return appendBool(appendKeyString(key, field), self)
+}
+
+// receiverSink stages only unmasked winners, preserving receiver claim order.
+// The call witness is not part of the output edge or its stored metadata.
+func (s rebuildCapabilityScratch) receiverSink() func(*graph.Edge, string) error {
+	var ordinal uint64
+	return func(e *graph.Edge, callee string) error {
+		id := pendingEdgeKey(&graph.Edge{From: e.From, To: callee, Kind: graph.EdgeCalls, FilePath: e.FilePath, Line: e.Line})
+		call, err := s.receiverCall(id)
+		if err != nil {
+			return err
+		}
+		for _, key := range [][]byte{
+			rebuildCapabilityKey('n', e.From), rebuildCapabilityKey('n', e.To),
+			rebuildCapabilityReceiverRecorder(call, true), rebuildCapabilityReceiverRecorder(call, false),
+		} {
+			if err := s.put(key, []byte{rebuildCapabilityWanted}); err != nil {
+				return err
+			}
+		}
+		value, err := encodeEdge(e)
+		if err != nil {
+			return err
+		}
+		// The live graph stays quiet until all proof is complete.
+		ordinal++
+		return s.put(binary.BigEndian.AppendUint64(rebuildCapabilityKey('i'), ordinal),
+			append(appendKeyString(nil, string(id)), value...))
+	}
+}
+
+func (s rebuildCapabilityScratch) visitReceiver(ctx context.Context, visit func(*graph.Edge, string) error) error {
+	return pendingVisit(ctx, s.db, rebuildCapabilityKey('i'), func(r row) error {
+		id, raw, err := readKeyString(r.value)
+		if err != nil {
+			return err
+		}
+		e, err := decodeEdge(raw)
+		if err != nil {
+			return err
+		}
+		return visit(e, id)
+	})
+}
+
+func (s rebuildCapabilityScratch) receiverCall(id []byte) (*graph.Edge, error) {
+	call, err := pendingGet(s.db, id, func(value []byte) (*graph.Edge, error) {
+		if err := checkReceiverInput(id, value); err != nil {
+			return nil, err
+		}
+		return decodeEdge(value)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if call == nil || call.Kind != graph.EdgeCalls || !bytes.Equal(id, pendingEdgeKey(call)) {
+		return nil, invalid("receiver claim has no exact live call")
+	}
+	return call, nil
+}
+
+func (s rebuildCapabilityScratch) provesReceiver(e *graph.Edge, id []byte) (bool, error) {
+	const exact = rebuildCapabilityWanted | rebuildCapabilityProved
+	for _, id := range [...]string{e.From, e.To} {
+		state, err := s.state(rebuildCapabilityKey('n', id))
+		if err != nil || state != exact {
+			return false, err
+		}
+	}
+	call, err := s.receiverCall(id)
+	if err != nil {
+		return false, err
+	}
+	stationary, err := s.state(rebuildCapabilityReceiverRecorder(call, true))
+	if err != nil {
+		return false, err
+	}
+	moving, err := s.state(rebuildCapabilityReceiverRecorder(call, false))
+	return stationary|moving == exact, err
+}
+
 func (s rebuildCapabilityScratch) node(id string, decode func([]byte) (*graph.Node, error)) (*graph.Node, error) {
 	k := pendingNodeKey(id)
 	return pendingGet(s.db, k, func(v []byte) (*graph.Node, error) {
@@ -217,7 +407,9 @@ func (s rebuildCapabilityScratch) elect(ctx context.Context, view RebuildView, p
 	})
 }
 
-func (s rebuildCapabilityScratch) record(ctx context.Context, facts ParseFacts, processImport func(string, string) (string, string)) error {
+func (s rebuildCapabilityScratch) record(ctx context.Context, facts ParseFacts,
+	processImport func(string, string) (string, string), receiver bool,
+) error {
 	file, language := pathkey.Normalize(facts.File.FilePath), facts.EffectiveLanguage
 	supported := language == "go" || language == "javascript" || language == "typescript"
 	// Borrow only these structured import paths from one bounded receipt.
@@ -269,6 +461,19 @@ func (s rebuildCapabilityScratch) record(ctx context.Context, facts ParseFacts, 
 			continue
 		}
 		proved := supported && e.FilePath == file
+		if receiver && e.Kind == graph.EdgeCalls {
+			field, self := rebuildCapabilityReceiverTags(e)
+			if field != "" || self {
+				if err := s.note(rebuildCapabilityReceiverRecorder(e, true), proved); err != nil {
+					return err
+				}
+				if graph.IsUnresolvedTarget(e.To) {
+					if err := s.note(rebuildCapabilityReceiverRecorder(e, false), proved); err != nil {
+						return err
+					}
+				}
+			}
+		}
 		if err := s.note(rebuildCapabilityRecorder(e, true), proved); err != nil {
 			return err
 		}

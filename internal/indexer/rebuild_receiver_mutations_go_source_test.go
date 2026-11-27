@@ -96,8 +96,20 @@ func TestRebuildReceiverMutationsGoSource(t *testing.T) {
 					require.NoError(t, err)
 					require.False(t, stats.Incomplete)
 					require.NoError(t, runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, link, bound.SkipPlaceholderSources))
-					require.NoError(t, runRebuildDirectCapabilities(ctx, build, receipts))
 					checkRebuildGoReceiverOutputs(t, build.RebuildView(), native, tc.writeLine)
+					_, err = build.RebuildCapabilities(ctx, receipts, processExecMechanism, rebuildProcessImport,
+						rebuildReceiverRules(), 1<<20)
+					require.NoError(t, err)
+					want := slices.Collect(native.EdgesByKind(graph.EdgeAccessesField))
+					slices.SortFunc(want, compareRebuildTestFileEdgeKeys)
+					var got []*graph.Edge
+					require.NoError(t, build.RebuildView().VisitEdges(ctx, func(e *graph.Edge) error {
+						if e.Kind == graph.EdgeAccessesField {
+							got = append(got, e)
+						}
+						return nil
+					}))
+					require.Equal(t, want, got)
 					return nil
 				})
 			require.NoError(t, err)
@@ -136,12 +148,10 @@ func checkRebuildGoReceiverOutputs(t *testing.T, view store_pebble.RebuildView, 
 	const bump, tick, masked, field = p + "::T.Bump", p + "::T.Tick", p + "::T.Masked", p + "::T.n"
 	const firstCall = 7
 	ctx := t.Context()
-	var before, direct []*graph.Edge
+	var before []*graph.Edge
 	require.NoError(t, view.VisitEdges(ctx, func(e *graph.Edge) error {
 		before = append(before, e)
-		if e.Kind == graph.EdgeAccessesField {
-			direct = append(direct, e)
-		}
+		require.NotEqual(t, graph.EdgeAccessesField, e.Kind, "capabilities must not be present before the turn")
 		return nil
 	}))
 	requireRebuildGoReceiverLinks(t, before, field, bump, writeLine)
@@ -156,7 +166,6 @@ func checkRebuildGoReceiverOutputs(t *testing.T, view store_pebble.RebuildView, 
 			Origin: graph.OriginASTInferred, Meta: map[string]any{"access": "write", "indirect": true, "via": "Bump"}}
 	}
 	wantDirect := []*graph.Edge{write(bump, 3), write(masked, writeLine)}
-	require.ElementsMatch(t, wantDirect, direct)
 
 	var candidates []*graph.Edge
 	scratch := t.TempDir()
@@ -194,7 +203,4 @@ func checkRebuildGoReceiverOutputs(t *testing.T, view store_pebble.RebuildView, 
 	require.NoError(t, err)
 	nativeRows := slices.Collect(native.EdgesByKind(graph.EdgeAccessesField))
 	require.ElementsMatch(t, wantFinal, nativeRows)
-	// Preview native arbitration in memory. Nothing attaches to the B2 view.
-	preview := collapseCapabilityIdentities(append(slices.Clone(direct), candidates...))
-	require.ElementsMatch(t, nativeRows, preview)
 }

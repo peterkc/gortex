@@ -14,6 +14,12 @@ func runRebuildDirectCapabilities(ctx context.Context, build *store_pebble.Build
 	return build.RebuildDirectCapabilities(ctx, receipts, processExecMechanism, rebuildProcessImport)
 }
 
+func rebuildReceiverRules() store_pebble.ReceiverMutationRules {
+	return store_pebble.ReceiverMutationRules{
+		OwnerKey: receiverOwnerKey, BareCallName: bareCallName, IsStdlibMutator: isStdlibMutator,
+	}
+}
+
 // Only the structured extractor form can prove a call's import. The
 // name matcher alone also accepts bare calls and third-party lookalikes.
 func rebuildProcessImport(language, target string) (string, string) {

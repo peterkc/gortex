@@ -166,6 +166,7 @@ var rebuildFailureKinds = [...]error{
 	errRebuildResolverInputDenied, errRebuildResolverNamespace, errRebuildNpmInput, store_pebble.ErrRebuildImportDirectories,
 	errRebuildCrossRepoUnavailable, store_pebble.ErrRebuildAttributionChain,
 	resolver.ErrRebuildGoExternalRecordingPath, store_pebble.ErrRebuildUnknownProvenance, errRebuildModuleInput, errRebuildWorkspaceOutput,
+	store_pebble.ErrReceiverMutationNonconvergent, store_pebble.ErrReceiverMutationInput, store_pebble.ErrRebuildReceiverMutation,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
