@@ -401,14 +401,7 @@ func reactCandidateEdge(e graph.FrameworkCensusEdge) bool {
 }
 
 func fastapiCandidateEdge(e graph.FrameworkCensusEdge) bool {
-	if !graph.IsUnresolvedTarget(e.To) {
-		return false
-	}
-	switch e.Via {
-	case "fastapi.Depends", "fastapi.router":
-		return true
-	}
-	return false
+	return graph.IsUnresolvedTarget(e.To) && fastapiConventionDirs(e.Via) != nil
 }
 
 func factoryChainCandidateEdge(e graph.FrameworkCensusEdge) bool {

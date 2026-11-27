@@ -47,40 +47,26 @@ func resolveFastAPIDeps(g graph.Store, cands *frameworkPassCandidates) int {
 	var reindex []graph.EdgeReindex
 	for _, stream := range []iter.Seq[*graph.Edge]{callsStream, refsStream} {
 		for e := range stream {
-			if e == nil || e.Meta == nil || !graph.IsUnresolvedTarget(e.To) {
+			if e == nil {
 				continue
 			}
-			var preferDirs []string
-			switch via, _ := e.Meta["via"].(string); via {
-			case "fastapi.Depends":
-				preferDirs = fastapiDepDirs
-			case "fastapi.router":
-				preferDirs = fastapiRouterDirs
-			default:
+			via, _ := e.Meta["via"].(string)
+			name, preferDirs := fastapiResolveShape(e.To, via)
+			if preferDirs == nil {
 				continue
-			}
-			name := graph.UnresolvedName(e.To)
-			if strings.ContainsRune(name, '.') {
-				continue // member-expr target — left to the import resolver
 			}
 			fromFile := ""
 			if n := g.GetNode(e.From); n != nil {
 				fromFile = n.FilePath
 			}
-			if !strings.HasSuffix(fromFile, ".py") {
+			if !fastapiResolveSource(fromFile) {
 				continue
 			}
 			targetID, conf := ResolveByConvention(g, name, "", preferDirs, fromFile)
 			if targetID == "" {
 				continue
 			}
-			oldTo := e.To
-			e.To = targetID
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = conf
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, conf)
-			StampSynthesized(e, SynthFastAPIResolve)
-			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+			reindex = append(reindex, fastapiResolveRebind(e, targetID, conf))
 			resolved++
 		}
 	}
@@ -88,4 +74,44 @@ func resolveFastAPIDeps(g graph.Store, cands *frameworkPassCandidates) int {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func fastapiConventionDirs(via string) []string {
+	switch via {
+	case "fastapi.Depends":
+		return fastapiDepDirs
+	case "fastapi.router":
+		return fastapiRouterDirs
+	default:
+		return nil
+	}
+}
+
+func fastapiResolveShape(target, via string) (string, []string) {
+	if !graph.IsUnresolvedTarget(target) {
+		return "", nil
+	}
+	dirs := fastapiConventionDirs(via)
+	if dirs == nil {
+		return "", nil
+	}
+	name := graph.UnresolvedName(target)
+	if strings.ContainsRune(name, '.') {
+		return "", nil // member expressions are left to the import resolver
+	}
+	return name, dirs
+}
+
+func fastapiResolveSource(path string) bool {
+	return strings.HasSuffix(path, ".py")
+}
+
+func fastapiResolveRebind(e *graph.Edge, targetID string, conf float64) graph.EdgeReindex {
+	oldTo := e.To
+	e.To = targetID
+	e.Origin = graph.OriginASTInferred
+	e.Confidence = conf
+	e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, conf)
+	StampSynthesized(e, SynthFastAPIResolve)
+	return graph.EdgeReindex{Edge: e, OldTo: oldTo}
 }
