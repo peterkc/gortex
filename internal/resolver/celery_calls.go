@@ -29,14 +29,12 @@ func ResolveCeleryCalls(g graph.Store) int {
 	byName := map[string][]*graph.Node{}
 	byRegistered := map[string][]*graph.Node{}
 	for _, n := range nodesByKindsOrAll(g, graph.KindFunction, graph.KindMethod) {
-		if n == nil || n.Meta == nil {
-			continue
-		}
-		if task, _ := n.Meta["celery_task"].(string); task != "" {
+		task, registered := celeryTaskNode(n)
+		if task != "" {
 			byName[task] = append(byName[task], n)
 		}
-		if reg, _ := n.Meta["celery_registered_name"].(string); reg != "" {
-			byRegistered[reg] = append(byRegistered[reg], n)
+		if registered != "" {
+			byRegistered[registered] = append(byRegistered[registered], n)
 		}
 	}
 	if len(byName) == 0 {
@@ -46,55 +44,72 @@ func ResolveCeleryCalls(g graph.Store) int {
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if v, _ := e.Meta["via"].(string); v != celeryVia {
-			continue
-		}
-		task, _ := e.Meta["celery_task"].(string)
+		task, registered := celeryTaskCall(e)
 		if task == "" {
 			continue
 		}
-		var cands []*graph.Node
-		if reg, _ := e.Meta["celery_registered_name"].(string); reg != "" {
-			cands = byRegistered[reg]
-		} else {
-			cands = byName[task]
+		cands := byName[task]
+		if registered != "" {
+			cands = byRegistered[registered]
 		}
 		var target *graph.Node
 		if len(cands) <= celeryFanoutCap {
 			target = pickStoreAction(g, e, sameBoundaryCandidates(g, e.From, cands))
 		}
-
-		want := "unresolved::*." + task
-		if target != nil {
-			want = target.ID
-		}
-		if e.To == want {
-			if target != nil {
-				resolved++
-			}
-			continue
-		}
 		oldTo := e.To
-		e.To = want
+		var id string
 		if target != nil {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = ConfidenceTyped
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceTyped)
-			StampSynthesizedTyped(e, SynthCelery)
+			id = target.ID
 			resolved++
-		} else {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = 0
-			e.ConfidenceLabel = ""
-			UnstampSynthesized(e)
 		}
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		if rebindCeleryCall(e, task, id, target != nil) {
+			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		}
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func celeryTaskNode(n *graph.Node) (task, registered string) {
+	if n == nil {
+		return "", ""
+	}
+	task, _ = n.Meta["celery_task"].(string)
+	registered, _ = n.Meta["celery_registered_name"].(string)
+	return task, registered
+}
+
+func celeryTaskCall(e *graph.Edge) (task, registered string) {
+	if e == nil {
+		return "", ""
+	}
+	if via, _ := e.Meta["via"].(string); via != celeryVia {
+		return "", ""
+	}
+	task, _ = e.Meta["celery_task"].(string)
+	registered, _ = e.Meta["celery_registered_name"].(string)
+	return task, registered
+}
+
+func rebindCeleryCall(e *graph.Edge, task, target string, matched bool) bool {
+	if !matched {
+		target = "unresolved::*." + task
+	}
+	if e.To == target {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	if matched {
+		e.Confidence = ConfidenceTyped
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceTyped)
+		StampSynthesizedTyped(e, SynthCelery)
+	} else {
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		UnstampSynthesized(e)
+	}
+	return true
 }
