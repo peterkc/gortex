@@ -45,7 +45,7 @@ func ResolveCSharpDIImplementedInterfacesScoped(g graph.Store, scope map[string]
 			markers = append(markers, e)
 		case graph.DIBindingUseClass:
 			pf, _ := e.Meta[graph.MetaDIProvidesFor].(string)
-			existing[e.From+"\x00"+pf+"\x00"+providesTargetName(e.To)] = struct{}{}
+			existing[csharpDIBindingKey(e.From, pf, providesTargetName(e.To))] = struct{}{}
 		}
 	}
 	if len(markers) == 0 {
@@ -69,10 +69,7 @@ func ResolveCSharpDIImplementedInterfacesScoped(g graph.Store, scope map[string]
 		}
 		var impl *graph.Node
 		for _, cand := range g.FindNodesByNameInRepo(implName, repoPrefix) {
-			if cand == nil || cand.Language != "csharp" || cand.Kind != graph.KindType {
-				continue
-			}
-			if cand.Meta != nil && cand.Meta[metaPartialMergedInto] != nil {
+			if !csharpDIImplementation(cand) {
 				continue
 			}
 			if impl != nil {
@@ -86,13 +83,7 @@ func ResolveCSharpDIImplementedInterfacesScoped(g graph.Store, scope map[string]
 		}
 
 		for _, e := range g.GetOutEdges(impl.ID) {
-			if e.Kind != graph.EdgeImplements {
-				continue
-			}
-			// Method-set-inferred implements edges link every same-shaped
-			// type in the repo; binding DI on them would invent
-			// registrations. Source-declared hierarchy only.
-			if e.Meta != nil && e.Meta["via"] == MetaViaMethodSetInference {
+			if !csharpDIDeclaredImplements(e) {
 				continue
 			}
 			// The interface must land on an in-repo node: it supplies the
@@ -105,30 +96,51 @@ func ResolveCSharpDIImplementedInterfacesScoped(g graph.Store, scope map[string]
 			if iface == nil {
 				continue
 			}
-			key := m.From + "\x00" + iface.Name + "\x00" + implName
+			key := csharpDIBindingKey(m.From, iface.Name, implName)
 			if _, dup := existing[key]; dup {
 				continue
 			}
 			existing[key] = struct{}{}
-			g.AddEdge(&graph.Edge{
-				From:     m.From,
-				To:       graph.UnresolvedMarker + implName,
-				Kind:     graph.EdgeProvides,
-				FilePath: iface.FilePath,
-				Line:     iface.StartLine,
-				Origin:   graph.OriginASTInferred,
-				Meta: map[string]any{
-					graph.MetaDIBinding:     graph.DIBindingUseClass,
-					graph.MetaDIProvidesFor: iface.Name,
-					graph.MetaDISource:      "autofac",
-					graph.MetaDIImplFQCN:    implName,
-					MetaSynthesizedBy:       SynthCSharpDIIfaces,
-				},
-			})
+			g.AddEdge(csharpDIProvideEdge(m.From, implName, iface))
 			added++
 		}
 	}
 	return added
+}
+
+func csharpDIBindingKey(from, iface, impl string) string {
+	return from + "\x00" + iface + "\x00" + impl
+}
+
+func csharpDIImplementation(n *graph.Node) bool {
+	return n != nil && n.Language == "csharp" && n.Kind == graph.KindType && n.Meta[metaPartialMergedInto] == nil
+}
+
+func csharpDIInterface(n *graph.Node) bool {
+	return n != nil && n.Language == "csharp" && n.Kind == graph.KindInterface
+}
+
+// Same-shaped types do not constitute source-declared DI registrations.
+func csharpDIDeclaredImplements(e *graph.Edge) bool {
+	return e.Kind == graph.EdgeImplements && e.Meta["via"] != MetaViaMethodSetInference
+}
+
+func csharpDIProvideEdge(from, impl string, iface *graph.Node) *graph.Edge {
+	return &graph.Edge{
+		From:     from,
+		To:       graph.UnresolvedMarker + impl,
+		Kind:     graph.EdgeProvides,
+		FilePath: iface.FilePath,
+		Line:     iface.StartLine,
+		Origin:   graph.OriginASTInferred,
+		Meta: map[string]any{
+			graph.MetaDIBinding:     graph.DIBindingUseClass,
+			graph.MetaDIProvidesFor: iface.Name,
+			graph.MetaDISource:      "autofac",
+			graph.MetaDIImplFQCN:    impl,
+			MetaSynthesizedBy:       SynthCSharpDIIfaces,
+		},
+	}
 }
 
 // csharpDIResolveIface lands an implements-edge target on its in-repo
@@ -140,7 +152,7 @@ func ResolveCSharpDIImplementedInterfacesScoped(g graph.Store, scope map[string]
 func csharpDIResolveIface(g graph.Store, to, repoPrefix string) *graph.Node {
 	if !graph.IsUnresolvedTarget(to) {
 		n := g.GetNode(to)
-		if n != nil && n.Kind == graph.KindInterface && n.Language == "csharp" {
+		if csharpDIInterface(n) {
 			return n
 		}
 		return nil
@@ -151,7 +163,7 @@ func csharpDIResolveIface(g graph.Store, to, repoPrefix string) *graph.Node {
 	}
 	var found *graph.Node
 	for _, cand := range g.FindNodesByNameInRepo(name, repoPrefix) {
-		if cand == nil || cand.Language != "csharp" || cand.Kind != graph.KindInterface {
+		if !csharpDIInterface(cand) {
 			continue
 		}
 		if found != nil {
