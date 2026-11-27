@@ -7,6 +7,10 @@ import (
 	"sync"
 )
 
+// SQLiteReindexChunkSize is the direct SQLite ReindexEdges transaction size.
+// Private rebuilds that replay SQLite moves use the same window boundary.
+const SQLiteReindexChunkSize = 5000
+
 // EdgeReindex is the per-edge payload for ReindexEdges. Edge points
 // at the (already mutated) Edge value the caller wants the store to
 // re-bind; OldFrom / OldTo are the endpoints the edge had BEFORE the

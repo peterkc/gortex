@@ -2907,7 +2907,7 @@ func (s *Store) ReindexEdge(e *graph.Edge, oldTo string) {
 // per-tx overhead (BEGIN+COMMIT plus WAL fsync) but small enough that
 // the WAL doesn't balloon and a crash mid-batch only loses ≤chunk
 // mutations.
-const reindexChunkSize = 5000
+const reindexChunkSize = graph.SQLiteReindexChunkSize
 
 // errReindexWriterGateContended marks a reindex abandoned because the writer
 // gate stayed contended past its bounded window (see reindexEdgesSetOriented).
