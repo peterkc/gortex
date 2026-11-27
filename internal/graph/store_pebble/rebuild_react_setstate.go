@@ -91,8 +91,9 @@ type rebuildSetStatePass struct {
 	stats    RebuildReactSetStateStats
 }
 
-// c: lifecycle classes; m: candidate methods; r: exact membership receipt
-// identity -> live key; o: first owner by method; t: qualifying call receipt
+// c: lifecycle classes; m: candidate methods; q: possible owners of gated
+// callers; r: exact membership receipt identity -> live key; o: first owner
+// by method; t: qualifying call receipt
 // identity -> caller; g: live call gate; p: proved call gate; n: declaration
 // proof; l: lifecycle winner by class; w: staged output by exact key.
 func setStateScratch(col byte, fields ...string) []byte {
@@ -181,28 +182,65 @@ func (p *rebuildSetStatePass) capture(ctx context.Context, lifecycle string, isS
 	}); err != nil {
 		return false, err
 	}
-	return true, p.methods(ctx, func(n *graph.Node) error {
-		// Include every live membership, including owners outside the seed
-		// classes. Raw ancestry proves receipt order, not private key order.
-		if err := pendingVisit(ctx, p.b.pending, guardOutgoing(n.ID, graph.EdgeMemberOf), func(r row) error {
-			e, err := setStateInput(r)
-			if err != nil {
-				return err
-			}
-			return p.wantMembership(e, r.key)
-		}); err != nil {
-			return err
-		}
-		return pendingVisit(ctx, p.b.pending, guardOutgoing(n.ID, graph.EdgeCalls), func(r row) error {
+	return p.captureGates(ctx, lifecycle, isSetState)
+}
+
+func (p *rebuildSetStatePass) captureGates(ctx context.Context, lifecycle string, isSetState func(string) bool) (bool, error) {
+	active := false
+	if err := p.methods(ctx, func(n *graph.Node) error {
+		gated := false
+		if err := pendingVisit(ctx, p.b.pending, guardOutgoing(n.ID, graph.EdgeCalls), func(r row) error {
 			e, err := setStateInput(r)
 			if err != nil || !isSetState(e.To) {
 				return err
 			}
-			if err := p.mark('g', n.ID); err != nil {
+			gated = true
+			return p.wantCall(e, r.key)
+		}); err != nil || !gated {
+			return err
+		}
+		active = true
+		if err := p.mark('g', n.ID); err != nil {
+			return err
+		}
+		return p.memberships(ctx, n.ID, func(e *graph.Edge, key []byte) error {
+			if err := p.wantMembership(e, key); err != nil {
 				return err
 			}
-			return p.wantCall(e, r.key)
+			return p.mark('q', e.To)
 		})
+	}); err != nil || !active {
+		return false, err
+	}
+	return true, p.methods(ctx, func(n *graph.Node) error {
+		if n.Name != lifecycle {
+			return nil
+		}
+		gated, err := p.marked('g', n.ID)
+		if err != nil || gated {
+			return err
+		}
+		needed := false
+		if err := p.memberships(ctx, n.ID, func(e *graph.Edge, _ []byte) error {
+			match, err := p.marked('q', e.To)
+			needed = needed || match
+			return err
+		}); err != nil || !needed {
+			return err
+		}
+		// An owner outside the gated classes can still win first and
+		// disqualify this lifecycle target. Prove every competing owner.
+		return p.memberships(ctx, n.ID, p.wantMembership)
+	})
+}
+
+func (p *rebuildSetStatePass) memberships(ctx context.Context, id string, yield func(*graph.Edge, []byte) error) error {
+	return pendingVisit(ctx, p.b.pending, guardOutgoing(id, graph.EdgeMemberOf), func(r row) error {
+		e, err := setStateInput(r)
+		if err != nil {
+			return err
+		}
+		return yield(e, r.key)
 	})
 }
 
@@ -248,7 +286,7 @@ func (p *rebuildSetStatePass) wantMembership(e *graph.Edge, live []byte) error {
 
 func setStateCallProof(proof rebuildEdgeProof) bool {
 	switch proof {
-	case rebuildProofTemporalSynthetic, rebuildProofEventChannel, rebuildProofRNBridge, rebuildProofObserver, rebuildProofClosureCollection, rebuildProofReactSetState, rebuildProofFlutterSetState:
+	case rebuildProofTemporalSynthetic, rebuildProofEventChannel, rebuildProofRNBridge, rebuildProofObserver, rebuildProofClosureCollection:
 		return true
 	default:
 		return false
@@ -257,6 +295,11 @@ func setStateCallProof(proof rebuildEdgeProof) bool {
 
 func (p *rebuildSetStatePass) wantCall(e *graph.Edge, live []byte) error {
 	custody, err := readRebuildEdgeCustody(p.b.pending, live)
+	if errors.Is(err, ErrRebuildUnknownProvenance) {
+		// A stale producer digest cannot prove the gate. Another live
+		// call may still supply a valid witness for this caller.
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -288,12 +331,18 @@ func (p *rebuildSetStatePass) record(ctx context.Context, receipts iter.Seq2[Par
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if facts.EffectiveLanguage == "" || e.FilePath != file {
+			admitted := facts.EffectiveLanguage != "" && e.FilePath == file
+			if !admitted && e.Kind != graph.EdgeMemberOf {
 				continue
 			}
 			key := pendingEdgeKey(e)
-			if err := p.noteMembership(key); err != nil {
-				return err
+			if e.Kind == graph.EdgeMemberOf {
+				if err := p.noteMembership(key, admitted); err != nil {
+					return err
+				}
+			}
+			if !admitted {
+				continue
 			}
 			caller, err := p.get(append(setStateScratch('t'), key...))
 			if err != nil {
@@ -332,11 +381,16 @@ func (p *rebuildSetStatePass) record(ctx context.Context, receipts iter.Seq2[Par
 	})
 }
 
-func (p *rebuildSetStatePass) noteMembership(raw []byte) error {
+func (p *rebuildSetStatePass) noteMembership(raw []byte, admitted bool) error {
 	key := append(setStateScratch('r'), raw...)
 	state, err := p.get(key)
 	if err != nil || len(state) == 0 {
 		return err
+	}
+	if !admitted {
+		// Do not let a later matching receipt erase an earlier unproved
+		// position of this same membership in the owner election.
+		return noteRebuildScratchPayload(p.put, key, state, rebuildCapabilityUnproved)
 	}
 	if state[0] != rebuildCapabilityWanted {
 		return nil
