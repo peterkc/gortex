@@ -122,10 +122,15 @@ func TestRebuildCallMoveOrderWireCodesRetired(t *testing.T) {
 		{55, store_pebble.ErrRebuildMyBatis},
 		{57, store_pebble.ErrRebuildSQLCallsite},
 		{59, store_pebble.ErrRebuildStoreFactory},
+		{84, nil}, // deferred Godot scene connections
+		{90, nil}, // deferred Rust scope
+		{93, nil}, // deferred Pascal form
 	} {
 		t.Run(fmt.Sprint(tc.retired), func(t *testing.T) {
 			require.Nil(t, rebuildFailureKinds[tc.retired-1])
-			require.Equal(t, tc.retired+1, buildRefusal(tc.stage).Refusal)
+			if tc.stage != nil {
+				require.Equal(t, tc.retired+1, buildRefusal(tc.stage).Refusal)
+			}
 			var reply, acks bytes.Buffer
 			require.NoError(t, writeRebuildBuildReply(&reply, rebuildBuildReply{Refusal: tc.retired}))
 			err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
