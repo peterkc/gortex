@@ -656,7 +656,8 @@ func (p *rebuildObjectRegistryPass) prove(ctx context.Context, receipts iter.Seq
 		if !rebuildStoreCandidateExact(r.value[0]) {
 			return nil
 		}
-		class, _, err := readKeyString(r.value[len(p.prefix)+1:])
+		// Skip the proof byte and the cohort key prefix, including its column.
+		class, _, err := readKeyString(r.value[len(p.prefix)+2:])
 		if err != nil {
 			return err
 		}
