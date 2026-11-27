@@ -190,10 +190,17 @@ func TestRebuildNgRxEffectStoreInputs(t *testing.T) {
 				live.To = "unresolved::*.load"
 				require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &live, OldTo: raw.To}}))
 				b.AddEdge(raw)
+				rawKey := pendingEdgeKey(raw)
+				stationary, err := readRebuildEdgeCustody(b.pending, rawKey)
+				require.NoError(t, err)
+				require.Equal(t, rebuildEdgeCustody{}, stationary, "stationary custody is implicit")
+				moved, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(&live))
+				require.NoError(t, err)
+				require.Equal(t, rebuildEdgeCustody{raw: rawKey}, moved)
 				for _, e := range []*graph.Edge{raw, &live} {
-					claim, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(e))
+					claim, err := rebuildReceiptKey(b.pending, pendingEdgeKey(e))
 					require.NoError(t, err)
-					require.Equal(t, rebuildEdgeCustody{raw: pendingEdgeKey(raw)}, claim)
+					require.Equal(t, rawKey, claim, "both Calls claim the same receipt key")
 				}
 				receipts = func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
 			}
