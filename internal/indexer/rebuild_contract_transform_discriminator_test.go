@@ -160,7 +160,7 @@ func TestRebuildContractTransformedLaravelClassDiscriminator(t *testing.T) {
 func TestRebuildContractRawParseEligibility(t *testing.T) {
 	for _, tc := range []struct {
 		name, path, lang, raw string
-		classes              map[string]string
+		classes               map[string]string
 	}{
 		{name: "unchanged Go", path: "handler.go", lang: "go", raw: "package p\nfunc handler() {}\n"},
 		{name: "changed Go without callable", path: "handler.go", lang: "go", raw: "package p\nconst val = \"ok\"\n"},
