@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
@@ -117,7 +118,21 @@ func (b *BuildStore) RebuildGoExternalCalls(ctx context.Context,
 			if err != nil {
 				return err
 			}
-			return b.writeNode(n)
+			if err := b.writeNode(n); err != nil {
+				return err
+			}
+			live := pendingNodeKey(n.ID)
+			stamp, err := pendingGet(b.pending, live, func(raw []byte) ([]byte, error) {
+				digest := sha256.Sum256(raw)
+				return digest[:], nil
+			})
+			if err != nil {
+				return err
+			}
+			if stamp == nil {
+				return invalid("go external symbol missing after write")
+			}
+			return b.pending.Set(rebuildGoExternalSymbolStampKey(live), stamp, pebble.NoSync)
 		}); err != nil {
 			return err
 		}
@@ -140,6 +155,23 @@ func (b *BuildStore) RebuildGoExternalCalls(ctx context.Context,
 			}
 			e := &graph.Edge{From: from, To: to, Kind: graph.EdgeMemberOf, Origin: graph.OriginASTResolved}
 			return b.addEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofUntrackedMove})
+		})
+	})
+}
+
+// Private producer evidence is not published and does not change node encoding.
+func rebuildGoExternalSymbolStampKey(live []byte) []byte {
+	return append([]byte{'g', 'q', 'x'}, live...)
+}
+
+func rebuildGoExternalSymbolStamped(reader pebble.Reader, live []byte) (bool, error) {
+	return pendingGet(reader, rebuildGoExternalSymbolStampKey(live), func(stamp []byte) (bool, error) {
+		if len(stamp) != sha256.Size {
+			return false, invalid("go external symbol producer stamp")
+		}
+		return pendingGet(reader, live, func(raw []byte) (bool, error) {
+			digest := sha256.Sum256(raw)
+			return bytes.Equal(stamp, digest[:]), nil
 		})
 	})
 }
