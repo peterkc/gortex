@@ -15,9 +15,13 @@ func RunRebuildGodotAutoload(ctx context.Context, build *store_pebble.BuildStore
 		return 0, nil
 	}
 	return build.RebuildGodotAutoload(ctx, receipts, store_pebble.RebuildGodotAutoloadRules{
-		Decl:       gdAutoloadDecl,
-		MemberFile: gdScriptMemberFile,
-		Call:       gdScriptCallKey,
-		Rebind:     gdAutoloadRebind,
+		Decl:            gdAutoloadDecl,
+		MemberFile:      gdScriptMemberFile,
+		Call:            gdScriptCallKey,
+		Rebind:          gdAutoloadRebind,
+		DeclCandidate:   gdAutoloadDeclCandidate,
+		ScriptFile:      isGDScriptFile,
+		MemberKinds:     gdScriptMemberKinds,
+		ReceiptLanguage: func(language string) bool { return language == "godot_project" || language == "gdscript" },
 	})
 }

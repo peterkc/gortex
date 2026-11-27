@@ -15,10 +15,14 @@ func RunRebuildGodotPreloadAlias(ctx context.Context, build *store_pebble.BuildS
 		return 0, nil
 	}
 	return build.RebuildGodotPreloadAlias(ctx, receipts, store_pebble.RebuildGodotPreloadAliasRules{
-		Decl:       gdPreloadAliasDecl,
-		MemberFile: gdScriptMemberFile,
-		Call:       gdScriptCallKey,
-		SourceFile: gdEdgeSourceFile,
-		Rebind:     gdPreloadAliasRebind,
+		Decl:            gdPreloadAliasDecl,
+		MemberFile:      gdScriptMemberFile,
+		Call:            gdScriptCallKey,
+		SourceFile:      gdEdgeSourceFile,
+		Rebind:          gdPreloadAliasRebind,
+		DeclCandidate:   gdPreloadAliasDeclCandidate,
+		ScriptFile:      isGDScriptFile,
+		MemberKinds:     gdScriptMemberKinds,
+		ReceiptLanguage: func(language string) bool { return language == "gdscript" },
 	})
 }
