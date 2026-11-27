@@ -240,7 +240,9 @@ func TestRebuildRailsCallerNodeCap(t *testing.T) {
 			want := *call
 			want.To, want.Origin, want.Confidence = service.ID, graph.OriginASTInferred, 0.8
 			want.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.8)
-			want.Meta = map[string]any{"recv_const": service.Name, MetaSynthesizedBy: SynthRailsResolve}
+			want.Meta = map[string]any{
+				"recv_const": service.Name, MetaSynthesizedBy: SynthRailsResolve, MetaProvenance: ProvenanceHeuristic,
+			}
 			require.ElementsMatch(t, []*graph.Edge{&want, noMatch}, after)
 		})
 	}
