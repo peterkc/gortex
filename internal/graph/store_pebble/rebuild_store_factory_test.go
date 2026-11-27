@@ -115,6 +115,31 @@ func TestRebuildStoreFactoryRowCaps(t *testing.T) {
 	}
 }
 
+func TestRebuildStoreFactoryPreservesOversizedIncumbent(t *testing.T) {
+	old := storeFactoryTestCall(storeFactoryTestStub, 2)
+	caller := storeFactoryTestCaller()
+	action := storeFactoryTestAction("store.ts::reset", "store.ts", caller.WorkspaceID)
+	source := storeFactoryTestSource(old)
+	source.Nodes = []*graph.Node{caller}
+	b, receipts := seedSyntheticCustody(t, source, producerProofFacts(action))
+	incumbent := storeFactoryTestCall(action.ID, old.Line)
+	incumbent.Meta = map[string]any{"via": "other.producer"}
+	incumbent.Context = strings.Repeat("x", rebuildStoreFactoryRowBytes)
+	require.NoError(t, b.withWrites(func() error {
+		return b.addEdgeWithCustody(incumbent, rebuildEdgeCustody{proof: rebuildProofReceiver})
+	}))
+	before := rebuildFrameworkCustodyRows(t, b)
+	key := pendingEdgeKey(incumbent)
+	require.Greater(t, len(key)+len(before[string(key)]), rebuildStoreFactoryRowBytes)
+	stats, err := b.RebuildStoreFactory(t.Context(), receipts, storeFactoryTestRules())
+	require.NoError(t, err)
+	require.Equal(t, RebuildStoreFactoryStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+	oldKey := pendingEdgeKey(old)
+	delete(before, string(oldKey))
+	delete(before, string(pendingReverseKey(old, oldKey)))
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b), "keep the incumbent bytes and custody")
+}
+
 func TestRebuildStoreFactoryStaleCustody(t *testing.T) {
 	for _, name := range []string{"stationary", "moving", "malformed"} {
 		t.Run(name, func(t *testing.T) {

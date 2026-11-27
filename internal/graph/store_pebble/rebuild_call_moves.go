@@ -118,15 +118,10 @@ func (p *rebuildCallMoves) edge(key []byte) (*graph.Edge, error) {
 	})
 }
 
-func (p *rebuildCallMoves) validatedPresent(key []byte) (bool, error) {
-	e, err := p.edge(key)
-	return e != nil, err
-}
-
 // apply runs inside the caller's write scope, after every move has proved.
 // Each window first frees all old keys, then admits claims in receipt order.
 // Read the planned payload and raw key from scratch, not from an earlier window.
-func (p *rebuildCallMoves) apply(ctx context.Context, planned uint64, hasIncumbent func([]byte) (bool, error)) error {
+func (p *rebuildCallMoves) apply(ctx context.Context, planned uint64) error {
 	if p.ordered != planned {
 		return invalid(p.label + " ordered move count does not match plan")
 	}
@@ -151,7 +146,7 @@ func (p *rebuildCallMoves) apply(ctx context.Context, planned uint64, hasIncumbe
 			if e == nil {
 				return invalid(p.label + " ordered move has no planned edge")
 			}
-			occupied, err := hasIncumbent(pendingEdgeKey(e))
+			occupied, err := p.present(pendingEdgeKey(e))
 			if err != nil || occupied {
 				return err
 			}

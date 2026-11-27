@@ -75,7 +75,7 @@ func (b *BuildStore) RebuildSQLCallsites(ctx context.Context, receipts iter.Seq2
 	if err := p.prove(ctx, receipts); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx, p.stats.Moves, p.present) })
+	err = b.withWrites(func() error { return p.apply(ctx, p.stats.Moves) })
 	return p.stats, err
 }
 

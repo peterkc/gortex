@@ -626,6 +626,30 @@ func TestRebuildMyBatisRejectsInvalidInputAndOccupiedScratch(t *testing.T) {
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
 
+func TestRebuildMyBatisPreservesOversizedIncumbent(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	old := myBatisTestStub(myBatisTestPlaceholder("find"), "find")
+	xml := myBatisTestXML(t, "local", old)
+	require.NoError(t, b.AddParsedFile("local", xml))
+	method := myBatisTestMethod(t, b, "local")
+	incumbent := myBatisTestStub(myBatisTestLocal, "find")
+	incumbent.Meta = map[string]any{"via": "other.producer"}
+	incumbent.Context = strings.Repeat("x", rebuildMyBatisRowBytes)
+	require.NoError(t, b.withWrites(func() error {
+		return b.addEdgeWithCustody(incumbent, rebuildEdgeCustody{proof: rebuildProofReceiver})
+	}))
+	before := rebuildFrameworkCustodyRows(t, b)
+	key := pendingEdgeKey(incumbent)
+	require.Greater(t, len(key)+len(before[string(key)]), rebuildMyBatisRowBytes)
+	stats, err := runTestRebuildMyBatis(t, b, xml, method)
+	require.NoError(t, err)
+	require.Equal(t, RebuildMyBatisStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+	oldKey := pendingEdgeKey(old)
+	delete(before, string(oldKey))
+	delete(before, string(pendingReverseKey(old, oldKey)))
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b), "keep the incumbent bytes and custody")
+}
+
 func TestRebuildMyBatisCaptureCapsOnlyMapperCalls(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

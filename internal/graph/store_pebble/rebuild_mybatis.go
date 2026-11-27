@@ -85,7 +85,7 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 	if err := p.prove(ctx, receipts, rules); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx, p.stats.Moves, p.validatedPresent) })
+	err = b.withWrites(func() error { return p.apply(ctx, p.stats.Moves) })
 	return p.stats, err
 }
 

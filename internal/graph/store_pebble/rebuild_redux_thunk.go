@@ -80,7 +80,7 @@ func (b *BuildStore) RebuildReduxThunk(ctx context.Context, receipts iter.Seq2[P
 		return stats, err
 	}
 	// A destination that stays occupied wins by key, regardless of its payload.
-	err = b.withWrites(func() error { return p.apply(ctx, p.stats.Moves, p.present) })
+	err = b.withWrites(func() error { return p.apply(ctx, p.stats.Moves) })
 	return p.stats, err
 }
 
