@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"go/token"
@@ -192,12 +193,58 @@ func rebuildGoArgumentSource(e *graph.Edge, extractorOf func(string) string) boo
 		slices.Contains(graph.UnresolvedNameCandidateIDsForName(name, ""), e.From)
 }
 
+// rebuildExternalProved checks the emitted target against its installed bytes
+// and the exact frozen receipt at the original recording site.
+func (b *BuildStore) rebuildExternalProved(r row, e *graph.Edge) (bool, error) {
+	digest := sha256.Sum256(r.value)
+	if e.To == "external::error" && (e.Kind == graph.EdgeReturns || e.Kind == graph.EdgeThrows) {
+		proof, err := pendingGet(b.pending, rebuildExternalEvidenceKey('p', r.key), copyValue)
+		if err != nil || bytes.Equal(proof, digest[:]) {
+			return err == nil, err
+		}
+	}
+	evidence, err := pendingGet(b.pending, rebuildExternalEvidenceKey('m', r.key), copyValue)
+	if err != nil || evidence == nil {
+		return false, err
+	}
+	spec, savedDigest, err := readKeyString(evidence)
+	if err != nil || len(savedDigest) != sha256.Size {
+		return false, invalid("terminal external evidence")
+	}
+	target, valid := RebuildExternalImportTarget(spec)
+	if !valid || target != e.To || !bytes.Equal(savedDigest, digest[:]) {
+		return false, nil
+	}
+	custody, err := readRebuildEdgeCustody(b.pending, r.key)
+	if err != nil || custody.raw == nil {
+		return false, err
+	}
+	lang, err := pendingGet(b.pending, rebuildExternalEvidenceKey('r', custody.raw), copyValue)
+	if err != nil || len(lang) == 0 {
+		return false, err
+	}
+	raw, err := decodeLinkRecorder(custody.raw)
+	if err != nil {
+		return false, err
+	}
+	if raw.From != e.From || raw.Kind != e.Kind || raw.FilePath != e.FilePath || raw.Line != e.Line {
+		return false, nil
+	}
+	name := graph.UnresolvedName(raw.To)
+	if original, ok := strings.CutPrefix(name, "extern::"); ok {
+		return original == spec && !strings.Contains(original, "::"), nil
+	}
+	original, ok := strings.CutPrefix(name, "import::")
+	return ok && original != "" && e.Kind == graph.EdgeImports &&
+		(original == spec || string(lang) == "typescript" || string(lang) == "javascript"), nil
+}
+
 func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, extractorOf func(string) string) (relationsEndpointCounts, error) {
 	var counts relationsEndpointCounts
 	// The same lock covers this private lookup and the final node projection.
 	// A saved logical node may be omitted by the profile; an unknown ID may
 	// not. Native unresolved targets carry no declared node by design.
-	check := func(id string, e *graph.Edge, target, kept bool) error {
+	check := func(r row, id string, e *graph.Edge, target, kept bool) error {
 		if graph.IsProxyID(id) {
 			return invalid("proxy relations endpoint")
 		}
@@ -222,6 +269,14 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, extractorOf fu
 				key, valid := RebuildExternalImportTarget(specifier)
 				if !valid || key != id {
 					return invalid("malformed external import endpoint")
+				}
+				proved, err := b.rebuildExternalProved(r, e)
+				if err != nil {
+					return err
+				}
+				if !proved {
+					return fmt.Errorf("%w: unproved external relations endpoint %q: %w", errInvalidRecord, id,
+						&RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(e)})
 				}
 				if kept {
 					counts.externalImports++
@@ -252,10 +307,10 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, extractorOf fu
 				return err
 			}
 		}
-		if err := check(e.From, e, false, kept); err != nil {
+		if err := check(r, e.From, e, false, kept); err != nil {
 			return err
 		}
-		return check(e.To, e, true, kept)
+		return check(r, e.To, e, true, kept)
 	})
 	return counts, err
 }

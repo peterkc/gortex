@@ -684,6 +684,50 @@ func TestRebuildImportRewrittenPackagePrefix(t *testing.T) {
 	checkFrontierScratch(t, opts.ScratchParent)
 }
 
+func TestRebuildImportTerminalRewriteSeals(t *testing.T) {
+	ctx, b, opts := frontierFixture(t, 0)
+	const file, repo = "repo/app/main.ts", "repo"
+	const original, effective = "pkg/sub::Export", "@scope/pkg/sub::Export"
+	caller := rebuildImportTestNode(file, repo, "app", "", "typescript", graph.KindFile)
+	raw := rebuildImportTestEdge(file, file, original, 3)
+	want := rebuildImportTestMove(raw, "external::"+effective, false)
+	rewrite := func(path, spec string) string {
+		require.Equal(t, file, path)
+		require.Equal(t, original, spec)
+		return effective
+	}
+	require.Equal(t, []*graph.Edge{want}, rebuildImportNativeRows(t, []*graph.Node{caller}, []*graph.Edge{raw}, func(r *Resolver) {
+		r.SetNpmAliasResolver(rewrite)
+		r.SetWorkspaceMembership(func(string) string { return "" })
+	}))
+	require.NoError(t, b.AddParsedFile(repo, store_pebble.ParseFacts{
+		EffectiveLanguage: "typescript",
+		File:              graph.FileMetaRow{FilePath: file, NodeCount: 1},
+		Nodes:             []*graph.Node{caller},
+		Edges:             []*graph.Edge{raw},
+	}))
+	manifest, err := store_pebble.PrepareManifest(ctx, t.TempDir(), []store_pebble.ManifestFile{{Path: file, Kind: 'f', Language: "typescript"}}, store_pebble.Witness{
+		Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest, Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2},
+	}, "terminal-import")
+	require.NoError(t, err)
+	graphStage, err := b.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, manifest.Incarnation)
+	require.NoError(t, err)
+	base, err := b.RetainFileGraph(ctx, graphStage)
+	require.NoError(t, err)
+	in := RebuildMainInputs{
+		PathAlias:                func(_, _ string) (string, error) { return "", nil },
+		RewriteNpm:               func(path, spec string) (string, error) { return rewrite(path, spec), nil },
+		ExternalNpmDependency:    func(_, _ string) (bool, error) { return false, nil },
+		DependencyContractsReady: true,
+	}
+	require.NoError(t, runRebuildMain(ctx, b, opts, false, in))
+	require.Equal(t, []*graph.Edge{want}, rebuildFnPointerSaved(t, b))
+	stage, err := b.PrepareRelations(ctx, t.TempDir(), base, nil)
+	require.NoError(t, err)
+	require.Equal(t, store_pebble.StageRelations, stage.Witness.Stage)
+	require.NotEmpty(t, stage.Files)
+}
+
 func TestRebuildImportPostDirectoryRefusals(t *testing.T) {
 	t.Run("PrefixBudget", func(t *testing.T) {
 		ctx, b, opts := frontierFixture(t, 0)
