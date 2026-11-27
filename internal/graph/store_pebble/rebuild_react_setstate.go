@@ -82,6 +82,9 @@ func (b *BuildStore) rebuildSetState(ctx context.Context, receipts iter.Seq2[Par
 	if err := p.record(ctx, receipts); err != nil {
 		return stats, err
 	}
+	if err := p.proveMemberships(ctx, lifecycle); err != nil {
+		return stats, err
+	}
 	if err := p.elect(ctx, lifecycle, makeCall); err != nil {
 		return stats, err
 	}
@@ -96,9 +99,10 @@ type rebuildSetStatePass struct {
 }
 
 // c: highest live lifecycle candidate ID by class; m: candidate methods;
-// q: classes that can emit from a gated caller; r: membership receipt key ->
-// live key; o: first owner by method; t: qualifying call receipt key -> caller;
-// g: live call gate; p: proved call gate; n: declaration proof;
+// q: possible caller classes; s: first caller owner classes that can emit;
+// r: membership receipt key -> live key; o: first owner by method;
+// t: qualifying call receipt key -> caller; g: live call gate;
+// p: proved call gate; n: declaration proof;
 // l: lifecycle winner by class; w: staged output by exact key;
 // x: unproved output keys.
 func setStateScratch(col byte, fields ...string) []byte {
@@ -252,19 +256,21 @@ func (p *rebuildSetStatePass) captureGates(ctx context.Context, lifecycle string
 func (p *rebuildSetStatePass) markCallerClasses(ctx context.Context, n *graph.Node, lifecycle string) (bool, error) {
 	useful := false
 	err := p.memberships(ctx, n.ID, func(e *graph.Edge, _ []byte) error {
-		highest, err := p.get(setStateScratch('c', e.To))
-		if err != nil || len(highest) == 0 {
+		canEmit, err := p.classCanEmit(n, e.To, lifecycle)
+		if err != nil || !canEmit {
 			return err
-		}
-		// If this caller owns the class, earlier lifecycle IDs cannot beat
-		// it. At least one later ID is needed for a non-self output.
-		if n.Name == lifecycle && string(highest) <= n.ID {
-			return nil
 		}
 		useful = true
 		return p.mark('q', e.To)
 	})
 	return useful, err
+}
+
+func (p *rebuildSetStatePass) classCanEmit(n *graph.Node, class, lifecycle string) (bool, error) {
+	highest, err := p.get(setStateScratch('c', class))
+	// A lifecycle caller owns itself in this class. Only a later ID
+	// can replace it with a different target.
+	return len(highest) != 0 && (n.Name != lifecycle || string(highest) > n.ID), err
 }
 
 func (p *rebuildSetStatePass) memberships(ctx context.Context, id string, yield func(*graph.Edge, []byte) error) error {
@@ -402,6 +408,36 @@ func (p *rebuildSetStatePass) record(ctx context.Context, receipts iter.Seq2[Par
 			}
 		}
 	}
+	return nil
+}
+
+func (p *rebuildSetStatePass) proveMemberships(ctx context.Context, lifecycle string) error {
+	// Class capture was provisional until replay picked each caller's first
+	// owner. Require target membership receipts only in those classes.
+	if err := pendingVisit(ctx, p.b.pending, setStateScratch('g'), func(r row) error {
+		id, _, err := readKeyString(r.key[3:])
+		if err != nil {
+			return err
+		}
+		class, err := p.owner(id)
+		if err != nil || class == "" {
+			return err
+		}
+		n, err := p.node(ctx, id)
+		if err != nil {
+			return err
+		}
+		if n == nil {
+			return invalid("setState lost gated method")
+		}
+		canEmit, err := p.classCanEmit(n, class, lifecycle)
+		if err != nil || !canEmit {
+			return err
+		}
+		return p.mark('s', class)
+	}); err != nil {
+		return err
+	}
 	// Capture rejects receipt-key collisions, so each row represents one
 	// distinct live membership. Receipt-key order can differ from live order.
 	var refused rebuildScratchRefusals
@@ -417,7 +453,24 @@ func (p *rebuildSetStatePass) record(ctx context.Context, receipts iter.Seq2[Par
 		if err != nil {
 			return err
 		}
-		refused.add(id, bytes.Clone(live))
+		needed, err := p.marked('g', id.From)
+		if err != nil {
+			return err
+		}
+		if !needed {
+			// A target can have an owner outside a selected class. Its
+			// competing memberships can still change the first owner.
+			if err := p.memberships(ctx, id.From, func(e *graph.Edge, _ []byte) error {
+				selected, err := p.marked('s', e.To)
+				needed = needed || selected
+				return err
+			}); err != nil {
+				return err
+			}
+		}
+		if needed {
+			refused.add(id, bytes.Clone(live))
+		}
 		return nil
 	}); err != nil {
 		return err

@@ -79,6 +79,27 @@ func TestRebuildReactSetStateSkipsReceiptsWithoutLiveGate(t *testing.T) {
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
 
+func TestRebuildReactSetStateIgnoresEmptyCandidateID(t *testing.T) {
+	caller := setStateProofMethod("", "refresh", 5)
+	render := setStateProofMethod("render", "render", 10)
+	member := setStateProofMember(caller, "Widget")
+	call := setStateProofCall(caller, "unresolved::setState")
+	// Direct batch writes can install rows that the portable receipt codec rejects.
+	b, _ := seedSyntheticCustody(t, setStateProofFacts([]*graph.Node{caller, render},
+		member, setStateProofMember(render, "Widget"), call))
+	for _, e := range []*graph.Edge{member, call} {
+		live, err := b.pendingEdge(pendingEdgeKey(e))
+		require.NoError(t, err)
+		require.Equal(t, e, live)
+	}
+	before := rebuildFrameworkCustodyRows(t, b)
+	receipts := func(func(ParseFacts, error) bool) { t.Fatal("replayed receipts for an empty method ID") }
+	stats, err := b.RebuildReactSetState(t.Context(), receipts, setStateProofTarget, setStateProofOutput)
+	require.NoError(t, err)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
 func TestRebuildReactSetStateProvesOnlyGatedMemberships(t *testing.T) {
 	const chosen = "ZWidget"
 	caller := setStateProofMethod("refresh", "refresh", 5)

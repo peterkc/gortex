@@ -106,59 +106,100 @@ func TestRebuildSetStateLifecycleCallerProofScope(t *testing.T) {
 		{SynthReactSetState, "render"},
 		{SynthFlutterSetState, "build"},
 	} {
-		for _, mode := range []string{"only earlier lifecycle", "later lifecycle wins", "gated lifecycle is still a target"} {
+		for _, mode := range []string{
+			"only earlier lifecycle", "later lifecycle wins", "gated lifecycle is still a target",
+			"later lifecycle in first owner", "later lifecycle only in secondary class",
+		} {
 			t.Run(stage.synth+"/"+mode, func(t *testing.T) {
-				const file, class = "widget.go", "widget.go::Widget"
+				const file, class, other = "widget.go", "widget.go::Z-owner", "widget.go::A-other"
 				earlier := rebuildEventNode(file, "a", "go", "")
 				gated := rebuildEventNode(file, "m", "go", "")
 				earlier.Name, gated.Name = stage.lifecycle, stage.lifecycle
 				earlier.Kind, gated.Kind = graph.KindMethod, graph.KindMethod
-				member := func(n *graph.Node) *graph.Edge {
-					return &graph.Edge{From: n.ID, To: class, Kind: graph.EdgeMemberOf, FilePath: file, Line: n.StartLine}
+				member := func(n *graph.Node, owner string) *graph.Edge {
+					return &graph.Edge{From: n.ID, To: owner, Kind: graph.EdgeMemberOf, FilePath: file, Line: n.StartLine}
 				}
 				gate := func(n *graph.Node) *graph.Edge {
 					return &graph.Edge{From: n.ID, To: "unresolved::setState", Kind: graph.EdgeCalls, FilePath: file, Line: n.StartLine}
 				}
 				nodes := []*graph.Node{earlier, gated}
-				edges := []*graph.Edge{member(earlier), member(gated), gate(gated)}
+				edges := []*graph.Edge{member(earlier, class), gate(gated)}
+				gatedOwners := []string{class}
 				var from, target *graph.Node
+				var missingMemberships []string
 				switch mode {
 				case "later lifecycle wins":
 					later := rebuildEventNode(file, "z", "go", "")
 					later.Name, later.Kind = stage.lifecycle, graph.KindMethod
-					nodes, edges = append(nodes, later), append(edges, member(later))
+					nodes, edges = append(nodes, later), append(edges, member(later, class))
 					from, target = gated, later
 				case "gated lifecycle is still a target":
 					refresh := rebuildEventNode(file, "refresh", "go", "")
 					refresh.Kind = graph.KindMethod
-					nodes, edges = append(nodes, refresh), append(edges, member(refresh), gate(refresh))
+					nodes, edges = append(nodes, refresh), append(edges, member(refresh, class), gate(refresh))
 					from, target = refresh, gated
+				case "later lifecycle in first owner", "later lifecycle only in secondary class":
+					later := rebuildEventNode(file, "z", "go", "")
+					later.Name, later.Kind = stage.lifecycle, graph.KindMethod
+					nodes = append(nodes, later)
+					edges = append(edges, member(later, other))
+					gatedOwners = append(gatedOwners, other)
+					missingMemberships = []string{earlier.ID}
+					if mode == "later lifecycle in first owner" {
+						slices.Reverse(gatedOwners)
+						from, target = gated, later
+					} else {
+						missingMemberships = append(missingMemberships, later.ID)
+					}
+				}
+				for _, owner := range gatedOwners {
+					edges = append(edges, member(gated, owner))
 				}
 				b, native, proof := openRebuildReactSetStateStores(t, rebuildEventFacts(file, "go", nodes, edges...))
+				if len(missingMemberships) != 0 {
+					// Pin SQLite's first membership rather than assuming insertion order.
+					var owners []string
+					for _, e := range native.GetOutEdgesByNodeIDs([]string{gated.ID})[gated.ID] {
+						if e.Kind == graph.EdgeMemberOf {
+							owners = append(owners, e.To)
+						}
+					}
+					require.Equal(t, gatedOwners, owners)
+					proof[0].Edges = slices.DeleteFunc(proof[0].Edges, func(e *graph.Edge) bool {
+						return e.Kind == graph.EdgeMemberOf && slices.Contains(missingMemberships, e.From)
+					})
+				}
 				selection, err := NewFrameworkSynthesizerSelection([]string{stage.synth})
 				require.NoError(t, err)
 				report := RunFrameworkSynthesizersWithSelection(native, selection)
 				require.NoError(t, report.Err)
 				oracle := rebuildEventSQLiteRows(native)
-				receipts := rebuildGRPCReceipts(proof...)
+				var replays int
+				receipts := func(yield func(store_pebble.ParseFacts, error) bool) {
+					replays++
+					rebuildGRPCReceipts(proof...)(yield)
+				}
 				run, output := RunRebuildReactSetState, rebuildReactSetStateOutput
 				if stage.synth == SynthFlutterSetState {
 					run, output = RunRebuildFlutterSetState, rebuildFlutterSetStateOutput
 				}
 				var want int
-				if from == nil {
+				if mode == "only earlier lifecycle" {
 					// Native elects the gated method itself. There is no
 					// output to prove, even without membership receipts.
 					receipts = func(func(store_pebble.ParseFacts, error) bool) {
 						t.Fatal("replayed receipts for a lifecycle method that cannot call a different target")
 					}
-				} else {
+				} else if from != nil {
 					want = 1
-					require.Contains(t, oracle.edges, output(from.ID, target.ID, class, file, from.StartLine))
+					require.Contains(t, oracle.edges, output(from.ID, target.ID, gatedOwners[0], file, from.StartLine))
 				}
 				require.Equal(t, want, report.Total)
 				stats, err := run(t.Context(), b, receipts, selection)
 				require.NoError(t, err)
+				if mode != "only earlier lifecycle" {
+					require.Equal(t, 1, replays)
+				}
 				require.EqualValues(t, want, stats.Edges)
 				require.Equal(t, oracle, rebuildEventSavedRows(t, b))
 			})
