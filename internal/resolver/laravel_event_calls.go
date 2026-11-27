@@ -38,7 +38,7 @@ func ResolveLaravelEventCalls(g graph.Store) int {
 			continue
 		}
 		if n.Kind == graph.KindType {
-			if m, _ := n.Meta["laravel_listen_map"].(string); m != "" {
+			if m := laravelListenMap(n); m != "" {
 				listenMaps = append(listenMaps, m)
 			}
 			continue
@@ -46,24 +46,16 @@ func ResolveLaravelEventCalls(g graph.Store) int {
 		if n.Name == "handle" {
 			handleByClass[classByMethod[n.ID]] = append(handleByClass[classByMethod[n.ID]], n)
 		}
-		if n.Meta != nil {
-			if t, _ := n.Meta["laravel_listener_type"].(string); t != "" {
-				listenersByType[laravelSimpleName(t)] = append(listenersByType[laravelSimpleName(t)], n)
-			}
+		if t := laravelListenerType(n); t != "" {
+			name := laravelSimpleName(t)
+			listenersByType[name] = append(listenersByType[name], n)
 		}
 	}
 	// Source 2: fold the $listen maps into listenersByType via handleByClass.
 	for _, m := range listenMaps {
-		for _, entry := range strings.Split(m, ";") {
-			event, rest, ok := strings.Cut(entry, "=>")
-			if !ok {
-				continue
-			}
-			event = laravelSimpleName(strings.TrimSpace(event))
-			for _, l := range strings.Split(rest, ",") {
-				listenersByType[event] = append(listenersByType[event], handleByClass[laravelSimpleName(strings.TrimSpace(l))]...)
-			}
-		}
+		laravelListenEntries(m, func(event, class string) {
+			listenersByType[event] = append(listenersByType[event], handleByClass[class]...)
+		})
 	}
 	if len(listenersByType) == 0 {
 		return 0
@@ -73,24 +65,18 @@ func ResolveLaravelEventCalls(g graph.Store) int {
 	var reindex []graph.EdgeReindex
 	var batch []*graph.Edge
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if v, _ := e.Meta["via"].(string); v != laravelEventVia {
-			continue
-		}
-		evType, _ := e.Meta["laravel_event_type"].(string)
+		evType := laravelCallType(e)
 		if evType == "" {
 			continue
 		}
 		listeners := laravelDedupSorted(listenersByType[laravelSimpleName(evType)])
 		if len(listeners) == 0 {
-			resolved += laravelRebind(e, nil, evType, &reindex)
+			resolved += laravelRebind(e, nil, &reindex)
 			continue
 		}
-		resolved += laravelRebind(e, listeners[0], evType, &reindex)
+		resolved += laravelRebind(e, listeners[0], &reindex)
 		for _, l := range listeners[1:] {
-			batch = append(batch, laravelFanoutEdge(e, l, evType))
+			batch = append(batch, laravelFanoutEdge(e, l.ID, evType))
 			resolved++
 		}
 	}
@@ -103,39 +89,77 @@ func ResolveLaravelEventCalls(g graph.Store) int {
 	return resolved
 }
 
-func laravelRebind(e *graph.Edge, target *graph.Node, evType string, reindex *[]graph.EdgeReindex) int {
-	want := "unresolved::*.handle"
-	if target != nil {
-		want = target.ID
-	}
-	if e.To == want {
-		if target != nil {
-			return 1
+func laravelListenMap(n *graph.Node) string {
+	m, _ := n.Meta["laravel_listen_map"].(string)
+	return m
+}
+
+func laravelListenerType(n *graph.Node) string {
+	t, _ := n.Meta["laravel_listener_type"].(string)
+	return t
+}
+
+func laravelListenEntries(listenMap string, visit func(event, class string)) {
+	for _, entry := range strings.Split(listenMap, ";") {
+		event, rest, ok := strings.Cut(entry, "=>")
+		if !ok {
+			continue
 		}
-		return 0
+		event = laravelSimpleName(strings.TrimSpace(event))
+		for _, class := range strings.Split(rest, ",") {
+			visit(event, laravelSimpleName(strings.TrimSpace(class)))
+		}
 	}
-	oldTo := e.To
-	e.To = want
+}
+
+func laravelCallType(e *graph.Edge) string {
+	if e == nil {
+		return ""
+	}
+	if v, _ := e.Meta["via"].(string); v != laravelEventVia {
+		return ""
+	}
+	evType, _ := e.Meta["laravel_event_type"].(string)
+	return evType
+}
+
+func laravelRebind(e *graph.Edge, target *graph.Node, reindex *[]graph.EdgeReindex) int {
+	var id string
 	hit := 0
 	if target != nil {
-		e.Origin = graph.OriginASTInferred
+		id, hit = target.ID, 1
+	}
+	oldTo := e.To
+	if rebindLaravelEventCall(e, id, target != nil) {
+		*reindex = append(*reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+	}
+	return hit
+}
+
+func rebindLaravelEventCall(e *graph.Edge, target string, matched bool) bool {
+	if !matched {
+		target = "unresolved::*.handle"
+	}
+	if e.To == target {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	if matched {
 		e.Confidence = ConfidenceTyped
 		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceTyped)
 		StampSynthesizedTyped(e, SynthLaravelEvent)
-		hit = 1
 	} else {
-		e.Origin = graph.OriginASTInferred
 		e.Confidence = 0
 		e.ConfidenceLabel = ""
 		UnstampSynthesized(e)
 	}
-	*reindex = append(*reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
-	return hit
+	return true
 }
 
-func laravelFanoutEdge(e *graph.Edge, listener *graph.Node, evType string) *graph.Edge {
+func laravelFanoutEdge(e *graph.Edge, listener, evType string) *graph.Edge {
 	return &graph.Edge{
-		From: e.From, To: listener.ID, Kind: graph.EdgeCalls,
+		From: e.From, To: listener, Kind: graph.EdgeCalls,
 		FilePath: e.FilePath, Line: e.Line,
 		Origin:          graph.OriginASTInferred,
 		Confidence:      ConfidenceTyped,
