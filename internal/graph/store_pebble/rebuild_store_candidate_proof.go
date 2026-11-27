@@ -80,8 +80,13 @@ func (p *rebuildCallMoves) wantCandidateBuckets(buckets []rebuildStoreCandidateW
 	return nil
 }
 
-func (p *rebuildCallMoves) countCandidateBuckets(buckets [][]byte) error {
+func (p *rebuildCallMoves) countCandidateBuckets(buckets [][]byte, col int, proof byte) error {
 	for _, bucket := range buckets {
+		scope := bucket[col]
+		if (scope == 'w' || scope == 's') && proof&rebuildStoreOtherWorkspace != 0 ||
+			(scope == 'f' || scope == 's') && proof&rebuildStoreOtherFile != 0 {
+			continue
+		}
 		key := p.candidateProofKey(bucket)
 		count, err := rebuildScratchState(p.b.pending, key, p.label+" candidate bucket proof")
 		if err != nil {
@@ -132,6 +137,45 @@ func (p *rebuildCallMoves) noteCandidateScopeChange(cohort []byte, column int, g
 	return nil
 }
 
+// A receipt proves the role separately from the workspace and file. A
+// mismatch bit persists across duplicate receipts and affects only buckets
+// that read that field.
+const (
+	rebuildStoreOtherWorkspace byte = 1 << (iota + 3)
+	rebuildStoreOtherFile
+)
+
+func rebuildStoreCandidateExact(state byte) bool {
+	return state&^(rebuildStoreOtherWorkspace|rebuildStoreOtherFile) == rebuildScratchExact
+}
+
+func rebuildStoreCandidateProof(ok bool, raw, live *graph.Node) byte {
+	bits := rebuildScratchProofBit(ok)
+	if ok && raw.WorkspaceID != live.WorkspaceID {
+		bits |= rebuildStoreOtherWorkspace
+	}
+	if ok && raw.FilePath != live.FilePath {
+		bits |= rebuildStoreOtherFile
+	}
+	return bits
+}
+
+func (p *rebuildCallMoves) noteStoreNodeProof(key, claim []byte, proof byte) error {
+	if proof&^claim[0] == 0 {
+		return nil
+	}
+	claim[0] |= proof
+	return p.put(key, claim)
+}
+
+func rebuildStoreNodeReceipt(raw, live *graph.Node, file, lang string) bool {
+	return live != nil && lang != "" && raw.FilePath == file
+}
+
+func rebuildStoreCallerReceipt(raw, live *graph.Node, file, lang string) bool {
+	return rebuildStoreNodeReceipt(raw, live, file, lang) && raw.FilePath == live.FilePath && raw.WorkspaceID == live.WorkspaceID
+}
+
 // Recover the candidate's scope from its live declaration.
 func (p *rebuildCallMoves) foldExactCandidate(r row, prefix []byte, column int, global byte,
 	node func(string) (*graph.Node, error),
@@ -140,7 +184,7 @@ func (p *rebuildCallMoves) foldExactCandidate(r row, prefix []byte, column int, 
 	if err != nil {
 		return err
 	}
-	return p.countCandidateBuckets(rebuildStoreScopeKeys(r.value[1:], column, global, n))
+	return p.countCandidateBuckets(rebuildStoreScopeKeys(r.value[1:], column, global, n), column, r.value[0])
 }
 
 func (p *rebuildCallMoves) candidateProofNode(key []byte, node func(string) (*graph.Node, error)) (*graph.Node, error) {
@@ -165,7 +209,7 @@ func (p *rebuildCallMoves) getterProofKey(wanted []byte) []byte {
 // Note a known eligible getter that moved to another file. Unlike an omitted
 // duplicate in the same file, it can defeat a unique getter file.
 func (p *rebuildCallMoves) noteGetterFileChange(wanted []byte, state byte, raw, live *graph.Node, file, lang string) error {
-	if live != nil && lang != "" && rebuildStoreFactoryGetterKind(raw.Kind) && raw.FilePath == file && file != live.FilePath {
+	if rebuildStoreNodeReceipt(raw, live, file, lang) && file != live.FilePath {
 		return noteRebuildScratchState(p.put, wanted, state, rebuildCapabilityUnproved)
 	}
 	return nil

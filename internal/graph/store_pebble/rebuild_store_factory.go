@@ -430,7 +430,7 @@ func (p *rebuildStoreFactoryPass) recordNode(raw *graph.Node, file, lang string)
 		if err != nil {
 			return err
 		}
-		ok := rebuildStoreFactorySameNode(raw, live, file, lang) && raw.WorkspaceID == live.WorkspaceID
+		ok := rebuildStoreCallerReceipt(raw, live, file, lang)
 		if err := noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(ok)); err != nil {
 			return err
 		}
@@ -441,11 +441,6 @@ func (p *rebuildStoreFactoryPass) recordNode(raw *graph.Node, file, lang string)
 		}
 	}
 	return nil
-}
-
-func rebuildStoreFactorySameNode(raw, live *graph.Node, file, lang string) bool {
-	return live != nil && lang != "" && raw.FilePath == file && live.FilePath == file &&
-		raw.Language == live.Language && raw.Kind == live.Kind
 }
 
 func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, file, lang string) error {
@@ -465,26 +460,27 @@ func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, fil
 	if err != nil {
 		return err
 	}
-	ok := rebuildStoreFactorySameNode(raw, live, file, lang)
+	receipt := rebuildStoreNodeReceipt(raw, live, file, lang)
+	var proof byte
 	if col == 'c' {
 		binding, member := p.rules.Action(raw)
 		sameRole := raw.Kind == graph.KindFunction && bytes.Equal(claim[1:], rebuildStoreFactoryKey('u', binding, member))
-		if sameRole && live != nil && (raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
+		if sameRole && receipt && (raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
 			if err := p.noteCandidateScopeChange(claim[1:], len(p.prefix), 'a', raw, live); err != nil {
 				return err
 			}
 		}
-		ok = ok && sameRole && raw.WorkspaceID == live.WorkspaceID
+		proof = rebuildStoreCandidateProof(receipt && sameRole, raw, live)
 	} else {
-		sameGetter := p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], rebuildStoreFactoryKey('v', raw.Name))
+		sameGetter := rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], rebuildStoreFactoryKey('v', raw.Name))
 		if sameGetter {
 			if err := p.noteGetterFileChange(claim[1:], state, raw, live, file, lang); err != nil {
 				return err
 			}
 		}
-		ok = ok && sameGetter
+		proof = rebuildScratchProofBit(receipt && sameGetter && raw.FilePath == live.FilePath)
 	}
-	return noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(ok))
+	return p.noteStoreNodeProof(key, claim, proof)
 }
 
 func (p *rebuildStoreFactoryPass) proveActions(ctx context.Context) (anchor bool, err error) {
@@ -493,7 +489,7 @@ func (p *rebuildStoreFactoryPass) proveActions(ctx context.Context) (anchor bool
 		if len(r.value) <= len(p.prefix)+1 {
 			return invalid("Store Factory candidate proof")
 		}
-		if r.value[0] != rebuildScratchExact {
+		if !rebuildStoreCandidateExact(r.value[0]) {
 			return nil
 		}
 		anchor = true

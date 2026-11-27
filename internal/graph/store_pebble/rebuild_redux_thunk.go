@@ -414,7 +414,7 @@ func (p *rebuildReduxThunkPass) prove(ctx context.Context, receipts iter.Seq2[Pa
 			if len(r.value) <= len(p.prefix)+2 {
 				return invalid("Redux Thunk candidate proof")
 			}
-			if r.value[0] != rebuildScratchExact {
+			if !rebuildStoreCandidateExact(r.value[0]) {
 				return nil
 			}
 			anchor = anchor || pool == 't'
@@ -497,7 +497,7 @@ func (p *rebuildReduxThunkPass) recordNode(raw *graph.Node, file, lang string) e
 		if err != nil {
 			return err
 		}
-		ok := rebuildStoreFactorySameNode(raw, live, file, lang) && raw.WorkspaceID == live.WorkspaceID
+		ok := rebuildStoreCallerReceipt(raw, live, file, lang)
 		if err := noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(ok)); err != nil {
 			return err
 		}
@@ -529,15 +529,16 @@ func (p *rebuildReduxThunkPass) recordCandidate(pool byte, raw *graph.Node, file
 	if err != nil {
 		return err
 	}
-	ok := rebuildStoreFactorySameNode(raw, live, file, lang)
+	receipt := rebuildStoreNodeReceipt(raw, live, file, lang)
+	var proof byte
 	if pool == 'g' {
-		sameGetter := p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], p.poolKey(pool, 'u', raw.Name))
+		sameGetter := rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], p.poolKey(pool, 'u', raw.Name))
 		if sameGetter {
 			if err := p.noteGetterFileChange(claim[1:], state, raw, live, file, lang); err != nil {
 				return err
 			}
 		}
-		ok = ok && sameGetter
+		proof = rebuildScratchProofBit(receipt && sameGetter && raw.FilePath == live.FilePath)
 	} else {
 		var sameRole bool
 		if raw.Kind == graph.KindMethod || rebuildStoreFactoryGetterKind(raw.Kind) {
@@ -549,14 +550,14 @@ func (p *rebuildReduxThunkPass) recordCandidate(pool byte, raw *graph.Node, file
 				sameRole = binding != "" && bytes.Equal(claim[1:], p.poolKey(pool, 'u', member))
 			}
 		}
-		if sameRole && live != nil && (raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
+		if sameRole && receipt && (raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
 			if err := p.noteCandidateScopeChange(claim[1:], len(p.prefix)+1, 'i', raw, live); err != nil {
 				return err
 			}
 		}
-		ok = ok && sameRole && raw.WorkspaceID == live.WorkspaceID
+		proof = rebuildStoreCandidateProof(receipt && sameRole, raw, live)
 	}
-	return noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(ok))
+	return p.noteStoreNodeProof(key, claim, proof)
 }
 
 func (p *rebuildReduxThunkPass) proved(old []byte, e *graph.Edge, anchor bool) (bool, error) {

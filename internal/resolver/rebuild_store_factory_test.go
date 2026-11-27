@@ -697,3 +697,108 @@ func TestRebuildStoreFactoryAndReduxThunkGetterFileProof(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildStoreFactoryAndReduxThunkNodeRoleProof(t *testing.T) {
+	const callerFile, storeFile, movedFile = "caller.ts", "store.ts", "moved.ts"
+	for _, synth := range []string{SynthStoreFactory, SynthReduxThunk} {
+		t.Run(synth, func(t *testing.T) {
+			for _, mode := range []string{"role fields only", "workspace singleton ignores file", "global singleton ignores scope",
+				"caller file decides", "getter file action needs matching path", "action loses eligibility"} {
+				t.Run(mode, func(t *testing.T) {
+					caller := rebuildEventNode(callerFile, "call", "typescript", "workspace")
+					local := rebuildStoreFactoryAction(callerFile, caller.WorkspaceID)
+					remote := rebuildStoreFactoryAction(storeFile, caller.WorkspaceID)
+					getter := rebuildEventNode(storeFile, "useStore", caller.Language, "")
+					getter.Kind = graph.KindVariable
+					call := rebuildStoreFactoryMarker(callerFile, caller.ID, "unresolved::reset", "reset")
+					if synth == SynthReduxThunk {
+						call = rebuildReduxThunkMarker(caller, "reset", 9)
+						call.Meta["store_binding"] = "useStore"
+					}
+					left := rebuildEventFacts(callerFile, caller.Language, []*graph.Node{caller}, call)
+					right := rebuildEventFacts(storeFile, caller.Language, []*graph.Node{remote})
+					want := remote.ID
+					switch mode {
+					case "role fields only", "getter file action needs matching path":
+						left.Nodes = append(left.Nodes, local)
+						right.Nodes = append(right.Nodes, getter)
+					case "caller file decides":
+						left.Nodes = append(left.Nodes, local)
+						want = local.ID
+					case "global singleton ignores scope":
+						left.Nodes = nil
+					}
+					facts := []store_pebble.ParseFacts{left, right}
+					var tail []store_pebble.ParseFacts
+					if synth == SynthReduxThunk {
+						anchor := rebuildReduxThunkNode("anchor.ts", "unrelated")
+						tail = append(tail, rebuildEventFacts(anchor.FilePath, anchor.Language, []*graph.Node{anchor}))
+					}
+					b := openRebuildGRPCBuild(t, append(facts, tail...)...)
+					before := rebuildEventSavedRows(t, b)
+					selection, err := NewFrameworkSynthesizerSelection([]string{synth})
+					require.NoError(t, err)
+					frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+					require.NoError(t, err)
+					changed := *remote
+					switch mode {
+					case "role fields only":
+						c, g := *caller, *getter
+						c.Kind, c.Language = graph.KindMethod, "javascript"
+						g.Kind, g.Language = graph.KindConstant, "javascript"
+						changed.Language = "javascript"
+						if synth == SynthReduxThunk {
+							changed.Kind = graph.KindMethod
+							changed.Meta = map[string]any{"store_factory": "other"}
+						} else {
+							changed.Name = "someOtherName"
+							changed.Meta = map[string]any{"store_factory": "useStore", "store_member": "reset"}
+						}
+						left.Nodes = []*graph.Node{&c, local}
+						right.Nodes = []*graph.Node{&changed, &g}
+					case "caller file decides":
+						c := *caller
+						c.FilePath = storeFile
+						left.Nodes = []*graph.Node{local}
+						right.Nodes = []*graph.Node{remote, &c}
+					case "workspace singleton ignores file", "global singleton ignores scope", "getter file action needs matching path":
+						changed.FilePath = movedFile
+						if mode == "global singleton ignores scope" {
+							changed.WorkspaceID = "other"
+						}
+						right.Nodes = right.Nodes[1:]
+						tail = append(tail, rebuildEventFacts(movedFile, caller.Language, []*graph.Node{&changed}))
+					case "action loses eligibility":
+						changed.Kind = graph.KindType
+						right.Nodes = []*graph.Node{&changed}
+					}
+					receipts := rebuildGRPCReceipts(append([]store_pebble.ParseFacts{left, right}, tail...)...)
+					var moves uint64
+					confidence := 0.75
+					if synth == SynthStoreFactory {
+						stats, proofErr := RunRebuildStoreFactory(t.Context(), b, receipts, frozen)
+						moves, err = stats.Moves, proofErr
+					} else {
+						stats, proofErr := RunRebuildReduxThunk(t.Context(), b, receipts, frozen)
+						moves, err = stats.Moves, proofErr
+						confidence = ConfidenceHeuristic
+					}
+					switch mode {
+					case "role fields only", "workspace singleton ignores file", "global singleton ignores scope":
+						require.NoError(t, err)
+						require.Equal(t, uint64(1), moves)
+						requireRebuildStoreCandidateMove(t, b, before, call, want, synth, confidence)
+					default:
+						var refusal *store_pebble.RebuildUnknownProvenanceError
+						require.ErrorAs(t, err, &refusal)
+						first := graph.EdgeIdentityFor(call)
+						first.To = want
+						require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: first}, refusal)
+						require.Zero(t, moves)
+						require.Equal(t, before, rebuildEventSavedRows(t, b))
+					}
+				})
+			}
+		})
+	}
+}
