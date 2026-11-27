@@ -17,6 +17,7 @@ func TestRebuildPlatformGoRelationsWithoutSentinels(t *testing.T) {
 			const lenID = "old::builtin::go::len"
 			worker, head, base, owner, _, file, _ := relationsStageFixtureRevision(t, profile, revision)
 			worker.AddNode(&graph.Node{ID: file.Path, FilePath: file.Path, Name: file.Path, Kind: graph.KindFile, Language: "go", RepoPrefix: "old"})
+			putTestGoBuiltinScope(t, worker, "old", file.Path, "old")
 			call := &graph.Edge{From: owner.ID, To: "unresolved::len", Kind: graph.EdgeCalls, FilePath: file.Path, Line: 4,
 				Meta: map[string]any{"keep": "other data"}}
 			call.SetBuiltinReceiverHint(graph.BuiltinReceiverHint{Language: "go", Form: "unbound", Name: "len"})
@@ -95,6 +96,8 @@ func TestRebuildPlatformCallValidationAndRefresh(t *testing.T) {
 	call.To = "old::builtin::go::len"
 	call.SetBuiltinReceiverHint(graph.BuiltinReceiverHint{Language: "go", Form: "unbound", Name: "len"})
 	worker.AddNode(&graph.Node{ID: "other.go::len", FilePath: "other.go", Name: "len", Kind: graph.KindFunction, Language: "go", RepoPrefix: owner.RepoPrefix})
+	putTestGoBuiltinScope(t, worker, owner.RepoPrefix, file.Path, "old")
+	putTestGoBuiltinScope(t, worker, owner.RepoPrefix, "other.go", "old len")
 	require.NoError(t, worker.withWrites(func() error {
 		return worker.putEdgeWithCustody(&call, rebuildEdgeCustody{proof: rebuildProofObserver})
 	}))
@@ -231,9 +234,9 @@ func TestRebuildPlatformWebCallRefusals(t *testing.T) {
 	invalidRole.Meta = nil
 	worker.AddEdge(&invalidRole)
 	require.NoError(t, worker.SettleRebuildPlatformCalls(ctx, js), "non-Calls do not enter the status sweep")
-	require.ErrorContains(t, worker.validateRebuildPlatformEdge(ctx, worker.pending, &invalidRole, revision, js), "role, scope or status differs")
+	require.ErrorContains(t, worker.validateRebuildPlatformEdge(worker.pending, &invalidRole, revision, js), "role, scope or status differs")
 	invalidRole.Meta = call.Meta
-	require.ErrorContains(t, worker.validateRebuildPlatformEdge(ctx, worker.pending, &invalidRole, revision, js), "link_status outside a builtin Call")
+	require.ErrorContains(t, worker.validateRebuildPlatformEdge(worker.pending, &invalidRole, revision, js), "link_status outside a builtin Call")
 }
 
 func TestRebuildPlatformCallRejectsSizeBeforeDecode(t *testing.T) {
@@ -261,4 +264,64 @@ func TestRebuildBuiltinNodeCannotBePublished(t *testing.T) {
 	_, err := worker.PrepareRelations(t.Context(), t.TempDir(), base, nil)
 	require.ErrorIs(t, err, ErrRelationsSeal)
 	require.ErrorContains(t, err, "builtin node cannot be published")
+}
+
+func putTestGoBuiltinScope(t *testing.T, worker *BuildStore, repo, file, scope string) {
+	t.Helper()
+	node := &graph.Node{ID: file, FilePath: file, Name: file, Kind: graph.KindFile, Language: "go", RepoPrefix: repo}
+	if scope != "" {
+		node.Meta = map[string]any{RebuildGoBuiltinScopeReceiptMeta: scope}
+	}
+	require.NoError(t, worker.recordRebuildGoBuiltinScope(repo, ParseFacts{
+		EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: file}, Nodes: []*graph.Node{node},
+	}))
+}
+
+func TestRebuildGoBuiltinPackageScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, pkg, other string
+		want             graph.LinkStatus
+	}{
+		{"local var in same package", "example", "example", graph.LinkStatusPlatform},
+		{"grouped iota in calling test package", "example_test", "example_test len", graph.LinkStatusProbablePlatform},
+		{"grouped iota in different test package", "example", "example_test len", graph.LinkStatusPlatform},
+		{"unchecked sibling", "example", "", graph.LinkStatusProbablePlatform},
+		{"unchecked caller", "", "example", graph.LinkStatusProbablePlatform},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			worker, _, _, owner, raw, file, _ := relationsStageFixtureRevision(t, FullProfile, graph.PlatformCatalogRevision)
+			worker.AddNode(&graph.Node{ID: file.Path, FilePath: file.Path, Name: file.Path, Kind: graph.KindFile, Language: "go", RepoPrefix: owner.RepoPrefix})
+			putTestGoBuiltinScope(t, worker, owner.RepoPrefix, file.Path, tc.pkg)
+			const other = "other_test.go"
+			node := &graph.Node{ID: other, FilePath: other, Name: other, Kind: graph.KindFile, Language: "go", RepoPrefix: owner.RepoPrefix}
+			if tc.other != "" {
+				node.Meta = map[string]any{RebuildGoBuiltinScopeReceiptMeta: tc.other}
+			}
+			kind := graph.KindVariable
+			if strings.HasSuffix(tc.other, " len") {
+				kind = graph.KindEnumMember
+			}
+			named := &graph.Node{ID: other + "::len", FilePath: other, Name: "len", Kind: kind, Language: "go", RepoPrefix: owner.RepoPrefix}
+			require.NoError(t, worker.AddParsedFile(owner.RepoPrefix, ParseFacts{
+				EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: other, NodeCount: 2}, Nodes: []*graph.Node{node, named},
+			}))
+			stored, err := worker.pendingNode(other)
+			require.NoError(t, err)
+			require.NotNil(t, stored)
+			require.NotContains(t, stored.Meta, RebuildGoBuiltinScopeReceiptMeta)
+			call := *raw
+			call.To = "old::builtin::go::len"
+			call.SetBuiltinReceiverHint(graph.BuiltinReceiverHint{Language: "go", Form: "unbound", Name: "len"})
+			worker.AddEdge(&call)
+			extractor := func(string) string { return "go" }
+			require.NoError(t, worker.SettleRebuildPlatformCalls(ctx, extractor))
+			saved, err := worker.pendingEdge(pendingEdgeKey(&call))
+			require.NoError(t, err)
+			status, ok := saved.LinkStatus()
+			require.True(t, ok)
+			require.Equal(t, tc.want, status)
+			require.NoError(t, worker.ValidateRebuildCallDelta(ctx, saved, graph.PlatformCatalogRevision, extractor))
+		})
+	}
 }

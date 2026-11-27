@@ -1,9 +1,48 @@
 package languages
 
 import (
+	"maps"
+	"slices"
+	"strings"
+
 	"github.com/zzet/gortex/internal/graph"
 	sitter "github.com/zzet/gortex/internal/parser/tsitter"
 )
+
+// Inspect only source-file declarations. The native graph uses the same node
+// ID for a package var/const and a local var/const, so it cannot prove scope.
+func goBuiltinPackageScope(root *sitter.Node, src []byte) string {
+	var pkg string
+	names := make(map[string]struct{})
+	var declaration func(*sitter.Node)
+	declaration = func(n *sitter.Node) {
+		switch n.Type() {
+		case "package_clause":
+			if name := n.NamedChild(0); name != nil && name.Type() == "package_identifier" {
+				pkg = name.Content(src)
+			}
+		case "function_declaration", "var_spec", "const_spec", "type_spec", "type_alias":
+			for i := 0; i < int(n.ChildCount()); i++ {
+				if n.FieldNameForChild(i) == "name" {
+					if name := n.Child(i).Content(src); graph.IsGoBuiltinFunction(name) {
+						names[name] = struct{}{}
+					}
+				}
+			}
+		case "var_declaration", "const_declaration", "type_declaration", "var_spec_list", "const_spec_list", "type_spec_list":
+			for child := range n.NamedChildren() {
+				declaration(child)
+			}
+		}
+	}
+	for n := range root.NamedChildren() {
+		declaration(n)
+	}
+	if pkg == "" {
+		return ""
+	}
+	return strings.Join(append([]string{pkg}, slices.Sorted(maps.Keys(names))...), " ")
+}
 
 // Use AST ancestry, not the line-based graph caller, to identify the scope.
 // Function literals and calls outside a declaration body are not proved here.

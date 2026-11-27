@@ -67,7 +67,7 @@ func (idx *Indexer) installRebuildParsePolicy(policy rebuildParsePolicy) {
 // binary layout or the shared native contract extraction policy.
 const rebuildContractCaptureVersion = 1
 
-const rebuildBuiltinReceiverCaptureVersion = 2
+const rebuildBuiltinReceiverCaptureVersion = 3
 
 // The same language selection controls parser opt-in and receipt invalidation.
 func capturesRebuildBuiltinReceiverFacts(lang string) bool {

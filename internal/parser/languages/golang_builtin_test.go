@@ -64,3 +64,26 @@ func ordinary(xs []int) int {
 	}
 	assert.Equal(t, map[string]int{"sample.go::parameter": 1, "sample.go::intrinsic": 2, "sample.go::ambiguous": 1}, hits)
 }
+
+func TestGoBuiltinPackageScopeFacts(t *testing.T) {
+	for _, tc := range []struct{ name, src, want string }{
+		{"local", "package p\nfunc unrelated() { var len int; _ = len }", "p"},
+		{"grouped iota in external test", "package p_test\nconst (\nlen = iota\n)\n", "p_test len"},
+		{"package declarations", "package p\nvar (\nx, cap int\n)\ntype len = int\nfunc max() {}\n", "p cap len max"},
+		{"method is not a package declaration", "package p\ntype T int\nfunc (t T) len() {}", "p"},
+		{"parse error", "package p\nvar x = ]", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ext := NewGoExtractor()
+			native, err := ext.Extract("example_test.go", []byte(tc.src))
+			require.NoError(t, err)
+			defer native.ReleaseTree()
+			assert.Empty(t, native.GoBuiltinScope)
+			captured, err := ext.ExtractWithOptions("example_test.go", []byte(tc.src), parser.ExtractionOptions{CaptureBuiltinReceiverFacts: true})
+			require.NoError(t, err)
+			defer captured.ReleaseTree()
+			assert.Equal(t, tc.want, captured.GoBuiltinScope)
+			assert.ElementsMatch(t, native.Nodes, captured.Nodes)
+		})
+	}
+}

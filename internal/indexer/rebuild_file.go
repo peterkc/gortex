@@ -251,6 +251,17 @@ func (idx *Indexer) extractPreparedRebuildFileInto(ctx context.Context, rel stri
 			constants[i].FilePath = rel
 		}
 	}
+	if result.GoBuiltinScope != "" {
+		for _, n := range result.Nodes {
+			if n != nil && n.Kind == graph.KindFile && n.ID == graphPath {
+				if n.Meta == nil {
+					n.Meta = make(map[string]any, 1)
+				}
+				n.Meta[store_pebble.RebuildGoBuiltinScopeReceiptMeta] = result.GoBuiltinScope
+				break
+			}
+		}
+	}
 	facts := store_pebble.ParseFacts{
 		Nodes: result.Nodes, Edges: result.Edges, File: meta, Constants: constants, EffectiveLanguage: lang,
 	}

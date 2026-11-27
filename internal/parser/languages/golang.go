@@ -378,6 +378,9 @@ func (e *GoExtractor) ExtractWithOptions(filePath string, src []byte, opts parse
 	root := tree.RootNode()
 	checked, parseErrors := parser.ParseErrorVerdict(root)
 	result := &parser.ExtractionResult{Tree: pt, ParseChecked: checked, ParseErrors: parseErrors}
+	if opts.CaptureBuiltinReceiverFacts && checked && parseErrors == 0 {
+		result.GoBuiltinScope = goBuiltinPackageScope(root, src)
+	}
 
 	fileNode := &graph.Node{
 		ID:        filePath,

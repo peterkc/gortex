@@ -309,7 +309,7 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, revision uint3
 		if !bytes.Equal(r.key, pendingEdgeKey(e)) {
 			return invalid("working edge identity does not match key")
 		}
-		if err := b.validateRebuildPlatformEdge(ctx, b.pending, e, revision, extractorOf); err != nil {
+		if err := b.validateRebuildPlatformEdge(b.pending, e, revision, extractorOf); err != nil {
 			return err
 		}
 		kept := true

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"path"
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -39,7 +38,7 @@ func (b *BuildStore) SettleRebuildPlatformCalls(ctx context.Context, extractorOf
 		}
 		entry, exact := graph.LookupPlatformBuiltin(revision, e.To)
 		if exact && entry.Language == "go" {
-			want, err := b.rebuildGoBuiltinCallStatus(ctx, snap, e, entry, extractorOf)
+			want, err := b.rebuildGoBuiltinCallStatus(snap, e, entry, extractorOf)
 			if err != nil {
 				return err
 			}
@@ -55,7 +54,7 @@ func (b *BuildStore) SettleRebuildPlatformCalls(ctx context.Context, extractorOf
 				return b.withWrites(func() error { return b.refreshPendingEdge(e) })
 			}
 		}
-		return b.validateRebuildPlatformEdge(ctx, snap, e, revision, extractorOf)
+		return b.validateRebuildPlatformEdge(snap, e, revision, extractorOf)
 	})
 }
 
@@ -70,7 +69,7 @@ func (b *BuildStore) ValidateRebuildCallDelta(ctx context.Context, edge *graph.E
 		return invalid("proxy retained Call endpoint")
 	}
 	return b.RebuildView().read(ctx, func(snap *pebble.Snapshot) error {
-		if err := b.validateRebuildPlatformEdge(ctx, snap, edge, revision, extractorOf); err != nil {
+		if err := b.validateRebuildPlatformEdge(snap, edge, revision, extractorOf); err != nil {
 			return err
 		}
 		for i, id := range [...]string{edge.From, edge.To} {
@@ -89,7 +88,7 @@ func (b *BuildStore) ValidateRebuildCallDelta(ctx context.Context, edge *graph.E
 	})
 }
 
-func (b *BuildStore) validateRebuildPlatformEdge(ctx context.Context, reader rebuildPlatformReader, e *graph.Edge, revision uint32, extractorOf func(string) string) error {
+func (b *BuildStore) validateRebuildPlatformEdge(reader rebuildPlatformReader, e *graph.Edge, revision uint32, extractorOf func(string) string) error {
 	if graph.IsBuiltinStub(e.From) {
 		if _, err := b.provedBuiltinSourceOwner(e); err != nil {
 			return err
@@ -122,7 +121,7 @@ func (b *BuildStore) validateRebuildPlatformEdge(ctx context.Context, reader reb
 				return invalid("unsupported Go builtin target role")
 			}
 		}
-		want, err := b.rebuildGoBuiltinCallStatus(ctx, reader, e, entry, extractorOf)
+		want, err := b.rebuildGoBuiltinCallStatus(reader, e, entry, extractorOf)
 		if err != nil {
 			return err
 		}
@@ -159,7 +158,7 @@ func (b *BuildStore) checkGoBuiltinTargetScope(reader rebuildPlatformReader, e *
 	return nil
 }
 
-func (b *BuildStore) rebuildGoBuiltinCallStatus(ctx context.Context, reader rebuildPlatformReader, e *graph.Edge, entry graph.PlatformBuiltin, extractorOf func(string) string) (graph.LinkStatus, error) {
+func (b *BuildStore) rebuildGoBuiltinCallStatus(reader rebuildPlatformReader, e *graph.Edge, entry graph.PlatformBuiltin, extractorOf func(string) string) (graph.LinkStatus, error) {
 	if entry.Category == "const" {
 		return "", invalid("Go builtin constant cannot be called")
 	}
@@ -170,36 +169,11 @@ func (b *BuildStore) rebuildGoBuiltinCallStatus(ctx context.Context, reader rebu
 	if entry.Category != "" || !ok || hint.Language != "go" || hint.Form != "unbound" || hint.Name != entry.Name {
 		return graph.LinkStatusProbablePlatform, nil
 	}
-	// A same-directory declaration in any Go package blocks exactness. This
-	// also handles external test packages conservatively without assuming a
-	// package name from the filename. Graph candidates use checked postings.
-	repo, dir := graph.StubRepoPrefix(e.To), path.Dir(e.FilePath)
-	blocked := false
-	prefix := keyStrings([]byte{familyName, nameRebuildScoped}, entry.Name, repo, "go")
-	err := pendingVisit(ctx, reader, prefix, func(r row) error {
-		_, _, id, _, err := readRebuildCandidateIndex(nameRebuildScoped, r.key, r.value)
-		if err != nil {
-			return err
-		}
-		n, err := pendingGet(reader, pendingNodeKey(id), decodeNodeLight)
-		if err != nil {
-			return err
-		}
-		if n == nil || n.ID != id || !bytes.Equal(r.key, rebuildCandidateKey(nameRebuildScoped, n)) {
-			return invalid("stale Go builtin package candidate index entry")
-		}
-		if n.FilePath != "" && path.Dir(n.FilePath) == dir {
-			switch n.Kind {
-			case graph.KindFunction, graph.KindType, graph.KindInterface, graph.KindConstant, graph.KindVariable:
-				blocked = true
-			}
-		}
-		return nil
-	})
+	clear, err := rebuildGoBuiltinPackageClear(reader, e.FilePath, graph.StubRepoPrefix(e.To), entry.Name)
 	if err != nil {
 		return "", err
 	}
-	if blocked {
+	if !clear {
 		return graph.LinkStatusProbablePlatform, nil
 	}
 	return graph.LinkStatusPlatform, nil

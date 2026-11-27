@@ -190,6 +190,9 @@ type ExtractionResult struct {
 	// blob). Keyed by the const node id. Empty for languages / files with
 	// no literal constants.
 	ConstValues []ConstValue
+	// GoBuiltinScope carries the package and builtin-name declarations for
+	// opt-in rebuild extraction only; it is not graph metadata.
+	GoBuiltinScope string
 }
 
 // ConstValue is one constant's persisted literal value: the const node id,
