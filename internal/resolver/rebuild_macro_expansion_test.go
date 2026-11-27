@@ -212,3 +212,90 @@ func TestRebuildMacroExpansionCountsSkippedUseClaim(t *testing.T) {
 		require.Contains(t, rows.edges, macroExpansionEdge(caller.ID, callee.ID, file, 2, macro.Name))
 	}
 }
+
+func TestRebuildMacroExpansionProvesAmbiguity(t *testing.T) {
+	const file, lang = "cohort.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	kept := rebuildEventNode(file, "kept", lang, "")
+	omitted := rebuildEventNode(file, "omitted", lang, "")
+	control := rebuildEventNode(file, "control", lang, "")
+	macro := func(id, name string) *graph.Node {
+		return &graph.Node{ID: file + "::" + id, Name: name, Kind: graph.KindMacro, FilePath: file, Language: lang,
+			Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
+	}
+	first, second, third, unique := macro("first", "APPLY"), macro("second", "APPLY"), macro("third", "APPLY"), macro("unique", "UNIQUE")
+	call := func(from, to string, line int) *graph.Edge {
+		return &graph.Edge{From: from, To: to, Kind: graph.EdgeCalls, FilePath: file, Line: line}
+	}
+	firstBody, secondBody := call(first.ID, kept.ID, 1), call(second.ID, omitted.ID, 2)
+	thirdBody, uniqueBody := call(third.ID, omitted.ID, 3), call(unique.ID, control.ID, 4)
+	use := call(caller.ID, "unresolved::APPLY", 5)
+	controlUse := call(caller.ID, "unresolved::UNIQUE", 6)
+	add := macroExpansionEdge(caller.ID, kept.ID, file, use.Line, first.Name)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name     string
+		omitNode *graph.Node
+		omitBody *graph.Edge
+		third    bool
+		occupy   bool
+		direct   bool
+		refuse   bool
+	}{
+		{name: "missing declaration", omitNode: second, refuse: true},
+		{name: "missing body", omitBody: secondBody, refuse: true},
+		{name: "complete ambiguity"},
+		{name: "two independent proofs", omitNode: third, omitBody: thirdBody, third: true},
+		{name: "sole possible output has incumbent", omitNode: second, occupy: true},
+		{name: "direct use cannot select a different member", omitNode: second, direct: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodes := []*graph.Node{caller, kept, omitted, control, first, second, unique}
+			site := *use
+			if tc.direct {
+				site.To = second.ID
+			}
+			edges := []*graph.Edge{firstBody, secondBody, uniqueBody, &site, controlUse}
+			if tc.third {
+				nodes = append(nodes, third)
+				edges = append(edges, thirdBody)
+			}
+			if tc.occupy {
+				edges = append(edges, call(caller.ID, kept.ID, use.Line))
+			}
+			facts := rebuildEventFacts(file, lang, nodes, edges...)
+			receipt := rebuildEventFacts(file, lang,
+				slices.DeleteFunc(slices.Clone(nodes), func(n *graph.Node) bool { return n == tc.omitNode }),
+				slices.DeleteFunc(slices.Clone(edges), func(e *graph.Edge) bool { return e == tc.omitBody })...)
+			b := openRebuildGRPCBuild(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			oracle := facts
+			if tc.refuse {
+				oracle = receipt
+			}
+			native := rebuildGRPCNative(t, oracle)
+			report := RunFrameworkSynthesizersWithSelection(native, selection)
+			require.NoError(t, report.Err)
+			want := rebuildEventSQLiteRows(native)
+			if tc.refuse {
+				require.Contains(t, want.edges, add, "native receipts expose the suppressed add")
+			}
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(t.Context(), b, frozen))
+			stats, err := RunRebuildMacroExpansion(t.Context(), b, rebuildGRPCReceipts(receipt), frozen)
+			if tc.refuse {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(add)}, refused)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, stats.Adds)
+			require.Equal(t, want, rebuildEventSavedRows(t, b))
+		})
+	}
+}

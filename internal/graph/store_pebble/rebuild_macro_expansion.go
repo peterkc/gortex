@@ -149,14 +149,32 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 	if err := p.plan(ctx); err != nil {
 		return stats, err
 	}
-	if p.stats.Adds == 0 {
+	ambiguous, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('L'))
+	if err != nil {
+		return stats, err
+	}
+	if p.stats.Adds == 0 && !ambiguous {
 		callers, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('h'))
 		if err != nil || !callers {
 			return p.stats, err
 		}
 	}
+	if ambiguous {
+		if err := p.ambiguousCohorts(ctx, func(cohort []byte) error {
+			return p.cohortMacros(ctx, cohort, func(id string) error {
+				return p.put(p.key('m', id), []byte{rebuildCapabilityWanted})
+			})
+		}); err != nil {
+			return stats, err
+		}
+	}
 	if err := p.record(ctx, receipts); err != nil {
 		return stats, err
+	}
+	if ambiguous {
+		if err := p.proveAmbiguity(ctx); err != nil {
+			return stats, err
+		}
 	}
 	if err := p.prove(ctx); err != nil || p.stats.Adds == 0 {
 		return p.stats, err
@@ -207,6 +225,9 @@ func (p *rebuildMacroExpansion) collectBodies(ctx context.Context) error {
 		}); err != nil || !active {
 			return err
 		}
+		if err := p.put(p.key('A', n.RepoPrefix, n.Name, n.ID), nil); err != nil {
+			return err
+		}
 		return p.addUnique(p.key('a', n.RepoPrefix, n.Name), n.ID)
 	})
 }
@@ -245,8 +266,9 @@ func (p *rebuildMacroExpansion) collectUses(ctx context.Context) error {
 		if err := p.claimInput(old); err != nil || e.From == "" || e.To == "" {
 			return err
 		}
-		id := e.To
-		if graph.IsUnresolvedTarget(id) {
+		var repo, name string
+		unresolved := graph.IsUnresolvedTarget(e.To)
+		if unresolved {
 			if err := p.put(p.key('h', e.From), []byte{rebuildCapabilityWanted}); err != nil {
 				return err
 			}
@@ -257,19 +279,26 @@ func (p *rebuildMacroExpansion) collectUses(ctx context.Context) error {
 			if err != nil || caller == nil {
 				return err
 			}
-			id, _, err = p.unique(p.key('a', caller.RepoPrefix, graph.UnresolvedName(e.To)))
-			if err != nil || id == "" {
-				return err
-			}
+			repo, name = caller.RepoPrefix, graph.UnresolvedName(e.To)
 		} else {
-			n, err := p.macro(id)
+			n, err := p.macro(e.To)
 			if err != nil || n == nil {
 				return err
 			}
-			only, _, err := p.unique(p.key('a', n.RepoPrefix, n.Name))
-			if err != nil || only != id {
+			repo, name = n.RepoPrefix, n.Name
+		}
+		id, seen, err := p.unique(p.key('a', repo, name))
+		if err != nil || !seen {
+			return err
+		}
+		if id == "" {
+			if err := p.put(p.key('L', repo, name), nil); err != nil {
 				return err
 			}
+			return p.put(append(p.key('t', repo, name), old...), nil)
+		}
+		if !unresolved && id != e.To {
+			return nil
 		}
 		p.stats.Sites++
 		key := appendKeyLine(p.key('s', e.From, e.FilePath), e.Line)
@@ -497,6 +526,81 @@ func (p *rebuildMacroExpansion) noteRawCallerOutputs(ctx context.Context, n *gra
 			}
 			add := p.rules.Add(e.From, callee, e.FilePath, e.Line, name)
 			key := pendingEdgeKey(add)
+			exists, err := p.present(key)
+			if err != nil || exists {
+				return err
+			}
+			return p.put(append(p.column('y'), key...), nil)
+		})
+	})
+}
+
+func (p *rebuildMacroExpansion) ambiguousCohorts(ctx context.Context, visit func([]byte) error) error {
+	prefix := p.column('L')
+	return p.visit(ctx, prefix, func(r row) error { return visit(r.key[len(prefix):]) })
+}
+
+func (p *rebuildMacroExpansion) cohortMacros(ctx context.Context, cohort []byte, visit func(string) error) error {
+	prefix := append(p.column('A'), cohort...)
+	return p.visit(ctx, prefix, func(r row) error {
+		id, rest, err := readKeyString(r.key[len(prefix):])
+		if err != nil || id == "" || len(rest) != 0 {
+			return invalid("macro expansion cohort member")
+		}
+		return visit(id)
+	})
+}
+
+func (p *rebuildMacroExpansion) proveAmbiguity(ctx context.Context) error {
+	return p.ambiguousCohorts(ctx, func(cohort []byte) error {
+		var exactID string
+		var exactCount int
+		if err := p.cohortMacros(ctx, cohort, func(id string) error {
+			if exactCount == 2 {
+				return nil
+			}
+			state, err := rebuildScratchState(p.b.pending, p.key('m', id), "macro expansion declaration proof")
+			if err != nil || state != rebuildScratchExact {
+				return err
+			}
+			body, err := rebuildGuardHasPrefix(ctx, p.b.pending, p.key('e', id))
+			if err == nil && body {
+				exactID = id
+				exactCount++
+			}
+			return err
+		}); err != nil || exactCount == 2 {
+			return err
+		}
+		// Only a member that can be the sole survivor can change a use.
+		return p.cohortMacros(ctx, cohort, func(id string) error {
+			if exactCount == 1 && id != exactID {
+				return nil
+			}
+			return p.noteAmbiguousOutputs(ctx, cohort, id)
+		})
+	})
+}
+
+func (p *rebuildMacroExpansion) noteAmbiguousOutputs(ctx context.Context, cohort []byte, id string) error {
+	n, err := p.macro(id)
+	if err != nil || n == nil {
+		return errors.Join(err, invalid("macro expansion declaration missing"))
+	}
+	uses := append(p.column('t'), cohort...)
+	return p.visit(ctx, uses, func(r row) error {
+		e, err := p.edge(r.key[len(uses):])
+		if err != nil || e == nil {
+			return errors.Join(err, invalid("macro expansion use missing"))
+		}
+		if e.To != id && !graph.IsUnresolvedTarget(e.To) {
+			return nil
+		}
+		return p.body(ctx, id, func(_ row, callee string) error {
+			if callee == e.From {
+				return nil
+			}
+			key := pendingEdgeKey(p.rules.Add(e.From, callee, e.FilePath, e.Line, n.Name))
 			exists, err := p.present(key)
 			if err != nil || exists {
 				return err
