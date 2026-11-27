@@ -247,3 +247,26 @@ func TestRebuildRailsCallerNodeCap(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildRailsIgnoresConventionConfidence(t *testing.T) {
+	const nearby, distant = "shop/lib/mail.rb", "other/lib/mail.rb"
+	caller := rebuildEventNode(nearby, "caller", "ruby", "")
+	winner := rebuildEventNode(nearby, "MailService", "ruby", "")
+	loser := rebuildEventNode(distant, winner.Name, "ruby", "")
+	winner.Kind, loser.Kind = graph.KindType, graph.KindType
+	call := &graph.Edge{From: caller.ID, To: "unresolved::*.send", Kind: graph.EdgeCalls, FilePath: nearby, Line: 1,
+		Meta: map[string]any{"recv_const": winner.Name}}
+	local := rebuildEventFacts(nearby, "ruby", []*graph.Node{caller, winner}, call)
+	other := rebuildEventFacts(distant, "ruby", []*graph.Node{loser})
+	build, native := openRebuildEventStores(t, local, other)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthRailsResolve})
+	require.NoError(t, err)
+	require.NoError(t, FreezeRebuildRailsInputs(t.Context(), build, selection))
+	stats, err := RunRebuildRails(t.Context(), build, rebuildGRPCReceipts(local), selection)
+	require.NoError(t, err)
+	require.Equal(t, store_pebble.RebuildRailsStats{Stubs: 1, Moves: 1}, stats)
+	require.Equal(t, 1, ResolveRailsRefs(native))
+	want := rebuildEventSQLiteRows(native)
+	require.Equal(t, winner.ID, want.edges[0].To)
+	require.Equal(t, want, rebuildEventSavedRows(t, build))
+}

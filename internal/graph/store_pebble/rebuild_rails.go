@@ -42,7 +42,13 @@ func rebuildRailsScratch(b *BuildStore) rebuildCallMoves {
 
 // FreezeRailsInputs retains pre-loop Call identities, not their payloads.
 func (b *BuildStore) FreezeRailsInputs(ctx context.Context, match func(graph.FrameworkCensusEdge) bool) error {
-	return b.freezeConventionInputs(ctx, rebuildRailsScratch(b), ErrRebuildRails, match)
+	callMatch := match
+	if match != nil {
+		callMatch = func(e graph.FrameworkCensusEdge) bool {
+			return e.Kind == graph.EdgeCalls && match(e)
+		}
+	}
+	return b.freezeConventionInputs(ctx, rebuildRailsScratch(b), ErrRebuildRails, callMatch)
 }
 
 // RebuildRails rereads the surviving Calls, MemberOf and ModelsTable at its
@@ -288,7 +294,6 @@ func (p *rebuildRails) recordRailsFacts(ctx context.Context, facts ParseFacts) e
 
 type rebuildRailsDecision struct {
 	target, class string
-	local         bool
 }
 
 func (p *rebuildRails) elect(ctx context.Context, q rebuildExpressQuery, fromDir string, proved bool) (rebuildRailsDecision, bool, error) {
@@ -296,7 +301,7 @@ func (p *rebuildRails) elect(ctx context.Context, q rebuildExpressQuery, fromDir
 	if proved {
 		nameCol, methodCol, modelCol, possibleCol = 'A', 'B', 'Z', 'X'
 	}
-	id, _, local, err := p.convention(ctx, q, fromDir, nameCol)
+	id, _, _, err := p.convention(ctx, q, fromDir, nameCol)
 	if err != nil || id == "" {
 		return rebuildRailsDecision{}, false, err
 	}
@@ -320,7 +325,7 @@ func (p *rebuildRails) elect(ctx context.Context, q rebuildExpressQuery, fromDir
 	if certain == "" {
 		certain = id
 	}
-	return rebuildRailsDecision{target: certain, class: id, local: local}, false, nil
+	return rebuildRailsDecision{target: certain, class: id}, false, nil
 }
 
 // Native takes the first matching member in the combined-kind ID order.

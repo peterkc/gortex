@@ -91,23 +91,45 @@ func TestRebuildRailsReceiptCallerEntersSource(t *testing.T) {
 		Meta: map[string]any{"recv_const": class.Name}}
 	facts := ParseFacts{EffectiveLanguage: "ruby", File: graph.FileMetaRow{FilePath: file},
 		Nodes: []*graph.Node{caller, class}, Edges: []*graph.Edge{call}}
-	b, _ := seedSyntheticCustody(t, facts)
-	before := rebuildFrameworkCustodyRows(t, b)
-	facts.Nodes = []*graph.Node{class}
-	rawCaller := *caller
-	rawCaller.FilePath = "routes.rb"
-	receipts := func(yield func(ParseFacts, error) bool) {
-		if yield(facts, nil) {
-			yield(producerProofFacts(&rawCaller), nil)
-		}
+	for _, tc := range []struct {
+		name      string
+		oversized bool
+	}{
+		{"reports provenance disagreement", false},
+		{"checks receipt-made caller size", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			liveFacts := facts
+			if tc.oversized {
+				liveCaller := *caller
+				liveCaller.Meta = map[string]any{"padding": strings.Repeat("x", 16<<20)}
+				liveFacts.Nodes = []*graph.Node{&liveCaller, class}
+			}
+			b, _ := seedSyntheticCustody(t, liveFacts)
+			before := rebuildFrameworkCustodyRows(t, b)
+			proof := facts
+			proof.Nodes = []*graph.Node{class}
+			rawCaller := *caller
+			rawCaller.FilePath = "routes.rb"
+			receipts := func(yield func(ParseFacts, error) bool) {
+				if yield(proof, nil) {
+					yield(producerProofFacts(&rawCaller), nil)
+				}
+			}
+			require.NoError(t, b.FreezeRailsInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
+			stats, err := b.RebuildRails(t.Context(), receipts, rebuildRailsReviewRules())
+			if tc.oversized {
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "rails caller node")
+			} else {
+				var refused *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refused)
+			}
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
 	}
-	require.NoError(t, b.FreezeRailsInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
-	stats, err := b.RebuildRails(t.Context(), receipts, rebuildRailsReviewRules())
-	var refused *RebuildUnknownProvenanceError
-	require.ErrorAs(t, err, &refused)
-	require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refused)
-	require.Zero(t, stats)
-	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
 
 func TestRebuildRailsFirstMemberIgnoresLaterUncertainOwner(t *testing.T) {
@@ -273,4 +295,81 @@ func TestRebuildRailsFreezeGuardsAndRoleCap(t *testing.T) {
 			require.False(t, busy)
 		})
 	}
+}
+
+func TestRebuildRailsElectionProofGuards(t *testing.T) {
+	const file, lang = "routes.rb", "ruby"
+	for _, scenario := range []string{"exact", "class conflict", "member conflict", "missing source", "proved-only uncertainty"} {
+		t.Run(scenario, func(t *testing.T) {
+			caller := &graph.Node{ID: "caller", Kind: graph.KindFunction, FilePath: file, Language: lang}
+			class := &graph.Node{ID: "class", Name: "MailService", Kind: graph.KindType, FilePath: file, Language: lang}
+			method := &graph.Node{ID: "method", Name: "send", Kind: graph.KindMethod, FilePath: file, Language: lang}
+			member := &graph.Edge{From: method.ID, To: class.ID, Kind: graph.EdgeMemberOf, FilePath: file, Line: 2}
+			call := &graph.Edge{From: caller.ID, To: "unresolved::send", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
+				Meta: map[string]any{"recv_const": class.Name}}
+			facts := producerProofFacts(caller)
+			facts.Nodes = append(facts.Nodes, class, method)
+			facts.Edges = []*graph.Edge{call, member}
+			proof := facts
+			var extra []ParseFacts
+			switch scenario {
+			case "class conflict":
+				conflict := *class
+				conflict.FilePath = "other.rb"
+				extra = append(extra, producerProofFacts(&conflict))
+			case "member conflict":
+				conflict := *method
+				conflict.FilePath = "other.rb"
+				extra = append(extra, producerProofFacts(&conflict))
+			case "missing source":
+				proof.Nodes = []*graph.Node{class, method}
+			case "proved-only uncertainty":
+				// Two live classes in the same directory leave the live
+				// election empty. Replay finds one class but a possible member.
+				other := *class
+				other.ID = "other-class"
+				field := *method
+				field.Kind = graph.KindField
+				facts.Nodes = []*graph.Node{caller, class, &other, &field}
+			}
+			b, _ := seedSyntheticCustody(t, facts)
+			before := rebuildFrameworkCustodyRows(t, b)
+			require.NoError(t, b.FreezeRailsInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
+			stats, err := b.RebuildRails(t.Context(), sqlCallsiteTestReceipts(append(extra, proof)...), rebuildRailsReviewRules())
+			if scenario == "exact" {
+				require.NoError(t, err)
+				require.Equal(t, RebuildRailsStats{Stubs: 1, Moves: 1}, stats)
+				want := *call
+				want.To = method.ID
+				requireRebuildLinkCustody(t, b, &want, rebuildEdgeCustody{raw: pendingEdgeKey(call)})
+				return
+			}
+			require.ErrorIs(t, err, ErrRebuildRails)
+			var refused *RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refused)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildRailsFreezeIgnoresReferences(t *testing.T) {
+	const file, lang = "routes.rb", "ruby"
+	caller := &graph.Node{ID: "caller", Kind: graph.KindFunction, FilePath: file, Language: lang}
+	ref := &graph.Edge{From: caller.ID, To: "unresolved::send", Kind: graph.EdgeReferences, FilePath: file, Line: 1,
+		Meta: map[string]any{"recv_const": "MailService"}}
+	facts := producerProofFacts(caller)
+	facts.Edges = []*graph.Edge{ref}
+	b, receipts := seedSyntheticCustody(t, facts)
+	ctx := t.Context()
+	before := rebuildFrameworkCustodyRows(t, b)
+	require.NoError(t, b.FreezeRailsInputs(ctx, func(e graph.FrameworkCensusEdge) bool {
+		t.Errorf("Rails freeze passed a %v to its matcher", e.Kind)
+		return true
+	}))
+	stats, err := b.RebuildRails(ctx, receipts, rebuildRailsReviewRules())
+	require.NoError(t, err)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
