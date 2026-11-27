@@ -1,11 +1,14 @@
 package resolver
 
 import (
+	"iter"
 	"maps"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
 func TestRebuildGDScriptReceiverGateSQLiteOracle(t *testing.T) {
@@ -107,4 +110,59 @@ func TestRebuildGDScriptReceiverGateSQLiteOracle(t *testing.T) {
 	require.Zero(t, RunFrameworkSynthesizersWithSelection(sqlite, requested).GDScriptReceiverGated)
 	require.Equal(t, after, rebuildEventSavedRows(t, b))
 	require.Equal(t, after, rebuildEventSQLiteRows(sqlite))
+}
+
+func TestRebuildGDScriptReceiverGateWithoutClasses(t *testing.T) {
+	const file = "project.godot"
+	manifest := &graph.Node{ID: file + "::Singleton", Name: "Singleton", Kind: graph.KindType, FilePath: file, Language: "godot_project",
+		Meta: map[string]any{"gd_kind": "autoload", "gd_script": "owner.gd"}}
+	script := &graph.Node{ID: "owner.gd", Kind: graph.KindFile, FilePath: "owner.gd", Language: "gdscript"}
+	for _, hasClass := range []bool{false, true} {
+		b := openRebuildGRPCBuild(t, rebuildEventFacts(file, "godot_project", []*graph.Node{manifest}),
+			rebuildEventFacts(script.FilePath, script.Language, []*graph.Node{script}))
+		class := &graph.Node{ID: "owner.gd::Owner", Name: "Owner", Kind: graph.KindType, FilePath: script.FilePath, Language: script.Language,
+			Meta: map[string]any{"gd_kind": "class_name"}}
+		if hasClass {
+			b.AddNode(class)
+		}
+		large := *manifest
+		large.Meta = maps.Clone(manifest.Meta)
+		large.Meta["gd_script"] = strings.Repeat("x", rebuildGDScriptGateEvidenceBytes)
+		b.AddNode(&large)
+		count, err := RunRebuildGDScriptReceiverGate(t.Context(), b, true)
+		require.Zero(t, count)
+		if hasClass {
+			require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+		} else {
+			require.NoError(t, err)
+		}
+	}
+}
+
+func TestRebuildGDScriptReceiverGateSkipsUnusedEvidenceBudget(t *testing.T) {
+	class := &graph.Node{ID: "owner.gd::Owner", Name: "Owner", Kind: graph.KindType, Language: "gdscript",
+		Meta: map[string]any{"gd_kind": "class_name"}}
+	manifest := &graph.Node{ID: "project.godot::Singleton", Name: "Singleton", Kind: graph.KindType, Language: "godot_project",
+		Meta: map[string]any{"gd_kind": "autoload", "gd_script": strings.Repeat("x", rebuildGDScriptGateEvidenceBytes/2)}}
+	alias := &graph.Node{ID: "owner.gd::Alias", Name: "Alias", Kind: graph.KindVariable, Language: "gdscript",
+		Meta: map[string]any{"gd_preload": "res://" + strings.Repeat("x", rebuildGDScriptGateEvidenceBytes/2) + ".gd"}}
+	for _, hasClass := range []bool{false, true} {
+		classes := iter.Seq2[*graph.Node, error](func(yield func(*graph.Node, error) bool) {
+			if hasClass {
+				yield(class, nil)
+			}
+		})
+		scripts := iter.Seq2[*graph.Node, error](func(yield func(*graph.Node, error) bool) {
+			if yield(manifest, nil) {
+				yield(alias, nil)
+			}
+		})
+		demote, err := prepareRebuildGDScriptReceiverGate(classes, scripts)
+		require.Nil(t, demote)
+		if hasClass {
+			require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+		} else {
+			require.NoError(t, err)
+		}
+	}
 }

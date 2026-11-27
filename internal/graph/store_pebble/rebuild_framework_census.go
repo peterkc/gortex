@@ -14,16 +14,51 @@ const rebuildFrameworkGateRowBytes = 16 << 20
 
 // VisitFrameworkGateNodes streams the pre-framework light node projection.
 func (v RebuildView) VisitFrameworkGateNodes(ctx context.Context, yield func(*graph.Node) error) error {
-	return v.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
-		n, err := decodeNodeLight(r.value)
-		if err == nil && !bytes.Equal(r.key, pendingNodeKey(n.ID)) {
-			return invalid("framework census node identity")
-		}
+	_, err := v.HasFrameworkGateNode(ctx, func(n *graph.Node) (bool, error) {
+		return false, yield(n)
+	})
+	return err
+}
+
+// HasFrameworkGateNode stops at the first matching light node.
+func (v RebuildView) HasFrameworkGateNode(ctx context.Context, matches func(*graph.Node) (bool, error)) (bool, error) {
+	found := false
+	err := v.read(ctx, func(snap *pebble.Snapshot) (err error) {
+		prefix := []byte{familyNode}
+		it, err := snap.NewIterWithContext(ctx, &pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 		if err != nil {
 			return err
 		}
-		return yield(n)
+		defer func() { err = errors.Join(err, it.Close()) }()
+		for ok := it.First(); ok; ok = it.Next() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			raw, err := it.ValueAndErr()
+			if err != nil {
+				return err
+			}
+			if err := v.mutationError(); err != nil {
+				return err
+			}
+			n, err := decodeNodeLight(raw)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(it.Key(), pendingNodeKey(n.ID)) {
+				return invalid("framework census node identity")
+			}
+			found, err = matches(n)
+			if err != nil || found {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		return it.Error()
 	})
+	return found, err
 }
 
 // VisitFrameworkGateEdges streams only the kinds used by the wired call and

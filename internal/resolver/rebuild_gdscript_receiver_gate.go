@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"iter"
 	"slices"
-	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
@@ -18,11 +17,10 @@ func FreezeRebuildGDScriptReceiverGate(ctx context.Context, view store_pebble.Re
 	if requested.none() {
 		return false, nil
 	}
-	var active bool
-	if err := view.VisitFrameworkGateNodes(ctx, func(n *graph.Node) error {
-		active = active || strings.ToLower(strings.TrimSpace(n.Language)) == "gdscript"
-		return nil
-	}); err != nil {
+	active, err := view.HasFrameworkGateNode(ctx, func(n *graph.Node) (bool, error) {
+		return normalizeFrameworkLanguage(n.Language) == "gdscript", nil
+	})
+	if err != nil {
 		return false, fmt.Errorf("%w: %w", store_pebble.ErrRebuildGDScriptReceiverGate, err)
 	}
 	return active, nil
@@ -39,55 +37,64 @@ func RunRebuildGDScriptReceiverGate(ctx context.Context, b *store_pebble.BuildSt
 
 const rebuildGDScriptGateEvidenceBytes = 16 << 20
 
-type rebuildGDScriptGateEvidence map[graph.NodeKind][]*graph.Node
-
-func (p rebuildGDScriptGateEvidence) NodesByKind(kind graph.NodeKind) iter.Seq[*graph.Node] {
-	return slices.Values(p[kind])
-}
-
-// Keep only the native index fields, in ascending ID order (the cold SQLite
-// node-kind index tiebreaker). Charge entry overhead as well as string bytes.
-func prepareRebuildGDScriptReceiverGate(nodes iter.Seq2[*graph.Node, error]) (store_pebble.RebuildGDScriptReceiverDemoter, error) {
-	evidence := make(rebuildGDScriptGateEvidence, 3)
+// Fold only the native declaration fields, in ascending ID order. The
+// class index decides whether script declarations can affect the gate.
+func prepareRebuildGDScriptReceiverGate(classRows, scripts iter.Seq2[*graph.Node, error]) (store_pebble.RebuildGDScriptReceiverDemoter, error) {
+	classes := make(map[string]*gdClass)
 	budget := rebuildGDScriptGateEvidenceBytes
-	for n, err := range nodes {
+	charge := func(size int) error {
+		budget -= 1024 + size // Include index entry overhead.
+		if budget < 0 {
+			return fmt.Errorf("%w: GDScript receiver evidence", store_pebble.ErrRebuildLinkInputSize)
+		}
+		return nil
+	}
+	for n, err := range classRows {
 		if err != nil {
 			return nil, err
 		}
-		p := graph.Node{ID: n.ID, Name: n.Name, FilePath: n.FilePath, Kind: n.Kind, Language: n.Language}
-		switch n.Kind {
-		case graph.KindType:
-			kind, _ := n.Meta["gd_kind"].(string)
-			if n.Language == "gdscript" && (kind == "class_name" || kind == "inner_class") {
-				parent, _ := n.Meta["gd_extends"].(string)
-				opaque, _ := n.Meta["gd_extends_opaque"].(bool)
-				p.Meta = map[string]any{"gd_kind": kind, "gd_extends": parent, "gd_extends_opaque": opaque}
-			} else if _, script := gdAutoloadDecl(n); script != "" {
-				p.Meta = map[string]any{"gd_kind": kind, "gd_script": script}
-			} else {
-				continue
+		if class, ok := gdClassDecl(n); ok {
+			if err := charge(len(n.Name) + len(class.fileID) + len(class.parent)); err != nil {
+				return nil, err
 			}
-		case graph.KindVariable:
-			if _, script := gdPreloadAliasDecl(n); script == "" {
-				continue
-			}
-			p.Meta = map[string]any{"gd_preload": n.Meta["gd_preload"]}
+			gdIndexClass(classes, n.Name, class)
 		}
-		budget -= 1024 + len(p.ID) + len(p.Name) + len(p.FilePath)
-		for _, v := range p.Meta {
-			s, _ := v.(string)
-			budget -= len(s)
-		}
-		if budget < 0 {
-			return nil, fmt.Errorf("%w: GDScript receiver evidence", store_pebble.ErrRebuildLinkInputSize)
-		}
-		evidence[n.Kind] = append(evidence[n.Kind], &p)
 	}
-	classes := gdClassIndex(evidence)
 	if len(classes) == 0 {
 		return nil, nil
 	}
-	autoloads, aliases := gdAutoloadScripts(evidence), gdPreloadAliases(evidence)
+	decls := make(map[string]string)
+	preloads := make(map[string]map[string]string)
+	var files []*graph.Node
+	for n, err := range scripts {
+		if err != nil {
+			return nil, err
+		}
+		if isGDScriptFile(n) {
+			if err := charge(len(n.ID) + len(n.FilePath)); err != nil {
+				return nil, err
+			}
+			files = append(files, &graph.Node{ID: n.ID, Kind: n.Kind, Language: n.Language, FilePath: n.FilePath})
+		} else if name, path := gdAutoloadDecl(n); path != "" {
+			if err := charge(len(name) + len(path)); err != nil {
+				return nil, err
+			}
+			gdRecordAutoload(decls, name, path)
+		} else if fileID, path := gdPreloadAliasDecl(n); path != "" {
+			if err := charge(len(fileID) + len(n.Name) + len(path)); err != nil {
+				return nil, err
+			}
+			gdRecordPreloadAlias(preloads, fileID, n.Name, path)
+		}
+	}
+	var autoloads map[string]string
+	if len(decls) != 0 {
+		autoloads = gdResolveAutoloadScripts(decls, slices.Values(files))
+	}
+	var aliases map[string]map[string]string
+	if len(preloads) != 0 {
+		aliases = gdResolvePreloadAliases(preloads, slices.Values(files))
+	}
 	return func(e *graph.Edge, lookup func(string) (*graph.Node, error)) (bool, error) {
 		g := rebuildGDScriptGateNodes{lookup: lookup}
 		mismatch := gdReceiverMismatch(&g, e, classes, autoloads, aliases)
