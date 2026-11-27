@@ -588,6 +588,14 @@ func buildRebuildStages(
 				zap.Uint64("stubs", objectRegistry.Stubs), zap.Uint64("resolved", objectRegistry.Resolved),
 				zap.Uint64("moves", objectRegistry.Moves))
 		}
+		rtkQuery, err := resolver.RunRebuildRTKQuery(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if rtkQuery.Moves != 0 {
+			logger.Info("rebuild RTK Query applied to private build",
+				zap.Uint64("resolved", rtkQuery.Resolved), zap.Uint64("moves", rtkQuery.Moves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

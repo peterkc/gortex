@@ -36,6 +36,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"store factory", store_pebble.ErrRebuildStoreFactory, 60},
 		{"redux thunk", store_pebble.ErrRebuildReduxThunk, 61},
 		{"object registry", store_pebble.ErrRebuildObjectRegistry, 63},
+		{"RTK Query", store_pebble.ErrRebuildRTKQuery, 64},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {

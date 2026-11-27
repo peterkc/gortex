@@ -192,6 +192,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildReduxThunk,
 	nil, // 62: reserved for NgRx Effect
 	store_pebble.ErrRebuildObjectRegistry,
+	store_pebble.ErrRebuildRTKQuery,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
