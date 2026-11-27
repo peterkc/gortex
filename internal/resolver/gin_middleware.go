@@ -40,7 +40,7 @@ func ResolveGinMiddlewareCalls(g graph.Store) int {
 		if n.Meta == nil {
 			continue
 		}
-		if d, _ := n.Meta["gin_dispatcher"].(bool); d {
+		if ginMiddlewareDispatcher(n) {
 			dispatchers = append(dispatchers, n)
 		}
 		if _, ok := n.Meta["gin_handlers"]; ok {
@@ -75,12 +75,7 @@ func ResolveGinMiddlewareCalls(g graph.Store) int {
 			cands := nameIndex[name]
 			sort.Slice(cands, func(i, j int) bool { return cands[i].ID < cands[j].ID })
 			for _, h := range cands {
-				if h == nil || h.ID == d.ID {
-					continue
-				}
-				// Repo-scope: a dispatcher only reaches handlers in its own
-				// dispatch boundary (vendored Gin + app handlers in one repo).
-				if !sameDispatchBoundary(d, h) {
+				if !ginMiddlewareTarget(d, h) {
 					continue
 				}
 				key := d.ID + "\x00" + h.ID
@@ -100,6 +95,19 @@ func ResolveGinMiddlewareCalls(g graph.Store) int {
 		g.AddEdge(e)
 	}
 	return len(batch)
+}
+
+func ginMiddlewareDispatcher(n *graph.Node) bool {
+	if n == nil {
+		return false
+	}
+	dispatcher, _ := n.Meta["gin_dispatcher"].(bool)
+	return dispatcher
+}
+
+// A dispatcher only reaches handlers in its own dispatch boundary.
+func ginMiddlewareTarget(dispatcher, handler *graph.Node) bool {
+	return handler != nil && handler.ID != dispatcher.ID && sameDispatchBoundary(dispatcher, handler)
 }
 
 // ginHandlerNames coerces the gin_handlers Meta value (stamped as []string,
