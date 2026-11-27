@@ -66,7 +66,7 @@ func TestRebuildTemporalConstCollapseOrder(t *testing.T) {
 			require.Zero(t, stats.DiscoveryPasses)
 			require.Equal(t, tc.passes, stats.CollapsePasses)
 			require.Greater(t, stats.ScratchBytes, uint64(tc.threshold))
-			require.Positive(t, stats.SpillBytes)
+			require.Zero(t, stats.SpillBytes)
 			t.Logf("saved order-locked results (%d): %v; scratch bytes=%d, L0 table bytes flushed=%d",
 				len(got), got, stats.ScratchBytes, stats.SpillBytes)
 		})
@@ -92,7 +92,7 @@ func TestRebuildTemporalConstDiscoveryCap(t *testing.T) {
 			require.Equal(t, want, got)
 			require.Equal(t, 9, stats.Names)
 			require.Equal(t, 8, stats.DiscoveryPasses)
-			require.Positive(t, stats.SpillBytes)
+			require.Zero(t, stats.SpillBytes)
 		})
 	}
 }
@@ -139,7 +139,7 @@ func TestRebuildTemporalConstCandidateOrderAndLiterals(t *testing.T) {
 			got, stats := readRebuildTemporalConst(t, view, 1, seeds, queries)
 			require.Equal(t, orderedTemporalConstRows(locked), got)
 			require.Equal(t, 13, stats.Names)
-			require.Positive(t, stats.SpillBytes)
+			require.Zero(t, stats.SpillBytes)
 			t.Logf("raw reverse candidates: %v; saved order-locked results (%d): %v", orderedTemporalConstRows(rawReverse), len(got), got)
 		})
 	}

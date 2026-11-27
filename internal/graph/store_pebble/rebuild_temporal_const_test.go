@@ -44,7 +44,7 @@ func TestRebuildTemporalConstScratchRows(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.Names)
-	require.Positive(t, stats.SpillBytes)
+	require.Zero(t, stats.SpillBytes)
 	value, err := result.Value(ctx, "Name")
 	require.ErrorIs(t, err, ErrRebuildTemporalConst)
 	require.Empty(t, value)

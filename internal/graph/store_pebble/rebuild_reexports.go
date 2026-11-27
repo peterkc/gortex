@@ -28,9 +28,9 @@ const (
 )
 
 // RebuildReexportStats describes successful closure construction. ScratchBytes
-// counts logical key/value bytes submitted, not memory use. SpillBytes is the
-// actual L0 flush output at the first requested spill checkpoint. It is not
-// peak RSS or a count of all later flushes/compactions.
+// counts logical key/value bytes submitted, not memory use. SpillBytes counts
+// physical bytes of closed threshold SST runs consumed by this pass. It is
+// zero because this pass uses only the pending overlay.
 type RebuildReexportStats struct {
 	ScratchBytes uint64
 	SpillBytes   uint64
@@ -79,9 +79,8 @@ func (c *RebuildImportClosure) Visit(ctx context.Context, yield func(callerFile,
 //
 // A nil repos set uses all callers. A non-nil set restricts caller seeds and
 // import sources (not re-exports). skipTarget and directory are the native
-// resolver's placeholder and path rules. spillAt triggers one forced flush on
-// logical bytes written beyond that threshold. Pebble's usual memtable/cache
-// limits continue to apply; there is no app-side batch of graph rows.
+// resolver's placeholder and path rules. spillAt must be positive. Pebble's
+// usual memtable/cache limits apply; there is no app-side batch of graph rows.
 func (v RebuildView) WithImportClosure(
 	ctx context.Context, repos map[string]struct{}, spillAt int,
 	skipTarget func(string) bool, directory func(string) string,
@@ -113,15 +112,7 @@ func (v RebuildView) WithImportClosure(
 		err = errors.Join(err, db.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
 	}()
 
-	// Exclude prior saved facts from the measured spill. The only writer until
-	// consume adds rows to this column, including the frontier range tombstones.
-	if err := db.Flush(); err != nil {
-		return stats, err
-	}
-	pass := reexportPass{
-		db: db, directory: directory, spillAt: uint64(spillAt),
-		flushBase: db.Metrics().Levels[0].TableBytesFlushed,
-	}
+	pass := reexportPass{db: db, directory: directory}
 	if err := pass.load(ctx, v, repos, skipTarget); err != nil {
 		return stats, fmt.Errorf("load placements and import relations: %w", err)
 	}
@@ -152,8 +143,6 @@ func (v RebuildView) beginImportClosure(prefix []byte) error {
 type reexportPass struct {
 	db        *pebble.DB
 	directory func(string) string
-	spillAt   uint64
-	flushBase uint64
 	stats     RebuildReexportStats
 }
 
@@ -276,7 +265,8 @@ func (p *reexportPass) enqueue(column byte, caller, target string) (err error) {
 	if err := batch.Commit(pebble.NoSync); err != nil {
 		return err
 	}
-	return p.countWrite(len(seen) + len(key))
+	p.stats.ScratchBytes += uint64(len(seen) + len(key))
+	return nil
 }
 
 func (p *reexportPass) addDirectory(caller, dir string) error {
@@ -296,21 +286,7 @@ func (p *reexportPass) set(key, value []byte) error {
 	if err := p.db.Set(key, value, pebble.NoSync); err != nil {
 		return err
 	}
-	return p.countWrite(len(key) + len(value))
-}
-
-func (p *reexportPass) countWrite(n int) error {
-	p.stats.ScratchBytes += uint64(n)
-	if p.stats.ScratchBytes <= p.spillAt || p.stats.SpillBytes != 0 {
-		return nil
-	}
-	if err := p.db.Flush(); err != nil {
-		return err
-	}
-	p.stats.SpillBytes = p.db.Metrics().Levels[0].TableBytesFlushed - p.flushBase
-	if p.stats.SpillBytes == 0 {
-		return errors.New("import closure spill checkpoint produced no SST bytes")
-	}
+	p.stats.ScratchBytes += uint64(len(key) + len(value))
 	return nil
 }
 

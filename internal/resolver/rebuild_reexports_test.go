@@ -95,8 +95,8 @@ func TestRebuildReexportsNativeEquality(t *testing.T) {
 					if stats.Rounds != 0 || stats.Directories != 0 {
 						t.Fatalf("empty scope processed a caller: %+v", stats)
 					}
-				} else if stats.Rounds != 3 || stats.Directories == 0 || stats.SpillBytes == 0 {
-					t.Fatalf("no persisted closure, three-hop frontier, or 1-byte spill: %+v", stats)
+				} else if stats.Rounds != 3 || stats.Directories == 0 || stats.SpillBytes != 0 {
+					t.Fatalf("expected a persisted closure, a three-hop frontier, and zero SST spill: %+v", stats)
 				}
 			})
 		}
@@ -121,10 +121,10 @@ func TestRebuildReexportsSpill1MiB(t *testing.T) {
 	}
 	const spillAt = 1 << 20
 	stats := assertRebuildReexportRows(t, nodes, edges, map[string]struct{}{"app": {}}, spillAt, nil)
-	if stats.ScratchBytes <= spillAt || stats.SpillBytes == 0 || stats.Rounds != 2 || stats.Directories != leaves+2 {
-		t.Fatalf("missing 1-MiB spill or closure work: %+v", stats)
+	if stats.ScratchBytes <= spillAt || stats.SpillBytes != 0 || stats.Rounds != 2 || stats.Directories != leaves+2 {
+		t.Fatalf("expected more than 1 MiB of scratch writes, closure rows, and zero SST spill: %+v", stats)
 	}
-	t.Logf("saved closure and actual flush witness: %+v", stats)
+	t.Logf("saved closure and logical scratch bytes: %+v", stats)
 }
 
 func assertRebuildReexportRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge, repos map[string]struct{}, spillAt int, check func(*store_pebble.RebuildImportClosure)) store_pebble.RebuildReexportStats {

@@ -64,7 +64,7 @@ func TestRebuildReexportsFailureCleanup(t *testing.T) {
 		t.Fatalf("expired result = %t, %v", found, err)
 	}
 	stats, err = withClosure(func(*RebuildImportClosure) error { return nil })
-	if err != nil || stats.Directories != 1 || stats.SpillBytes == 0 {
+	if err != nil || stats.Directories != 1 || stats.SpillBytes != 0 {
 		t.Fatalf("fresh pass after refusal = %+v, %v", stats, err)
 	}
 	assertClean()

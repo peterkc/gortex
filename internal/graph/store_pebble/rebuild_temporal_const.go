@@ -32,8 +32,10 @@ type TemporalConstCandidate struct {
 }
 
 // TemporalConstStats counts names visited and rounds that discovered a name or
-// installed a value. Each round count can reach eight. SpillBytes is the actual
-// L0 table output through the spill checkpoint, not a memory measurement.
+// installed a value. Each round count can reach eight. ScratchBytes counts
+// logical key/value bytes submitted. SpillBytes counts physical bytes of
+// closed threshold SST runs consumed by this pass. It is zero because this
+// pass uses only the pending overlay.
 type TemporalConstStats struct {
 	Names           int
 	DiscoveryPasses int
@@ -103,12 +105,7 @@ func (v RebuildView) WithTemporalConstDeref(
 		err = errors.Join(err, db.DeleteRange(temporalConstPrefix, prefixEnd(temporalConstPrefix), pebble.NoSync))
 	}()
 
-	// Exclude earlier saved facts from the physical spill measurement. Before
-	// consume, only this component writes to the worker DB.
-	if err := db.Flush(); err != nil {
-		return stats, err
-	}
-	p := temporalConstPass{view: v, project: project, spillAt: uint64(spillAt), flushBase: db.Metrics().Levels[0].TableBytesFlushed}
+	p := temporalConstPass{view: v, project: project}
 	if err := seed(func(name string) error {
 		if err := ctx.Err(); err != nil || name == "" {
 			return err
@@ -148,11 +145,9 @@ func (v RebuildView) startTemporalConstScratch() error {
 // At most one alias/name iterator and one name-candidate iterator are active.
 // Only the current tuple, candidate and a few literal/alias strings are held.
 type temporalConstPass struct {
-	view      RebuildView
-	project   func(*graph.Node) TemporalConstCandidate
-	spillAt   uint64
-	flushBase uint64
-	stats     TemporalConstStats
+	view    RebuildView
+	project func(*graph.Node) TemporalConstCandidate
+	stats   TemporalConstStats
 }
 
 func (p *temporalConstPass) resolve(ctx context.Context) error {
@@ -285,16 +280,6 @@ func (p *temporalConstPass) set(key []byte, value string) error {
 		return err
 	}
 	p.stats.ScratchBytes += uint64(len(key) + len(value))
-	if p.stats.ScratchBytes <= p.spillAt || p.stats.SpillBytes != 0 {
-		return nil
-	}
-	if err := db.Flush(); err != nil {
-		return err
-	}
-	p.stats.SpillBytes = db.Metrics().Levels[0].TableBytesFlushed - p.flushBase
-	if p.stats.SpillBytes == 0 {
-		return errors.New("spill checkpoint for Temporal constants produced no SST bytes")
-	}
 	return nil
 }
 
