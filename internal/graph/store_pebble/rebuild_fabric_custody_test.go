@@ -21,7 +21,7 @@ func TestRebuildFabricStoreBindsNewCustodyAndPreservesIncumbent(t *testing.T) {
 	rawKey := pendingEdgeKey(facts[0].Edges[0])
 	require.Equal(t, rawKey, before[string(rebuildLinkRecorderKey(incumbentKey))])
 
-	stats, err := b.RebuildFabric(t.Context(), rebuildFabricStoreReceipts(facts), rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
+	stats, err := b.RebuildFabric(t.Context(), sharedClaimsTestReceipts(facts...), rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
 	require.NoError(t, err)
 	require.EqualValues(t, 3, stats.Edges)
 	after := rebuildFrameworkCustodyRows(t, b)
@@ -125,7 +125,7 @@ func TestRebuildFabricStoreRefusesUnprovedEndpointsBeforeWriting(t *testing.T) {
 			}
 
 			before := rebuildFrameworkCustodyRows(t, b)
-			stats, err := b.RebuildFabric(t.Context(), rebuildFabricStoreReceipts(presented), rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
+			stats, err := b.RebuildFabric(t.Context(), sharedClaimsTestReceipts(presented...), rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
 			require.ErrorIs(t, err, ErrRebuildFabric)
 			require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
 			var refused *RebuildUnknownProvenanceError
@@ -142,7 +142,7 @@ func TestRebuildFabricStoreRefusesUnprovedEndpointsBeforeWriting(t *testing.T) {
 
 func TestRebuildFabricStoreRefusesInvalidInputs(t *testing.T) {
 	b, facts := seedRebuildFabricStore(t)
-	receipts := rebuildFabricStoreReceipts(facts)
+	receipts := sharedClaimsTestReceipts(facts...)
 	before := rebuildFrameworkCustodyRows(t, b)
 	for _, tc := range []struct {
 		name      string
@@ -169,7 +169,7 @@ func TestRebuildFabricStorePreservesOccupiedScratch(t *testing.T) {
 	key := rebuildFabricKey('s', facts[0].Nodes[0].ID)
 	require.NoError(t, b.pending.Set(key, []byte("existing Fabric scratch"), pebble.NoSync))
 	before := rebuildFrameworkCustodyRows(t, b)
-	stats, err := b.RebuildFabric(t.Context(), rebuildFabricStoreReceipts(facts), rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
+	stats, err := b.RebuildFabric(t.Context(), sharedClaimsTestReceipts(facts...), rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
 	require.ErrorIs(t, err, ErrRebuildFabric)
 	require.ErrorIs(t, err, errInvalidRecord)
 	require.Zero(t, stats)
@@ -223,16 +223,6 @@ func seedRebuildFabricStore(t *testing.T) (*BuildStore, []ParseFacts) {
 	// Install the incumbent with actual receipt lineage, not an injected proof.
 	require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: incumbent, OldTo: raw.To}}))
 	return b, facts
-}
-
-func rebuildFabricStoreReceipts(facts []ParseFacts) iter.Seq2[ParseFacts, error] {
-	return func(yield func(ParseFacts, error) bool) {
-		for _, f := range facts {
-			if !yield(f, nil) {
-				return
-			}
-		}
-	}
 }
 
 func rebuildFabricStoreCandidate(n *graph.Node) (string, string, bool) {
