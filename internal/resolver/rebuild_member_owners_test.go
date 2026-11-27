@@ -34,11 +34,15 @@ func TestRebuildMemberOwnerSQLiteOrder(t *testing.T) {
 				provider := rebuildEventNode(php, "Provider", "php", "")
 				provider.Kind = graph.KindType
 				provider.Meta = map[string]any{"laravel_listen_map": "Fired=>Wanted"}
+				// The native preflight needs a PHP handle. This one has no
+				// owner or typed listener role, so it cannot win the election.
+				witness := rebuildEventNode(php, "Unmapped.handle", "php", "")
+				witness.Kind, witness.Name = graph.KindMethod, "handle"
 				call = &graph.Edge{
 					From: caller.ID, To: "unresolved::*.handle", Kind: graph.EdgeCalls, FilePath: php, Line: 9,
 					Meta: map[string]any{"via": laravelEventVia, "laravel_event_type": "Fired"},
 				}
-				facts = rebuildEventFacts(php, "php", []*graph.Node{caller, provider}, call)
+				facts = rebuildEventFacts(php, "php", []*graph.Node{caller, provider, witness}, call)
 			}
 			for _, tc := range []struct {
 				name         string
