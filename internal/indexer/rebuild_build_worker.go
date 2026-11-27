@@ -428,6 +428,9 @@ func buildRebuildStages(
 		if err != nil {
 			return err
 		}
+		if err := resolver.FreezeRebuildFnPointerInputs(ctx, private, selection); err != nil {
+			return err
+		}
 		grpc, err := resolver.RunRebuildGRPC(ctx, private, receipts, selection)
 		if err != nil {
 			return err
@@ -669,6 +672,16 @@ func buildRebuildStages(
 			logger.Info("rebuild Laravel event applied to private build",
 				zap.Uint64("stubs", laravel.Stubs), zap.Uint64("resolved", laravel.Resolved),
 				zap.Uint64("moves", laravel.Moves), zap.Uint64("adds", laravel.Adds))
+		}
+		fnPointer, err := resolver.RunRebuildFnPointerStage(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if fnPointer.Sweeps != 0 {
+			logger.Info("rebuild function pointer applied to private build",
+				zap.Uint64("resolved", fnPointer.Resolved), zap.Uint64("ref_moves", fnPointer.RefMoves),
+				zap.Uint64("moves", fnPointer.CallMoves), zap.Uint64("adds", fnPointer.Adds),
+				zap.Int("sweeps", fnPointer.Sweeps))
 		}
 	}
 	// The supported tails only changed private scratch. Relation projection

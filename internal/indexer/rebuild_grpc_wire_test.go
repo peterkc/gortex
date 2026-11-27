@@ -46,6 +46,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"C# partial merge", store_pebble.ErrRebuildCSharpPartial, 70},
 		{"Sidekiq", store_pebble.ErrRebuildSidekiq, 71},
 		{"Laravel event", store_pebble.ErrRebuildLaravelEvent, 72},
+		{"function pointer", store_pebble.ErrRebuildFnPointer, 73},
 		{"C# interface dispatch", store_pebble.ErrRebuildCSharpIfaceDispatch, 74},
 	} {
 		t.Run(stage.name, func(t *testing.T) {

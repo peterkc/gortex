@@ -198,7 +198,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildCSharpPartial,
 	store_pebble.ErrRebuildSidekiq,
 	store_pebble.ErrRebuildLaravelEvent,
-	nil, // 73: reserved
+	store_pebble.ErrRebuildFnPointer,
 	store_pebble.ErrRebuildCSharpIfaceDispatch,
 }
 

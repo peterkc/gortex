@@ -57,6 +57,8 @@ const (
 	rebuildProofMediatRFanout
 	// Exact Laravel Call, handler, and listener route receipts for fanout.
 	rebuildProofLaravelEventFanout
+	// Exact function pointer inputs and elected slot member for fanout.
+	rebuildProofFnPointerFanout
 	rebuildProofLimit
 )
 

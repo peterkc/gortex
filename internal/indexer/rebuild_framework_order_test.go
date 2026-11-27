@@ -55,6 +55,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"C# interface dispatch", "edges", 1},
 		{"Sidekiq", "moves", 1},
 		{"Laravel event", "moves", 1},
+		{"function pointer", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -82,7 +83,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				ProvidersOff: true,
 				Recipes: map[string]rebuildDigest{
 					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1}, "kotlin": {1}, "mybatis": {1},
-					"sql": {1}, "python": {1}, "csharp": {1}, "ruby": {1}, "php": {1},
+					"sql": {1}, "python": {1}, "csharp": {1}, "ruby": {1}, "php": {1}, "c": {1},
 				},
 				Policy:  freezeRebuildParsePolicy(root, cfg),
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
@@ -655,6 +656,16 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	laravelFacts := receipt([]*graph.Node{publish, laravelHandler}, edge(publish, publish.ID, graph.EdgeCalls, 2,
 		map[string]any{"via": "laravel-event", "laravel_event_type": "OrderShipped"}))
 
+	const fnFile = "function-pointer.c"
+	fnInvoker := node(fnFile, "c", "invoke", graph.KindFunction, 1)
+	fnHandler := node(fnFile, "c", "handler", graph.KindFunction, 4)
+	fnFacts := receipt([]*graph.Node{fnInvoker, fnHandler},
+		edge(fnInvoker, fnHandler.ID, graph.EdgeReferences, 2,
+			map[string]any{"via": "fn-pointer-reg", "fnptr_struct": "Slot", "fnptr_field": "fn", "fnptr_fn": fnHandler.Name}),
+		edge(fnInvoker, fnInvoker.ID, graph.EdgeCalls, 3,
+			map[string]any{"via": "fn-pointer-dispatch", "fnptr_struct": "Slot", "fnptr_field": "fn"}),
+	)
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -665,6 +676,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
-		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts,
+		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts,
 	}
 }
