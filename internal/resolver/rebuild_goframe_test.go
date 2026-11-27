@@ -134,6 +134,176 @@ func TestRebuildGoFrameRoutes(t *testing.T) {
 		require.Equal(t, []*graph.Edge{call}, rebuildEventSavedRows(t, build).edges)
 	})
 
+	t.Run("sqlite bound directory tie", func(t *testing.T) {
+		tie := handler("tie", "api", pkg, "ws", true)
+		stale := cloneFrameworkEdge(call)
+		stale.To = far.ID
+		facts := []store_pebble.ParseFacts{
+			rebuildEventFacts(file, "go", callFacts.Nodes, stale), factsFor(winner), factsFor(tie), factsFor(far),
+		}
+		build, native := openRebuildEventStores(t, facts...)
+		require.Zero(t, ResolveGoFrameRoutes(native))
+		moves, err := RunRebuildGoFrame(t.Context(), build, rebuildGRPCReceipts(facts...), freeze(t, build))
+		require.NoError(t, err)
+		require.EqualValues(t, 1, moves)
+		want := rebuildEventSQLiteRows(native)
+		require.Len(t, want.edges, 1)
+		require.Equal(t, call.To, want.edges[0].To)
+		require.Equal(t, want, rebuildEventSavedRows(t, build))
+	})
+
+	t.Run("moved untagged receipt entrant", func(t *testing.T) {
+		facts := []store_pebble.ParseFacts{callFacts, factsFor(winner)}
+		build := openRebuildGRPCBuild(t, facts...)
+		moved := cloneFrameworkEdge(call)
+		moved.To, moved.Meta = "earlier-binding", nil
+		require.NoError(t, build.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: moved, OldTo: call.To}}))
+		checkRefusal(t, build, moved, facts...)
+	})
+
+	t.Run("both raw claimants untagged", func(t *testing.T) {
+		for _, haveHandler := range []bool{false, true} {
+			facts := []store_pebble.ParseFacts{callFacts}
+			if haveHandler {
+				facts = append(facts, factsFor(winner))
+			}
+			build := openRebuildGRPCBuild(t, facts...)
+			moved := cloneFrameworkEdge(call)
+			moved.To, moved.Meta = "earlier-binding", nil
+			require.NoError(t, build.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: moved, OldTo: call.To}}))
+			stationary := cloneFrameworkEdge(call)
+			stationary.Meta = nil
+			build.AddEdge(stationary)
+			if haveHandler {
+				checkRefusal(t, build, moved, facts...)
+				continue
+			}
+			before := rebuildEventSavedRows(t, build)
+			moves, err := RunRebuildGoFrame(t.Context(), build, rebuildGRPCReceipts(facts...), freeze(t, build))
+			require.NoError(t, err)
+			require.Zero(t, moves)
+			require.Equal(t, before, rebuildEventSavedRows(t, build))
+		}
+	})
+
+	t.Run("receipt-only route uses raw source workspace", func(t *testing.T) {
+		plain := cloneFrameworkEdge(call)
+		plain.Meta = nil
+		source := *route
+		source.Kind = graph.KindFunction // the route namespace, not the node kind, admits the turn
+		otherSource := source
+		otherSource.WorkspaceID = "foreign"
+		for _, rawMatches := range []bool{false, true} {
+			liveSource, rawSource := &source, &otherSource
+			if rawMatches {
+				liveSource, rawSource = rawSource, liveSource
+			}
+			live := rebuildEventFacts(file, "go", []*graph.Node{liveSource, alias}, plain)
+			raw := rebuildEventFacts(file, "go", []*graph.Node{rawSource, alias}, call)
+			build := openRebuildGRPCBuild(t, live, factsFor(winner))
+			if rawMatches {
+				checkRefusal(t, build, plain, raw, factsFor(winner))
+				continue
+			}
+			before := rebuildEventSavedRows(t, build)
+			moves, err := RunRebuildGoFrame(t.Context(), build, rebuildGRPCReceipts(raw, factsFor(winner)), freeze(t, build))
+			require.NoError(t, err)
+			require.Zero(t, moves)
+			require.Equal(t, before, rebuildEventSavedRows(t, build))
+		}
+	})
+
+	t.Run("duplicate raw Call role", func(t *testing.T) {
+		for _, conflict := range []bool{false, true} {
+			first, dup := cloneFrameworkEdge(call), cloneFrameworkEdge(call)
+			if conflict {
+				first.Meta["goframe_route"] = route.ID
+			} else {
+				dup.Meta["observer"] = "not the first payload"
+			}
+			facts := []store_pebble.ParseFacts{callFacts, factsFor(winner)}
+			receipts := []store_pebble.ParseFacts{
+				rebuildEventFacts(file, "go", callFacts.Nodes, first), rebuildEventFacts(file, "go", nil, dup), factsFor(winner),
+			}
+			build, native := openRebuildEventStores(t, facts...)
+			if conflict {
+				checkRefusal(t, build, call, receipts...)
+				continue
+			}
+			require.Equal(t, 1, ResolveGoFrameRoutes(native))
+			moves, err := RunRebuildGoFrame(t.Context(), build, rebuildGRPCReceipts(receipts...), freeze(t, build))
+			require.NoError(t, err)
+			require.EqualValues(t, 1, moves)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, build))
+		}
+	})
+
+	t.Run("ambiguous receipt of a stationary tagged Call", func(t *testing.T) {
+		bound := cloneFrameworkEdge(call)
+		bound.To = winner.ID
+		raw := cloneFrameworkEdge(bound)
+		raw.Meta["goframe_request_pkg"] = "other-package"
+		moved := cloneFrameworkEdge(bound)
+		moved.To, moved.Meta = "z-earlier-binding", nil
+		input := rebuildEventFacts(file, "go", callFacts.Nodes, bound)
+		build := openRebuildGRPCBuild(t, input, factsFor(winner))
+		require.NoError(t, build.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: moved, OldTo: bound.To}}))
+		build.AddEdge(bound)
+		checkRefusal(t, build, bound, rebuildEventFacts(file, "go", callFacts.Nodes, raw), factsFor(winner))
+	})
+
+	t.Run("raw role and receipt scope guards", func(t *testing.T) {
+		for _, mode := range []string{"language", "owner", "removed role", "missing source", "no handler receipt"} {
+			build := openRebuildGRPCBuild(t, callFacts, factsFor(winner), factsFor(otherWorkspace))
+			raw, rawHandler := callFacts, factsFor(winner)
+			switch mode {
+			case "language":
+				raw.EffectiveLanguage = ""
+			case "owner":
+				raw.File.FilePath = "wrong.go"
+			case "removed role":
+				plain := cloneFrameworkEdge(call)
+				plain.Meta = nil
+				raw.Edges = []*graph.Edge{plain}
+			case "missing source":
+				raw.Nodes = []*graph.Node{alias}
+			case "no handler receipt":
+				rawHandler.Nodes = nil
+			}
+			if mode == "missing source" {
+				checkRefusal(t, build, call, raw, rawHandler, factsFor(otherWorkspace))
+			} else {
+				checkRefusal(t, build, call, raw, rawHandler)
+			}
+		}
+	})
+
+	t.Run("only optional handler cannot change a stationary Call", func(t *testing.T) {
+		bound := cloneFrameworkEdge(call)
+		bound.To = winner.ID
+		boundFacts := rebuildEventFacts(file, "go", callFacts.Nodes, bound)
+		build := openRebuildGRPCBuild(t, boundFacts, factsFor(winner))
+		before := rebuildEventSavedRows(t, build)
+		moves, err := RunRebuildGoFrame(t.Context(), build, rebuildGRPCReceipts(boundFacts), freeze(t, build))
+		require.NoError(t, err)
+		require.Zero(t, moves)
+		require.Equal(t, before, rebuildEventSavedRows(t, build))
+	})
+
+	t.Run("occupied mirror keeps its payload", func(t *testing.T) {
+		_, mirror := goframeRouteRebind(cloneFrameworkEdge(call), req, winner)
+		mirror.Meta["incumbent"] = true
+		facts := rebuildEventFacts(file, "go", callFacts.Nodes, call, mirror)
+		build, native := openRebuildEventStores(t, facts, factsFor(winner))
+		require.Equal(t, 1, ResolveGoFrameRoutes(native))
+		moves, err := RunRebuildGoFrame(t.Context(), build, rebuildGRPCReceipts(facts, factsFor(winner)), freeze(t, build))
+		require.NoError(t, err)
+		require.EqualValues(t, 1, moves)
+		want := rebuildEventSQLiteRows(native)
+		require.Contains(t, want.edges, mirror)
+		require.Equal(t, want, rebuildEventSavedRows(t, build))
+	})
+
 	t.Run("frozen selection", func(t *testing.T) {
 		build := openRebuildGRPCBuild(t, factsFor(winner))
 		selection := freeze(t, build)

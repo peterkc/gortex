@@ -19,6 +19,7 @@ func RunRebuildGoFrame(ctx context.Context, build *store_pebble.BuildStore, rece
 		Route:   goframeRouteShape,
 		Handler: goframeMethodShape,
 		Dir:     goframeDir,
+		Rank:    goframeHandlerRank,
 		Rebind: func(e *graph.Edge, req string, target *graph.Node) (graph.EdgeReindex, *graph.Edge) {
 			return goframeRouteRebind(cloneFrameworkEdge(e), req, target)
 		},

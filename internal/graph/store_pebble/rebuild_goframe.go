@@ -21,6 +21,7 @@ type RebuildGoFrameRules struct {
 	Route   func(*graph.Edge) (request, pkg, route string)
 	Handler func(*graph.Node) (request, pkg string, bound bool)
 	Dir     func(string) string
+	Rank    func(source *graph.Node, routePkg, routeDir, workspace, pkg, dir string, bound bool) int
 	Rebind  func(*graph.Edge, string, *graph.Node) (graph.EdgeReindex, *graph.Edge)
 }
 
@@ -37,7 +38,7 @@ func (b *BuildStore) RebuildGoFrame(ctx context.Context, receipts iter.Seq2[Pars
 			err = fmt.Errorf("%w: %w", ErrRebuildGoFrame, err)
 		}
 	}()
-	if receipts == nil || rules.Route == nil || rules.Handler == nil || rules.Dir == nil || rules.Rebind == nil {
+	if receipts == nil || rules.Route == nil || rules.Handler == nil || rules.Dir == nil || rules.Rank == nil || rules.Rebind == nil {
 		return 0, invalid("goframe inputs")
 	}
 	prefix := rebuildGoFramePrefix
@@ -52,6 +53,17 @@ func (b *BuildStore) RebuildGoFrame(ctx context.Context, receipts iter.Seq2[Pars
 	p := rebuildGoFrame{
 		rebuildCallMoves: rebuildCallMoves{b: b, prefix: prefix, rowBytes: 16 << 20, label: "GoFrame", inputRow: "input row"},
 		rules:            rules,
+	}
+	// Index tagged receipt keys before scanning live claims. Untagged moves
+	// do not need scratch state unless a tagged receipt can reach them.
+	if err := visitGoFrameReceipts(ctx, receipts, func(e *graph.Edge) error {
+		request, _, _ := p.rules.Route(e)
+		if request == "" {
+			return nil
+		}
+		return p.put(append(p.column('q'), pendingEdgeKey(e)...), nil)
+	}); err != nil {
+		return 0, err
 	}
 	if err := p.capture(ctx); err != nil {
 		return 0, err
@@ -92,16 +104,16 @@ func (p *rebuildGoFrame) saveHandler(col byte, n *graph.Node) error {
 	if request == "" {
 		return nil
 	}
-	var rank byte
+	var boundByte byte
 	if bound {
-		rank = 2
+		boundByte = 1
 	}
 	if col == 'h' {
 		if err := p.put(p.key('i', n.ID), nil); err != nil {
 			return err
 		}
 	}
-	return p.put(p.key(col, request, n.ID), keyStrings([]byte{rank}, pkg, n.WorkspaceID, p.rules.Dir(n.FilePath)))
+	return p.put(p.key(col, request, n.ID), keyStrings([]byte{boundByte}, pkg, n.WorkspaceID, p.rules.Dir(n.FilePath)))
 }
 
 func (p *rebuildGoFrame) capture(ctx context.Context) error {
@@ -127,14 +139,21 @@ func (p *rebuildGoFrame) capture(ctx context.Context) error {
 		if err != nil || kind != graph.EdgeCalls {
 			return err
 		}
-		// A moved, untagged Call can share a raw key with a tagged Call.
 		custody, err := readRebuildEdgeCustody(snap, r.key)
 		if err != nil && !errors.Is(err, ErrRebuildUnknownProvenance) {
 			return err
 		}
-		stationary := err == nil && custody.proof == 0 && custody.raw == nil
-		if custody.raw != nil {
-			if err := p.claim(custody.raw, r.key); err != nil {
+		var raw []byte
+		if err == nil && custody.proof == 0 {
+			raw = custody.raw
+			if raw == nil {
+				raw = r.key
+			}
+		}
+		var taggedReceipt bool
+		if raw != nil {
+			taggedReceipt, err = p.present(append(p.column('q'), raw...))
+			if err != nil {
 				return err
 			}
 		}
@@ -143,23 +162,56 @@ func (p *rebuildGoFrame) capture(ctx context.Context) error {
 			return err
 		}
 		request, _, _ := p.rules.Route(e)
-		if request == "" {
+		if request == "" && !taggedReceipt {
 			return nil
 		}
 		if err := p.input(r.key, r.value); err != nil {
 			return err
 		}
-		if err := p.put(append(p.column('s'), r.key...), nil); err != nil {
+		if err := p.put(append(p.column('s'), r.key...), raw); err != nil {
 			return err
 		}
-		if err := p.put(p.key('f', e.From), nil); err != nil {
-			return err
+		if raw == nil {
+			return nil
 		}
-		if stationary {
-			return p.claim(nil, r.key)
+		if taggedReceipt {
+			if err := p.put(p.key('f', e.From), nil); err != nil {
+				return err
+			}
 		}
-		return nil
+		return p.claim(raw, r.key)
 	})
+}
+
+// visitGoFrameReceipts keeps role discovery, recording and ordering on the same
+// receipt owner and language rules.
+func visitGoFrameReceipts(ctx context.Context, receipts iter.Seq2[ParseFacts, error], visit func(*graph.Edge) error) error {
+	for facts, err := range receipts {
+		if err != nil {
+			return err
+		}
+		if facts.EffectiveLanguage == "" {
+			continue
+		}
+		if err := visitGoFrameReceiptCalls(ctx, facts.Edges, pathkey.Normalize(facts.File.FilePath), visit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func visitGoFrameReceiptCalls(ctx context.Context, edges []*graph.Edge, file string, visit func(*graph.Edge) error) error {
+	for _, e := range edges {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if e != nil && e.Kind == graph.EdgeCalls && e.FilePath == file {
+			if err := visit(e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (p *rebuildGoFrame) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
@@ -182,7 +234,7 @@ func (p *rebuildGoFrame) record(ctx context.Context, receipts iter.Seq2[ParseFac
 			if err != nil {
 				return err
 			}
-			if source || n.Kind == graph.KindContract {
+			if source {
 				if err := p.put(p.key('F', n.ID), append([]byte{1}, n.WorkspaceID...)); err != nil {
 					return err
 				}
@@ -207,72 +259,8 @@ func (p *rebuildGoFrame) record(ctx context.Context, receipts iter.Seq2[ParseFac
 				}
 			}
 		}
-		for _, e := range facts.Edges {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if e == nil || e.Kind != graph.EdgeCalls || e.FilePath != file {
-				continue
-			}
-			key := pendingEdgeKey(e)
-			claim, err := p.marked(append(p.column('r'), key...))
-			if err != nil {
-				return err
-			}
-			if len(claim) > 1 {
-				if !bytes.Equal(key, claim[1:]) {
-					occupied, err := p.present(key)
-					if err != nil {
-						return err
-					}
-					if occupied {
-						incumbent, err := readRebuildEdgeCustody(p.b.pending, key)
-						if err != nil && !errors.Is(err, ErrRebuildUnknownProvenance) {
-							return err
-						}
-						if err == nil && incumbent.raw == nil && incumbent.proof == 0 {
-							continue // the stationary row also claims this receipt
-						}
-					}
-				}
-				key = claim[1:]
-			} else {
-				request, _, _ := p.rules.Route(e)
-				if request == "" || claim != nil {
-					continue
-				}
-				// A stationary raw tag can introduce the role. A receipt for
-				// an edge removed or moved upstream cannot resurrect it.
-				live, err := p.b.pendingEdge(key)
-				if err != nil {
-					return err
-				}
-				if live == nil {
-					continue
-				}
-				raw, err := rebuildReceiptKey(p.b.pending, key)
-				if errors.Is(err, ErrRebuildUnknownProvenance) || err == nil && !bytes.Equal(raw, key) {
-					continue
-				}
-				if err != nil {
-					return err
-				}
-				if err := p.put(append(p.column('s'), key...), nil); err != nil {
-					return err
-				}
-			}
-			if request, _, _ := p.rules.Route(e); request == "" {
-				// The receipt removes the role. Its other fields cannot
-				// influence the projection.
-				e = &graph.Edge{Kind: graph.EdgeCalls}
-			}
-			data, err := encodeEdge(e)
-			if err != nil {
-				return err
-			}
-			if err := p.put(append(p.column('j'), key...), data); err != nil {
-				return err
-			}
+		if err := visitGoFrameReceiptCalls(ctx, facts.Edges, file, p.recordCall); err != nil {
+			return err
 		}
 	}
 	return p.visit(ctx, p.column('I'), func(r row) error {
@@ -282,6 +270,41 @@ func (p *rebuildGoFrame) record(ctx context.Context, receipts iter.Seq2[ParseFac
 		}
 		return p.saveHandler('H', n)
 	})
+}
+
+// recordCall retains the first payload at a relevant raw key. A later receipt
+// can disprove its route role, but cannot replace that payload or its position.
+func (p *rebuildGoFrame) recordCall(e *graph.Edge) error {
+	raw := pendingEdgeKey(e)
+	claimed, err := p.present(append(p.column('r'), raw...))
+	if err != nil || !claimed {
+		return err
+	}
+	key := append(p.column('j'), raw...)
+	first, err := pendingGet(p.b.pending, key, decodeEdge)
+	if err != nil {
+		return err
+	}
+	if first != nil {
+		if !p.sameRouteRole(first, e) {
+			return p.put(append(p.column('d'), raw...), nil)
+		}
+		return nil
+	}
+	if request, _, _ := p.rules.Route(e); request == "" {
+		e = &graph.Edge{Kind: graph.EdgeCalls}
+	}
+	data, err := encodeEdge(e)
+	if err != nil {
+		return err
+	}
+	return p.put(key, data)
+}
+
+func (p *rebuildGoFrame) sameRouteRole(a, b *graph.Edge) bool {
+	ar, ap, am := p.rules.Route(a)
+	br, bp, bm := p.rules.Route(b)
+	return ar == br && (ar == "" || ap == bp && am == bm)
 }
 
 type rebuildGoFrameWinner struct {
@@ -320,22 +343,20 @@ func (p *rebuildGoFrame) elect(ctx context.Context, col byte, request, pkg, dir 
 			}
 		}
 		candidatePkg, tail, err := readKeyString(r.value[1:])
-		if err != nil || pkg != "" && candidatePkg != pkg {
+		if err != nil {
 			return err
 		}
 		workspace, tail, err := readKeyString(tail)
-		if err != nil || source != nil && source.WorkspaceID != workspace {
+		if err != nil {
 			return err
 		}
 		candidateDir, _, err := readKeyString(tail)
 		if err != nil {
 			return err
 		}
-		rank := int(r.value[0])
-		if candidateDir == dir {
-			rank++
+		if rank := p.rules.Rank(source, pkg, dir, workspace, candidatePkg, candidateDir, r.value[0] != 0); rank >= 0 {
+			best.offer(id, rank)
 		}
-		best.offer(id, rank)
 		return nil
 	})
 	return best, err
@@ -393,42 +414,13 @@ func (p *rebuildGoFrame) plan(ctx context.Context) (uint64, error) {
 			}
 			move, mirror = p.rules.Rebind(live, request, winner.node())
 		}
-		raw, err := pendingGet(p.b.pending, append(p.column('j'), key...), decodeEdge)
-		if err != nil {
-			return err
-		}
-		if raw == nil && move.Edge != nil {
-			id, err := decodeLinkRecorder(key)
-			if err == nil {
-				refused.add(id, bytes.Clone(key))
-			}
-			return err
-		}
-		if raw == nil {
-			raw = live
-		} else {
-			// The first receipt gives the position and role, not the live
-			// target after main and earlier framework turns.
-			id, err := decodeLinkRecorder(key)
-			if err != nil {
-				return err
-			}
-			raw.From, raw.To, raw.FilePath, raw.Line = id.From, id.To, id.FilePath, id.Line
-		}
-		workspace, err := p.get(p.key('F', raw.From))
-		if err != nil {
-			return err
-		}
-		proved, err := p.matches(ctx, raw, workspace, source, rawOn, optionalCount, move.Edge, mirror)
+		proved, err := p.compareCall(ctx, r.value, live, source, rawOn, optionalCount, move.Edge, mirror)
 		if err != nil {
 			return err
 		}
 		if !proved {
-			id, err := decodeLinkRecorder(key)
-			if err == nil {
-				refused.add(id, bytes.Clone(key))
-			}
-			return err
+			refused.add(graph.EdgeIdentityFor(live), bytes.Clone(key))
+			return nil
 		}
 		if move.Edge == nil {
 			return nil
@@ -447,6 +439,46 @@ func (p *rebuildGoFrame) plan(ctx context.Context) (uint64, error) {
 		return p.put(append(p.column('w'), pendingEdgeKey(mirror)...), payload)
 	})
 	return moves, errors.Join(err, refused.err())
+}
+
+// compareCall tests the raw role at the current turn's site and target. A
+// shared receipt can be attached to either claimant only when neither world
+// changes the output; it can never authorize a move on either row.
+func (p *rebuildGoFrame) compareCall(ctx context.Context, rawKey []byte, live *graph.Edge, source *graph.Node,
+	rawOn bool, optionalCount int, move, mirror *graph.Edge,
+) (bool, error) {
+	var raw *graph.Edge
+	var ambiguous bool
+	if len(rawKey) != 0 {
+		claim, err := p.marked(append(p.column('r'), rawKey...))
+		if err != nil {
+			return false, err
+		}
+		ambiguous = len(claim) == 1
+		conflict, err := p.present(append(p.column('d'), rawKey...))
+		if err != nil || conflict {
+			return false, err
+		}
+		raw, err = pendingGet(p.b.pending, append(p.column('j'), rawKey...), decodeEdge)
+		if err != nil {
+			return false, err
+		}
+	}
+	if move != nil && (raw == nil || ambiguous) {
+		return false, nil
+	}
+	if raw == nil {
+		raw = live
+	} else {
+		// The receipt supplies the first role. Earlier turns supply the
+		// current key; the original raw key only determines move order.
+		raw.From, raw.To, raw.FilePath, raw.Line = live.From, live.To, live.FilePath, live.Line
+	}
+	workspace, err := p.get(p.key('F', raw.From))
+	if err != nil {
+		return false, err
+	}
+	return p.matches(ctx, raw, workspace, source, rawOn, optionalCount, move, mirror)
 }
 
 func (p *rebuildGoFrame) matches(ctx context.Context, raw *graph.Edge, workspace []byte, source *graph.Node,
@@ -507,32 +539,16 @@ func rebuildGoFrameEdgeEqual(a, b *graph.Edge) (bool, error) {
 }
 
 func (p *rebuildGoFrame) order(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
-	for facts, err := range receipts {
+	return visitGoFrameReceipts(ctx, receipts, func(raw *graph.Edge) error {
+		key := append(p.column('r'), pendingEdgeKey(raw)...)
+		claim, err := p.marked(key)
+		if err != nil || len(claim) <= 1 {
+			return err
+		}
+		first, err := pendingGet(p.b.pending, append(p.column('j'), key[len(p.prefix)+1:]...), decodeEdge)
 		if err != nil {
 			return err
 		}
-		if facts.EffectiveLanguage == "" {
-			continue
-		}
-		file := pathkey.Normalize(facts.File.FilePath)
-		for _, raw := range facts.Edges {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if raw == nil || raw.Kind != graph.EdgeCalls || raw.FilePath != file {
-				continue
-			}
-			key := append(p.column('r'), pendingEdgeKey(raw)...)
-			claim, err := p.marked(key)
-			if err != nil {
-				return err
-			}
-			if len(claim) > 1 {
-				if err := p.noteReceipt(key, claim, true); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
+		return p.noteReceipt(key, claim, first != nil && p.sameRouteRole(first, raw))
+	})
 }

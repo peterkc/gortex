@@ -10,6 +10,86 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+func TestRebuildGoFrameStoreGuards(t *testing.T) {
+	const file = "routes.go"
+	rules := RebuildGoFrameRules{
+		Route: func(e *graph.Edge) (string, string, string) {
+			request, _ := e.Meta["request"].(string)
+			return request, "", e.From
+		},
+		Handler: func(n *graph.Node) (string, string, bool) { return n.Name, "", false },
+		Dir:     func(string) string { return "" },
+		Rank:    func(*graph.Node, string, string, string, string, string, bool) int { return 0 },
+		Rebind: func(e *graph.Edge, _ string, target *graph.Node) (graph.EdgeReindex, *graph.Edge) {
+			if target == nil || e.To == target.ID {
+				return graph.EdgeReindex{}, nil
+			}
+			next := *e
+			next.To = target.ID
+			return graph.EdgeReindex{Edge: &next, OldTo: e.To}, nil
+		},
+	}
+	for _, mode := range []string{"nil receipts", "nil rank", "occupied scratch", "tagged Call cap", "deleted raw", "stale stamp"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			rules := rules
+			b := newBuild(t, FullProfile)
+			call := &graph.Edge{From: "route", To: "unresolved::*.Req", Kind: graph.EdgeCalls, FilePath: file,
+				Meta: map[string]any{"request": "Req"}}
+			handler := &graph.Node{ID: "handler", Name: "Req", Kind: graph.KindMethod, FilePath: file, Language: "go"}
+			facts := ParseFacts{
+				EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: file, NodeCount: 1},
+				Nodes: []*graph.Node{handler}, Edges: []*graph.Edge{call},
+			}
+			receipts := unreadStoreFactoryReceipts(t)
+			switch mode {
+			case "nil receipts":
+				receipts = nil
+			case "nil rank":
+				rules.Rank = nil
+			case "occupied scratch":
+				require.NoError(t, b.pending.Set([]byte("gqjz"), []byte("sentinel"), pebble.NoSync))
+			case "tagged Call cap":
+				wide := *call
+				wide.Context = strings.Repeat("x", 16<<20)
+				b.AddEdge(&wide)
+				receipts = func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
+			case "deleted raw", "stale stamp":
+				b.AddNode(handler)
+				receipts = func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
+				if mode == "stale stamp" {
+					plain := *call
+					plain.Meta = nil
+					require.NoError(t, b.withWrites(func() error {
+						return b.putEdgeWithCustody(&plain, rebuildEdgeCustody{proof: rebuildProofReceiver})
+					}))
+					plain.Context = "changed under the recorder"
+					data, err := encodeEdge(&plain)
+					require.NoError(t, err)
+					require.NoError(t, b.pending.Set(pendingEdgeKey(&plain), data, pebble.NoSync))
+					_, err = readRebuildEdgeCustody(b.pending, pendingEdgeKey(&plain))
+					require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+				}
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			moves, err := b.RebuildGoFrame(ctx, receipts, rules)
+			switch mode {
+			case "deleted raw", "stale stamp":
+				require.NoError(t, err)
+			case "tagged Call cap":
+				require.ErrorIs(t, err, ErrRebuildGoFrame)
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "GoFrame input row")
+			default:
+				require.ErrorIs(t, err, ErrRebuildGoFrame)
+				require.ErrorIs(t, err, errInvalidRecord)
+			}
+			require.Zero(t, moves)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
 func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 	const file, caller, owner, handler = "rpc.go", "caller", "server", "server.Hello"
 	stub := func(to, payload string) *graph.Edge {
