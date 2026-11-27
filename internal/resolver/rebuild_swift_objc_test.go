@@ -323,18 +323,23 @@ func TestRebuildSwiftObjCNativeDropsStructuralProtocolTargets(t *testing.T) {
 func TestRebuildSwiftObjCRefusesUnprovedEndpointsBeforeWriting(t *testing.T) {
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthSwiftObjC})
 	require.NoError(t, err)
+	exact := graph.EdgeIdentity{From: rebuildBridgeExact, To: rebuildBridgeExactObjC, Kind: graph.EdgeReferences, FilePath: "p/Bridge.swift", Line: 5}
+	// Both setter directions are refused. The Objective-C source sorts first.
+	setter := graph.EdgeIdentity{From: rebuildBridgeSetterObjC, To: rebuildBridgeSetter, Kind: graph.EdgeReferences, FilePath: "p/Bridge.m", Line: 16}
+	protocol := graph.EdgeIdentity{From: rebuildBridgeAdopter, To: rebuildBridgeProtocol, Kind: graph.EdgeImplements, FilePath: "p/Bridge.m", Line: 15}
 	for _, tc := range []struct {
 		name       string
 		file, node int
 		alter      func(*graph.Node)
 		count      uint64
+		first      graph.EdgeIdentity
 	}{
-		{name: "missing protocol receipt", file: 2, count: 1},
-		{"objc_selector", 0, 0, func(n *graph.Node) { n.Meta["objc_selector"] = "changed:" }, 1},
-		{"objc_setter_selector", 0, 3, func(n *graph.Node) { n.Meta["objc_setter_selector"] = "changed:" }, 2},
-		{"objc_protocols", 1, 2, func(n *graph.Node) { n.Meta["objc_protocols"] = "Other" }, 1},
-		{"Name", 0, 0, func(n *graph.Node) { n.Name = "changed" }, 1},
-		{"StartLine", 0, 0, func(n *graph.Node) { n.StartLine++ }, 1},
+		{name: "missing protocol receipt", file: 2, count: 1, first: protocol},
+		{"objc_selector", 0, 0, func(n *graph.Node) { n.Meta["objc_selector"] = "changed:" }, 1, exact},
+		{"objc_setter_selector", 0, 3, func(n *graph.Node) { n.Meta["objc_setter_selector"] = "changed:" }, 2, setter},
+		{"objc_protocols", 1, 2, func(n *graph.Node) { n.Meta["objc_protocols"] = "Other" }, 1, protocol},
+		{"Name", 0, 0, func(n *graph.Node) { n.Name = "changed" }, 1, exact},
+		{"StartLine", 0, 0, func(n *graph.Node) { n.StartLine++ }, 1, exact},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts, stationary := rebuildSwiftObjCFixture(0)
@@ -353,6 +358,7 @@ func TestRebuildSwiftObjCRefusesUnprovedEndpointsBeforeWriting(t *testing.T) {
 			var refusal *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
 			require.Equal(t, tc.count, refusal.Count)
+			require.Equal(t, tc.first, refusal.First)
 			require.Zero(t, stats)
 			require.Equal(t, before, rebuildSwiftObjCPrivateEdges(t, b))
 		})

@@ -456,14 +456,20 @@ func TestRebuildFunctionTemporalDispatchFullNameMiss(t *testing.T) {
 import "go.temporal.io/sdk/workflow"
 func Run(ctx workflow.Context) {
     go workflow.ExecuteActivity(ctx, "Charge", 1)
+    go workflow.ExecuteChildWorkflow(ctx, "ChildWorkflow", 2)
 }
 `))
 	require.NoError(t, err)
 	defer facts.ReleaseTree()
-	const target = "unresolved::temporal::activity::Charge"
-	var goCall, goSpawn *graph.Edge
+	const activityTarget = "unresolved::temporal::activity::Charge"
+	const workflowTarget = "unresolved::temporal::workflow::ChildWorkflow"
+	var goCall, activitySpawn, workflowSpawn *graph.Edge
 	for _, e := range facts.Edges {
-		if e.To != target {
+		if e.To == workflowTarget && e.Kind == graph.EdgeSpawns {
+			require.Nil(t, workflowSpawn)
+			workflowSpawn = e
+		}
+		if e.To != activityTarget {
 			continue
 		}
 		switch e.Kind {
@@ -471,12 +477,13 @@ func Run(ctx workflow.Context) {
 			require.Nil(t, goCall)
 			goCall = e
 		case graph.EdgeSpawns:
-			require.Nil(t, goSpawn)
-			goSpawn = e
+			require.Nil(t, activitySpawn)
+			activitySpawn = e
 		}
 	}
 	require.NotNil(t, goCall)
-	require.NotNil(t, goSpawn)
+	require.NotNil(t, activitySpawn)
+	require.NotNil(t, workflowSpawn)
 
 	java := languages.NewJavaExtractor()
 	java.SetTemporalInvokers([]string{"Invoker"}, nil)
@@ -511,7 +518,8 @@ func Run(ctx workflow.Context) {
 		lang string
 	}{
 		{"Go call", goCall, "go"},
-		{"Go spawn", goSpawn, "go"},
+		{"Go activity spawn", activitySpawn, "go"},
+		{"Go workflow spawn", workflowSpawn, "go"},
 		{"Java stub", javaStub, "java"},
 		{"Java start", javaStart, "java"},
 	} {
@@ -590,6 +598,7 @@ func TestRebuildFunctionFrameworkMarkersRefuseOtherRows(t *testing.T) {
 		{"spawn wrong origin", spawn, func(e *graph.Edge) { e.Origin = graph.OriginASTInferred }},
 		{"spawn outside Go", spawn, func(e *graph.Edge) { e.FilePath = "caller.java" }},
 		{"spawn wrong prefix", spawn, func(e *graph.Edge) { e.To = "unresolved::temporal::other::Charge" }},
+		{"workflow spawn empty name", spawn, func(e *graph.Edge) { e.To = "unresolved::temporal::workflow::" }},
 		{"RN marker not a call", rn, func(e *graph.Edge) { e.Kind = graph.EdgeReads }},
 		{"RN marker outside JS and TS", rn, func(e *graph.Edge) { e.FilePath = "caller.go" }},
 		{"RN marker empty module", rn, func(e *graph.Edge) {

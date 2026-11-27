@@ -7,6 +7,58 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+func TestRebuildReactNativeBridgeSkipsSoleSelfRecorder(t *testing.T) {
+	for _, peer := range []bool{false, true} {
+		name := "sole self candidate"
+		if peer {
+			name = "distinct candidate"
+		}
+		t.Run(name, func(t *testing.T) {
+			const file, language = "app.ts", "typescript"
+			meta := map[string]any{"rn_module": "Calendar", "rn_method": "open"}
+			caller := &graph.Node{ID: "caller", Name: "open", FilePath: file, Language: language, Kind: graph.KindMethod, Meta: meta}
+			call := &graph.Edge{From: caller.ID, To: "unresolved::rn::Calendar::open", FilePath: file, Kind: graph.EdgeCalls, Line: 9, Meta: meta}
+			app := ParseFacts{EffectiveLanguage: language, File: graph.FileMetaRow{FilePath: file}, Nodes: []*graph.Node{caller}, Edges: []*graph.Edge{call}}
+			facts := []ParseFacts{app}
+			native := &graph.Node{ID: "Calendar.java::open", Name: "open", FilePath: "Calendar.java", Language: "java", Kind: graph.KindMethod, Meta: meta}
+			if peer {
+				facts = append(facts, producerProofFacts(native))
+			}
+			b, exact := seedSyntheticCustody(t, facts...)
+			key := pendingEdgeKey(call)
+			reads := 0
+			receipts := func(yield func(ParseFacts, error) bool) {
+				reads++
+				if reads == 1 {
+					row, err := pendingGet(b.pending, rebuildRNKey('r', string(key)), copyValue)
+					require.NoError(t, err)
+					if peer {
+						require.Equal(t, append([]byte{rebuildCapabilityWanted}, key...), row)
+					} else {
+						require.Empty(t, row, "the sole self match cannot elect an output")
+					}
+				}
+				exact(yield)
+			}
+			makeCall := func(input *graph.Edge, target *graph.Node) *graph.Edge {
+				return &graph.Edge{From: input.From, To: target.ID, FilePath: input.FilePath, Kind: input.Kind, Line: input.Line}
+			}
+			stats, err := b.RebuildReactNativeBridge(t.Context(), receipts,
+				func(lang string) bool { return lang == language },
+				func(e *graph.Edge) bool { return e.To == call.To }, makeCall)
+			require.NoError(t, err)
+			if peer {
+				require.Equal(t, 2, reads)
+				require.EqualValues(t, 1, stats.Edges)
+				checkSetStateProofOutput(t, b, makeCall(call, native), rebuildProofRNBridge)
+			} else {
+				require.Equal(t, 1, reads)
+				require.Zero(t, stats)
+			}
+		})
+	}
+}
+
 func TestRebuildReactNativeBridgeGuardLineage(t *testing.T) {
 	for _, tc := range []struct {
 		name                    string
