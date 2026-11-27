@@ -348,12 +348,12 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil
 		}
-		if target == "" {
-			return nil
-		}
 		proved, uncertain, err := p.elect(ctx, q, fromDir, true)
 		if err != nil {
 			return err
+		}
+		if target == "" && proved == "" && !uncertain {
+			return nil
 		}
 		callerProof, err := rebuildScratchState(p.b.pending, p.key('n', e.From), "rails caller proof")
 		if err != nil {
