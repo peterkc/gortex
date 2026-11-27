@@ -344,7 +344,7 @@ func (b *BuildStore) applyRebuildLinkReindexes(ctx context.Context, moves []grap
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := b.reindexChunk(moves); err != nil {
+		if err := b.reindexChunkWithRecorders(moves, refreshKind == ""); err != nil {
 			return err
 		}
 		return ctx.Err()

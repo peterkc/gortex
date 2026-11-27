@@ -206,9 +206,19 @@ func (b *BuildStore) ReindexEdges(batch []graph.EdgeReindex) {
 }
 
 func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
+	return b.reindexChunkWithRecorders(batch, false)
+}
+
+// capture records the original key at the checked main writer. Other moves
+// may inherit an existing recorder but cannot invent one.
+func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, capture bool) error {
 	// First free every moving stored identity. A stationary destination
 	// preserves its row, and the first claimant wins any free destination.
-	var candidates []*graph.Edge
+	type claim struct {
+		edge     *graph.Edge
+		recorder []byte
+	}
+	var candidates []claim
 	created := make(map[string]int, len(batch))
 	moved := make(map[string]bool, len(batch))
 	for _, r := range batch {
@@ -228,6 +238,7 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 			from.FilePath, from.Line = r.OldFilePath, r.OldLine
 		}
 		oldKey, key := pendingEdgeKey(&from), pendingEdgeKey(e)
+		var recorder []byte
 		old, err := b.pendingEdge(oldKey)
 		if err != nil {
 			return err
@@ -237,7 +248,7 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 				continue
 			}
 			if index, ok := created[string(oldKey)]; ok {
-				candidates[index] = nil
+				candidates[index] = claim{}
 				delete(created, string(oldKey))
 			} else if r.RefreshIdentity {
 				continue
@@ -248,6 +259,13 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 			}
 			continue
 		} else {
+			recorder, err = readLinkRecorder(b.pending, oldKey)
+			if err != nil {
+				return err
+			}
+			if recorder == nil && capture {
+				recorder = oldKey
+			}
 			if err := b.deleteEdge(oldKey, old); err != nil {
 				return err
 			}
@@ -261,9 +279,10 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 		if _, ok := created[string(key)]; !ok {
 			created[string(key)] = len(candidates)
 		}
-		candidates = append(candidates, e)
+		candidates = append(candidates, claim{edge: e, recorder: recorder})
 	}
-	for _, e := range candidates {
+	for _, c := range candidates {
+		e := c.edge
 		if e == nil || graph.StructuralEdgeTargetInvalid(e.Kind, e.To) {
 			continue
 		}
@@ -272,7 +291,7 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 			return err
 		}
 		if old == nil {
-			if err := b.putEdge(e); err != nil {
+			if err := b.putEdgeWithLinkRecorder(e, c.recorder); err != nil {
 				return err
 			}
 		}

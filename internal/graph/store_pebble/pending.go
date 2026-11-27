@@ -155,6 +155,10 @@ func (b *BuildStore) writeNode(n *graph.Node) error {
 }
 
 func (b *BuildStore) putEdge(e *graph.Edge) error {
+	return b.putEdgeWithLinkRecorder(e, nil)
+}
+
+func (b *BuildStore) putEdgeWithLinkRecorder(e *graph.Edge, recorder []byte) error {
 	if graph.IsProxyID(e.From) || graph.IsProxyID(e.To) {
 		return invalid("proxy edge cannot be published")
 	}
@@ -171,10 +175,23 @@ func (b *BuildStore) putEdge(e *graph.Edge) error {
 	if err := batch.Set(pendingReverseKey(e, key), key, nil); err != nil {
 		return err
 	}
+	if recorder != nil {
+		if err := batch.Set(rebuildLinkRecorderKey(key), recorder, nil); err != nil {
+			return err
+		}
+	}
 	return batch.Commit(pebble.NoSync)
 }
 
 func (b *BuildStore) deleteEdge(key []byte, edge *graph.Edge) error {
+	// Central deletes also invalidate lineage for any later reuse of this key.
+	recorderKey := rebuildLinkRecorderKey(key)
+	recorded, err := pendingGet(b.pending, recorderKey, func([]byte) (bool, error) {
+		return true, nil
+	})
+	if err != nil {
+		return err
+	}
 	batch := b.pending.NewBatch()
 	defer batch.Close()
 	if err := batch.Delete(key, nil); err != nil {
@@ -182,6 +199,11 @@ func (b *BuildStore) deleteEdge(key []byte, edge *graph.Edge) error {
 	}
 	if err := batch.Delete(pendingReverseKey(edge, key), nil); err != nil {
 		return err
+	}
+	if recorded {
+		if err := batch.Delete(recorderKey, nil); err != nil {
+			return err
+		}
 	}
 	return batch.Commit(pebble.NoSync)
 }
