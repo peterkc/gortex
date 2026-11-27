@@ -24,6 +24,7 @@ func RunRebuildValueRefs(ctx context.Context, build *store_pebble.BuildStore, re
 			return name
 		},
 		Distinctive: isDistinctiveValueName,
+		Elect:       electValueRefDeclaration,
 		Shadows:     valueRefShadowsReader,
 		Generated:   isGeneratedReader,
 		Rebind:      rebindValueRef,

@@ -1,9 +1,12 @@
 package store_pebble
 
 import (
+	"errors"
+	"iter"
 	"slices"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -223,4 +226,211 @@ func requireRebuildLinkCustody(t *testing.T, b *BuildStore, e *graph.Edge, want 
 	got, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(e))
 	require.NoError(t, err)
 	require.Equal(t, want, got, "custody for %+v", graph.EdgeIdentityFor(e))
+}
+
+func valueRefsScratchTestRules() RebuildValueRefsRules {
+	// These stage tests need just one named declaration. The resolver oracle
+	// exercises the real language policy and declaration election.
+	return RebuildValueRefsRules{
+		Name: func(e *graph.Edge) string {
+			name, _ := e.Meta["name"].(string)
+			return name
+		},
+		Distinctive: func(name string) bool { return name == "LIMIT_KEY" },
+		Elect: func(_ int, decls iter.Seq2[string, int]) (string, bool) {
+			for id := range decls {
+				return id, false
+			}
+			return "", false
+		},
+		Shadows:   func(_, _ string) bool { return false },
+		Generated: func(*graph.Node) bool { return false },
+		Rebind: func(e *graph.Edge, target string, _ bool) (graph.EdgeReindex, bool) {
+			old := e.To
+			e.To = target
+			return graph.EdgeReindex{Edge: e, OldTo: old}, true
+		},
+	}
+}
+
+func TestRebuildValueRefsStageInputs(t *testing.T) {
+	for _, mode := range []string{"nil receipts", "nil name", "nil distinctive", "nil elect", "nil shadows", "nil generated", "nil rebind", "scratch occupied"} {
+		t.Run(mode, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			rules := valueRefsScratchTestRules()
+			receipts := func(func(ParseFacts, error) bool) { t.Fatal("replayed receipts before admission") }
+			want := "value refs inputs"
+			switch mode {
+			case "nil receipts":
+				receipts = nil
+			case "nil name":
+				rules.Name = nil
+			case "nil distinctive":
+				rules.Distinctive = nil
+			case "nil elect":
+				rules.Elect = nil
+			case "nil shadows":
+				rules.Shadows = nil
+			case "nil generated":
+				rules.Generated = nil
+			case "nil rebind":
+				rules.Rebind = nil
+			case "scratch occupied":
+				want = "value refs scratch occupied"
+				require.NoError(t, b.pending.Set(rebuildValueRefsPrefix, []byte("another owner's scratch"), pebble.NoSync))
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			count, err := b.RebuildValueRefs(t.Context(), receipts, rules)
+			require.ErrorIs(t, err, ErrRebuildValueRefs)
+			require.ErrorContains(t, err, want)
+			require.Zero(t, count)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildValueRefsStageReceiptFailure(t *testing.T) {
+	const file, name = "value.go", "LIMIT_KEY"
+	reader := &graph.Node{ID: "reader", FilePath: file, Kind: graph.KindFunction, Language: "go"}
+	decl := &graph.Node{ID: "declaration", FilePath: file, Kind: graph.KindConstant, Language: "go", Name: name}
+	use := &graph.Edge{From: reader.ID, To: "unresolved::valueref::" + name, Kind: graph.EdgeReads, FilePath: file, Line: 10,
+		Meta: map[string]any{"name": name}}
+	facts := ParseFacts{
+		EffectiveLanguage: "go",
+		File:              graph.FileMetaRow{FilePath: file},
+		Nodes:             []*graph.Node{reader, decl},
+		Edges:             []*graph.Edge{use},
+	}
+	failure := errors.New("fixture receipt failed")
+	for _, mode := range []string{"edge replay", "node replay", "unchanged rebind", "wrong rebind"} {
+		t.Run(mode, func(t *testing.T) {
+			b, exact := seedSyntheticCustody(t, facts)
+			before := rebuildFrameworkCustodyRows(t, b)
+			var replay int
+			receipts := func(yield func(ParseFacts, error) bool) {
+				replay++
+				if yield(facts, nil) && (mode == "edge replay" || mode == "node replay" && replay == 2) {
+					yield(ParseFacts{}, failure)
+				}
+			}
+			rules := valueRefsScratchTestRules()
+			switch mode {
+			case "unchanged rebind":
+				rules.Rebind = func(*graph.Edge, string, bool) (graph.EdgeReindex, bool) { return graph.EdgeReindex{}, false }
+			case "wrong rebind":
+				rules.Rebind = func(e *graph.Edge, _ string, _ bool) (graph.EdgeReindex, bool) {
+					old := e.To
+					e.To = "wrong"
+					return graph.EdgeReindex{Edge: e, OldTo: old}, true
+				}
+			}
+			count, err := b.RebuildValueRefs(t.Context(), receipts, rules)
+			require.ErrorIs(t, err, ErrRebuildValueRefs)
+			if mode == "edge replay" || mode == "node replay" {
+				require.ErrorIs(t, err, failure)
+			} else {
+				require.ErrorContains(t, err, "value refs move did not rebind")
+			}
+			require.Zero(t, count)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			// A clean replay after a failed proof sees no leftover scratch.
+			count, err = b.RebuildValueRefs(t.Context(), exact, valueRefsScratchTestRules())
+			require.NoError(t, err)
+			require.EqualValues(t, 1, count)
+			live := *use
+			live.To = decl.ID
+			stored, err := b.pendingEdge(pendingEdgeKey(&live))
+			require.NoError(t, err)
+			require.Equal(t, &live, stored)
+		})
+	}
+}
+
+func TestRebuildValueRefsCaptureNarrowing(t *testing.T) {
+	const file, other, name = "value.go", "other.go", "LIMIT_KEY"
+	b := newBuild(t, FullProfile)
+	reader := &graph.Node{ID: "reader", FilePath: file, Kind: graph.KindFunction, Language: "go"}
+	decl := &graph.Node{ID: "declaration", FilePath: file, Kind: graph.KindConstant, Language: "go", Name: name}
+	away := &graph.Node{ID: "unrelated", FilePath: other, Kind: graph.KindConstant, Language: "go", Name: name}
+	use := &graph.Edge{From: reader.ID, To: "unresolved::valueref::" + name, Kind: graph.EdgeReads, FilePath: file, Line: 10,
+		Meta: map[string]any{"name": name}}
+	settled, ordinary, originated, nonValue := *use, *use, *use, *use
+	settled.Line, ordinary.Line, originated.Line, nonValue.Line = 11, 12, 13, 14
+	ordinary.To, nonValue.To = "ordinary", "originally-ordinary"
+	b.AddBatch([]*graph.Node{reader, decl, away}, []*graph.Edge{use, &settled, &ordinary, &originated, &nonValue})
+	settledMove, originatedMove, nonValueMove := settled, originated, nonValue
+	settledMove.To, originatedMove.To, nonValueMove.To = decl.ID, "unresolved::valueref::moved", "unresolved::valueref::not-originated"
+	require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{
+		{Edge: &nonValueMove, OldTo: nonValue.To}, {Edge: &settledMove, OldTo: settled.To}, {Edge: &originatedMove, OldTo: originated.To},
+	}))
+	// Deliberately corrupt an unrelated file's node bytes; a whole-node
+	// scan fails here, even though that node cannot change this election.
+	require.NoError(t, b.pending.Set(pendingNodeKey(away.ID), []byte{0xff}, pebble.NoSync))
+	p := rebuildValueRefs{
+		rebuildCallMoves: rebuildCallMoves{b: b, prefix: rebuildValueRefsPrefix, rowBytes: 16 << 20, label: "value refs", inputRow: "input row"},
+		rules:            valueRefsScratchTestRules(),
+	}
+	require.NoError(t, p.captureReads(t.Context()))
+	for _, pair := range []struct{ raw, live *graph.Edge }{
+		{use, use}, {&settled, &settledMove}, {&originated, &originatedMove},
+	} {
+		claim, err := p.marked(append(p.column('r'), pendingEdgeKey(pair.raw)...))
+		require.NoError(t, err)
+		require.Equal(t, append([]byte{rebuildCapabilityWanted}, pendingEdgeKey(pair.live)...), claim)
+	}
+	for _, raw := range []*graph.Edge{&ordinary, &nonValue} {
+		claim, err := p.marked(append(p.column('r'), pendingEdgeKey(raw)...))
+		require.NoError(t, err)
+		require.Empty(t, claim)
+	}
+	var claims int
+	require.NoError(t, p.visit(t.Context(), p.column('r'), func(row) error {
+		claims++
+		return nil
+	}))
+	require.Equal(t, 3, claims)
+	require.NoError(t, p.captureNodes(t.Context()))
+	var declarations int
+	require.NoError(t, p.visit(t.Context(), p.column('d'), func(r row) error {
+		declarations++
+		require.Equal(t, p.key('d', file, name, decl.ID), r.key)
+		return nil
+	}))
+	require.Equal(t, 1, declarations)
+}
+
+func TestRebuildValueRefsSelectedFileIndexGuards(t *testing.T) {
+	const file, name = "value.go", "LIMIT_KEY"
+	for _, mode := range []string{"identity", "missing", "ownership"} {
+		t.Run(mode, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			decl := &graph.Node{ID: "declaration", FilePath: file, Kind: graph.KindConstant, Language: "go", Name: name}
+			b.AddNode(decl)
+			p := rebuildValueRefs{
+				rebuildCallMoves: rebuildCallMoves{b: b, prefix: rebuildValueRefsPrefix, rowBytes: 16 << 20, label: "value refs", inputRow: "input row"},
+				rules:            valueRefsScratchTestRules(),
+			}
+			require.NoError(t, p.put(p.key('q', file, name), nil))
+			fileKey := keyStrings([]byte{familyFile}, file, decl.ID)
+			switch mode {
+			case "identity":
+				require.NoError(t, b.pending.Set(fileKey, []byte("wrong"), pebble.NoSync))
+			case "missing":
+				require.NoError(t, b.pending.Delete(pendingNodeKey(decl.ID), pebble.NoSync))
+			case "ownership":
+				changed := *decl
+				changed.FilePath = "other.go"
+				encoded, err := encodeNode(&changed)
+				require.NoError(t, err)
+				require.NoError(t, b.pending.Set(pendingNodeKey(decl.ID), encoded, pebble.NoSync))
+			}
+			err := p.captureNodes(t.Context())
+			require.ErrorIs(t, err, ErrRebuildView)
+			want := "value refs file index " + mode
+			if mode == "missing" {
+				want = "value refs indexed node missing"
+			}
+			require.ErrorContains(t, err, want)
+		})
+	}
 }

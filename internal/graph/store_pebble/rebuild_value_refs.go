@@ -18,10 +18,11 @@ var ErrRebuildValueRefs = errors.New("pebble rebuild value refs failed")
 
 var rebuildValueRefsPrefix = []byte{'g', 'q', 49}
 
-// RebuildValueRefsRules supplies the native read, naming and shadow policy.
+// RebuildValueRefsRules supplies the native read, declaration and shadow policy.
 type RebuildValueRefsRules struct {
 	Name        func(*graph.Edge) string
 	Distinctive func(string) bool
+	Elect       func(readLine int, decls iter.Seq2[string, int]) (id string, conditional bool)
 	Shadows     func(reader, local string) bool
 	Generated   func(*graph.Node) bool
 	Rebind      func(*graph.Edge, string, bool) (graph.EdgeReindex, bool)
@@ -40,7 +41,8 @@ func (b *BuildStore) RebuildValueRefs(ctx context.Context, receipts iter.Seq2[Pa
 			err = fmt.Errorf("%w: %w", ErrRebuildValueRefs, err)
 		}
 	}()
-	if receipts == nil || rules.Name == nil || rules.Distinctive == nil || rules.Shadows == nil || rules.Generated == nil || rules.Rebind == nil {
+	if receipts == nil || rules.Name == nil || rules.Distinctive == nil || rules.Elect == nil ||
+		rules.Shadows == nil || rules.Generated == nil || rules.Rebind == nil {
 		return 0, invalid("value refs inputs")
 	}
 	prefix := rebuildValueRefsPrefix
@@ -111,8 +113,18 @@ func (p *rebuildValueRefs) captureReads(ctx context.Context) error {
 			return err
 		}
 		if raw != nil {
-			if err := p.claim(raw, r.key); err != nil {
-				return err
+			original := id
+			if !bytes.Equal(raw, r.key) {
+				original, err = decodeLinkRecorder(raw)
+				if err != nil {
+					return err
+				}
+			}
+			// A settled edge still owns its original placeholder receipt.
+			if valueRefPlaceholder(original.To) {
+				if err := p.claim(raw, r.key); err != nil {
+					return err
+				}
 			}
 		}
 		if !valueRefPlaceholder(id.To) || id.FilePath == "" {
@@ -144,7 +156,7 @@ func (p *rebuildValueRefs) recordReads(ctx context.Context, receipts iter.Seq2[P
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if facts.EffectiveLanguage == "" || e.Kind != graph.EdgeReads || e.FilePath != file {
+			if facts.EffectiveLanguage == "" || e.Kind != graph.EdgeReads || e.FilePath != file || !valueRefPlaceholder(e.To) {
 				continue
 			}
 			if err := p.recordRead(e, ordinal); err != nil {
@@ -172,10 +184,7 @@ func (p *rebuildValueRefs) recordRead(e *graph.Edge, ordinal uint64) error {
 	if err != nil || seen {
 		return err
 	}
-	var name string
-	if valueRefPlaceholder(e.To) {
-		name = p.rules.Name(e)
-	}
+	name := p.rules.Name(e)
 	if err := p.put(key, []byte(name)); err != nil || name == "" {
 		return err
 	}
@@ -199,29 +208,61 @@ func (p *rebuildValueRefs) nodeRole(n *graph.Node, decl, local byte) []byte {
 }
 
 func (p *rebuildValueRefs) captureNodes(ctx context.Context) error {
-	return p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
-		n, err := checkedRebuildLightNode(r, p.label)
-		if err != nil || n.FilePath == "" {
+	prefix := p.column('q')
+	var previous string
+	return p.b.RebuildView().visit(ctx, prefix, func(snap *pebble.Snapshot, r row) error {
+		file, _, err := readKeyString(r.key[len(prefix):])
+		if err != nil || file == previous {
 			return err
 		}
-		key := p.nodeRole(n, 'd', 's')
-		if key == nil {
-			return nil
-		}
-		wanted, err := p.present(p.key('q', n.FilePath, n.Name))
-		if err != nil || !wanted {
-			return err
-		}
-		if key[len(p.prefix)] == 'd' {
-			if err := p.input(r.key, r.value); err != nil {
-				return err
-			}
-		}
-		if err := p.put(p.key('i', n.ID), nil); err != nil {
-			return err
-		}
-		return p.put(key, appendKeyLine(nil, n.StartLine))
+		previous = file
+		return p.captureFileNodes(ctx, snap, file)
 	})
+}
+
+func (p *rebuildValueRefs) captureFileNodes(ctx context.Context, snap *pebble.Snapshot, file string) error {
+	prefix := keyStrings([]byte{familyFile}, file)
+	return pendingVisit(ctx, snap, prefix, func(r row) error {
+		id, rest, err := readKeyString(r.key[len(prefix):])
+		if err != nil || len(rest) != 0 || id != string(r.value) {
+			return invalid("value refs file index identity")
+		}
+		key := pendingNodeKey(id)
+		found, err := pendingGet(snap, key, func(value []byte) (bool, error) {
+			return true, p.captureFileNode(file, row{key, value})
+		})
+		if err == nil && !found {
+			return invalid("value refs indexed node missing")
+		}
+		return err
+	})
+}
+
+func (p *rebuildValueRefs) captureFileNode(file string, r row) error {
+	n, err := checkedRebuildLightNode(r, p.label)
+	if err != nil {
+		return err
+	}
+	if n.FilePath != file {
+		return invalid("value refs file index ownership")
+	}
+	key := p.nodeRole(n, 'd', 's')
+	if key == nil {
+		return nil
+	}
+	wanted, err := p.present(p.key('q', n.FilePath, n.Name))
+	if err != nil || !wanted {
+		return err
+	}
+	if key[len(p.prefix)] == 'd' {
+		if err := p.input(r.key, r.value); err != nil {
+			return err
+		}
+	}
+	if err := p.put(p.key('i', n.ID), nil); err != nil {
+		return err
+	}
+	return p.put(key, appendKeyLine(nil, n.StartLine))
 }
 
 func (p *rebuildValueRefs) recordNodes(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
@@ -327,34 +368,35 @@ func (p *rebuildValueRefs) facts(ctx context.Context, e *graph.Edge, name string
 		decl, local = 'D', 'S'
 	}
 	prefix := p.key(decl, e.FilePath, name)
-	var line int
-	if err := p.visit(ctx, prefix, func(r row) error {
-		id, rest, err := readKeyString(r.key[len(prefix):])
-		if err != nil || len(rest) != 0 || len(r.value) != 8 {
-			return invalid("value refs declaration row")
-		}
-		if proved {
-			if err := p.inputNode(id); err != nil {
-				return err
+	var scanErr error
+	facts.winner.id, facts.winner.conditional = p.rules.Elect(e.Line, func(yield func(string, int) bool) {
+		// Even if the election stops, account for every declaration's receipt.
+		stopped := false
+		scanErr = p.visit(ctx, prefix, func(r row) error {
+			id, rest, err := readKeyString(r.key[len(prefix):])
+			if err != nil || len(rest) != 0 || len(r.value) != 8 {
+				return invalid("value refs declaration row")
 			}
-		} else {
-			known, err := p.present(p.key('p', id))
-			if err != nil {
-				return err
+			if proved {
+				if err := p.inputNode(id); err != nil {
+					return err
+				}
+			} else {
+				known, err := p.present(p.key('p', id))
+				if err != nil {
+					return err
+				}
+				facts.omitted = facts.omitted || !known
 			}
-			facts.omitted = facts.omitted || !known
-		}
-		start := int(int64(binary.BigEndian.Uint64(r.value) ^ (1 << 63)))
-		idSet := facts.winner.id != ""
-		facts.winner.conditional = facts.winner.conditional || idSet
-		// The SQLite file index supplies ascending IDs to the stable line
-		// sort: choose the last preceding row, or the first future row.
-		if !idSet || start <= e.Line && (line > e.Line || start >= line) || line > e.Line && start < line {
-			facts.winner.id, line = id, start
-		}
-		return nil
-	}); err != nil {
-		return facts, err
+			if !stopped {
+				start := int(int64(binary.BigEndian.Uint64(r.value) ^ (1 << 63)))
+				stopped = !yield(id, start)
+			}
+			return nil
+		})
+	})
+	if scanErr != nil {
+		return facts, scanErr
 	}
 	prefix = p.key(local, e.FilePath, name)
 	err := p.visit(ctx, prefix, func(r row) error {
