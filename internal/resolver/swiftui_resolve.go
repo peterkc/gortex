@@ -33,14 +33,7 @@ func ResolveSwiftUIRefs(g graph.Store) int {
 	var reindex []graph.EdgeReindex
 	for _, kind := range []graph.EdgeKind{graph.EdgeInstantiates, graph.EdgeReferences, graph.EdgeTypedAs, graph.EdgeCalls} {
 		for e := range g.EdgesByKind(kind) {
-			if e == nil || !graph.IsUnresolvedTarget(e.To) {
-				continue
-			}
-			name := graph.UnresolvedName(e.To)
-			if name == "" || strings.ContainsRune(name, '.') {
-				continue
-			}
-			dirs, modelOnly, ok := swiftUIDirsFor(name)
+			name, dirs, modelOnly, ok := swiftUIRefShape(e)
 			if !ok {
 				continue
 			}
@@ -48,7 +41,7 @@ func ResolveSwiftUIRefs(g graph.Store) int {
 			if n := g.GetNode(e.From); n != nil {
 				fromFile = n.FilePath
 			}
-			if !strings.HasSuffix(fromFile, ".swift") {
+			if !swiftUIRefSource(fromFile) {
 				continue
 			}
 			targetID, conf := ResolveByConvention(g, name, "", dirs, fromFile)
@@ -57,17 +50,11 @@ func ResolveSwiftUIRefs(g graph.Store) int {
 			}
 			if modelOnly {
 				tn := g.GetNode(targetID)
-				if tn == nil || !swiftUIPathHasDir(tn.FilePath, swiftUIModelDirs) {
+				if tn == nil || !swiftUIModelPath(tn.FilePath) {
 					continue
 				}
 			}
-			oldTo := e.To
-			e.To = targetID
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = conf
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, conf)
-			StampSynthesized(e, SynthSwiftUIResolve)
-			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+			reindex = append(reindex, swiftUIRefRebind(e, targetID, conf))
 			resolved++
 		}
 	}
@@ -75,6 +62,36 @@ func ResolveSwiftUIRefs(g graph.Store) int {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func swiftUIRefShape(e *graph.Edge) (name string, dirs []string, modelOnly, ok bool) {
+	if e == nil || !graph.IsUnresolvedTarget(e.To) {
+		return "", nil, false, false
+	}
+	name = graph.UnresolvedName(e.To)
+	if name == "" || strings.ContainsRune(name, '.') {
+		return "", nil, false, false
+	}
+	dirs, modelOnly, ok = swiftUIDirsFor(name)
+	return name, dirs, modelOnly, ok
+}
+
+func swiftUIRefSource(path string) bool {
+	return strings.HasSuffix(path, ".swift")
+}
+
+func swiftUIModelPath(path string) bool {
+	return swiftUIPathHasDir(path, swiftUIModelDirs)
+}
+
+func swiftUIRefRebind(e *graph.Edge, target string, conf float64) graph.EdgeReindex {
+	oldTo := e.To
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	e.Confidence = conf
+	e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, conf)
+	StampSynthesized(e, SynthSwiftUIResolve)
+	return graph.EdgeReindex{Edge: e, OldTo: oldTo}
 }
 
 // swiftUIDirsFor classifies a reference name into its convention directories;
