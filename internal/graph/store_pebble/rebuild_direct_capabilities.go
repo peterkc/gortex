@@ -84,9 +84,18 @@ func (b *BuildStore) rebuildCapabilities(ctx context.Context, receipts iter.Seq2
 		})
 	}
 	if err := visit(func(e *graph.Edge) error {
-		keys := [][]byte{rebuildCapabilityKey('n', e.From), rebuildCapabilityKey('n', e.To), rebuildCapabilityRecorder(e, true)}
-		if e.Kind != graph.EdgeReadsConfig {
-			keys = append(keys, rebuildCapabilityRecorder(e, false))
+		keys := [][]byte{rebuildCapabilityKey('n', e.From), rebuildCapabilityKey('n', e.To), rebuildCapabilityRecorder('e', e, e.To)}
+		switch e.Kind {
+		case graph.EdgeCalls:
+			name, err := s.resolvedCallName(e.To)
+			if err != nil {
+				return err
+			}
+			if name != "" {
+				keys = append(keys, rebuildCapabilityRecorder('r', e, name))
+			}
+		case graph.EdgeReads, graph.EdgeWrites:
+			keys = append(keys, rebuildCapabilityRecorder('r', e, ""))
 		}
 		for _, k := range keys {
 			if err := s.put(k, []byte{rebuildCapabilityWanted}); err != nil {
@@ -138,8 +147,8 @@ func (b *BuildStore) rebuildCapabilities(ctx context.Context, receipts iter.Seq2
 		return stats, &RebuildUnknownProvenanceError{Count: count, First: graph.EdgeIdentityFor(first)}
 	}
 	if rules != nil && hasWinners {
-		// Keep the prior row-size refusal without staging a second copy of
-		// each winner. The former ordering key added the source repo prefix.
+		// Preserve the combined pass's previous admission limit. The input
+		// and winner row checks do not charge the former key's repo prefix.
 		if err := visit(s.checkDirectWinnerSize); err != nil {
 			return stats, err
 		}
@@ -181,16 +190,33 @@ func rebuildCapabilityKey(column byte, parts ...string) []byte {
 	return keyStrings([]byte{'g', 'c', column}, parts...)
 }
 
-func rebuildCapabilityRecorder(e *graph.Edge, exact bool) []byte {
-	column := byte('r')
-	if exact {
-		column = 'e'
+func rebuildCapabilityRecorder(column byte, e *graph.Edge, target string) []byte {
+	key := rebuildCapabilityKey(column, e.From, string(e.Kind), e.FilePath)
+	if column != 'r' || target != "" {
+		key = appendKeyString(key, target)
 	}
-	k := rebuildCapabilityKey(column, e.From, string(e.Kind), e.FilePath)
-	if exact {
-		k = appendKeyString(k, e.To)
+	return appendKeyLine(key, e.Line)
+}
+
+func rebuildPendingCallName(target string) string {
+	// Bare and wildcard-member placeholders carry a name, with or without
+	// a repo prefix. Do not collapse a structured stub to its last token.
+	name := strings.TrimPrefix(graph.UnresolvedName(target), "*.")
+	if strings.ContainsAny(name, ".:\\") {
+		return ""
 	}
-	return appendKeyLine(k, e.Line)
+	return name
+}
+
+func (s rebuildCapabilityScratch) resolvedCallName(target string) (string, error) {
+	if graph.IsUnresolvedTarget(target) {
+		return "", nil
+	}
+	n, err := s.node(target, decodeNodeLight)
+	if err != nil || n == nil || (n.Kind != graph.KindFunction && n.Kind != graph.KindMethod) {
+		return "", err
+	}
+	return n.Name, nil
 }
 
 func rebuildCapabilityExternal(e *graph.Edge, target string) []byte {
@@ -246,13 +272,8 @@ func rebuildCapabilityReceiverTags(e *graph.Edge) (string, bool) {
 	return field, self
 }
 
-func rebuildCapabilityReceiverRecorder(e *graph.Edge, exact bool) []byte {
-	key := rebuildCapabilityRecorder(e, exact)
-	if exact {
-		key[2] = 'b'
-	} else {
-		key[2] = 'm'
-	}
+func rebuildCapabilityReceiverRecorder(column byte, e *graph.Edge, target string) []byte {
+	key := rebuildCapabilityRecorder(column, e, target)
 	field, self := rebuildCapabilityReceiverTags(e)
 	return appendBool(appendKeyString(key, field), self)
 }
@@ -268,10 +289,14 @@ func (s rebuildCapabilityScratch) receiverSink() func(*graph.Edge, string) error
 			return err
 		}
 		keys := [][]byte{
-			rebuildCapabilityKey('n', e.From), rebuildCapabilityKey('n', e.To), rebuildCapabilityReceiverRecorder(call, true),
+			rebuildCapabilityKey('n', e.From), rebuildCapabilityKey('n', e.To), rebuildCapabilityReceiverRecorder('b', call, call.To),
 		}
-		if !graph.IsUnresolvedTarget(call.To) {
-			keys = append(keys, rebuildCapabilityReceiverRecorder(call, false))
+		name, err := s.resolvedCallName(call.To)
+		if err != nil {
+			return err
+		}
+		if name != "" {
+			keys = append(keys, rebuildCapabilityReceiverRecorder('m', call, name))
 		}
 		for _, key := range keys {
 			if err := s.put(key, []byte{rebuildCapabilityWanted}); err != nil {
@@ -331,13 +356,16 @@ func (s rebuildCapabilityScratch) provesReceiver(e *graph.Edge, id []byte) (bool
 	if err != nil {
 		return false, err
 	}
-	stationary, err := s.state(rebuildCapabilityReceiverRecorder(call, true))
-	if err != nil || graph.IsUnresolvedTarget(call.To) {
-		// A pending target is not a move. Another unresolved spelling at
-		// the same site cannot prove or taint this call's exact recorder.
+	stationary, err := s.state(rebuildCapabilityReceiverRecorder('b', call, call.To))
+	if err != nil {
+		return false, err
+	}
+	name, err := s.resolvedCallName(call.To)
+	if err != nil || name == "" {
+		// A pending target is not a move. Only its exact recorder counts.
 		return stationary == exact, err
 	}
-	moving, err := s.state(rebuildCapabilityReceiverRecorder(call, false))
+	moving, err := s.state(rebuildCapabilityReceiverRecorder('m', call, name))
 	return stationary|moving == exact, err
 }
 
@@ -463,49 +491,65 @@ func (s rebuildCapabilityScratch) record(ctx context.Context, facts ParseFacts,
 			continue
 		}
 		proved := supported && e.FilePath == file
+		var callName string
+		if e.Kind == graph.EdgeCalls {
+			callName = rebuildPendingCallName(e.To)
+		}
 		if receiver && e.Kind == graph.EdgeCalls {
 			field, self := rebuildCapabilityReceiverTags(e)
 			if field != "" || self {
-				if err := s.note(rebuildCapabilityReceiverRecorder(e, true), proved); err != nil {
+				if err := s.note(rebuildCapabilityReceiverRecorder('b', e, e.To), proved); err != nil {
 					return err
 				}
-				if graph.IsUnresolvedTarget(e.To) {
-					if err := s.note(rebuildCapabilityReceiverRecorder(e, false), proved); err != nil {
+				if callName != "" {
+					if err := s.note(rebuildCapabilityReceiverRecorder('m', e, callName), proved); err != nil {
 						return err
 					}
 				}
 			}
 		}
-		if err := s.note(rebuildCapabilityRecorder(e, true), proved); err != nil {
+		if err := s.note(rebuildCapabilityRecorder('e', e, e.To), proved); err != nil {
 			return err
 		}
-		// Calls and field accesses can move from a pending target without
-		// changing the recorder. An unrelated stationary target cannot.
-		if e.Kind != graph.EdgeReadsConfig && graph.IsUnresolvedTarget(e.To) {
-			if err := s.note(rebuildCapabilityRecorder(e, false), proved); err != nil {
+		// Field evidence keeps its existing site key. A moving call must
+		// name the same callee; structured process externs are proved below.
+		if callName != "" || ((e.Kind == graph.EdgeReads || e.Kind == graph.EdgeWrites) && graph.IsUnresolvedTarget(e.To)) {
+			if err := s.note(rebuildCapabilityRecorder('r', e, callName), proved); err != nil {
 				return err
 			}
 		}
-		if !proved || e.Kind != graph.EdgeCalls {
+		if e.Kind != graph.EdgeCalls {
 			continue
 		}
 		// A stationary raw call cannot certify attribution of the same key.
-		if err := s.note(rebuildCapabilityExternal(e, e.To), false); err != nil {
-			return err
+		if proved {
+			if err := s.note(rebuildCapabilityExternal(e, e.To), false); err != nil {
+				return err
+			}
+		}
+		name := graph.UnresolvedName(e.To)
+		if !strings.HasPrefix(name, "extern::") {
+			continue
 		}
 		path, symbol := processImport(language, e.To)
-		if !imports[path] {
+		if proved && !imports[path] {
 			continue
 		}
 		caller, err := s.node(e.From, decodeNodeLight)
 		if err != nil {
 			return err
 		}
-		if caller == nil || caller.Language != language {
+		if caller == nil || (proved && caller.Language != language) {
+			continue
+		}
+		if !proved {
+			path, symbol = processImport(caller.Language, graph.UnresolvedMarker+name)
+		}
+		if path == "" {
 			continue
 		}
 		target := graph.StubID(caller.RepoPrefix, graph.StubKindStdlib, path, symbol)
-		if err := s.note(rebuildCapabilityExternal(e, target), true); err != nil {
+		if err := s.note(rebuildCapabilityExternal(e, target), proved); err != nil {
 			return err
 		}
 	}
@@ -518,31 +562,34 @@ func (s rebuildCapabilityScratch) proves(e *graph.Edge, processImport func(strin
 	if err != nil || owner != exact {
 		return false, err
 	}
-	recorder, err := s.state(rebuildCapabilityRecorder(e, true))
+	recorder, err := s.state(rebuildCapabilityRecorder('e', e, e.To))
+	if err != nil || recorder&rebuildCapabilityUnproved != 0 {
+		return false, err
+	}
+	target, err := s.state(rebuildCapabilityKey('n', e.To))
 	if err != nil {
 		return false, err
 	}
-	if e.Kind != graph.EdgeReadsConfig {
-		moving, err := s.state(rebuildCapabilityRecorder(e, false))
-		if err != nil {
-			return false, err
+	if e.Kind != graph.EdgeCalls {
+		if e.Kind != graph.EdgeReadsConfig {
+			moving, err := s.state(rebuildCapabilityRecorder('r', e, ""))
+			return target == exact && recorder|moving == exact, err
 		}
-		recorder |= moving
-	}
-	if recorder != exact {
-		return false, nil
-	}
-	target, err := s.state(rebuildCapabilityKey('n', e.To))
-	if err != nil || e.Kind != graph.EdgeCalls {
-		return target == exact, err
+		return target == exact && recorder == exact, nil
 	}
 	n, err := s.node(e.To, decodeNode)
 	if err != nil {
 		return false, err
 	}
 	if target == exact && n != nil && (n.Kind == graph.KindFunction || n.Kind == graph.KindMethod) {
-		return true, nil
+		if n.Name == "" || graph.IsUnresolvedTarget(e.To) {
+			return recorder == exact, nil
+		}
+		moving, err := s.state(rebuildCapabilityRecorder('r', e, n.Name))
+		return recorder|moving == exact, err
 	}
+	// This key names the full attributed target and is proved by the
+	// classified import receipt, not by the plain callee name.
 	proof, err := s.state(rebuildCapabilityExternal(e, e.To))
 	if err != nil || proof != exact || target != rebuildCapabilityWanted {
 		return false, err

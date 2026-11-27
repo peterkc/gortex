@@ -58,11 +58,8 @@ func (v RebuildView) visitReceiverMutations(ctx context.Context, scratchParent s
 ) (stats ReceiverMutationStats, err error) {
 	defer func() {
 		if err != nil {
-			if _, ok := errors.AsType[*sortedRunLimitError](err); ok {
-				err = fmt.Errorf("%w: receiver_matches=%d: %w", ErrReceiverMutationInput, stats.Matches, err)
-			}
+			err = wrapReceiverMutationError(err, stats.Matches)
 			stats = ReceiverMutationStats{}
-			err = fmt.Errorf("%w: %w", ErrRebuildReceiverMutation, err)
 		}
 	}()
 	if v.build == nil || scratchParent == "" || spillAt < 1 || spillAt > goldBufferBytes ||
@@ -114,6 +111,13 @@ func (v RebuildView) visitReceiverMutations(ctx context.Context, scratchParent s
 		stats.Facts = count
 	}
 	return stats, ErrReceiverMutationNonconvergent
+}
+
+func wrapReceiverMutationError(err error, matches uint64) error {
+	if _, ok := errors.AsType[*sortedRunLimitError](err); ok {
+		err = fmt.Errorf("%w: receiver_matches=%d: %w", ErrReceiverMutationInput, matches, err)
+	}
+	return fmt.Errorf("%w: %w", ErrRebuildReceiverMutation, err)
 }
 
 type receiverPass struct {

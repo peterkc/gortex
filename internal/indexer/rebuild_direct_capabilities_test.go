@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"iter"
 	"maps"
 	"slices"
 	"testing"
@@ -148,6 +149,89 @@ func TestRebuildDirectCapabilitiesRefusesUnprovedWinner(t *testing.T) {
 	require.Equal(t, uint8(36), reply.Refusal)
 	require.Equal(t, uint64(1), reply.UnknownProvenance)
 	requireRebuildTestFileRows(t, build, nodes, before)
+}
+
+func TestRebuildCapabilitiesResolvedCallReceipts(t *testing.T) {
+	const path, caller, field = "p/m.go", "p/m.go::T.Tick", "p/m.go::T.n"
+	for _, route := range []struct {
+		name, callee string
+		counts       [3]int
+	}{
+		{"direct", "execSync", [3]int{0, 1, 0}},
+		{"receiver", "Bump", [3]int{0, 0, 2}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			callee := path + "::T." + route.callee
+			nodes := []*graph.Node{
+				{ID: caller, Name: "Tick", Kind: graph.KindMethod, FilePath: path, Language: "go", Meta: map[string]any{"receiver": "T"}},
+				{ID: callee, Name: route.callee, Kind: graph.KindMethod, FilePath: path, Language: "go", Meta: map[string]any{"receiver": "T"}},
+				{ID: field, Name: "n", Kind: graph.KindField, FilePath: path, Language: "go", Meta: map[string]any{"receiver": "T"}},
+			}
+			call := &graph.Edge{From: caller, To: callee, Kind: graph.EdgeCalls, FilePath: path, Line: 7,
+				Origin: graph.OriginASTResolved, Meta: map[string]any{"recv_self": true}}
+			before := []*graph.Edge{call}
+			var base []*graph.Edge
+			if route.name == "receiver" {
+				base = []*graph.Edge{{From: callee, To: field, Kind: graph.EdgeWrites, FilePath: path, Line: 3,
+					Origin: graph.OriginASTResolved}}
+				before = append(before, base...)
+			}
+			slices.SortFunc(before, compareRebuildTestFileEdgeKeys)
+			native := rebuildDirectCapabilitiesNative(t, nodes, before, route.counts)
+			want := native.AllEdges()
+			slices.SortFunc(want, compareRebuildTestFileEdgeKeys)
+			for _, tc := range []struct {
+				name, admitted, deferred string
+				accept                   bool
+			}{
+				{"decoy", "unresolved::*.Noop", "", false},
+				{"converse", "unresolved::*." + route.callee, "unresolved::*.Noop", true},
+				{"namespaced", "repo::unresolved::*." + route.callee, "", true},
+				{"structured-decoy", "unresolved::extern::other::" + route.callee, "", false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					build, _ := openRebuildTestFileStore(t)
+					build.AddBatch(nodes, before)
+					requireRebuildTestFileRows(t, build, nodes, before)
+					raw := *call
+					raw.To = tc.admitted
+					// Deliberately supply receipts independently of the live graph.
+					// Only the named receipt evidence changes between cases.
+					var receipts iter.Seq2[store_pebble.ParseFacts, error] = func(yield func(store_pebble.ParseFacts, error) bool) {
+						if !yield(store_pebble.ParseFacts{EffectiveLanguage: "go",
+							File: graph.FileMetaRow{FilePath: path}, Nodes: nodes, Edges: append(slices.Clone(base), &raw)}, nil) {
+							return
+						}
+						if tc.deferred != "" {
+							decoy := raw
+							decoy.To = tc.deferred
+							yield(store_pebble.ParseFacts{EffectiveLanguage: "python", File: graph.FileMetaRow{FilePath: "decoy.py"},
+								Edges: []*graph.Edge{&decoy}}, nil)
+						}
+					}
+					ctx := t.Context()
+					var err error
+					if route.name == "receiver" {
+						_, err = build.RebuildCapabilities(ctx, receipts, processExecMechanism, rebuildProcessImport, rebuildReceiverRules(), 1<<20)
+					} else {
+						err = runRebuildDirectCapabilities(ctx, build, receipts)
+					}
+					if tc.accept {
+						require.NoError(t, err)
+						requireRebuildTestFileRows(t, build, native.AllNodes(), want)
+						return
+					}
+					var refusal *store_pebble.RebuildUnknownProvenanceError
+					require.ErrorAs(t, err, &refusal)
+					require.Equal(t, uint64(1), refusal.Count)
+					if route.name == "receiver" {
+						require.Equal(t, graph.EdgeIdentity{From: caller, To: field, Kind: graph.EdgeAccessesField, FilePath: path, Line: 7}, refusal.First)
+					}
+					requireRebuildTestFileRows(t, build, nodes, before)
+				})
+			}
+		})
+	}
 }
 
 func rebuildDirectCapabilitiesNative(t *testing.T, nodes []*graph.Node, edges []*graph.Edge, counts [3]int) *graph.Graph {

@@ -658,15 +658,20 @@ func TestRebuildBuildViewRefusal(t *testing.T) {
 
 func TestRebuildBuildReceiverRefusals(t *testing.T) {
 	for _, tc := range []struct {
-		cause error
-		code  uint8
+		cause  error
+		code   uint8
+		detail string
 	}{
-		{store_pebble.ErrReceiverMutationNonconvergent, 39},
-		{store_pebble.ErrReceiverMutationInput, 40},
-		{io.ErrUnexpectedEOF, 41},
+		{store_pebble.ErrReceiverMutationNonconvergent, 39, ""},
+		{store_pebble.ErrReceiverMutationInput, 40, "receiver_matches=73: merge claims: pebble claims exceeds 1024 sorted runs"},
+		{io.ErrUnexpectedEOF, 41, ""},
 	} {
 		t.Run(tc.cause.Error(), func(t *testing.T) {
-			cause := fmt.Errorf("%w: %w", store_pebble.ErrRebuildReceiverMutation, tc.cause)
+			cause := tc.cause
+			if tc.detail != "" {
+				cause = fmt.Errorf("%w: %s", cause, tc.detail)
+			}
+			cause = fmt.Errorf("%w: %w", store_pebble.ErrRebuildReceiverMutation, cause)
 			want := tc.cause
 			if tc.code == 41 {
 				want = store_pebble.ErrRebuildReceiverMutation
@@ -683,6 +688,9 @@ func TestRebuildBuildReceiverRefusals(t *testing.T) {
 			require.ErrorIs(t, err, ErrRebuildWorker)
 			require.ErrorIs(t, err, want)
 			require.ErrorContains(t, err, tc.cause.Error())
+			if tc.detail != "" {
+				require.ErrorContains(t, err, tc.detail)
+			}
 			require.Empty(t, acks.Bytes())
 		})
 	}
