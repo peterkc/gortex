@@ -894,6 +894,10 @@ func (e *GoExtractor) ExtractWithOptions(filePath string, src []byte, opts parse
 	}
 
 	// --- Calls ---
+	var builtinBindings map[uintptr]map[string]string
+	if opts.CaptureBuiltinReceiverFacts {
+		builtinBindings = make(map[uintptr]map[string]string)
+	}
 	for _, c := range calls {
 		callerID := findEnclosingFunc(funcRanges, c.line)
 		if callerID == "" {
@@ -1036,6 +1040,17 @@ func (e *GoExtractor) ExtractWithOptions(filePath string, src []byte, opts parse
 			applyGoTemporalStartMeta(edge, c)
 			stampReturnUsage(edge, c.returnUsage)
 			attachGoTemporalCallArgNames(edge, c, c.callNode, src, paramNamesByFunc[callerID])
+			if builtinBindings != nil && !c.genericInst && graph.IsGoBuiltinFunction(c.callName) {
+				c.callNode.WithScratch(func() {
+					if c.callNode.ChildByFieldName("type_arguments") == nil {
+						edge.SetBuiltinReceiverHint(graph.BuiltinReceiverHint{
+							Language: "go",
+							Form:     goBuiltinCallForm(c.callNode, c.callName, src, builtinBindings),
+							Name:     c.callName,
+						})
+					}
+				})
+			}
 			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
