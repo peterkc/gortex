@@ -170,6 +170,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildGRPC,
 	store_pebble.ErrRebuildTemporal,
 	store_pebble.ErrRebuildEventChannel,
+	store_pebble.ErrRebuildSwiftObjC,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

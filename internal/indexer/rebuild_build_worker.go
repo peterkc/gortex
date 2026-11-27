@@ -453,6 +453,15 @@ func buildRebuildStages(
 				zap.Uint64("pairs", eventChannel.Pairs),
 				zap.Uint64("spill_bytes", eventChannel.SpillBytes))
 		}
+		swiftObjC, err := resolver.RunRebuildSwiftObjC(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		if err != nil {
+			return err
+		}
+		if swiftObjC.Edges != 0 {
+			logger.Info("rebuild Swift/ObjC applied to private build",
+				zap.Uint64("edges", swiftObjC.Edges),
+				zap.Uint64("spill_bytes", swiftObjC.SpillBytes))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
