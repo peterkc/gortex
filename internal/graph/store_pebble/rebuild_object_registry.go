@@ -467,7 +467,8 @@ func (p *rebuildObjectRegistryPass) recordNode(raw *graph.Node, file, lang strin
 	if err != nil {
 		return err
 	}
-	same := rebuildStoreFactorySameNode(raw, live, file, lang)
+	same := rebuildStoreNodeReceipt(raw, live, file, lang) && live.FilePath == file &&
+		raw.Language == live.Language && raw.Kind == live.Kind
 	if caller != 0 {
 		ok := same && raw.WorkspaceID == live.WorkspaceID
 		if err := noteRebuildScratchState(p.put, callerKey, caller, rebuildScratchProofBit(ok)); err != nil {
