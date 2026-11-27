@@ -25,10 +25,7 @@ func ResolveSidekiqCalls(g graph.Store) int {
 	byFull := map[string][]*graph.Node{}
 	bySimple := map[string][]*graph.Node{}
 	for _, n := range nodesByKindsOrAll(g, graph.KindMethod, graph.KindFunction) {
-		if n == nil || n.Meta == nil {
-			continue
-		}
-		w, _ := n.Meta["sidekiq_worker"].(string)
+		w := sidekiqWorkerName(n)
 		if w == "" {
 			continue
 		}
@@ -42,13 +39,7 @@ func ResolveSidekiqCalls(g graph.Store) int {
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if v, _ := e.Meta["via"].(string); v != sidekiqVia {
-			continue
-		}
-		worker, _ := e.Meta["sidekiq_worker"].(string)
+		worker := sidekiqCallName(e)
 		if worker == "" {
 			continue
 		}
@@ -58,36 +49,60 @@ func ResolveSidekiqCalls(g graph.Store) int {
 		}
 		target := pickStoreAction(g, e, sameBoundaryCandidates(g, e.From, cands))
 
-		want := "unresolved::*.perform"
+		var id string
 		if target != nil {
-			want = target.ID
-		}
-		if e.To == want {
-			if target != nil {
-				resolved++
-			}
-			continue
+			id = target.ID
+			resolved++
 		}
 		oldTo := e.To
-		e.To = want
-		if target != nil {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = ConfidenceTyped
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceTyped)
-			StampSynthesizedTyped(e, SynthSidekiq)
-			resolved++
-		} else {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = 0
-			e.ConfidenceLabel = ""
-			UnstampSynthesized(e)
+		if rebindSidekiqCall(e, id, target != nil) {
+			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func sidekiqWorkerName(n *graph.Node) string {
+	if n == nil {
+		return ""
+	}
+	worker, _ := n.Meta["sidekiq_worker"].(string)
+	return worker
+}
+
+func sidekiqCallName(e *graph.Edge) string {
+	if e == nil {
+		return ""
+	}
+	if via, _ := e.Meta["via"].(string); via != sidekiqVia {
+		return ""
+	}
+	worker, _ := e.Meta["sidekiq_worker"].(string)
+	return worker
+}
+
+func rebindSidekiqCall(e *graph.Edge, target string, matched bool) bool {
+	if !matched {
+		target = "unresolved::*.perform"
+	}
+	if e.To == target {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	if matched {
+		e.Confidence = ConfidenceTyped
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceTyped)
+		StampSynthesizedTyped(e, SynthSidekiq)
+	} else {
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		UnstampSynthesized(e)
+	}
+	return true
 }
 
 // sidekiqSimpleName returns the last `::` segment of a Ruby constant path.
