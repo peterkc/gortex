@@ -20,9 +20,11 @@ const (
 // a pure-name guess, lower than a typed binding.
 const (
 	fnPointerFanoutCap  = 64
-	fnPointerSweepCap   = 8
 	fnPointerConfidence = 0.7
 )
+
+// fnPointerSweepCap bounds transitive propagation through chains of copied slots.
+const fnPointerSweepCap = 8
 
 // ResolveFnPointerDispatch binds C/C++ function-pointer dispatch: a function
 // registered into a struct's fn-pointer field

@@ -76,3 +76,21 @@ func TestResolveMediatRCalls_UnknownRequestStaysPlaceholder(t *testing.T) {
 
 	assert.Equal(t, 0, ResolveMediatRCalls(g))
 }
+
+func TestResolveMediatRCalls_InvalidHandlerKindDoesNotActivate(t *testing.T) {
+	const file = "App.cs"
+	for _, kind := range []string{"", "unexpected"} {
+		g := graph.New()
+		mediatrHandler(g, "handler", file, "Message", kind)
+		call := &graph.Edge{From: "caller", To: "settled", Kind: graph.EdgeCalls, FilePath: file,
+			Meta: map[string]any{"via": mediatrVia, "mediatr_kind": "request", "mediatr_request_type": "Message"}}
+		g.AddEdge(call)
+		want := *call
+		require.Zero(t, ResolveMediatRCalls(g))
+		var got []*graph.Edge
+		for e := range g.EdgesByKind(graph.EdgeCalls) {
+			got = append(got, e)
+		}
+		require.Equal(t, []*graph.Edge{&want}, got)
+	}
+}
