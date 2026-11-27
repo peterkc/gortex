@@ -177,6 +177,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildClosureCollection,
 	store_pebble.ErrRebuildReactSetState,
 	store_pebble.ErrRebuildFlutterSetState,
+	store_pebble.ErrRebuildKMPExpectActual,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

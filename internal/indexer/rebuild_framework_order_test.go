@@ -34,6 +34,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"closure collection", "edges", 1},
 		{"React setState", "edges", 1},
 		{"Flutter setState", "edges", 1},
+		{"KMP expect/actual", "edges", 2},
 	}
 	for _, tc := range []struct {
 		name  string
@@ -57,7 +58,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				BaseRecipe:   store_pebble.HeadDigest{1},
 				ProvidersOff: true,
 				Recipes: map[string]rebuildDigest{
-					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1},
+					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1}, "kotlin": {1},
 				},
 				Policy:  freezeRebuildParsePolicy(root, cfg),
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
@@ -243,10 +244,17 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		edge(start, "unresolved::RunActivity", graph.EdgeCalls, 6, map[string]any{"arg_names": []string{"NotifyActivity"}}),
 	)
 
+	expect := node("common.kt", "kotlin", "platformClock", graph.KindFunction, 2)
+	expect.Meta = map[string]any{"kmp_role": "expect"}
+	actual := node("platform.kt", "kotlin", expect.Name, graph.KindFunction, 2)
+	actual.Meta = map[string]any{"kmp_role": "actual"}
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler}),
 		receipt([]*graph.Node{java}),
 		appFacts, grpcFacts, widgetFacts, temporalFacts,
+		receipt([]*graph.Node{expect}),
+		receipt([]*graph.Node{actual}),
 	}
 }

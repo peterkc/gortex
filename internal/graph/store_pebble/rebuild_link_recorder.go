@@ -47,6 +47,8 @@ const (
 	rebuildProofReactSetState
 	// Elected membership, build declarations and qualifying call.
 	rebuildProofFlutterSetState
+	// Exact expect and actual declaration ownership.
+	rebuildProofKMPExpectActual
 )
 
 type rebuildEdgeCustody struct {
@@ -69,7 +71,7 @@ func (c rebuildEdgeCustody) encode(edge []byte) ([]byte, error) {
 	if c.proof == 0 {
 		return c.raw, nil
 	}
-	if c.proof > rebuildProofFlutterSetState || len(c.raw) != 0 {
+	if c.proof > rebuildProofKMPExpectActual || len(c.raw) != 0 {
 		return nil, invalid("edge custody proof")
 	}
 	digest := sha256.Sum256(edge)
@@ -81,7 +83,7 @@ func readRebuildEdgeCustody(reader pebble.Reader, live []byte) (rebuildEdgeCusto
 		if len(raw) >= 2 && raw[0] == familyEdge && raw[1] == edgeOut {
 			return rebuildEdgeCustody{raw: bytes.Clone(raw)}, nil
 		}
-		if len(raw) != 2+sha256.Size || raw[0] != rebuildEdgeProofFormat || raw[1] == 0 || rebuildEdgeProof(raw[1]) > rebuildProofFlutterSetState {
+		if len(raw) != 2+sha256.Size || raw[0] != rebuildEdgeProofFormat || raw[1] == 0 || rebuildEdgeProof(raw[1]) > rebuildProofKMPExpectActual {
 			return rebuildEdgeCustody{}, invalid("edge custody format")
 		}
 		match, err := pendingGet(reader, live, func(edge []byte) (bool, error) {
