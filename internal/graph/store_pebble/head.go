@@ -121,6 +121,9 @@ func (h *Head) publish(ctx context.Context, tables StageTables, delta bool) (Hea
 		if prior.Stage != StageSearch || tables.Witness.Stage != StageSearch {
 			return zero, fmt.Errorf("%w: edit delta requires a complete base and result", ErrStageOrder)
 		}
+		if tables.Witness.PlatformCatalogRevision != prior.PlatformCatalogRevision {
+			return zero, fmt.Errorf("%w: changed platform catalog requires a fresh build", ErrStaleBase)
+		}
 	} else {
 		if prior.Stage != 0 && (tables.Witness.Version() != prior.Version() || tables.Witness.FrozenInputs != prior.FrozenInputs) {
 			return zero, fmt.Errorf("%w: stage belongs to a different version", ErrStaleBase)

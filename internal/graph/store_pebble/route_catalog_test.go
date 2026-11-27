@@ -48,6 +48,7 @@ func TestRouteCatalogSwitchHead(t *testing.T) {
 	want := routeCheckout{Incarnation: inc}
 	assertRoute(want)
 	oldLoc, old, oldManifest := newRouteTestHead(t, checkout, routeTestOldLease, 1)
+	oldManifest.Witness.PlatformCatalogRevision = ^uint32(0) // unknown to this binary
 	var unrouted routeLocator
 	require.NoError(t, catalog.registerCandidate(ctx, checkout, inc, unrouted, oldLoc))
 	want.Candidate = oldLoc
@@ -85,7 +86,8 @@ func TestRouteCatalogSwitchHead(t *testing.T) {
 	require.NotNil(t, live.GetNode("a.go::F"))
 	assertRoute(want) // The catalog's record still refers to the old manifest.
 
-	nextLoc, next, nextManifest := newRouteTestHead(t, checkout, routeTestNewLease, 2)
+	nextLoc, next, nextManifest := newRouteTestHead(t, checkout, routeTestNewLease, 1)
+	nextManifest.Witness.PlatformCatalogRevision = graph.PlatformCatalogRevision
 	require.NoError(t, catalog.registerCandidate(ctx, checkout, inc, oldLoc, nextLoc))
 	want.Candidate = nextLoc
 	manifestReceipt := publishRouteTestStage(t, next, nextManifest)
@@ -134,6 +136,7 @@ func TestRouteCatalogSwitchHead(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StageManifest, pw.Stage)
 	require.Equal(t, oldReceipt.Version, pw.Version())
+	require.Equal(t, ^uint32(0), pw.PlatformCatalogRevision)
 	require.Nil(t, pinned.GetNode("a.go::F"))
 
 	require.ErrorIs(t, catalog.registerCandidate(ctx, checkout, inc, oldLoc, nextLoc), ErrStaleBase)

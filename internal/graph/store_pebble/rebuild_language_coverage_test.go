@@ -53,6 +53,7 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 					File: graph.FileMetaRow{FilePath: path, Size: 10, ContentHash: "content", NodeCount: 1}}))
 			}
 			w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, FrozenInputs: HeadDigest{9}, Profile: FullProfile, Stage: StageManifest}
+			w.PlatformCatalogRevision = graph.PlatformCatalogRevision
 			manifest, err := PrepareManifest(ctx, t.TempDir(), files, w, testHeadIncarnation)
 			require.NoError(t, err)
 			_, err = head.PublishStage(ctx, manifest)
@@ -188,6 +189,7 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 			s := stageRead(t, head)
 			got, err := s.Publication()
 			require.NoError(t, err)
+			require.Equal(t, graph.PlatformCatalogRevision, got.PlatformCatalogRevision)
 			require.Equal(t, wantUnsupported, got.Unsupported)
 			hits, err := s.SearchContent("", "decl", 10)
 			require.ErrorIs(t, err, errors.ErrUnsupported)
@@ -213,6 +215,10 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 			// A validly encoded delta with a worsening or unproved claim must
 			// refuse even when it references the exact current base.
 			bad = StageTables{Dir: t.TempDir(), Incarnation: testHeadIncarnation, Base: digest, Witness: search.Witness}
+			bad.Witness.PlatformCatalogRevision++
+			_, err = head.PublishDelta(ctx, bad)
+			require.ErrorIs(t, err, ErrStaleBase, "a new catalog needs a fresh build")
+			bad.Witness = search.Witness
 			bad.Witness.Input = HeadDigest{42}
 			for _, coverage := range []*RelationCoverage{nil, {DeferredLanguages: []string{"rust"}}} {
 				bad.Witness.Relations = coverage

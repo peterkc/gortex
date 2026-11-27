@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/zzet/gortex/internal/excludes"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/source"
 )
@@ -193,6 +194,7 @@ func sealRebuildBuildInputs(ctx context.Context, lease string, src *source.Files
 	}
 	req.ProjectName, req.BaseRecipe = name, req.Witness.Recipe
 	req.Witness.Input, req.Witness.FrozenInputs = input, store_pebble.HeadDigest(digest)
+	req.Witness.PlatformCatalogRevision = graph.PlatformCatalogRevision
 	req.Witness.Recipe = req.projectRecipe(threshold)
 	return req, nil
 }

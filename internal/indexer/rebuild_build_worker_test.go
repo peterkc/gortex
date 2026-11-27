@@ -228,6 +228,7 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 				require.NoError(t, err)
 				req.Witness.FrozenInputs = store_pebble.HeadDigest(digest)
 			}
+			req.Witness.PlatformCatalogRevision = graph.PlatformCatalogRevision
 			req.Witness.Recipe = req.projectRecipe(cfg.Coverage.ClonesThreshold())
 			require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, inputs))
 			core, logs := observer.New(zap.InfoLevel)
@@ -364,6 +365,9 @@ func TestRebuildBuildRequestPreservesPathBytesAndSetting(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, inputs, gotInputs)
 	require.Equal(t, rebuildTestIncarnation, got.Incarnation)
+	require.Equal(t, graph.PlatformCatalogRevision, got.Witness.PlatformCatalogRevision)
+	got.Witness.PlatformCatalogRevision++
+	require.ErrorIs(t, got.checkProjectRecipe(), errRebuildBuildWire)
 	require.True(t, got.ProvidersOff)
 	var cfgGot config.IndexConfig
 	require.NoError(t, json.Unmarshal(got.Config, &cfgGot))
@@ -456,6 +460,7 @@ func TestRebuildBuildMalformedStageDoesNotPublish(t *testing.T) {
 	for name, expected := range map[string]error{
 		"skip manifest":      store_pebble.ErrStageOrder,
 		"wrong input digest": store_pebble.ErrStaleBase,
+		"wrong revision":     store_pebble.ErrStaleBase,
 		"invalid frame":      errRebuildBuildWire,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -469,6 +474,8 @@ func TestRebuildBuildMalformedStageDoesNotPublish(t *testing.T) {
 				w.Stage = store_pebble.StageFileGraph
 			case "wrong input digest":
 				w.Input = store_pebble.HeadDigest{2}
+			case "wrong revision":
+				w.PlatformCatalogRevision++
 			case "invalid frame":
 				in.Write([]byte{0xff, 0xff, 0xff, 0xff})
 			}
@@ -862,6 +869,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 				exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, leases, headDir,
 				func(ctx context.Context, offer store_pebble.StageTables) error {
 					require.False(t, tc.mismatch, "a mismatched epoch must not reach the child")
+					require.Equal(t, graph.PlatformCatalogRevision, offer.Witness.PlatformCatalogRevision)
 					stages = append(stages, offer.Witness.Stage)
 					if offer.Witness.Stage == store_pebble.StageManifest {
 						ref := rebuildDigest(offer.Witness.FrozenInputs)

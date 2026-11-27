@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"go.uber.org/zap"
 )
@@ -87,6 +88,7 @@ func TestRebuildGitPolicyMismatchRefusesBeforeBuild(t *testing.T) {
 					Stage: store_pebble.StageManifest, Profile: store_pebble.DefaultProfile, UsesGitIgnorePolicy: tc.marked,
 				},
 			}
+			req.Witness.PlatformCatalogRevision = graph.PlatformCatalogRevision
 			req.Witness.Recipe = req.projectRecipe(cfg.Coverage.ClonesThreshold())
 			require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, nil))
 			err = buildRebuildStages(ctx, lease, zap.NewNop(),

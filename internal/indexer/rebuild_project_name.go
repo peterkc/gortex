@@ -13,6 +13,7 @@ import (
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/clones"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/indexer/source"
@@ -320,6 +321,10 @@ func (req rebuildBuildRequest) checkTrackedRepos() error {
 func (req rebuildBuildRequest) checkProjectRecipe() error {
 	if err := req.checkTrackedRepos(); err != nil {
 		return err
+	}
+	if req.Witness.PlatformCatalogRevision != graph.PlatformCatalogRevision {
+		return fmt.Errorf("%w: build requires platform catalog revision %d, got %d", errRebuildBuildWire,
+			graph.PlatformCatalogRevision, req.Witness.PlatformCatalogRevision)
 	}
 	if !req.ProvidersOff {
 		return fmt.Errorf("%w: missing frozen semantic and resolver LSP off policy", errRebuildBuildWire)

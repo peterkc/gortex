@@ -153,6 +153,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				require.NoError(t, err)
 				req.Witness.FrozenInputs = store_pebble.HeadDigest(digest)
 			}
+			req.Witness.PlatformCatalogRevision = graph.PlatformCatalogRevision
 			req.Witness.Recipe = req.projectRecipe(cfg.Coverage.ClonesThreshold())
 			require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, inputs))
 			core, logs := observer.New(zap.InfoLevel)
@@ -300,6 +301,7 @@ func TestRebuildBuildFrameworkCensusStaysFrozenAfterEvent(t *testing.T) {
 	})
 	require.NoError(t, err)
 	req.Witness.FrozenInputs = store_pebble.HeadDigest(digest)
+	req.Witness.PlatformCatalogRevision = graph.PlatformCatalogRevision
 	req.Witness.Recipe = req.projectRecipe(cfg.Coverage.ClonesThreshold())
 	require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, inputs))
 

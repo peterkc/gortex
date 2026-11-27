@@ -63,7 +63,8 @@ func TestManifestFrozenInputWitness(t *testing.T) {
 	legacy := []byte{1, byte(StageManifest), 4, 'f', 'u', 'l', 'l'}
 	legacy = append(legacy, w.Input[:]...)
 	legacy = append(legacy, w.Recipe[:]...)
-	version := w.Version()
+	version := blake3.Sum256(append(w.Input[:], w.Recipe[:]...))
+	require.Equal(t, HeadDigest(version), w.Version(), "legacy identity")
 	legacy = append(legacy, version[:]...)
 	legacy = append(legacy, 0, 0) // no dependencies or families
 	raw, err := encodeWitness(w)
@@ -100,6 +101,30 @@ func TestManifestFrozenInputWitness(t *testing.T) {
 	got.Stage, got.FrozenInputs = StageFileGraph, HeadDigest{4}
 	_, err = h.PublishStage(ctx, StageTables{Dir: t.TempDir(), Base: base, Witness: got, Incarnation: testHeadIncarnation})
 	require.ErrorIs(t, err, ErrStaleBase)
+}
+
+func TestWitnessCatalogRevisionEncoding(t *testing.T) {
+	w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Profile: FullProfile, Stage: StageManifest, PlatformCatalogRevision: 7}
+	raw, err := encodeWitness(w)
+	require.NoError(t, err)
+	require.Equal(t, []byte{witnessCatalogFormat, 0, 0, 0, 7, witnessFormat}, raw[:6])
+	got, err := decodeWitness(raw)
+	require.NoError(t, err)
+	require.Equal(t, w, got)
+	for n := range len(raw) {
+		_, err := decodeWitness(raw[:n])
+		require.ErrorIs(t, err, errInvalidRecord)
+	}
+	_, err = decodeWitness(append(bytes.Clone(raw[:5]), raw...))
+	require.ErrorIs(t, err, errInvalidRecord, "the revision cannot be nested")
+	raw[4]++ // the stored version still belongs to revision 7
+	_, err = decodeWitness(raw)
+	require.ErrorIs(t, err, errInvalidRecord)
+	w.PlatformCatalogRevision = 0
+	legacy, err := encodeWitness(w)
+	require.NoError(t, err)
+	_, err = decodeWitness(append([]byte{witnessCatalogFormat, 0, 0, 0, 0}, legacy...))
+	require.ErrorIs(t, err, errInvalidRecord, "zero must keep its legacy encoding")
 }
 
 func TestManifestGitPolicyWitness(t *testing.T) {
