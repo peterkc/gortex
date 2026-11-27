@@ -105,7 +105,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				Recipes: map[string]rebuildDigest{
 					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1}, "kotlin": {1}, "mybatis": {1},
 					"sql": {1}, "python": {1}, "csharp": {1}, "ruby": {1}, "php": {1}, "c": {1},
-					"godot_project": {1}, "gdscript": {1},
+					"godot_project": {1}, "gdscript": {1}, "svelte": {1},
 				},
 				Policy:  freezeRebuildParsePolicy(root, cfg),
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
@@ -124,7 +124,9 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 					}
 				}
 				path, lang := facts.File.FilePath, facts.EffectiveLanguage
-				require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte("// cached receipt fixture\n"), 0o600))
+				file := filepath.Join(root, path)
+				require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o700))
+				require.NoError(t, os.WriteFile(file, []byte("// cached receipt fixture\n"), 0o600))
 				input, _, err := readRebuildInput(ctx, src, path, lang, 1024)
 				require.NoError(t, err)
 				inputs = append(inputs, input)
