@@ -23,5 +23,7 @@ func rebuildReactResolveColumns(b *BuildStore) rebuildCallMoves {
 
 // RebuildReactResolve runs after Express and before FastAPI.
 func (b *BuildStore) RebuildReactResolve(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules RebuildConventionRules) (uint64, error) {
-	return b.rebuildConvention(ctx, receipts, rebuildReactResolveColumns(b), rules, ErrRebuildReactResolve, true)
+	cols := rebuildReactResolveColumns(b)
+	kinds := [...]graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences, graph.EdgeRendersChild}
+	return b.rebuildConvention(ctx, receipts, cols, rules, ErrRebuildReactResolve, cols.label+" fallback inputs", kinds[:], graph.EdgeRendersChild)
 }

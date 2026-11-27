@@ -24,5 +24,7 @@ func rebuildFastAPIColumns(b *BuildStore) rebuildCallMoves {
 // RebuildFastAPI resolves residual dependency and router rows. Calls and
 // References share native move windows, with each kind in receipt order.
 func (b *BuildStore) RebuildFastAPI(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules RebuildConventionRules) (uint64, error) {
-	return b.rebuildConvention(ctx, receipts, rebuildFastAPIColumns(b), rules, ErrRebuildFastAPI, false)
+	cols := rebuildFastAPIColumns(b)
+	kinds := [...]graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
+	return b.rebuildConvention(ctx, receipts, cols, rules, ErrRebuildFastAPI, cols.label+" fallback inputs", kinds[:])
 }

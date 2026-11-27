@@ -70,7 +70,7 @@ func (b *BuildStore) freezeConventionInputs(ctx context.Context, p rebuildCallMo
 }
 
 func (b *BuildStore) rebuildConvention(ctx context.Context, receipts iter.Seq2[ParseFacts, error], cols rebuildCallMoves,
-	rules RebuildConventionRules, stageErr error, renders bool,
+	rules RebuildConventionRules, stageErr error, inputError string, kinds []graph.EdgeKind, liveKinds ...graph.EdgeKind,
 ) (count uint64, err error) {
 	defer func() {
 		if err != nil {
@@ -79,7 +79,7 @@ func (b *BuildStore) rebuildConvention(ctx context.Context, receipts iter.Seq2[P
 		}
 	}()
 	if receipts == nil || rules.Shape == nil || rules.Source == nil || rules.Eligible == nil || rules.Rank == nil || rules.Rebind == nil {
-		return 0, invalid(cols.label + " fallback inputs")
+		return 0, invalid(inputError)
 	}
 	frozen, err := cols.present(cols.column('I'))
 	if err != nil {
@@ -92,12 +92,8 @@ func (b *BuildStore) rebuildConvention(ctx context.Context, receipts iter.Seq2[P
 		err = errors.Join(err, b.pending.DeleteRange(cols.prefix, prefixEnd(cols.prefix), pebble.NoSync))
 	}()
 	p := rebuildConventionPass{rebuildCallMoves: cols, rules: rules}
-	if err := p.capture(ctx, renders); err != nil {
+	if err := p.capture(ctx, liveKinds); err != nil {
 		return 0, err
-	}
-	kinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
-	if renders {
-		kinds = append(kinds, graph.EdgeRendersChild)
 	}
 	return p.run(ctx, receipts, kinds)
 }
@@ -258,7 +254,7 @@ func (p *rebuildConventionPass) capNode(id string) error {
 
 // h holds active sites and their raw keys; n and s request only the possible
 // name candidates and source paths used by these sites.
-func (p *rebuildConventionPass) capture(ctx context.Context, renders bool) error {
+func (p *rebuildConventionPass) capture(ctx context.Context, liveKinds []graph.EdgeKind) error {
 	prefix := p.column('i')
 	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 		key := r.key[len(prefix):]
@@ -267,14 +263,23 @@ func (p *rebuildConventionPass) capture(ctx context.Context, renders bool) error
 			return err // An earlier turn moved or removed the exact key.
 		}
 		return p.captureSite(ctx, key, val)
-	}); err != nil || !renders {
+	}); err != nil || len(liveKinds) == 0 {
 		return err
 	}
-	// Native streams current RendersChild rows instead of freezing them.
+	// React filters live RendersChild by kind. UIKit also checks the
+	// unresolved target in the key before decoding the value.
+	rendersOnly := len(liveKinds) == 1 && liveKinds[0] == graph.EdgeRendersChild
 	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
-		kind, err := rebuildAttributionEdgeKind(r.key)
-		if err != nil || kind != graph.EdgeRendersChild {
-			return err
+		if rendersOnly {
+			kind, err := rebuildAttributionEdgeKind(r.key)
+			if err != nil || kind != graph.EdgeRendersChild {
+				return err
+			}
+		} else {
+			id, err := decodeLinkRecorder(r.key)
+			if err != nil || !slices.Contains(liveKinds, id.Kind) || !graph.IsUnresolvedTarget(id.To) {
+				return err
+			}
 		}
 		return p.captureSite(ctx, r.key, r.value)
 	})

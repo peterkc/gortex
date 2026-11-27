@@ -3,10 +3,8 @@ package store_pebble
 import (
 	"context"
 	"errors"
-	"fmt"
 	"iter"
 
-	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -25,40 +23,8 @@ func (b *BuildStore) FreezeUIKitInputs(ctx context.Context, match func(graph.Fra
 
 // RebuildUIKit refetches the frozen sites after SwiftUI and scans the live
 // Instantiates and TypedAs sites. Moves follow native kind and receipt order.
-func (b *BuildStore) RebuildUIKit(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules RebuildConventionRules) (count uint64, err error) {
-	defer func() {
-		if err != nil {
-			count = 0
-			err = fmt.Errorf("%w: %w", ErrRebuildUIKit, err)
-		}
-	}()
-	if receipts == nil || rules.Shape == nil || rules.Source == nil || rules.Eligible == nil || rules.Rank == nil || rules.Rebind == nil {
-		return 0, invalid("uikit inputs")
-	}
-	cols := rebuildUIKitColumns(b)
-	frozen, err := cols.present(cols.column('I'))
-	if err != nil {
-		return 0, err
-	}
-	if !frozen {
-		return 0, invalid("uikit census missing")
-	}
-	defer func() {
-		err = errors.Join(err, b.pending.DeleteRange(cols.prefix, prefixEnd(cols.prefix), pebble.NoSync))
-	}()
-	p := rebuildConventionPass{rebuildCallMoves: cols, rules: rules}
-	if err := p.capture(ctx, false); err != nil {
-		return 0, err
-	}
-	if err := b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
-		id, err := decodeLinkRecorder(r.key)
-		if err != nil || id.Kind != graph.EdgeInstantiates && id.Kind != graph.EdgeTypedAs || !graph.IsUnresolvedTarget(id.To) {
-			return err
-		}
-		return p.captureSite(ctx, r.key, r.value)
-	}); err != nil {
-		return 0, err
-	}
+func (b *BuildStore) RebuildUIKit(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules RebuildConventionRules) (uint64, error) {
 	kinds := [...]graph.EdgeKind{graph.EdgeInstantiates, graph.EdgeReferences, graph.EdgeTypedAs, graph.EdgeCalls}
-	return p.run(ctx, receipts, kinds[:])
+	return b.rebuildConvention(ctx, receipts, rebuildUIKitColumns(b), rules, ErrRebuildUIKit, "uikit inputs", kinds[:],
+		graph.EdgeInstantiates, graph.EdgeTypedAs)
 }
