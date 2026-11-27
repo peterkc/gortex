@@ -63,7 +63,11 @@ func (b *BuildStore) RebuildUIKit(ctx context.Context, receipts iter.Seq2[ParseF
 	if err != nil || !active {
 		return 0, err
 	}
-	for _, kind := range [...]graph.EdgeKind{graph.EdgeInstantiates, graph.EdgeReferences, graph.EdgeTypedAs, graph.EdgeCalls} {
+	kinds := [...]graph.EdgeKind{graph.EdgeInstantiates, graph.EdgeReferences, graph.EdgeTypedAs, graph.EdgeCalls}
+	if err := p.captureClaims(ctx, kinds[:]); err != nil {
+		return 0, err
+	}
+	for _, kind := range kinds {
 		if err := p.record(ctx, receipts, kind); err != nil {
 			return 0, err
 		}

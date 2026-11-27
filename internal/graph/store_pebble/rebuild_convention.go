@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -99,6 +100,9 @@ func (b *BuildStore) rebuildConvention(ctx context.Context, receipts iter.Seq2[P
 	kinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
 	if renders {
 		kinds = append(kinds, graph.EdgeRendersChild)
+	}
+	if err := p.captureClaims(ctx, kinds); err != nil {
+		return 0, err
 	}
 	for _, kind := range kinds {
 		if err := p.record(ctx, receipts, kind); err != nil {
@@ -251,7 +255,7 @@ func (p *rebuildConventionPass) captureSite(ctx context.Context, old, val []byte
 			return err
 		}
 		if raw != nil {
-			if err := p.claim(raw, old); err != nil {
+			if err := p.put(append(p.column('k'), raw...), nil); err != nil {
 				return err
 			}
 		}
@@ -262,6 +266,32 @@ func (p *rebuildConventionPass) captureSite(ctx context.Context, old, val []byte
 		p.count++
 	}
 	return p.put(append(p.column('h'), old...), raw)
+}
+
+// A non-moving row can own a mover's raw receipt. Only index claims for
+// receipts a move actually needs, but consider every live edge of those kinds.
+func (p *rebuildConventionPass) captureClaims(ctx context.Context, kinds []graph.EdgeKind) error {
+	if p.count == 0 {
+		return nil
+	}
+	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
+		kind, err := rebuildAttributionEdgeKind(r.key)
+		if err != nil || !slices.Contains(kinds, kind) {
+			return err
+		}
+		raw, err := rebuildReceiptKey(snap, r.key)
+		if errors.Is(err, ErrRebuildUnknownProvenance) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		wanted, err := p.present(append(p.column('k'), raw...))
+		if err != nil || !wanted {
+			return err
+		}
+		return p.claim(raw, r.key)
+	})
 }
 
 func (p *rebuildConventionPass) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error], kind graph.EdgeKind) error {
@@ -406,7 +436,7 @@ func (p *rebuildConventionPass) prove(ctx context.Context) error {
 			return nil
 		}
 		claim, err := p.marked(append(p.column('r'), r.value...))
-		if err == nil && (!sourceSeen || len(claim) == 0 || claim[0] != rebuildScratchExact) {
+		if err == nil && (!sourceSeen || len(claim) <= 1 || claim[0] != rebuildScratchExact || !bytes.Equal(claim[1:], old)) {
 			refused.add(graph.EdgeIdentityFor(e), nil)
 		}
 		return err

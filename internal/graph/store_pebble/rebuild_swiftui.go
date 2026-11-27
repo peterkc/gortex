@@ -56,6 +56,9 @@ func (b *BuildStore) RebuildSwiftUI(ctx context.Context, receipts iter.Seq2[Pars
 	if err != nil || !active {
 		return 0, err
 	}
+	if err := p.captureClaims(ctx, kinds[:]); err != nil {
+		return 0, err
+	}
 	for _, kind := range kinds {
 		if err := p.record(ctx, receipts, kind); err != nil {
 			return 0, err
