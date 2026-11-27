@@ -88,7 +88,7 @@ func TestRebuildFileImportsRunAndTail(t *testing.T) {
 	var want []*graph.Edge
 	for i, from := range []string{"a.lua", "b.lua", "c.lua"} {
 		e := &graph.Edge{From: from, To: "unresolved::import::target", Kind: graph.EdgeImports, Line: i + 1}
-		if i == 0 {
+		if i == 1 {
 			e.Via = strings.Repeat("x", threshold)
 		}
 		b.AddEdge(e)
@@ -99,14 +99,30 @@ func TestRebuildFileImportsRunAndTail(t *testing.T) {
 	var bytes uint64
 	stats, err := b.RebuildFileImports(ctx, threshold, nil, func(_ *RebuildFileImportIndex, e *graph.Edge) (string, error) {
 		if e.From == "c.lua" {
-			// The oversized first move is already on disk. The next move
-			// stays in memory. Neither may have a pending scratch row.
+			// The small first move must spill before the oversized move
+			// is appended. Each run contains one move; the third is the tail.
 			paths, err := filepath.Glob(filepath.Join(b.scratchParent, "pending", "file-import-*", "*.sst"))
 			require.NoError(t, err)
-			require.Len(t, paths, 1)
-			info, err := os.Stat(paths[0])
-			require.NoError(t, err)
-			bytes = uint64(info.Size())
+			require.Len(t, paths, 2)
+			for i, path := range paths {
+				info, err := os.Stat(path)
+				require.NoError(t, err)
+				bytes += uint64(info.Size())
+				var got []*graph.Edge
+				require.NoError(t, visitFileImportRun(ctx, path, fileImportLua, func(r row) error {
+					_, raw, err := readKeyString(r.value)
+					if err != nil {
+						return err
+					}
+					move, err := decodeEdge(raw)
+					if err != nil {
+						return err
+					}
+					got = append(got, move)
+					return nil
+				}))
+				require.Equal(t, want[i:i+1], got)
+			}
 			require.NoError(t, pendingVisit(ctx, b.pending, fileImportLua, func(row) error {
 				return fmt.Errorf("file-import move was written to the overlay")
 			}))
@@ -115,7 +131,7 @@ func TestRebuildFileImportsRunAndTail(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 	require.Equal(t, 3, stats.LuaMoves)
-	require.Equal(t, 1, stats.Flushes)
+	require.Equal(t, 2, stats.Flushes)
 	require.Positive(t, bytes)
 	require.Equal(t, bytes, stats.SpillBytes)
 	assertFileImportRunsRemoved(t, b)
@@ -125,6 +141,39 @@ func TestRebuildFileImportsRunAndTail(t *testing.T) {
 		return nil
 	}))
 	require.Equal(t, want, got)
+}
+
+func TestRebuildFileImportsGodotRunAndTailOrder(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	ctx := t.Context()
+	p := fileImportPass{build: b, spillAt: 1 << 10}
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(p.dir)) })
+	stream := fileImportMoves{prefix: fileImportGodot}
+	for i, from := range []string{"a.tscn", "b.tscn", "c.tscn", "d.tscn", "e.tscn", "f.tscn"} {
+		kind := graph.EdgeReferences
+		if i%2 == 1 {
+			kind = graph.EdgeImports
+		}
+		e := &graph.Edge{From: from, To: "unresolved::res://target.gd", Kind: kind, FilePath: from, Line: 1}
+		require.NoError(t, p.stageResolved(ctx, &stream, e, "target.gd"))
+		if i == 1 || i == 3 {
+			// Fix the layout: two mixed runs, then a mixed in-memory tail.
+			require.Len(t, stream.rows, 2)
+			require.NoError(t, p.spill(ctx, &stream))
+		}
+	}
+	require.Equal(t, 2, stream.runs)
+	require.Len(t, stream.rows, 2)
+	var got []string
+	require.NoError(t, stream.visit(ctx, p.dir, func(r row) error {
+		from, _, err := readKeyString(r.key[len(fileImportGodot)+1+2:]) // move prefix, group, edge family and direction
+		if err != nil {
+			return err
+		}
+		got = append(got, from)
+		return nil
+	}))
+	require.Equal(t, []string{"a.tscn", "c.tscn", "e.tscn", "b.tscn", "d.tscn", "f.tscn"}, got)
 }
 
 func assertFileImportRunsRemoved(t *testing.T, b *BuildStore) {

@@ -77,6 +77,9 @@ func (f *RebuildFileImportIndex) VisitBasename(ctx context.Context, base string,
 // must not mutate the input or keep the borrowed index. Relative returns a
 // replacement (only target/provenance may change) or nil on a miss. Lua and
 // Godot return only the target or empty on a miss.
+// Lua and Godot buffer moves separately during the same scan. Together,
+// their buffered key and value bytes can approach twice spillAt, excluding
+// the current row and writer overhead. Oversized rows spill on their own.
 func (b *BuildStore) RebuildFileImports(ctx context.Context, spillAt int,
 	relative func(*RebuildFileImportIndex, *graph.Edge) (*graph.Edge, error),
 	lua, godot func(*RebuildFileImportIndex, *graph.Edge) (string, error),
@@ -181,13 +184,7 @@ func (b *BuildStore) RebuildFileImports(ctx context.Context, spillAt int,
 			return err
 		}
 		p.stats.GodotMoves++
-		// The ref/import discriminator orders one combined Godot reindex
-		// stream, including when the 5,000-row boundary crosses the groups.
-		order := byte(0)
-		if e.Kind == graph.EdgeImports {
-			order = 1
-		}
-		return p.stageResolved(ctx, &godotMoves, e, target, order)
+		return p.stageResolved(ctx, &godotMoves, e, target)
 	}); err != nil {
 		return stats, err
 	}
@@ -218,18 +215,26 @@ type fileImportMoves struct {
 	runs   int
 }
 
-func (p *fileImportPass) stageResolved(ctx context.Context, stream *fileImportMoves, e *graph.Edge, target string, order ...byte) error {
+func (p *fileImportPass) stageResolved(ctx context.Context, stream *fileImportMoves, e *graph.Edge, target string) error {
 	moved := *e
 	moved.To, moved.Origin = target, graph.OriginASTResolved
-	return p.stage(ctx, stream, e, &moved, order...)
+	return p.stage(ctx, stream, e, &moved)
 }
 
-func (p *fileImportPass) stage(ctx context.Context, stream *fileImportMoves, e, moved *graph.Edge, order ...byte) error {
+func (p *fileImportPass) stage(ctx context.Context, stream *fileImportMoves, e, moved *graph.Edge) error {
 	raw, err := encodeEdge(moved)
 	if err != nil {
 		return err
 	}
-	key := append(bytes.Clone(stream.prefix), order...)
+	key := bytes.Clone(stream.prefix)
+	if bytes.Equal(stream.prefix, fileImportGodot) {
+		// Godot applies references before imports in one combined stream.
+		group := byte(0)
+		if e.Kind == graph.EdgeImports {
+			group = 1
+		}
+		key = append(key, group)
+	}
 	key = append(key, pendingEdgeKey(e)...)
 	value := append(appendKeyString(nil, e.To), raw...)
 	size := len(key) + len(value)
