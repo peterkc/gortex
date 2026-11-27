@@ -69,3 +69,25 @@ func TestRebuildLaravelStationaryCallRoute(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildLaravelScriptHostReceipt(t *testing.T) {
+	const file = "app.php"
+	publisher := rebuildEventNode(file, "publish", "php", "")
+	listener := rebuildEventNode(file, "listen", "php", "")
+	listener.Meta = map[string]any{"laravel_listener_type": "Notice"}
+	call := &graph.Edge{
+		From: publisher.ID, To: "unresolved::*.handle", Kind: graph.EdgeCalls, FilePath: file, Line: 3,
+		Meta: map[string]any{"via": laravelEventVia, "laravel_event_type": "Notice"},
+	}
+	facts := rebuildEventFacts(file, "php", []*graph.Node{publisher, listener}, call)
+	b, native := openRebuildEventStores(t, facts)
+	raw := *listener
+	raw.Language = "script-host-policy"
+	facts.Nodes = []*graph.Node{publisher, &raw}
+	facts.EffectiveLanguage = "script-host"
+	stats, err := RunRebuildLaravelEvent(t.Context(), b, rebuildGRPCReceipts(facts), rebuildLaravelTestSelection(t))
+	require.NoError(t, err)
+	require.Equal(t, store_pebble.RebuildLaravelEventStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+	require.Equal(t, 1, ResolveLaravelEventCalls(native))
+	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+}

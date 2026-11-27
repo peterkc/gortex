@@ -259,10 +259,10 @@ func (p *rebuildLaravelEventPass) record(ctx context.Context, receipts iter.Seq2
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if n.FilePath != file || n.Language == "" || n.Language != facts.EffectiveLanguage {
+			if n.FilePath != file || facts.EffectiveLanguage == "" {
 				continue
 			}
-			if err := p.recordNode(n, file); err != nil {
+			if err := p.recordNode(n); err != nil {
 				return err
 			}
 		}
@@ -282,12 +282,12 @@ func (p *rebuildLaravelEventPass) record(ctx context.Context, receipts iter.Seq2
 	return nil
 }
 
-func (p *rebuildLaravelEventPass) recordNode(n *graph.Node, file string) error {
+func (p *rebuildLaravelEventPass) recordNode(n *graph.Node) error {
 	if !laravelCallable(n.Kind) && n.Kind != graph.KindType {
 		return nil
 	}
 	live, err := p.b.pendingNode(n.ID)
-	if err != nil || !sameRebuildLanguageMarker(n, live, file) {
+	if err != nil || live == nil {
 		return err
 	}
 	if n.Kind == graph.KindType && (live.Kind != graph.KindType || p.rules.ListenMap(n) != p.rules.ListenMap(live)) {
