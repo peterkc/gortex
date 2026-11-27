@@ -102,7 +102,7 @@ func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 			case "raw receipt after competitor":
 				facts.Edges = []*graph.Edge{decoy, rival, raw, register, member}
 			case "stale":
-				// order refuses stale custody before replaying even the valid rival.
+				// order skips the stale digest. wantProvenance refuses the move during reduce.
 				facts.Edges = []*graph.Edge{rival, decoy, register, member}
 			case "unproved stationary", "synthetic stationary", "untracked stationary":
 				facts.Edges = []*graph.Edge{register, member}

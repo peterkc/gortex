@@ -343,8 +343,8 @@ func (p *rebuildGRPC) order(ctx context.Context, receipts iter.Seq2[ParseFacts, 
 	stubs := rebuildGRPCKey('s')
 	ordered := rebuildGRPCKey('o')
 	recorders := rebuildGRPCKey('i')
-	// Match receipts by the original key of each surviving stub. Two
-	// different live stubs cannot both claim the same receipt ordinal.
+	// Index raw receipt claims before election. Duplicate claims refuse
+	// even if one of the stubs would stay stationary.
 	if err := pendingVisit(ctx, p.b.pending, stubs, func(r row) error {
 		live := r.key[len(stubs):]
 		custody, err := readRebuildEdgeCustody(p.b.pending, live)
@@ -431,9 +431,9 @@ func (p *rebuildGRPC) order(ctx context.Context, receipts iter.Seq2[ParseFacts, 
 			ordinal++
 		}
 	}
-	// Still elect input rows without an exact receipt so a stationary row can
-	// stay unchanged and a moving row produces the normal provenance refusal.
-	// These rows follow all ordered rows; none may enter the durable writer.
+	// Elect the remaining stubs after the receipt-ordered rows. A stationary
+	// stub can stay unchanged. For a move, wantProvenance refuses stale or
+	// producer custody, and prove requires an exact receipt.
 	return pendingVisit(ctx, p.b.pending, stubs, func(r row) error {
 		if len(r.value) != 0 {
 			return nil

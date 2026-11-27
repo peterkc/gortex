@@ -42,6 +42,31 @@ func TestRebuildGRPCRejectsInvalidScratch(t *testing.T) {
 	}))
 }
 
+func TestRebuildGRPCRejectsMalformedRecorder(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	stub := &graph.Edge{
+		From: "caller", To: "unresolved::stub", Kind: graph.EdgeCalls, FilePath: "rpc.go", Line: 1,
+		Meta: map[string]any{"via": "grpc.stub", "grpc_service": "Greeter", "grpc_method": "Hello"},
+	}
+	b.AddEdge(stub)
+	key := rebuildLinkRecorderKey(pendingEdgeKey(stub))
+	// A truncated producer stamp is a format error, not a stale digest.
+	require.NoError(t, b.pending.Set(key, []byte{rebuildEdgeProofFormat, byte(rebuildProofReceiver)}, pebble.NoSync))
+	before := rebuildFrameworkCustodyRows(t, b)
+	receipts := func(func(ParseFacts, error) bool) {
+		t.Fatal("malformed custody must refuse before receipt replay")
+	}
+	stats, err := b.RebuildGRPC(t.Context(), receipts, func(*graph.Edge, string, string, string, string) bool {
+		t.Fatal("malformed custody must refuse before rebind")
+		return false
+	})
+	require.ErrorIs(t, err, ErrRebuildGRPC)
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "edge custody format")
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
 func TestRebuildGRPCWinnerCustody(t *testing.T) {
 	const file, caller, owner, handler = "rpc.go", "caller", "server", "server.Hello"
 	b, err := OpenBuild(filepath.Join(t.TempDir(), "working"), FullProfile)
@@ -57,6 +82,7 @@ func TestRebuildGRPCWinnerCustody(t *testing.T) {
 	loser := stub("unresolved::loser", 1)
 	direct := stub("unresolved::direct", 2)
 	blocked := stub("unresolved::blocked", 3)
+	stationary := stub(handler, 6)
 	keeper := &graph.Edge{From: caller, To: handler, Kind: graph.EdgeCalls, FilePath: file, Line: 3,
 		Meta: map[string]any{"keeper": true}}
 	facts := ParseFacts{
@@ -66,7 +92,7 @@ func TestRebuildGRPCWinnerCustody(t *testing.T) {
 			{ID: owner, Name: "server", Kind: graph.KindType, Language: "go", FilePath: file},
 			{ID: handler, Name: "Hello", Kind: graph.KindMethod, Language: "go", FilePath: file},
 		},
-		Edges: []*graph.Edge{raw, loser, direct, keeper, blocked,
+		Edges: []*graph.Edge{stationary, raw, loser, direct, keeper, blocked,
 			{From: caller, To: "unresolved::RegisterGreeterServer", Kind: graph.EdgeCalls, FilePath: file, Line: 4,
 				Meta: map[string]any{"grpc_register_service": "Greeter", "grpc_register_impl": "server"}},
 			{From: handler, To: owner, Kind: graph.EdgeMemberOf, FilePath: file, Line: 5},
@@ -74,9 +100,15 @@ func TestRebuildGRPCWinnerCustody(t *testing.T) {
 	}
 	require.NoError(t, b.AddParsedFile("", facts))
 	require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: live, OldTo: raw.To}}))
+	producer := rebuildEdgeCustody{proof: rebuildProofReceiver}
+	require.NoError(t, b.addEdgeWithCustody(stationary, producer))
+	stationaryKey := pendingEdgeKey(stationary)
+	before := rebuildFrameworkCustodyRows(t, b)
 	flushed := b.pending.Metrics().Levels[0].TableBytesFlushed
+	var reduced []string
 	stats, err := b.RebuildGRPC(ctx, func(yield func(ParseFacts, error) bool) { yield(facts, nil) },
 		func(e *graph.Edge, _, _, to, _ string) bool {
+			reduced = append(reduced, e.To)
 			if to == "" || e.To == to {
 				return false
 			}
@@ -84,8 +116,18 @@ func TestRebuildGRPCWinnerCustody(t *testing.T) {
 			return true
 		})
 	require.NoError(t, err)
-	require.Equal(t, uint64(4), stats.Moves)
+	require.Equal(t, RebuildGRPCStats{Stubs: 5, Registrations: 1, Resolved: 5, Moves: 4}, stats)
+	// The producer-stamped receipt was first, but the stationary stub is reduced last.
+	require.Equal(t, []string{live.To, loser.To, direct.To, blocked.To, stationary.To}, reduced)
 	require.Equal(t, flushed, b.pending.Metrics().Levels[0].TableBytesFlushed)
+	after := rebuildFrameworkCustodyRows(t, b)
+	for _, key := range [][]byte{stationaryKey, rebuildLinkRecorderKey(stationaryKey)} {
+		require.NotEmpty(t, before[string(key)])
+		require.Equal(t, before[string(key)], after[string(key)])
+	}
+	custody, err := readRebuildEdgeCustody(b.pending, stationaryKey)
+	require.NoError(t, err)
+	require.Equal(t, producer, custody)
 	for _, tc := range []struct {
 		line int
 		raw  *graph.Edge
@@ -101,10 +143,15 @@ func TestRebuildGRPCWinnerCustody(t *testing.T) {
 			require.Empty(t, got.raw)
 			require.Equal(t, true, row.Meta["keeper"])
 		} else {
-			require.Equal(t, pendingEdgeKey(tc.raw), got.raw)
+			old := pendingEdgeKey(tc.raw)
+			require.Equal(t, old, got.raw)
+			require.Equal(t, old, after[string(rebuildLinkRecorderKey(key))])
+			value, err := encodeEdge(stub(handler, tc.line))
+			require.NoError(t, err)
+			require.Equal(t, value, after[string(key)])
 		}
 	}
-	requireRebuildCustodyCount(t, b, 2)
+	requireRebuildCustodyCount(t, b, 3)
 }
 
 func requireRebuildCustodyCount(t *testing.T, b *BuildStore, want int) {
