@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,13 +141,14 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 			require.NoError(t, err)
 			req.Witness.Input = store_pebble.HeadDigest(rootBytes)
 			if tc.exact {
+				// Capture checked parent entries and closures from the fixture tree.
 				digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
-					for _, in := range inputs {
-						if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceRegularFact, Path: []byte(in.Path)}); err != nil {
-							return err
-						}
-					}
-					return emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")})
+					raw := int64(rebuildCppRawLimit)
+					_, err := captureRebuildCheckoutNamespace(ctx, src.FrozenRoot(), nil, nil, &raw,
+						func(_ string, mode fs.FileMode, _ rebuildGitMember, _ bool) (bool, error) {
+							return mode.IsRegular(), nil
+						}, emit)
+					return err
 				})
 				require.NoError(t, err)
 				req.Witness.FrozenInputs = store_pebble.HeadDigest(digest)
