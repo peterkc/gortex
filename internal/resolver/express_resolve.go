@@ -33,13 +33,8 @@ func ResolveExpressHandlers(g graph.Store) int {
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if _, ok := e.Meta["express_handler_ref"]; !ok {
-			continue
-		}
-		if !graph.IsUnresolvedTarget(e.To) {
+		cls, method, name, ok := expressHandlerKey(e)
+		if !ok {
 			continue
 		}
 		fromFile := ""
@@ -48,29 +43,56 @@ func ResolveExpressHandlers(g graph.Store) int {
 		}
 
 		var targetID string
-		if cls, _ := e.Meta["express_ref_class"].(string); cls != "" {
-			method, _ := e.Meta["express_ref_method"].(string)
+		if cls != "" {
 			targetID = expressResolveMember(g, cls, method, fromFile, classMethods)
-		} else if name, _ := e.Meta["express_ref_name"].(string); name != "" {
-			id, _ := ResolveByConvention(g, name, "Middleware", expressMiddlewareDirs, fromFile)
-			targetID = id
-		}
-		if targetID == "" {
-			continue
+		} else if name != "" {
+			targetID, _ = ResolveByConvention(g, name, "Middleware", expressMiddlewareDirs, fromFile)
 		}
 		oldTo := e.To
-		e.To = targetID
-		e.Origin = graph.OriginASTInferred
-		e.Confidence = 0.85
-		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.85)
-		StampSynthesized(e, SynthExpressResolve)
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
-		resolved++
+		if rebindExpressHandler(e, targetID) {
+			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+			resolved++
+		}
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func expressHandlerKey(e *graph.Edge) (class, method, name string, ok bool) {
+	if e == nil || !graph.IsUnresolvedTarget(e.To) {
+		return "", "", "", false
+	}
+	if _, ok := e.Meta["express_handler_ref"]; !ok {
+		return "", "", "", false
+	}
+	class, _ = e.Meta["express_ref_class"].(string)
+	if class != "" {
+		method, _ = e.Meta["express_ref_method"].(string)
+	} else {
+		name, _ = e.Meta["express_ref_name"].(string)
+	}
+	return class, method, name, true
+}
+
+func rebindExpressHandler(e *graph.Edge, target string) bool {
+	if target == "" {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	e.Confidence = 0.85
+	e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.85)
+	StampSynthesized(e, SynthExpressResolve)
+	return true
+}
+
+func expressMemberDirs(class string) []string {
+	if strings.HasSuffix(class, "Controller") {
+		return expressControllerDirs
+	}
+	return expressServiceDirs
 }
 
 // expressResolveMember binds an XController.method / XService.method handler:
@@ -80,14 +102,7 @@ func expressResolveMember(g graph.Store, cls, method, fromFile string, classMeth
 	if method == "" {
 		return ""
 	}
-	preferDirs := expressServiceDirs
-	switch {
-	case strings.HasSuffix(cls, "Controller"):
-		preferDirs = expressControllerDirs
-	case strings.HasSuffix(cls, "Service"), strings.HasSuffix(cls, "Helper"), strings.HasSuffix(cls, "Utils"):
-		preferDirs = expressServiceDirs
-	}
-	classID, _ := ResolveByConvention(g, cls, "", preferDirs, fromFile)
+	classID, _ := ResolveByConvention(g, cls, "", expressMemberDirs(cls), fromFile)
 	className := cls
 	if classID != "" {
 		className = expressSimpleName(classID)
@@ -121,8 +136,8 @@ func expressResolveMember(g graph.Store, cls, method, fromFile string, classMeth
 func expressClassMethodIndex(g graph.Store) map[string]map[string][]*graph.Node {
 	classOf := map[string]string{}
 	for e := range graph.EdgesLightSeq(g, graph.EdgeMemberOf) {
-		if e != nil && e.From != "" && e.To != "" {
-			classOf[e.From] = expressSimpleName(e.To)
+		if class, ok := expressMemberOwner(e); ok {
+			classOf[e.From] = class
 		}
 	}
 	out := map[string]map[string][]*graph.Node{}
@@ -140,6 +155,13 @@ func expressClassMethodIndex(g graph.Store) map[string]map[string][]*graph.Node 
 		out[cls][n.Name] = append(out[cls][n.Name], n)
 	}
 	return out
+}
+
+func expressMemberOwner(e *graph.Edge) (string, bool) {
+	if e == nil || e.From == "" || e.To == "" {
+		return "", false
+	}
+	return expressSimpleName(e.To), true
 }
 
 // expressSimpleName returns the last `::`-delimited segment of a node ID.

@@ -70,13 +70,9 @@ func ResolveByConvention(g graph.Store, name, suffix string, preferDirs []string
 // dirConventionCandidates returns the resolvable symbol nodes matching name
 // (and the suffix-stripped name when applicable).
 func dirConventionCandidates(g graph.Store, name, suffix string) []*graph.Node {
-	names := []string{name}
-	if suffix != "" && len(name) > len(suffix) && strings.HasSuffix(name, suffix) {
-		names = append(names, strings.TrimSuffix(name, suffix))
-	}
 	seen := map[string]bool{}
 	var out []*graph.Node
-	for _, nm := range names {
+	for _, nm := range dirConventionNames(name, suffix) {
 		for _, n := range g.FindNodesByName(nm) {
 			if n == nil || seen[n.ID] || !isConventionResolvable(n) {
 				continue
@@ -86,6 +82,14 @@ func dirConventionCandidates(g graph.Store, name, suffix string) []*graph.Node {
 		}
 	}
 	return out
+}
+
+func dirConventionNames(name, suffix string) []string {
+	names := []string{name}
+	if suffix != "" && len(name) > len(suffix) && strings.HasSuffix(name, suffix) {
+		names = append(names, strings.TrimSuffix(name, suffix))
+	}
+	return names
 }
 
 // isConventionResolvable reports whether a node is a real definition this
