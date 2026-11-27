@@ -194,7 +194,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildCelery,
 	store_pebble.ErrRebuildSpringEvents,
 	store_pebble.ErrRebuildMediatR,
-	nil, // 69: reserved
+	store_pebble.ErrRebuildCSharpDIIfaces,
 	store_pebble.ErrRebuildCSharpPartial,
 	store_pebble.ErrRebuildSidekiq,
 	store_pebble.ErrRebuildLaravelEvent,

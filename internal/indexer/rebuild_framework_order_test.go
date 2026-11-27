@@ -51,6 +51,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Celery", "moves", 1},
 		{"Spring events", "moves", 1},
 		{"MediatR", "moves", 1},
+		{"C# DI interfaces", "edges", 1},
 		{"C# interface dispatch", "edges", 1},
 		{"Sidekiq", "moves", 1},
 		{"Laravel event", "moves", 1},
@@ -630,7 +631,10 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	implMethod := node(ifaceFile, "csharp", ifaceMethod.Name, graph.KindMethod, 5)
 	ifaceMethod.ID, implMethod.ID = iface.ID+".Tick", impl.ID+".Tick"
 	invoke := node(ifaceFile, "csharp", "invoke", graph.KindMethod, 7)
-	ifaceFacts := receipt([]*graph.Node{iface, ifaceMethod, impl, implMethod, invoke},
+	registration := &graph.Node{ID: ifaceFile, Name: ifaceFile, Kind: graph.KindFile, Language: "csharp", FilePath: ifaceFile}
+	ifaceFacts := receipt([]*graph.Node{iface, ifaceMethod, impl, implMethod, invoke, registration},
+		edge(registration, graph.UnresolvedMarker+impl.Name, graph.EdgeProvides, 9,
+			map[string]any{graph.MetaDIBinding: graph.DIBindingAsImplemented}),
 		edge(ifaceMethod, iface.ID, graph.EdgeMemberOf, 2, nil),
 		edge(impl, iface.ID, graph.EdgeImplements, 4, nil),
 		edge(implMethod, impl.ID, graph.EdgeMemberOf, 5, nil),

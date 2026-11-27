@@ -638,6 +638,13 @@ func buildRebuildStages(
 				zap.Uint64("stubs", mediatr.Stubs), zap.Uint64("resolved", mediatr.Resolved),
 				zap.Uint64("moves", mediatr.Moves), zap.Uint64("adds", mediatr.Adds))
 		}
+		csharpDI, err := resolver.RunRebuildCSharpDIIfaces(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if csharpDI != 0 {
+			logger.Info("rebuild C# DI interfaces applied to private build", zap.Uint64("edges", csharpDI))
+		}
 		csharpIface, err := resolver.RunRebuildCSharpIfaceDispatch(ctx, private, receipts, selection)
 		if err != nil {
 			return err

@@ -42,6 +42,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"Celery", store_pebble.ErrRebuildCelery, 66},
 		{"Spring events", store_pebble.ErrRebuildSpringEvents, 67},
 		{"MediatR", store_pebble.ErrRebuildMediatR, 68},
+		{"C# DI interfaces", store_pebble.ErrRebuildCSharpDIIfaces, 69},
 		{"C# partial merge", store_pebble.ErrRebuildCSharpPartial, 70},
 		{"Sidekiq", store_pebble.ErrRebuildSidekiq, 71},
 		{"Laravel event", store_pebble.ErrRebuildLaravelEvent, 72},
