@@ -409,7 +409,7 @@ func TestRebuildMacroExpansionRequiresDeclarationAndBody(t *testing.T) {
 			require.Equal(t, store_pebble.RebuildMacroExpansionStats{Sites: 1, Owned: 1, Adds: 1}, stats)
 			// Native freezes the same keys before the move and refetches only
 			// those keys at its turn, not the newly created replacement.
-			streams := newFrameworkStreamCandidates(native, map[string]int{"c": 1}, nil)
+			streams := newFrameworkStreamCandidates(native, map[string]int{"c": 1}, map[string]int{SynthMacroExpansion: 1})
 			collectFrameworkEdgeCensus(native, streams)
 			keys := streams.perPass[SynthMacroExpansion]
 			require.NotNil(t, keys)
