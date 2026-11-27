@@ -168,25 +168,28 @@ func (p *rebuildMyBatisPass) candidate(key []byte) (string, error) {
 	})
 }
 
-func (p *rebuildMyBatisPass) elect(join, repo string) (string, error) {
+func (p *rebuildMyBatisPass) elect(join, from string) (method string, caller *graph.Node, err error) {
 	if join == "" {
-		return "", nil
+		return "", nil, nil
 	}
-	state := ""
-	var err error
-	if repo != "" {
-		state, err = p.candidate(rebuildMyBatisKey('e', join, repo))
+	state, err := p.candidate(rebuildMyBatisKey('e', join, ""))
+	if err != nil {
+		return "", nil, err
+	}
+	// An empty or unique workspace cohort has the same result in every repo.
+	if state == "\x00" && from != "" {
+		caller, err = p.node(from)
 		if err != nil {
-			return "", err
+			return "", nil, err
+		}
+		if caller != nil && caller.RepoPrefix != "" {
+			state, err = p.candidate(rebuildMyBatisKey('e', join, caller.RepoPrefix))
 		}
 	}
-	if state == "" {
-		state, err = p.candidate(rebuildMyBatisKey('e', join, ""))
-	}
 	if len(state) > 1 {
-		return state[1:], err
+		method = state[1:]
 	}
-	return "", err
+	return method, caller, err
 }
 
 func (p *rebuildMyBatisPass) plan(ctx context.Context, rules rebuildMyBatisRules) error {
@@ -211,28 +214,19 @@ func (p *rebuildMyBatisPass) plan(ctx context.Context, rules rebuildMyBatisRules
 		}
 		p.stats.Stubs++
 		custody, err := readRebuildEdgeCustody(snap, r.key)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrRebuildUnknownProvenance) {
 			return err
 		}
-		// A raw key may have only one claimant, including stationary stubs.
-		if custody.proof == 0 {
+		// A stale stamp cannot claim a raw receipt. If the stub moves,
+		// prove counts the refused destination; a stationary stub stays put.
+		// Valid raw keys still allow only one claimant, even if stationary.
+		if err == nil && custody.proof == 0 {
 			if err := p.claimRecorder(custody.raw, r.key); err != nil {
 				return err
 			}
 		}
-		var caller *graph.Node
-		if e.From != "" {
-			caller, err = p.node(e.From)
-			if err != nil {
-				return err
-			}
-		}
-		repo := ""
-		if caller != nil {
-			repo = caller.RepoPrefix
-		}
 		join := rules.join(ns, stmt)
-		method, err := p.elect(join, repo)
+		method, caller, err := p.elect(join, e.From)
 		if err != nil {
 			return err
 		}
@@ -490,14 +484,20 @@ func (p *rebuildMyBatisPass) proved(old []byte, e *graph.Edge, rules rebuildMyBa
 		return false, err
 	}
 	ns, stmt := rules.stub(e)
-	if join := rules.join(ns, stmt); join != "" {
-		state, err := p.state(rebuildMyBatisKey('u', join))
-		if err != nil || state != rebuildCapabilityWanted {
-			return false, err
-		}
+	join := rules.join(ns, stmt)
+	if join == "" {
+		return true, nil
+	}
+	cohort, err := p.state(rebuildMyBatisKey('u', join))
+	if err != nil || cohort != rebuildCapabilityWanted {
+		return false, err
 	}
 	if e.From == "" {
 		return true, nil // native skips the empty caller ID
+	}
+	workspace, err := p.candidate(rebuildMyBatisKey('e', join, ""))
+	if err != nil || workspace != "\x00" {
+		return err == nil, err
 	}
 	caller, err := p.node(e.From)
 	if err != nil || caller == nil {
