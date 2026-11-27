@@ -223,22 +223,25 @@ func (p *rebuildConventionPass) captureSite(ctx context.Context, old, val []byte
 		return nil
 	}
 	source, err := p.source(e.From)
-	if err != nil || source == nil || !p.rules.Source(source.FilePath) {
-		return err
-	}
-	live, _, err := p.pick(ctx, names, dirs, source.FilePath, false)
 	if err != nil {
 		return err
 	}
-	if err := p.input(old, val); err != nil {
-		return err
+	var live rebuildConventionPick
+	if source != nil && p.rules.Source(source.FilePath) {
+		if err := p.input(old, val); err != nil {
+			return err
+		}
+		live, _, err = p.pick(ctx, names, dirs, source.FilePath, false)
+		if err != nil {
+			return err
+		}
 	}
 	for _, name := range names {
 		if err := p.put(p.key('n', name), nil); err != nil {
 			return err
 		}
 	}
-	if err := p.put(p.key('s', source.ID), nil); err != nil {
+	if err := p.put(p.key('s', e.From), nil); err != nil {
 		return err
 	}
 	var raw []byte
@@ -310,14 +313,14 @@ func (p *rebuildConventionPass) recordNode(raw *graph.Node) error {
 			return err
 		}
 	}
+	if source {
+		if err := p.put(p.key('q', raw.ID, raw.FilePath), nil); err != nil {
+			return err
+		}
+	}
 	live, err := p.source(raw.ID)
 	if err != nil || live == nil || raw.FilePath != live.FilePath {
 		return err
-	}
-	if source {
-		if err := p.put(p.key('q', raw.ID), nil); err != nil {
-			return err
-		}
 	}
 	if named && raw.Name == live.Name && p.rules.Eligible(raw) && p.rules.Eligible(live) {
 		return p.put(p.key('p', raw.ID), nil)
@@ -348,40 +351,62 @@ func (p *rebuildConventionPass) prove(ctx context.Context) error {
 	prefix := p.column('h')
 	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 		old := r.key[len(prefix):]
-		e, err := p.edge(old)
-		if err != nil || e == nil {
+		val, err := p.get(old)
+		if err != nil || val == nil {
 			return errors.Join(err, invalid(p.label+" site disappeared"))
 		}
+		e, err := p.decodeKeyedEdge(old, val)
+		if err != nil {
+			return err
+		}
 		source, err := p.source(e.From)
-		if err != nil || source == nil {
-			return errors.Join(err, invalid(p.label+" source disappeared"))
+		if err != nil {
+			return err
 		}
 		via, _ := e.Meta["via"].(string)
 		names, dirs := p.rules.Shape(e.To, via)
-		live, proved, err := p.pick(ctx, names, dirs, source.FilePath, true)
-		if err != nil {
-			return err
+		var live, proved rebuildConventionPick
+		if source != nil && p.rules.Source(source.FilePath) {
+			live, proved, err = p.pick(ctx, names, dirs, source.FilePath, true)
+			if err != nil {
+				return err
+			}
 		}
 		id, confidence := live.result()
 		proofID, proofConfidence := proved.result()
-		receipt, err := p.receiptPick(ctx, names, dirs, source.FilePath)
-		if err != nil {
+		var sourceSeen, changed bool
+		sources := p.key('q', e.From)
+		if err := pendingVisit(ctx, p.b.pending, sources, func(r row) error {
+			file, _, err := readKeyString(r.key[len(sources):])
+			if err != nil {
+				return err
+			}
+			sourceSeen = true
+			var receipt rebuildConventionPick
+			if p.rules.Source(file) {
+				if err := p.input(old, val); err != nil {
+					return err
+				}
+				receipt, err = p.receiptPick(ctx, names, dirs, file)
+				if err != nil {
+					return err
+				}
+			}
+			receiptID, receiptConfidence := receipt.result()
+			changed = changed || id != receiptID || confidence != receiptConfidence
+			return nil
+		}); err != nil {
 			return err
 		}
-		receiptID, receiptConfidence := receipt.result()
-		if id != proofID || confidence != proofConfidence || id != receiptID || confidence != receiptConfidence {
+		if id != proofID || confidence != proofConfidence || changed {
 			refused.add(graph.EdgeIdentityFor(e), nil)
 			return nil
 		}
 		if id == "" {
 			return nil
 		}
-		sourceOK, err := p.present(p.key('q', e.From))
-		if err != nil {
-			return err
-		}
 		claim, err := p.marked(append(p.column('r'), r.value...))
-		if err == nil && (!sourceOK || len(claim) == 0 || claim[0] != rebuildScratchExact) {
+		if err == nil && (!sourceSeen || len(claim) == 0 || claim[0] != rebuildScratchExact) {
 			refused.add(graph.EdgeIdentityFor(e), nil)
 		}
 		return err
