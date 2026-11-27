@@ -171,7 +171,10 @@ func (p *rebuildLaravelEventPass) collectNodes(ctx context.Context) (bool, error
 		}
 		var hasRole bool
 		found := p.roles(n, func(role laravelReceiptRole) {
-			hasRole = true
+			if !hasRole {
+				hasRole = true
+				err = p.input(r.key, r.value)
+			}
 			if err == nil {
 				err = p.putRole(role.kind, n.ID, role.event, role.class)
 			}
@@ -322,7 +325,13 @@ func (p *rebuildLaravelEventPass) recordNode(ctx context.Context, n *graph.Node)
 		if err != nil || !wanted && len(next) == 0 {
 			return err
 		}
-		live, err := p.storeReceiptNode(n.ID)
+		key := pendingNodeKey(n.ID)
+		live, err := pendingGet(p.b.pending, key, func(val []byte) (*graph.Node, error) {
+			if err := p.input(key, val); err != nil {
+				return nil, err
+			}
+			return checkedRebuildLightNode(row{key, val}, p.label)
+		})
 		if err != nil || live == nil {
 			return err
 		}
@@ -428,6 +437,14 @@ func (p *rebuildLaravelEventPass) recordEdge(e *graph.Edge, admitted bool, order
 			}
 		}
 	}
+	edge := p.edge
+	if e.Kind == graph.EdgeMemberOf {
+		edge = func(key []byte) (*graph.Edge, error) {
+			return pendingGet(p.b.pending, key, func(val []byte) (*graph.Edge, error) {
+				return guardLightEdge(row{key, val})
+			})
+		}
+	}
 	return p.recordOwnerEdge(e, admitted, order, func(live *graph.Edge) bool {
 		return p.rules.Call(e) == p.rules.Call(live)
 	}, func(live *graph.Edge) (string, bool) {
@@ -437,7 +454,7 @@ func (p *rebuildLaravelEventPass) recordEdge(e *graph.Edge, admitted bool, order
 			return err
 		}
 		return invalid("Laravel receipt live edge missing")
-	}, p.edge)
+	}, edge)
 }
 
 // joinHandles elects the owner from MemberOf rows, not from a class node or
@@ -523,8 +540,15 @@ func (p *rebuildLaravelEventPass) joinHandles(ctx context.Context) error {
 }
 
 func (p *rebuildLaravelEventPass) possibleOwners(ctx context.Context, id string) error {
-	return p.members(ctx, id, func(_ row, e *graph.Edge) error {
+	return p.members(ctx, id, func(r row, e *graph.Edge) error {
 		class := p.rules.SimpleName(e.To)
+		used, err := p.classUsed(ctx, class)
+		if err != nil || !used {
+			return err
+		}
+		if err := p.input(r.key, r.value); err != nil {
+			return err
+		}
 		if err := p.join(ctx, 'q', 'x', class, id); err != nil {
 			return err
 		}
@@ -574,10 +598,13 @@ func (p *rebuildLaravelEventPass) owner(ctx context.Context, id string) (string,
 	err := p.members(ctx, id, func(r row, e *graph.Edge) error {
 		name := p.rules.SimpleName(e.To)
 		owners.observe(name)
-		if !mapped {
-			var err error
-			mapped, err = p.classUsed(ctx, name)
-			if err != nil {
+		used, err := p.classUsed(ctx, name)
+		if err != nil {
+			return err
+		}
+		if used {
+			mapped = true
+			if err := p.input(r.key, r.value); err != nil {
 				return err
 			}
 		}
