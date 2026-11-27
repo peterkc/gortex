@@ -262,7 +262,7 @@ func (p *fileImportPass) spill(ctx context.Context, stream *fileImportMoves) err
 	}
 	sortFileImportMoves(stream.rows)
 	path := stream.runPath(p.dir, stream.runs)
-	if err := writeFileImportRun(ctx, path, stream.rows); err != nil {
+	if err := writeLinkRun(ctx, path, stream.rows); err != nil {
 		return err
 	}
 	info, err := os.Stat(path)
@@ -284,23 +284,6 @@ func (s *fileImportMoves) runPath(dir string, i int) string {
 
 func sortFileImportMoves(rows []row) {
 	slices.SortFunc(rows, func(a, b row) int { return bytes.Compare(a.key, b.key) })
-}
-
-func writeFileImportRun(ctx context.Context, path string, rows []row) (err error) {
-	w, err := newLinkTable(path)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, w.Close()) }()
-	for _, r := range rows {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := w.Set(r.key, r.value); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func visitFileImportRun(ctx context.Context, path string, prefix []byte, yield func(row) error) (err error) {

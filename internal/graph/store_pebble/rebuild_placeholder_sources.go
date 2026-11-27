@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
-	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -335,7 +334,7 @@ func (p *RebuildPlaceholderSources) writeMoves(ctx context.Context, path string)
 
 func (p *RebuildPlaceholderSources) visitMoves(ctx context.Context, yield func(row) error) error {
 	for i := range p.stats.Flushes {
-		if err := visitPlaceholderMoveRun(ctx, p.runPath(i), yield); err != nil {
+		if err := visitLinkRun(ctx, p.runPath(i), yield); err != nil {
 			return err
 		}
 	}
@@ -348,32 +347,6 @@ func (p *RebuildPlaceholderSources) visitMoves(ctx context.Context, yield func(r
 		}
 	}
 	return ctx.Err()
-}
-
-func visitPlaceholderMoveRun(ctx context.Context, path string, yield func(row) error) (err error) {
-	table, err := openLinkTable(ctx, path)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, table.Close()) }()
-	it, err := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, it.Close()) }()
-	for kv := it.First(); kv != nil; kv = it.Next() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		value, _, err := kv.Value(nil)
-		if err != nil {
-			return err
-		}
-		if err := yield(row{kv.K.UserKey, value}); err != nil {
-			return err
-		}
-	}
-	return errors.Join(ctx.Err(), it.Error())
 }
 
 // Close releases scratch even if a main mutation or Apply failed.

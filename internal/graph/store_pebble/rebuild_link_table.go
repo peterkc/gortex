@@ -73,3 +73,46 @@ func openLinkTable(ctx context.Context, path string) (*sstable.Reader, error) {
 	}
 	return table, nil
 }
+
+func writeLinkRun(ctx context.Context, path string, rows []row) (err error) {
+	w, err := newLinkTable(path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, w.Close()) }()
+	for _, r := range rows {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := w.Set(r.key, r.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func visitLinkRun(ctx context.Context, path string, yield func(row) error) (err error) {
+	table, err := openLinkTable(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, table.Close()) }()
+	it, err := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, it.Close()) }()
+	for kv := it.First(); kv != nil; kv = it.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		value, _, err := kv.Value(nil)
+		if err != nil {
+			return err
+		}
+		if err := yield(row{kv.K.UserKey, value}); err != nil {
+			return err
+		}
+	}
+	return errors.Join(ctx.Err(), it.Error())
+}
