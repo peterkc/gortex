@@ -92,8 +92,18 @@ func (p *rebuildRTKQueryPass) state(key []byte) (byte, error) {
 func (p *rebuildRTKQueryPass) node(id string) (*graph.Node, error) {
 	key := pendingNodeKey(id)
 	return pendingGet(p.b.pending, key, func(raw []byte) (*graph.Node, error) {
+		if err := p.nodeInput(key, raw); err != nil {
+			return nil, err
+		}
 		return checkedRebuildLightNode(row{key, raw}, p.label)
 	})
+}
+
+func (p *rebuildRTKQueryPass) nodeInput(key, val []byte) error {
+	if len(key)+len(val) > p.rowBytes {
+		return fmt.Errorf("%w: %s node row", ErrRebuildLinkInputSize, p.label)
+	}
+	return nil
 }
 
 func (p *rebuildRTKQueryPass) unique(key []byte) (string, bool, error) {
@@ -127,6 +137,12 @@ func (p *rebuildRTKQueryPass) collect(ctx context.Context) (bool, error) {
 			return err
 		}
 		endpoint, hook := p.rules.Node(n)
+		if endpoint == "" && !hook {
+			return nil
+		}
+		if err := p.nodeInput(r.key, r.value); err != nil {
+			return err
+		}
 		if endpoint != "" {
 			haveEndpoints = true
 			if err := p.put(p.key('d', n.ID), append([]byte{rebuildCapabilityWanted}, endpoint...)); err != nil {
@@ -162,15 +178,17 @@ func (p *rebuildRTKQueryPass) collect(ctx context.Context) (bool, error) {
 }
 
 type rebuildRTKQueryPick struct {
-	target     string
-	caller     *graph.Node
-	buckets    []rebuildStoreCandidateWitness
-	getter     []byte // nonempty only when ambiguity consulted the binding getter
-	callerFile bool   // caller file can decide an untagged election
-	file       string // file for a tagged endpoint lookup
+	target      string
+	caller      *graph.Node
+	buckets     []rebuildStoreCandidateWitness
+	getter      []byte // nonempty only when ambiguity consulted the binding getter
+	getterProof bool   // getter file can change the pick
+	ambiguous   bool   // the scoped pool must consult the binding and file
+	callerFile  bool   // caller file can decide an untagged election
+	file        string // file for a tagged endpoint lookup
 }
 
-func (p *rebuildRTKQueryPass) elect(e *graph.Edge, name string, tagged bool) (pick rebuildRTKQueryPick, err error) {
+func (p *rebuildRTKQueryPass) elect(e *graph.Edge, name string, tagged, resolveGetter bool) (pick rebuildRTKQueryPick, err error) {
 	pick.caller, err = p.node(e.From)
 	if err != nil {
 		return pick, err
@@ -191,13 +209,20 @@ func (p *rebuildRTKQueryPass) elect(e *graph.Edge, name string, tagged bool) (pi
 	if err != nil {
 		return pick, err
 	}
+	pick.ambiguous = seen && id == ""
+	binding, _ := e.Meta["store_binding"].(string)
+	if !resolveGetter && pick.ambiguous && binding != "" {
+		pick.getter = p.key('v', binding)
+		return pick, nil
+	}
+	var getterFile string
 	decision, err := pickRebuildStoreCandidate(p.unique, scoped, id, seen, func() (string, error) {
-		binding, _ := e.Meta["store_binding"].(string)
 		if binding == "" {
 			return "", nil
 		}
 		pick.getter = p.key('v', binding)
 		file, _, err := p.unique(p.key('t', binding))
+		getterFile = file
 		return file, err
 	}, pick.file, func(file string) []byte {
 		if pick.caller != nil {
@@ -206,7 +231,8 @@ func (p *rebuildRTKQueryPass) elect(e *graph.Edge, name string, tagged bool) (pi
 		return p.key('f', name, file)
 	})
 	pick.target, pick.buckets = decision.target, decision.buckets
-	pick.callerFile = seen && id == "" && !decision.getterWinner
+	pick.callerFile = pick.ambiguous && !decision.getterWinner
+	pick.getterProof = pick.getter != nil && (getterFile == "" || decision.getterWinner)
 	return pick, err
 }
 
@@ -254,16 +280,19 @@ func (p *rebuildRTKQueryPass) plan(ctx context.Context) error {
 		if err := p.input(r.key, r.value); err != nil {
 			return err
 		}
-		if !tagged {
-			if binding, _ := e.Meta["store_binding"].(string); binding != "" {
-				deferred = true
-				if err := p.put(p.key('b', binding), nil); err != nil {
-					return err
-				}
-				return p.put(append(p.column('l'), r.key...), nil)
-			}
+		pick, err := p.elect(e, name, tagged, false)
+		if err != nil {
+			return err
 		}
-		return p.planCall(r.key, e, name, tagged)
+		if pick.getter == nil {
+			return p.planCall(r.key, e, name, tagged, pick)
+		}
+		deferred = true
+		binding, _ := e.Meta["store_binding"].(string)
+		if err := p.put(p.key('b', binding), nil); err != nil {
+			return err
+		}
+		return p.put(append(p.column('l'), r.key...), nil)
 	}); err != nil || !deferred {
 		return err
 	}
@@ -281,7 +310,11 @@ func (p *rebuildRTKQueryPass) plan(ctx context.Context) error {
 			return invalid("RTK Query deferred Call missing")
 		}
 		name, tagged := p.rules.Call(e)
-		return p.planCall(old, e, name, tagged)
+		pick, err := p.elect(e, name, tagged, true)
+		if err != nil {
+			return err
+		}
+		return p.planCall(old, e, name, tagged, pick)
 	})
 }
 
@@ -299,6 +332,9 @@ func (p *rebuildRTKQueryPass) collectGetters(ctx context.Context) error {
 		if err != nil || !p.rules.Getter(n, light.Name) {
 			return err
 		}
+		if err := p.nodeInput(r.key, r.value); err != nil {
+			return err
+		}
 		if err := p.put(p.key('g', n.ID), append([]byte{rebuildCapabilityWanted}, p.key('v', n.Name)...)); err != nil {
 			return err
 		}
@@ -306,11 +342,7 @@ func (p *rebuildRTKQueryPass) collectGetters(ctx context.Context) error {
 	})
 }
 
-func (p *rebuildRTKQueryPass) planCall(old []byte, e *graph.Edge, name string, tagged bool) error {
-	pick, err := p.elect(e, name, tagged)
-	if err != nil {
-		return err
-	}
+func (p *rebuildRTKQueryPass) planCall(old []byte, e *graph.Edge, name string, tagged bool, pick rebuildRTKQueryPick) error {
 	if pick.target != "" {
 		p.stats.Resolved++
 	}
@@ -485,9 +517,13 @@ func (p *rebuildRTKQueryPass) recordCall(raw *graph.Edge, file, lang string) err
 	liveName, liveTagged := p.rules.Call(live)
 	ok := lang != "" && raw.FilePath == file && name == liveName && tagged == liveTagged
 	if !tagged {
+		pick, err := p.elect(live, liveName, false, true)
+		if err != nil {
+			return err
+		}
 		binding, _ := raw.Meta["store_binding"].(string)
 		liveBinding, _ := live.Meta["store_binding"].(string)
-		ok = ok && graph.IsUnresolvedTarget(raw.To) && binding == liveBinding
+		ok = ok && graph.IsUnresolvedTarget(raw.To) && (!pick.ambiguous || binding == liveBinding)
 	}
 	return p.noteReceipt(key, claim, ok)
 }
@@ -574,7 +610,7 @@ func (p *rebuildRTKQueryPass) proved(old []byte, anchor bool) (bool, error) {
 		return false, invalid("RTK Query planned Call missing")
 	}
 	name, tagged := p.rules.Call(e)
-	pick, err := p.elect(e, name, tagged)
+	pick, err := p.elect(e, name, tagged, true)
 	if err != nil {
 		return false, err
 	}
@@ -602,8 +638,13 @@ func (p *rebuildRTKQueryPass) proved(old []byte, anchor bool) (bool, error) {
 		return len(proof) != 0 && rebuildStoreCandidateExact(proof[0]) && proof[0]&rebuildStoreOtherFile == 0, err
 	}
 	if pick.getter != nil {
-		binding, _ := e.Meta["store_binding"].(string)
-		ok, err := p.getterFilesProved(p.key('t', binding), pick.getter, p.unique)
+		var ok bool
+		if pick.getterProof {
+			binding, _ := e.Meta["store_binding"].(string)
+			ok, err = p.getterFilesProved(p.key('t', binding), pick.getter, p.unique)
+		} else {
+			ok, err = p.getterFileUnchanged(pick.getter)
+		}
 		if err != nil || !ok {
 			return false, err
 		}

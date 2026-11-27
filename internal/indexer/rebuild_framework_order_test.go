@@ -46,6 +46,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Redux Thunk", "moves", 1},
 		{"NgRx Effect", "moves", 1},
 		{"Object Registry", "moves", 1},
+		{"RTK Query", "moves", 1},
 		{"Vuex Dispatch", "moves", 1},
 		{"Celery", "moves", 1},
 		{"Spring events", "moves", 1},
@@ -507,10 +508,14 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	ngrxEffect := node(app, ts, "refreshClock$", graph.KindVariable, 36)
 	ngrxEffect.Meta = map[string]any{"ngrx_effect": ngrxEffect.Name}
 	ngrxAction := node(app, ts, "RefreshClock", graph.KindConstant, 39)
+	rtkEndpoint := node(app, ts, "getClock", graph.KindFunction, 41)
+	rtkEndpoint.Meta = map[string]any{"rtk_endpoint": rtkEndpoint.Name}
+	rtkHook := node(app, ts, "useGetClockQuery", graph.KindFunction, 43)
+	rtkHook.Meta = map[string]any{"rtk_generated_hook": true}
 	// Observer must accept the registrar call proved by event channel;
 	// the original receipt has no call to subscribe.
 	appFacts := receipt(
-		[]*graph.Node{thunk, setup, subscribe, notify, callback, field, topic, show, spec, command, execute, vuexAction, ngrxEffect, ngrxAction},
+		[]*graph.Node{thunk, setup, subscribe, notify, callback, field, topic, show, spec, command, execute, vuexAction, ngrxEffect, ngrxAction, rtkEndpoint, rtkHook},
 		edge(setup, topic.ID, graph.EdgeEmits, 3, event),
 		edge(subscribe, topic.ID, graph.EdgeListensOn, 7, event),
 		edge(subscribe, field.ID, graph.EdgeAccessesField, 8, nil),
@@ -528,6 +533,8 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		// A stale real target cannot be rebound by the main unresolved-call pass.
 		edge(show, setup.ID, graph.EdgeCalls, 30,
 			map[string]any{"via": "object-registry", "registry_value": command.Name, "registry_method": execute.Name}),
+		edge(rtkHook, setup.ID, graph.EdgeCalls, 44,
+			map[string]any{"via": "rtk-query", "rtk_endpoint": rtkEndpoint.Name}),
 		edge(show, setup.ID, graph.EdgeCalls, 34,
 			map[string]any{"via": "vuex-dispatch", "vuex_key": "account/signIn", "vuex_kind": "action"}),
 		edge(ngrxEffect, setup.ID, graph.EdgeCalls, 37,

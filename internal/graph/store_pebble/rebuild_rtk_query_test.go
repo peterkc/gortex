@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -66,4 +67,93 @@ func TestRebuildRTKQueryStationaryRawClaim(t *testing.T) {
 	require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func TestRebuildRTKQueryRowCaps(t *testing.T) {
+	const file, binding = "app.ts", "useStore"
+	large := strings.Repeat("x", 16<<20)
+	for _, tc := range []struct {
+		name, row string
+	}{
+		{"endpoint", "node row"},
+		{"hook", "node row"},
+		{"caller", "node row"},
+		{"deciding getter", "node row"},
+		{"unused getter", ""},
+		{"foreign function", ""},
+		{"owned Call", "edge row"},
+		{"foreign resolved Call", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := &graph.Node{ID: "caller", Name: "caller", Kind: graph.KindFunction, FilePath: file, Language: "typescript"}
+			hook := &graph.Node{ID: "hook", Name: "useQuery", Kind: graph.KindFunction, FilePath: file, Language: "typescript",
+				Meta: map[string]any{"rtk_generated_hook": true}}
+			endpoint := &graph.Node{ID: "endpoint", Name: "query", Kind: graph.KindFunction, FilePath: file, Language: "typescript",
+				Meta: map[string]any{"rtk_endpoint": "query"}}
+			getter := &graph.Node{ID: "getter", Name: binding, Kind: graph.KindVariable, FilePath: file, Language: "typescript"}
+			foreign := &graph.Node{ID: "foreign", Name: "unrelated", Kind: graph.KindFunction, FilePath: file, Language: "typescript"}
+			call := &graph.Edge{From: caller.ID, To: "unresolved::useQuery", Kind: graph.EdgeCalls, FilePath: file, Line: 2,
+				Meta: map[string]any{"store_binding": binding}}
+			resolved := &graph.Edge{From: caller.ID, To: foreign.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 3}
+			nodes := []*graph.Node{caller, hook, endpoint, getter, foreign}
+			var oversized *graph.Node
+			switch tc.name {
+			case "endpoint":
+				oversized = endpoint
+			case "hook":
+				oversized = hook
+			case "caller":
+				oversized = caller
+			case "deciding getter", "unused getter":
+				oversized = getter
+			case "foreign function":
+				oversized = foreign
+			case "owned Call":
+				call.Context = large
+			case "foreign resolved Call":
+				resolved.Context = large
+			}
+			if oversized != nil {
+				if oversized.Meta == nil {
+					oversized.Meta = map[string]any{}
+				}
+				oversized.Meta["large"] = large
+			}
+			facts := ParseFacts{
+				EffectiveLanguage: "typescript", File: graph.FileMetaRow{FilePath: file, NodeCount: len(nodes)},
+				Nodes: nodes, Edges: []*graph.Edge{call, resolved},
+			}
+			b := newBuild(t, FullProfile)
+			require.NoError(t, b.AddParsedFile("", facts))
+			if tc.name == "deciding getter" {
+				rival := *hook
+				rival.ID, rival.FilePath = "rival", "other.ts"
+				rivalFacts := ParseFacts{
+					EffectiveLanguage: "typescript", File: graph.FileMetaRow{FilePath: rival.FilePath, NodeCount: 1},
+					Nodes: []*graph.Node{&rival},
+				}
+				require.NoError(t, b.AddParsedFile("", rivalFacts))
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildRTKQuery(t.Context(), func(yield func(ParseFacts, error) bool) {
+				require.Empty(t, tc.row, "oversized stage-owned row must refuse before receipt replay")
+				yield(facts, nil)
+			}, rtkQueryStoreTestRules())
+			if tc.row != "" {
+				require.ErrorIs(t, err, ErrRebuildRTKQuery)
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "RTK Query "+tc.row)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, RebuildRTKQueryStats{Resolved: 1, Moves: 1}, stats)
+			moved := *call
+			moved.To = hook.ID
+			stored, err := b.pendingEdge(pendingEdgeKey(&moved))
+			require.NoError(t, err)
+			require.Equal(t, &moved, stored)
+		})
+	}
 }

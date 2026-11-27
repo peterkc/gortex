@@ -83,10 +83,10 @@ func TestRebuildRTKQuerySQLiteOracle(t *testing.T) {
 			require.Equal(t, "first Call receipt", saved.Meta["witness"])
 		}
 	}
-	for _, moves := range []uint64{5, 0} {
+	for _, wantStats := range []store_pebble.RebuildRTKQueryStats{{Resolved: 5, Moves: 5}, {Resolved: 2}} {
 		stats, err := RunRebuildRTKQuery(t.Context(), private, rebuildGRPCReceipts(facts), frozen)
 		require.NoError(t, err)
-		require.Equal(t, moves, stats.Moves)
+		require.Equal(t, wantStats, stats)
 		require.Equal(t, want, rebuildEventSavedRows(t, private))
 	}
 }
@@ -116,7 +116,7 @@ func TestRebuildRTKQueryDecidingProof(t *testing.T) {
 			stats, err := RunRebuildRTKQuery(t.Context(), private, rebuildGRPCReceipts(proof), selection)
 			if omit == "loser" {
 				require.NoError(t, err)
-				require.Equal(t, uint64(1), stats.Moves)
+				require.Equal(t, store_pebble.RebuildRTKQueryStats{Resolved: 1, Moves: 1}, stats)
 				native := openRebuildTemporalOracle(t, facts)
 				require.Equal(t, 1, ResolveRTKQueryCalls(native))
 				require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
@@ -178,7 +178,7 @@ func TestRebuildRTKQuerySQLiteWindow(t *testing.T) {
 	require.NoError(t, err)
 	stats, err := RunRebuildRTKQuery(t.Context(), private, rebuildGRPCReceipts(facts), selection)
 	require.NoError(t, err)
-	require.Equal(t, uint64(graph.SQLiteReindexChunkSize+1), stats.Moves)
+	require.Equal(t, store_pebble.RebuildRTKQueryStats{Resolved: graph.SQLiteReindexChunkSize + 1, Moves: graph.SQLiteReindexChunkSize + 1}, stats)
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
 }
 
@@ -269,4 +269,181 @@ func requireRTKQueryRefusal(t *testing.T, err error, stats store_pebble.RebuildR
 	want.To = target
 	require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
 	require.Zero(t, stats)
+}
+
+func TestRebuildRTKQueryEndpointReceipt(t *testing.T) {
+	const file = "api.ts"
+	caller := rtkQueryTestHook(file, "hook")
+	winner := rtkQueryTestEndpoint(file, "a", "query")
+	rival := rtkQueryTestEndpoint(file, "z", "other")
+	call := rtkQueryTestCall(caller.ID, "unresolved::*.query", file, "query", 5)
+	facts := rebuildEventFacts(file, "typescript", []*graph.Node{caller, winner, rival}, call)
+	b := openRebuildGRPCBuild(t, facts)
+	before := rebuildEventSavedRows(t, b)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthRTKQuery})
+	require.NoError(t, err)
+	raw := *rival
+	raw.Meta = map[string]any{"rtk_endpoint": "query"}
+	proof := rebuildEventFacts(file, "typescript", []*graph.Node{caller, winner, &raw}, call)
+	stats, err := RunRebuildRTKQuery(t.Context(), b, rebuildGRPCReceipts(proof), selection)
+	requireRTKQueryRefusal(t, err, stats, call, winner.ID)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
+	native := openRebuildTemporalOracle(t, proof)
+	require.Equal(t, 1, ResolveRTKQueryCalls(native))
+	rows := rebuildEventSQLiteRows(native)
+	require.Len(t, rows.edges, 1)
+	require.Equal(t, rival.ID, rows.edges[0].To)
+}
+
+func TestRebuildRTKQueryHookAndAnchorReceipts(t *testing.T) {
+	const file = "app.ts"
+	caller := &graph.Node{ID: file + "::render", Name: "render", Kind: graph.KindFunction, FilePath: file, Language: "typescript"}
+	hook, rival := rtkQueryTestHook(file, "hook"), rtkQueryTestHook(file, "rival")
+	rival.Name = "useOtherQuery"
+	entrant := &graph.Node{ID: file + "::entrant", Name: hook.Name, Kind: graph.KindFunction, FilePath: file, Language: "typescript"}
+	endpoint := rtkQueryTestEndpoint(file, "endpoint", "query")
+	call := &graph.Edge{From: caller.ID, To: "unresolved::useQuery", Kind: graph.EdgeCalls, FilePath: file, Line: 5}
+	facts := rebuildEventFacts(file, "typescript", []*graph.Node{caller, hook, rival, entrant, endpoint}, call)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthRTKQuery})
+	require.NoError(t, err)
+	for _, mismatch := range []string{"anchor missing", "anchor conflicting", "hook renamed", "rival renamed", "new hook"} {
+		t.Run(mismatch, func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			proof := facts
+			proof.Nodes = slices.Clone(facts.Nodes)
+			switch mismatch {
+			case "anchor missing":
+				proof.Nodes = proof.Nodes[:4]
+			case "anchor conflicting":
+				raw := *endpoint
+				raw.Meta = nil
+				proof.Nodes = append(proof.Nodes, &raw)
+			case "hook renamed":
+				raw := *hook
+				raw.Name = "useDifferentQuery"
+				proof.Nodes[1] = &raw
+			case "rival renamed":
+				raw := *rival
+				raw.Name = hook.Name
+				proof.Nodes[2] = &raw
+			case "new hook":
+				raw := *entrant
+				raw.Meta = hook.Meta
+				proof.Nodes[3] = &raw
+			}
+			proof.File.NodeCount = len(proof.Nodes)
+			stats, err := RunRebuildRTKQuery(t.Context(), b, rebuildGRPCReceipts(proof), selection)
+			requireRTKQueryRefusal(t, err, stats, call, hook.ID)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildRTKQueryGetterProof(t *testing.T) {
+	const file, other, binding = "app.ts", "store.ts", "useStore"
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthRTKQuery})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name, getterFile               string
+		singleton, omit, changeBinding bool
+		refuse                         bool
+	}{
+		{name: "getter beats caller file", getterFile: other},
+		{name: "deciding getter missing", getterFile: other, omit: true, refuse: true},
+		{name: "deciding binding changed", getterFile: other, changeBinding: true, refuse: true},
+		{name: "getter in caller file can be omitted", getterFile: file, omit: true},
+		{name: "getter in empty candidate file can be omitted", getterFile: "third.ts", omit: true},
+		{name: "singleton ignores binding and getter", getterFile: other, singleton: true, omit: true, changeBinding: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := &graph.Node{ID: file + "::render", Name: "render", Kind: graph.KindFunction, FilePath: file, Language: "typescript"}
+			local, remote := rtkQueryTestHook(file, "local"), rtkQueryTestHook(other, "remote")
+			endpoint := rtkQueryTestEndpoint(other, "query", "query")
+			getter := &graph.Node{ID: tc.getterFile + "::getter", Name: binding, Kind: graph.KindVariable, FilePath: tc.getterFile, Language: "typescript"}
+			call := &graph.Edge{From: caller.ID, To: "unresolved::useQuery", Kind: graph.EdgeCalls, FilePath: file, Line: 5,
+				Meta: map[string]any{"store_binding": binding}}
+			left := rebuildEventFacts(file, "typescript", []*graph.Node{caller, local}, call)
+			right := rebuildEventFacts(other, "typescript", []*graph.Node{endpoint})
+			if !tc.singleton {
+				right.Nodes = append(right.Nodes, remote)
+				right.File.NodeCount++
+			}
+			facts := []store_pebble.ParseFacts{left, right}
+			switch tc.getterFile {
+			case file:
+				facts[0].Nodes = append(facts[0].Nodes, getter)
+				facts[0].File.NodeCount++
+			case other:
+				facts[1].Nodes = append(facts[1].Nodes, getter)
+				facts[1].File.NodeCount++
+			default:
+				facts = append(facts, rebuildEventFacts(tc.getterFile, "typescript", []*graph.Node{getter}))
+			}
+			b := openRebuildGRPCBuild(t, facts...)
+			before := rebuildEventSavedRows(t, b)
+			proof := slices.Clone(facts)
+			if tc.omit {
+				for i := range proof {
+					proof[i].Nodes = slices.DeleteFunc(slices.Clone(proof[i].Nodes), func(n *graph.Node) bool { return n.ID == getter.ID })
+					proof[i].File.NodeCount = len(proof[i].Nodes)
+				}
+			}
+			if tc.changeBinding {
+				raw := *call
+				raw.Meta = map[string]any{"store_binding": "different"}
+				proof[0].Edges = []*graph.Edge{&raw}
+			}
+			stats, err := RunRebuildRTKQuery(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
+			if tc.refuse {
+				requireRTKQueryRefusal(t, err, stats, call, remote.ID)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildRTKQueryStats{Resolved: 1, Moves: 1}, stats)
+			native := openRebuildTemporalOracle(t, facts...)
+			require.Equal(t, 1, ResolveRTKQueryCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildRTKQueryEndpointGateAndReset(t *testing.T) {
+	const file = "api.ts"
+	caller := rtkQueryTestHook(file, "hook")
+	old := rtkQueryTestEndpoint(file, "former", "other")
+	call := rtkQueryTestCall(caller.ID, old.ID, file, "removed", 5)
+	call.Confidence = ConfidenceTyped
+	StampSynthesizedTyped(call, SynthRTKQuery)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthRTKQuery})
+	require.NoError(t, err)
+	for _, withEndpoint := range []bool{false, true} {
+		nodes := []*graph.Node{caller}
+		if withEndpoint {
+			nodes = append(nodes, old)
+		}
+		facts := rebuildEventFacts(file, "typescript", nodes, call)
+		b := openRebuildGRPCBuild(t, facts)
+		before := rebuildEventSavedRows(t, b)
+		stats, err := RunRebuildRTKQuery(t.Context(), b, func(yield func(store_pebble.ParseFacts, error) bool) {
+			require.True(t, withEndpoint, "no endpoint must skip receipt replay")
+			yield(facts, nil)
+		}, selection)
+		require.NoError(t, err)
+		if !withEndpoint {
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+			continue
+		}
+		require.Equal(t, store_pebble.RebuildRTKQueryStats{Moves: 1}, stats)
+		native := openRebuildTemporalOracle(t, facts)
+		require.Zero(t, ResolveRTKQueryCalls(native))
+		want := rebuildEventSQLiteRows(native)
+		require.Len(t, want.edges, 1)
+		require.Equal(t, "unresolved::*.removed", want.edges[0].To)
+		require.Zero(t, want.edges[0].Confidence)
+		require.NotContains(t, want.edges[0].Meta, MetaSynthesizedBy)
+		require.Equal(t, want, rebuildEventSavedRows(t, b))
+	}
 }
