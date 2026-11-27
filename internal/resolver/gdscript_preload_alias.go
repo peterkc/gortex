@@ -46,10 +46,7 @@ func ResolveGDScriptPreloadAliases(g graph.Store) int {
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil || !graph.IsUnresolvedTarget(e.To) {
-			continue
-		}
-		recv, _ := e.Meta["receiver_type"].(string)
+		recv, member := gdAutoloadCallKey(e)
 		if recv == "" {
 			continue
 		}
@@ -57,26 +54,30 @@ func ResolveGDScriptPreloadAliases(g graph.Store) int {
 		if byName == nil {
 			continue
 		}
-		target := members[byName[recv]][strings.TrimPrefix(graph.UnresolvedName(e.To), "*.")]
+		target := members[byName[recv]][member]
 		if target == "" {
 			continue
 		}
-		oldTo := e.To
-		e.To = target
-		// The alias states its own path in the source line that declares
-		// it, and the loaded script declares the member. Same grade of
-		// evidence as the autoload binding this mirrors.
-		e.Origin = graph.OriginASTResolved
-		e.Confidence = 0.9
-		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.9)
-		StampSynthesized(e, SynthGodotPreloadAlias)
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		reindex = append(reindex, gdPreloadAliasRebind(e, target))
 		resolved++
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func gdPreloadAliasRebind(e *graph.Edge, target string) graph.EdgeReindex {
+	oldTo := e.To
+	e.To = target
+	// The alias states its own path in the source line that declares
+	// it, and the loaded script declares the member. Same grade of
+	// evidence as the autoload binding this mirrors.
+	e.Origin = graph.OriginASTResolved
+	e.Confidence = 0.9
+	e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, 0.9)
+	StampSynthesized(e, SynthGodotPreloadAlias)
+	return graph.EdgeReindex{Edge: e, OldTo: oldTo}
 }
 
 // gdEdgeSourceFile returns the graph file ID an edge is sourced from.
@@ -96,16 +97,8 @@ func gdPreloadAliases(g graph.Store) map[string]map[string]string {
 	// decls[fileID][alias] = declared res:// path (project-relative).
 	var decls map[string]map[string]string
 	for n := range g.NodesByKind(graph.KindVariable) {
-		if n == nil || n.Meta == nil || n.Language != "gdscript" {
-			continue
-		}
-		path, _ := n.Meta["gd_preload"].(string)
-		path = gdProjectRelPath(path)
-		if path == "" || !strings.HasSuffix(path, ".gd") {
-			continue
-		}
-		fileID, _, ok := strings.Cut(n.ID, "::")
-		if !ok {
+		fileID, path := gdPreloadAliasDecl(n)
+		if path == "" {
 			continue
 		}
 		if decls == nil {
@@ -161,6 +154,22 @@ func gdPreloadAliases(g graph.Store) map[string]map[string]string {
 		}
 	}
 	return out
+}
+
+func gdPreloadAliasDecl(n *graph.Node) (fileID, path string) {
+	if n == nil || n.Language != "gdscript" {
+		return "", ""
+	}
+	path, _ = n.Meta["gd_preload"].(string)
+	path = gdProjectRelPath(path)
+	if path == "" || !strings.HasSuffix(path, ".gd") {
+		return "", ""
+	}
+	fileID, _, ok := strings.Cut(n.ID, "::")
+	if !ok {
+		return "", ""
+	}
+	return fileID, path
 }
 
 // gdProjectRelPath strips the `res://` scheme and any leading separator,

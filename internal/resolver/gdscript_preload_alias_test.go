@@ -77,3 +77,19 @@ func TestResolveGDScriptPreloadAliases_NoAliasesIsANoOp(t *testing.T) {
 	gdScriptFile(g, "src/ui/Hud.gd", "draw")
 	assert.Zero(t, ResolveGDScriptPreloadAliases(g))
 }
+
+// The preload turn sees only the residual Call left by autoload.
+func TestResolveGDScriptPreloadAliases_AfterAutoload(t *testing.T) {
+	g := gdPreloadGraph(t)
+	const caller = "src/ui/Hud.gd::draw"
+	gdScriptFile(g, "src/core/Game.gd", "clampf")
+	gdAutoloadNode(g, "M", "src/core/Game.gd")
+	gdRecvCall(g, caller, "src/ui/Hud.gd", "clampf", "M")
+
+	require.Equal(t, 1, ResolveGDScriptAutoloads(g))
+	assert.Zero(t, ResolveGDScriptPreloadAliases(g))
+	e := gdCallEdge(g, caller, "src/core/Game.gd::clampf")
+	require.NotNil(t, e)
+	assert.Equal(t, SynthGodotAutoload, e.Meta[MetaSynthesizedBy])
+	assert.Nil(t, gdCallEdge(g, caller, "src/util/Maths.gd::clampf"))
+}
