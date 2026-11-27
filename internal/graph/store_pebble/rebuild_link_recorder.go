@@ -10,9 +10,10 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// This family lives only in the private build. Indexed by winning live key,
-// it records the original complete receipt key or the producer proof without
-// changing the saved edge row.
+// This family lives only in the private build. For each winning live key it
+// can hold a raw receipt key, a producer proof, or an untracked-move marker.
+// Proofs and markers bind to the saved edge bytes. A stale digest returns
+// ErrRebuildUnknownProvenance; it is not a missing record.
 var rebuildLinkRecorderPrefix = []byte{'g', 'Z'}
 
 func rebuildLinkRecorderKey(live []byte) []byte {

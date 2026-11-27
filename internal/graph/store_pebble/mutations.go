@@ -213,10 +213,11 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 	return b.reindexChunkWithRecorders(batch, false)
 }
 
-// Capture records the original key on checked target or kind reindexes,
-// including main linking, Go receiver repair, and target attribution. A
-// generic move preserves an inherited raw key or marks a receipt input as
-// untracked. A missing old row is not proof of a raw source.
+// Checked reindexes can capture an existing old key as raw receipt lineage.
+// Generic reindexes, including placeholder source moves and function-pointer
+// moves, do not capture an old key. They keep inherited raw lineage or mark
+// a receipt-input move as untracked. A producer proof cannot move to a new
+// identity, and a missing old row cannot establish raw lineage.
 func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, capture bool) error {
 	// First free every moving stored identity. A stationary destination
 	// preserves its row, and the first claimant wins any free destination.
