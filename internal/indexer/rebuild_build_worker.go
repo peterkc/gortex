@@ -445,6 +445,9 @@ func buildRebuildStages(
 		if err := resolver.FreezeRebuildRailsInputs(ctx, private, selection); err != nil {
 			return err
 		}
+		if err := resolver.FreezeRebuildUIKitInputs(ctx, private, selection); err != nil {
+			return err
+		}
 		grpc, err := resolver.RunRebuildGRPC(ctx, private, receipts, selection)
 		if err != nil {
 			return err
@@ -770,6 +773,13 @@ func buildRebuildStages(
 		}
 		if swiftuiMoves != 0 {
 			logger.Info("rebuild SwiftUI applied to private build", zap.Uint64("moves", swiftuiMoves))
+		}
+		uikitMoves, err := resolver.RunRebuildUIKit(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if uikitMoves != 0 {
+			logger.Info("rebuild UIKit applied to private build", zap.Uint64("moves", uikitMoves))
 		}
 		vaporMoves, err := resolver.RunRebuildVapor(ctx, private, receipts, selection)
 		if err != nil {

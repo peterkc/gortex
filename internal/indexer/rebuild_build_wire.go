@@ -211,7 +211,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildGodotPreloadAlias,
 	nil, // 84: deferred Godot scene connections
 	store_pebble.ErrRebuildSwiftUI,
-	nil, // 86: UIKit
+	store_pebble.ErrRebuildUIKit,
 	store_pebble.ErrRebuildVapor,
 }
 

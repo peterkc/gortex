@@ -66,6 +66,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Godot autoload", "moves", 1},
 		{"Godot preload alias", "moves", 1},
 		{"SwiftUI", "moves", 1},
+		{"UIKit", "moves", 1},
 		{"Vapor", "moves", 1},
 	}
 	for _, tc := range []struct {
@@ -763,6 +764,12 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	swiftuiFacts := receipt([]*graph.Node{swiftuiCaller, swiftuiTarget},
 		edge(swiftuiCaller, "unresolved::"+swiftuiTarget.Name, graph.EdgeInstantiates, 2, nil))
 
+	const uikitPath = "UIKitHarness.swift"
+	uikitSource := node(uikitPath, "swift", "makeController", graph.KindFunction, 1)
+	uikitTarget := node(uikitPath, "swift", "PanelViewController", graph.KindType, 4)
+	uikitFacts := receipt([]*graph.Node{uikitSource, uikitTarget},
+		edge(uikitSource, "unresolved::"+uikitTarget.Name, graph.EdgeCalls, 2, nil))
+
 	const vaporPath = "VaporHarness.swift"
 	vaporCaller := node(vaporPath, "swift", "registerRoutes", graph.KindFunction, 1)
 	vaporTarget := node(vaporPath, "swift", "B2VaporHarnessController", graph.KindType, 4)
@@ -780,6 +787,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
 		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts, railsFacts,
-		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, vaporFacts,
+		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, uikitFacts, vaporFacts,
 	}
 }
