@@ -225,3 +225,19 @@ func TestRebuildGodotScriptNodeRowCaps(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildGodotAutoloadStationaryReceipt(t *testing.T) {
+	facts, call, _ := rebuildGodotAutoloadFacts()
+	call.To = "unresolved::*.missing"
+	build, native := openRebuildEventStores(t, facts...)
+	receipt := *call
+	receipt.Confidence = 0.5
+	facts[2].Edges = []*graph.Edge{&receipt}
+	changed, err := RunRebuildGodotAutoload(t.Context(), build, rebuildGRPCReceipts(facts...), rebuildGodotAutoloadSelection(t, build))
+	require.NoError(t, err)
+	require.Zero(t, changed)
+	require.Zero(t, ResolveGDScriptAutoloads(native))
+	saved := rebuildEventSavedRows(t, build)
+	require.Equal(t, rebuildEventSQLiteRows(native), saved)
+	require.Equal(t, []*graph.Edge{call}, saved.edges)
+}

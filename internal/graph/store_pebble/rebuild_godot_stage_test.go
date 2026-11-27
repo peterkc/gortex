@@ -33,11 +33,12 @@ func TestRebuildGodotStageBoundaries(t *testing.T) {
 			case "unrelated file size":
 				unrelated.Meta = map[string]any{"large": large}
 			}
-			b, receipts := seedSyntheticCustody(t,
+			facts := []ParseFacts{
 				ParseFacts{File: graph.FileMetaRow{FilePath: source}, EffectiveLanguage: language, Nodes: []*graph.Node{alias}, Edges: []*graph.Edge{call}},
 				ParseFacts{File: graph.FileMetaRow{FilePath: script}, EffectiveLanguage: language, Nodes: []*graph.Node{file, member}},
 				ParseFacts{File: graph.FileMetaRow{FilePath: unrelated.FilePath}, EffectiveLanguage: language, Nodes: []*graph.Node{unrelated}},
-			)
+			}
+			b, receipts := seedSyntheticCustody(t, facts...)
 			prefix := rebuildGodotPreloadAliasPrefix
 			switch mode {
 			case "nil input":
@@ -47,6 +48,7 @@ func TestRebuildGodotStageBoundaries(t *testing.T) {
 			case "raw identity":
 				raw := *call
 				raw.Line++
+				facts[0].Edges = []*graph.Edge{&raw}
 				require.NoError(t, b.putEdgeWithCustody(call, rebuildEdgeCustody{raw: pendingEdgeKey(&raw)}))
 			case "untracked move":
 				require.NoError(t, b.putEdgeWithCustody(call, rebuildEdgeCustody{proof: rebuildProofUntrackedMove}))
