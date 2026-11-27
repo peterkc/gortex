@@ -287,11 +287,11 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 					if !wanted {
 						continue
 					}
-					if err := p.nodeInput(r.key, r.value); err != nil {
-						return err
-					}
 					cohort := p.key('u', possible, n.Name)
 					for _, bucket := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'i', n) {
+						if err := p.noteCandidateSize(r, bucket); err != nil {
+							return err
+						}
 						if err := p.put(p.key('e', string(bucket)), nil); err != nil {
 							return err
 						}
@@ -321,10 +321,10 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 		if err != nil || !wanted {
 			return err
 		}
-		if err := p.nodeInput(r.key, r.value); err != nil {
-			return err
-		}
 		for _, key := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'i', n) {
+			if err := p.noteCandidateSize(r, key); err != nil {
+				return err
+			}
 			if err := p.addUnique(key, n.ID); err != nil {
 				return err
 			}
@@ -332,6 +332,15 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 		return nil
 	})
 	return haveMethods, err
+}
+
+// Census keeps only light candidate fields. A move checks the size of the
+// candidates in its consulted buckets, not every method of the requested class.
+func (p *rebuildObjectRegistryPass) noteCandidateSize(r row, bucket []byte) error {
+	if len(r.key)+len(r.value) <= p.rowBytes {
+		return nil
+	}
+	return p.put(p.key('B', string(bucket)), nil)
 }
 
 func (p *rebuildObjectRegistryPass) collectGetters(ctx context.Context) error {
@@ -510,6 +519,13 @@ func (p *rebuildObjectRegistryPass) planCall(old []byte, e *graph.Edge, pick reb
 		return err
 	}
 	for _, witness := range pick.buckets {
+		oversized, err := p.present(p.key('B', string(witness.bucket)))
+		if err != nil {
+			return err
+		}
+		if oversized {
+			return fmt.Errorf("%w: %s node row", ErrRebuildLinkInputSize, p.label)
+		}
 		extra, err := p.present(p.key('e', string(witness.bucket)))
 		if err != nil {
 			return err
@@ -544,8 +560,8 @@ func (p *rebuildObjectRegistryPass) recordNode(ctx context.Context, raw *graph.N
 	if err := p.recordStoreGetter(getterKey, wanted, files, raw, file, lang, p.node); err != nil || (caller == 0 && candidate == nil) {
 		return err
 	}
-	// Wanted candidates were capped at census. Other classes can still
-	// prove the stage-wide method anchor without reading node metadata.
+	// Moving Calls checked their candidate buckets during planning. Other
+	// candidates can prove the stage-wide anchor without reading metadata.
 	live, err := p.readNode(raw.ID, caller != 0)
 	if err != nil {
 		return err
@@ -665,7 +681,9 @@ func (p *rebuildObjectRegistryPass) prove(ctx context.Context, receipts iter.Seq
 		if err != nil || !wanted {
 			return err
 		}
-		return p.foldExactCandidate(r, prefix, len(p.prefix), 'i', p.node)
+		return p.foldExactCandidate(r, prefix, len(p.prefix), 'i', func(id string) (*graph.Node, error) {
+			return p.readNode(id, false)
+		})
 	}); err != nil {
 		return err
 	}

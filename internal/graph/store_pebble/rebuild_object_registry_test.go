@@ -191,17 +191,19 @@ func TestRebuildObjectRegistryBucketScope(t *testing.T) {
 
 func TestRebuildObjectRegistryCandidateNodeCap(t *testing.T) {
 	for _, tc := range []struct {
-		name, class, fromTarget, toTarget string
+		name, class, method, fromTarget, toTarget string
 	}{
-		{"wanted class", "Cmd", "unresolved::*.Cmd", ""},
-		{"unwanted class", "Other", "stale-method", "unresolved::*.Cmd"},
+		{"moving Call consults method", "Cmd", "run", "unresolved::*.Cmd", ""},
+		{"moving Call ignores method", "Cmd", "other", "stale-method", "unresolved::*.Cmd"},
+		{"stationary Call consults method", "Cmd", "run", "method", "method"},
+		{"moving Call ignores class", "Other", "run", "stale-method", "unresolved::*.Cmd"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const capBytes = 16 << 20
 			facts := objectRegistryTestFacts()
 			method, member, call := facts.Nodes[0], facts.Edges[0], facts.Edges[1]
 			method.Meta = map[string]any{"payload": strings.Repeat("x", capBytes)}
-			member.To, call.To = tc.class, tc.fromTarget
+			method.Name, member.To, call.To = tc.method, tc.class, tc.fromTarget
 			b, receipts := seedSyntheticCustody(t, facts)
 			before := rebuildFrameworkCustodyRows(t, b)
 			key := pendingNodeKey(method.ID)
@@ -216,8 +218,13 @@ func TestRebuildObjectRegistryCandidateNodeCap(t *testing.T) {
 				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 				return
 			}
-			// The foreign method still supplies the method-index anchor for a reset.
 			require.NoError(t, err)
+			if tc.toTarget == tc.fromTarget {
+				require.Equal(t, RebuildObjectRegistryStats{Stubs: 1, Resolved: 1}, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			// An unconsulted method still supplies the method-index anchor for a reset.
 			require.Equal(t, RebuildObjectRegistryStats{Stubs: 1, Moves: 1}, stats)
 			moved := *call
 			moved.To = tc.toTarget
