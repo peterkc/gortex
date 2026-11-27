@@ -190,7 +190,7 @@ func rebuildFrameworkCustodyRows(t *testing.T, b *BuildStore) map[string][]byte 
 	return rows
 }
 
-func TestRebuildGRPCWindowPreservesInheritedProof(t *testing.T) {
+func TestRebuildGRPCWindowPreservesInheritedRawCustody(t *testing.T) {
 	ctx := t.Context()
 	b := newBuild(t, FullProfile)
 	raw := graph.Edge{
