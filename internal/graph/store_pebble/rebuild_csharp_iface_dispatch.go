@@ -433,7 +433,7 @@ func (p *rebuildCSharpIface) closure(ctx context.Context, root string, proved bo
 	return prefix, errors.Join(p.b.pending.DeleteRange(queue, prefixEnd(queue), pebble.NoSync), p.put(done, nil))
 }
 
-var errRebuildIfaceCap = errors.New("C# interface family over native cap")
+var errRebuildIfaceCap = errors.New("interface family over the native C# cap")
 
 // Only one family is retained in memory. Its member count and total ID
 // bytes are bounded. Keep one slot per native posting, including overloads.
