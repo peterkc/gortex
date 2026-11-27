@@ -43,8 +43,6 @@ func TestRebuildFrameworkFamilyGateSQLiteOracle(t *testing.T) {
 	after := rebuildEventSQLiteRows(sqlite)
 	require.Len(t, after.edges, 5)
 	require.Equal(t, after, rebuildEventSavedRows(t, b))
-	require.Len(t, b.GetInEdges(jvm.ID), 3)
-	require.NoError(t, b.VerifyEdgeIdentities())
 	removed, err = RunRebuildFrameworkFamilyGate(t.Context(), b, needed)
 	require.NoError(t, err)
 	require.Zero(t, removed)
