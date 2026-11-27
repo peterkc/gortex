@@ -184,32 +184,6 @@ func (p *rebuildReduxThunkPass) collectGetters(ctx context.Context) error {
 	})
 }
 
-func (p *rebuildReduxThunkPass) unique(key []byte) (value string, seen bool, err error) {
-	state, err := pendingGet(p.b.pending, key, func(val []byte) (string, error) {
-		if len(val) == 1 && val[0] == 0 || len(val) > 1 && val[0] == 1 {
-			return string(val), nil
-		}
-		return "", invalid("Redux Thunk election row")
-	})
-	if len(state) > 0 && state[0] == 1 {
-		return state[1:], true, err
-	}
-	return "", state != "", err
-}
-
-// A singleton contains byte one and its value; zero means ambiguous.
-// Getter declarations in the same file share a value.
-func (p *rebuildReduxThunkPass) addUnique(key []byte, value string) error {
-	old, seen, err := p.unique(key)
-	if err != nil || seen && (old == "" || old == value) {
-		return err
-	}
-	if seen {
-		return p.put(key, []byte{0})
-	}
-	return p.put(key, append([]byte{1}, value...))
-}
-
 type rebuildReduxThunkPick struct {
 	target      string
 	inputs      [][]byte                       // consulted pool markers and caller
@@ -385,30 +359,6 @@ func (p *rebuildReduxThunkPass) planCall(old []byte, e *graph.Edge, callee, bind
 
 func (p *rebuildReduxThunkPass) state(key []byte) (byte, error) {
 	return rebuildScratchState(p.b.pending, key, "Redux Thunk receipt proof")
-}
-
-func (p *rebuildReduxThunkPass) marked(key []byte) ([]byte, error) {
-	return pendingGet(p.b.pending, key, func(val []byte) ([]byte, error) {
-		if len(val) == 0 || val[0]&rebuildCapabilityWanted == 0 {
-			return nil, invalid("Redux Thunk receipt claim")
-		}
-		return bytes.Clone(val), nil
-	})
-}
-
-func (p *rebuildReduxThunkPass) claim(raw, old []byte) error {
-	if raw == nil {
-		raw = old
-	}
-	key := append(p.column('r'), raw...)
-	claim, err := p.marked(key)
-	if err != nil {
-		return err
-	}
-	if claim != nil {
-		return p.put(key, []byte{rebuildCapabilityWanted | rebuildCapabilityUnproved})
-	}
-	return p.put(key, append([]byte{rebuildCapabilityWanted}, old...))
 }
 
 func (p *rebuildReduxThunkPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {

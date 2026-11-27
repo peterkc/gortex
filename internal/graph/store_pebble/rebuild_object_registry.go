@@ -62,8 +62,10 @@ func (b *BuildStore) RebuildObjectRegistry(ctx context.Context, receipts iter.Se
 		err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
 	}()
 	p := rebuildObjectRegistryPass{
-		rebuildCallMoves: rebuildCallMoves{b: b, prefix: prefix, rowBytes: 16 << 20, label: "Object Registry", inputRow: "edge row"},
-		rules:            rules,
+		rebuildCallMoves: rebuildCallMoves{
+			b: b, prefix: prefix, rowBytes: 16 << 20, label: "Object Registry", inputRow: "edge row", allowUncheckedRows: true,
+		},
+		rules: rules,
 	}
 	if err := p.collectEdges(ctx, graph.EdgeCalls); err != nil || p.stats.Stubs == 0 {
 		return p.stats, err
@@ -152,15 +154,7 @@ func (p *rebuildObjectRegistryPass) collectEdges(ctx context.Context, kind graph
 		if err != nil {
 			return err
 		}
-		key := append(p.column(col), raw...)
-		prior, err := p.get(key)
-		if err != nil {
-			return err
-		}
-		if prior != nil {
-			return p.put(key, []byte{rebuildCapabilityWanted | rebuildCapabilityUnproved})
-		}
-		return p.put(key, append([]byte{rebuildCapabilityWanted}, r.key...))
+		return p.claimKey(append(p.column(col), raw...), r.key)
 	})
 }
 
@@ -235,25 +229,6 @@ func (p *rebuildObjectRegistryPass) memberships(ctx context.Context, id string, 
 		}
 		return visit(p.rules.ClassName(e.To), order)
 	})
-}
-
-func (p *rebuildObjectRegistryPass) unique(key []byte) (string, bool, error) {
-	v, err := p.get(key)
-	if len(v) == 0 || v[0] == 0 {
-		return "", v != nil, err
-	}
-	return string(v[1:]), true, err
-}
-
-func (p *rebuildObjectRegistryPass) addUnique(key []byte, value string) error {
-	old, seen, err := p.unique(key)
-	if err != nil || seen && (old == "" || old == value) {
-		return err
-	}
-	if seen {
-		return p.put(key, []byte{0})
-	}
-	return p.put(key, append([]byte{1}, value...))
 }
 
 func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool, error) {

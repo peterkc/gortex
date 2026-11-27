@@ -18,6 +18,8 @@ type rebuildCallMoves struct {
 	label    string
 	inputRow string
 	ordered  uint64
+
+	allowUncheckedRows bool // Object Registry keeps its prior scratch decoding.
 }
 
 func (p *rebuildCallMoves) column(col byte) []byte {
@@ -30,6 +32,69 @@ func (p *rebuildCallMoves) put(key, value []byte) error {
 
 func (p *rebuildCallMoves) present(key []byte) (bool, error) {
 	return pendingGet(p.b.pending, key, func([]byte) (bool, error) { return true, nil })
+}
+
+// A singleton row contains byte one and its value. Byte zero marks any
+// non-singleton. Getter declarations in the same file share a value.
+func (p *rebuildCallMoves) unique(key []byte) (value string, seen bool, err error) {
+	if p.allowUncheckedRows {
+		v, err := pendingGet(p.b.pending, key, copyValue)
+		if len(v) == 0 || v[0] == 0 {
+			return "", v != nil, err
+		}
+		return string(v[1:]), true, err
+	}
+	state, err := pendingGet(p.b.pending, key, func(val []byte) (string, error) {
+		if len(val) == 1 && val[0] == 0 || len(val) > 1 && val[0] == 1 {
+			return string(val), nil
+		}
+		return "", invalid(p.label + " election row")
+	})
+	if len(state) > 0 && state[0] == 1 {
+		return state[1:], true, err
+	}
+	return "", state != "", err
+}
+
+func (p *rebuildCallMoves) addUnique(key []byte, value string) error {
+	old, seen, err := p.unique(key)
+	if err != nil || seen && (old == "" || old == value) {
+		return err
+	}
+	if seen {
+		return p.put(key, []byte{0})
+	}
+	return p.put(key, append([]byte{1}, value...))
+}
+
+func (p *rebuildCallMoves) marked(key []byte) ([]byte, error) {
+	if p.allowUncheckedRows {
+		return pendingGet(p.b.pending, key, copyValue)
+	}
+	return pendingGet(p.b.pending, key, func(val []byte) ([]byte, error) {
+		if len(val) == 0 || val[0]&rebuildCapabilityWanted == 0 {
+			return nil, invalid(p.label + " receipt claim")
+		}
+		return bytes.Clone(val), nil
+	})
+}
+
+func (p *rebuildCallMoves) claim(raw, old []byte) error {
+	if raw == nil {
+		raw = old
+	}
+	return p.claimKey(append(p.column('r'), raw...), old)
+}
+
+func (p *rebuildCallMoves) claimKey(key, old []byte) error {
+	claim, err := p.marked(key)
+	if err != nil {
+		return err
+	}
+	if claim != nil {
+		return p.put(key, []byte{rebuildCapabilityWanted | rebuildCapabilityUnproved})
+	}
+	return p.put(key, append([]byte{rebuildCapabilityWanted}, old...))
 }
 
 func (p *rebuildCallMoves) stage(old []byte, e *graph.Edge) error {

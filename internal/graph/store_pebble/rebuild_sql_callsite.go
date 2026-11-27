@@ -124,15 +124,6 @@ func (p *rebuildSQLCallsitePass) cohort(name string) (rebuildSQLCallsiteWitnesse
 	})
 }
 
-func (p *rebuildSQLCallsitePass) marked(key []byte) ([]byte, error) {
-	return pendingGet(p.b.pending, key, func(val []byte) ([]byte, error) {
-		if len(val) == 0 || val[0]&rebuildCapabilityWanted == 0 {
-			return nil, invalid("SQL callsite receipt claim")
-		}
-		return bytes.Clone(val), nil
-	})
-}
-
 func rebuildSQLCallsiteCandidate(n *graph.Node) bool {
 	return n.Kind == graph.KindFunction && n.Language == "sql" && n.Name != ""
 }
@@ -171,16 +162,7 @@ func (p *rebuildSQLCallsitePass) collect(ctx context.Context) (bool, error) {
 // Seen separates empty cohorts from ambiguous ones. A unique row carries
 // its ID after byte one; byte zero marks any non-singleton cohort.
 func (p *rebuildSQLCallsitePass) elect(name string) (target string, seen bool, err error) {
-	row, err := pendingGet(p.b.pending, rebuildSQLCallsiteKey('a', name), func(val []byte) (string, error) {
-		if len(val) == 1 && val[0] == 0 || len(val) > 1 && val[0] == 1 {
-			return string(val), nil
-		}
-		return "", invalid("SQL callsite election row")
-	})
-	if len(row) > 0 && row[0] == 1 {
-		return row[1:], true, err
-	}
-	return "", row != "", err
+	return p.unique(rebuildSQLCallsiteKey('a', name))
 }
 
 func (p *rebuildSQLCallsitePass) plan(ctx context.Context) error {
@@ -237,21 +219,6 @@ func (p *rebuildSQLCallsitePass) plan(ctx context.Context) error {
 		p.stats.Moves++
 		return nil
 	})
-}
-
-func (p *rebuildSQLCallsitePass) claim(raw, old []byte) error {
-	if raw == nil {
-		raw = old
-	}
-	key := append(rebuildSQLCallsiteKey('r'), raw...)
-	claim, err := p.marked(key)
-	if err != nil {
-		return err
-	}
-	if claim != nil {
-		return p.put(key, []byte{rebuildCapabilityWanted | rebuildCapabilityUnproved})
-	}
-	return p.put(key, append([]byte{rebuildCapabilityWanted}, old...))
 }
 
 func (p *rebuildSQLCallsitePass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
