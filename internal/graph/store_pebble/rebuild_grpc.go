@@ -88,22 +88,7 @@ func rebuildGRPCKey(column byte, fields ...string) []byte {
 }
 
 func (p *rebuildGRPC) put(key, value []byte) error {
-	if len(key)+len(value) > rebuildGRPCRowLimit {
-		return fmt.Errorf("%w: gRPC scratch row", ErrRebuildLinkInputSize)
-	}
-	if err := p.b.pending.Set(key, value, pebble.NoSync); err != nil {
-		return err
-	}
-	p.unflushed += len(key) + len(value)
-	if p.unflushed >= p.threshold {
-		before := p.b.pending.Metrics().Levels[0].TableBytesFlushed
-		if err := p.b.pending.Flush(); err != nil {
-			return err
-		}
-		p.stats.SpillBytes += p.b.pending.Metrics().Levels[0].TableBytesFlushed - before
-		p.unflushed = 0
-	}
-	return nil
+	return p.b.putRebuildScratch(key, value, rebuildGRPCRowLimit, p.threshold, &p.unflushed, &p.stats.SpillBytes, "gRPC")
 }
 
 func rebuildGRPCInput(key, value []byte) error {
@@ -614,23 +599,11 @@ func (p *rebuildGRPC) note(key []byte, proved bool) error {
 	if err != nil || state == 0 {
 		return err
 	}
-	bit := rebuildCapabilityUnproved
-	if proved {
-		bit = rebuildCapabilityProved
-	}
-	if state&bit != 0 {
-		return nil
-	}
-	return p.put(key, []byte{state | bit})
+	return noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(proved))
 }
 
 func (p *rebuildGRPC) state(key []byte) (byte, error) {
-	return pendingGet(p.b.pending, key, func(value []byte) (byte, error) {
-		if len(value) != 1 {
-			return 0, invalid("gRPC receipt proof")
-		}
-		return value[0], nil
-	})
+	return rebuildScratchState(p.b.pending, key, "gRPC receipt proof")
 }
 
 func (p *rebuildGRPC) record(ctx context.Context, facts ParseFacts) error {
@@ -682,15 +655,12 @@ func (p *rebuildGRPC) record(ctx context.Context, facts ParseFacts) error {
 }
 
 func (p *rebuildGRPC) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
-	for facts, err := range receipts {
-		if err != nil {
-			return err
-		}
-		if err := p.record(ctx, facts); err != nil {
-			return err
-		}
+	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
+		return p.record(ctx, facts)
+	}); err != nil {
+		return err
 	}
-	var refused RebuildUnknownProvenanceError
+	var refused rebuildScratchRefusals
 	if err := pendingVisit(ctx, p.b.pending, rebuildGRPCKey('m'), func(r row) error {
 		old, handler, e, err := rebuildGRPCMove(r.value)
 		if err != nil {
@@ -706,10 +676,7 @@ func (p *rebuildGRPC) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, 
 				return err
 			}
 			if state != rebuildCapabilityWanted|rebuildCapabilityProved {
-				if refused.Count == 0 {
-					refused.First = graph.EdgeIdentityFor(e)
-				}
-				refused.Count++
+				refused.add(graph.EdgeIdentityFor(e), nil)
 				break
 			}
 		}
@@ -717,8 +684,5 @@ func (p *rebuildGRPC) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, 
 	}); err != nil {
 		return err
 	}
-	if refused.Count != 0 {
-		return &refused
-	}
-	return nil
+	return refused.err()
 }

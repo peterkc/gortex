@@ -73,22 +73,7 @@ func rebuildRNPairKey(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildRNPairPass) put(key, value []byte) error {
-	if len(key)+len(value) > 16<<20 {
-		return fmt.Errorf("%w: React Native native pairing scratch row", ErrRebuildLinkInputSize)
-	}
-	if err := p.b.pending.Set(key, value, pebble.NoSync); err != nil {
-		return err
-	}
-	p.buffered += len(key) + len(value)
-	if p.buffered >= p.spillAt {
-		before := p.b.pending.Metrics().Levels[0].TableBytesFlushed
-		if err := p.b.pending.Flush(); err != nil {
-			return err
-		}
-		p.stats.SpillBytes += p.b.pending.Metrics().Levels[0].TableBytesFlushed - before
-		p.buffered = 0
-	}
-	return nil
+	return p.b.putRebuildScratch(key, value, 16<<20, p.spillAt, &p.buffered, &p.stats.SpillBytes, "React Native native pairing")
 }
 
 func (p *rebuildRNPairPass) pair(ctx context.Context, platform func(string) string,
@@ -207,19 +192,11 @@ func (p *rebuildRNPairPass) propose(e *graph.Edge) error {
 }
 
 func (p *rebuildRNPairPass) state(key []byte) (byte, error) {
-	return pendingGet(p.b.pending, key, func(value []byte) (byte, error) {
-		if len(value) != 1 {
-			return 0, invalid("React Native native pairing proof state")
-		}
-		return value[0], nil
-	})
+	return rebuildScratchState(p.b.pending, key, "React Native native pairing proof state")
 }
 
 func (p *rebuildRNPairPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
-	for facts, err := range receipts {
-		if err != nil {
-			return err
-		}
+	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, n := range facts.Nodes {
 			if err := ctx.Err(); err != nil {
@@ -237,40 +214,19 @@ func (p *rebuildRNPairPass) prove(ctx context.Context, receipts iter.Seq2[ParseF
 			if err != nil {
 				return err
 			}
-			bit := byte(rebuildCapabilityUnproved)
-			if facts.EffectiveLanguage == n.Language && n.FilePath == file && sameRebuildRNPairInput(n, live) {
-				bit = rebuildCapabilityProved
-			}
-			if state&bit == 0 {
-				if err := p.put(key, []byte{state | bit}); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	var refused RebuildUnknownProvenanceError
-	if err := p.visit(ctx, func(e *graph.Edge) error {
-		for _, id := range [...]string{e.From, e.To} {
-			state, err := p.state(rebuildRNPairKey('n', id))
-			if err != nil {
+			proved := facts.EffectiveLanguage == n.Language && n.FilePath == file && sameRebuildRNPairInput(n, live)
+			if err := noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(proved)); err != nil {
 				return err
-			}
-			if state != rebuildCapabilityWanted|rebuildCapabilityProved {
-				if refused.Count == 0 {
-					refused.First = graph.EdgeIdentityFor(e)
-				}
-				refused.Count++
-				break
 			}
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	if refused.Count != 0 {
-		return &refused
-	}
-	return nil
+	return proveRebuildScratchEndpoints(ctx, p.visit, func(id string) (bool, error) {
+		state, err := p.state(rebuildRNPairKey('n', id))
+		return state == rebuildScratchExact, err
+	}, nil)
 }
 
 func sameRebuildRNPairInput(raw, live *graph.Node) bool {
@@ -284,25 +240,9 @@ func sameRebuildRNPairInput(raw, live *graph.Node) bool {
 }
 
 func (p *rebuildRNPairPass) visit(ctx context.Context, yield func(*graph.Edge) error) error {
-	prefix := rebuildRNPairKey('e')
-	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		e, err := decodeEdge(r.value)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(r.key[len(prefix):], pendingEdgeKey(e)) {
-			return invalid("React Native native pairing proposal key")
-		}
-		return yield(e)
-	})
+	return visitRebuildScratchKeyedEdges(ctx, p.b.pending, rebuildRNPairKey('e'), 0, "React Native native pairing proposal key", yield)
 }
 
 func (p *rebuildRNPairPass) apply(ctx context.Context) error {
-	return p.visit(ctx, func(e *graph.Edge) error {
-		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofRNPair}); err != nil {
-			return err
-		}
-		p.stats.Edges++
-		return nil
-	})
+	return applyRebuildScratchEdges(ctx, p.visit, p.b, rebuildProofRNPair, &p.stats.Edges)
 }

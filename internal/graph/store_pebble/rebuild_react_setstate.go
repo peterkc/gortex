@@ -100,26 +100,11 @@ func setStateScratch(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildSetStatePass) put(key, value []byte) error {
-	if len(key)+len(value) > 16<<20 {
-		return fmt.Errorf("%w: setState scratch row", ErrRebuildLinkInputSize)
-	}
-	if err := p.b.pending.Set(key, value, pebble.NoSync); err != nil {
-		return err
-	}
-	p.buffered += len(key) + len(value)
-	if p.buffered >= p.spillAt {
-		before := p.b.pending.Metrics().Levels[0].TableBytesFlushed
-		if err := p.b.pending.Flush(); err != nil {
-			return err
-		}
-		p.stats.SpillBytes += p.b.pending.Metrics().Levels[0].TableBytesFlushed - before
-		p.buffered = 0
-	}
-	return nil
+	return p.b.putRebuildScratch(key, value, 16<<20, p.spillAt, &p.buffered, &p.stats.SpillBytes, "setState")
 }
 
 func (p *rebuildSetStatePass) get(key []byte) ([]byte, error) {
-	return pendingGet(p.b.pending, key, func(raw []byte) ([]byte, error) { return bytes.Clone(raw), nil })
+	return pendingGet(p.b.pending, key, copyValue)
 }
 
 func (p *rebuildSetStatePass) mark(col byte, id string) error {
@@ -297,10 +282,7 @@ func (p *rebuildSetStatePass) wantCall(e *graph.Edge, live []byte) error {
 }
 
 func (p *rebuildSetStatePass) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
-	for facts, err := range receipts {
-		if err != nil {
-			return err
-		}
+	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, e := range facts.Edges {
 			if err := ctx.Err(); err != nil {
@@ -331,6 +313,9 @@ func (p *rebuildSetStatePass) record(ctx context.Context, receipts iter.Seq2[Par
 				return err
 			}
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	return pendingVisit(ctx, p.b.pending, setStateScratch('r'), func(r row) error {
 		if len(r.value) < 2 {
@@ -372,8 +357,7 @@ func (p *rebuildSetStatePass) noteMembership(raw []byte) error {
 			return err
 		}
 	}
-	state[0] |= rebuildCapabilityProved
-	return p.put(key, state)
+	return noteRebuildScratchPayload(p.put, key, state, rebuildCapabilityProved)
 }
 
 func (p *rebuildSetStatePass) noteNode(ctx context.Context, raw *graph.Node, file, language string) error {
@@ -425,7 +409,7 @@ func (p *rebuildSetStatePass) elect(ctx context.Context, lifecycle string, makeC
 	}); err != nil {
 		return err
 	}
-	var refused RebuildUnknownProvenanceError
+	var refused rebuildScratchRefusals
 	if err := p.methods(ctx, func(n *graph.Node) error {
 		class, err := p.owner(n.ID)
 		if err != nil || class == "" {
@@ -464,10 +448,7 @@ func (p *rebuildSetStatePass) elect(ctx context.Context, lifecycle string, makeC
 			proved = proved && len(state) == 1 && state[0] == rebuildCapabilityProved
 		}
 		if !proved {
-			if refused.Count == 0 {
-				refused.First = graph.EdgeIdentityFor(e)
-			}
-			refused.Count++
+			refused.add(graph.EdgeIdentityFor(e), nil)
 			return nil
 		}
 		raw, err := encodeEdge(e)
@@ -478,26 +459,13 @@ func (p *rebuildSetStatePass) elect(ctx context.Context, lifecycle string, makeC
 	}); err != nil {
 		return err
 	}
-	if refused.Count != 0 {
-		return &refused
-	}
-	return nil
+	return refused.err()
 }
 
 func (p *rebuildSetStatePass) apply(ctx context.Context, proof rebuildEdgeProof) error {
-	prefix := setStateScratch('w')
-	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		e, err := decodeEdge(r.value)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(r.key[len(prefix):], pendingEdgeKey(e)) {
-			return invalid("setState proposal key")
-		}
-		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: proof}); err != nil {
-			return err
-		}
-		p.stats.Edges++
-		return nil
-	})
+	return applyRebuildScratchEdges(ctx, p.visit, p.b, proof, &p.stats.Edges)
+}
+
+func (p *rebuildSetStatePass) visit(ctx context.Context, yield func(*graph.Edge) error) error {
+	return visitRebuildScratchKeyedEdges(ctx, p.b.pending, setStateScratch('w'), 0, "setState proposal key", yield)
 }

@@ -65,13 +65,7 @@ func (b *BuildStore) RebuildKMPExpectActual(ctx context.Context, receipts iter.S
 		return stats, err
 	}
 	err = b.withWrites(func() error {
-		return p.visitProposals(ctx, func(e *graph.Edge) error {
-			if err := b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofKMPExpectActual}); err != nil {
-				return err
-			}
-			p.stats.Edges++
-			return nil
-		})
+		return applyRebuildScratchEdges(ctx, p.visitProposals, b, rebuildProofKMPExpectActual, &p.stats.Edges)
 	})
 	return p.stats, err
 }
@@ -91,22 +85,7 @@ func rebuildKMPKey(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildKMPPass) put(key, value []byte) error {
-	if len(key)+len(value) > rebuildKMPRowLimit {
-		return fmt.Errorf("%w: KMP expect/actual scratch row", ErrRebuildLinkInputSize)
-	}
-	if err := p.b.pending.Set(key, value, pebble.NoSync); err != nil {
-		return err
-	}
-	p.buffered += len(key) + len(value)
-	if p.buffered >= p.spillAt {
-		before := p.b.pending.Metrics().Levels[0].TableBytesFlushed
-		if err := p.b.pending.Flush(); err != nil {
-			return err
-		}
-		p.stats.SpillBytes += p.b.pending.Metrics().Levels[0].TableBytesFlushed - before
-		p.buffered = 0
-	}
-	return nil
+	return p.b.putRebuildScratch(key, value, rebuildKMPRowLimit, p.spillAt, &p.buffered, &p.stats.SpillBytes, "KMP expect/actual")
 }
 
 func rebuildKMPNodeLight(r row) (*graph.Node, error) {
@@ -228,19 +207,11 @@ func (p *rebuildKMPPass) propose(e *graph.Edge) error {
 }
 
 func (p *rebuildKMPPass) state(key []byte) (byte, error) {
-	return pendingGet(p.b.pending, key, func(raw []byte) (byte, error) {
-		if len(raw) != 1 {
-			return 0, invalid("KMP expect/actual proof state")
-		}
-		return raw[0], nil
-	})
+	return rebuildScratchState(p.b.pending, key, "KMP expect/actual proof state")
 }
 
 func (p *rebuildKMPPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
-	for facts, err := range receipts {
-		if err != nil {
-			return err
-		}
+	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, raw := range facts.Nodes {
 			if err := ctx.Err(); err != nil {
@@ -250,33 +221,14 @@ func (p *rebuildKMPPass) prove(ctx context.Context, receipts iter.Seq2[ParseFact
 				return err
 			}
 		}
-	}
-	var refused RebuildUnknownProvenanceError
-	var first []byte
-	if err := p.visitProposals(ctx, func(e *graph.Edge) error {
-		for _, id := range [...]string{e.From, e.To} {
-			state, err := p.state(rebuildKMPKey('n', id))
-			if err != nil {
-				return err
-			}
-			if state != rebuildCapabilityWanted|rebuildCapabilityProved {
-				key := pendingEdgeKey(e)
-				if first == nil || bytes.Compare(key, first) < 0 {
-					first = key
-					refused.First = graph.EdgeIdentityFor(e)
-				}
-				refused.Count++
-				break
-			}
-		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	if refused.Count != 0 {
-		return &refused
-	}
-	return nil
+	return proveRebuildScratchEndpoints(ctx, p.visitProposals, func(id string) (bool, error) {
+		state, err := p.state(rebuildKMPKey('n', id))
+		return state == rebuildScratchExact, err
+	}, pendingEdgeKey)
 }
 
 func (p *rebuildKMPPass) noteReceipt(raw *graph.Node, file, language string) error {
@@ -289,14 +241,8 @@ func (p *rebuildKMPPass) noteReceipt(raw *graph.Node, file, language string) err
 	if err != nil {
 		return err
 	}
-	bit := byte(rebuildCapabilityUnproved)
-	if language != "" && language == raw.Language && raw.FilePath == file && sameRebuildKMPInput(raw, live) {
-		bit = rebuildCapabilityProved
-	}
-	if state&bit != 0 {
-		return nil
-	}
-	return p.put(key, []byte{state | bit})
+	proved := language != "" && language == raw.Language && raw.FilePath == file && sameRebuildKMPInput(raw, live)
+	return noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(proved))
 }
 
 func sameRebuildKMPInput(raw, live *graph.Node) bool {
@@ -310,16 +256,5 @@ func sameRebuildKMPInput(raw, live *graph.Node) bool {
 }
 
 func (p *rebuildKMPPass) visitProposals(ctx context.Context, yield func(*graph.Edge) error) error {
-	prefix := rebuildKMPKey('w')
-	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		e, err := decodeEdge(r.value)
-		if err != nil {
-			return err
-		}
-		keyOffset := len(prefix) + 8 // ordinal width
-		if len(r.key) < keyOffset || !bytes.Equal(r.key[keyOffset:], pendingEdgeKey(e)) {
-			return invalid("KMP expect/actual proposal key")
-		}
-		return yield(e)
-	})
+	return visitRebuildScratchKeyedEdges(ctx, p.b.pending, rebuildKMPKey('w'), 8, "KMP expect/actual proposal key", yield)
 }

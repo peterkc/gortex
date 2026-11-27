@@ -119,22 +119,7 @@ func eventScratch(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildEventChannel) put(key, value []byte) error {
-	if len(key)+len(value) > 16<<20 {
-		return fmt.Errorf("%w: event channel scratch row", ErrRebuildLinkInputSize)
-	}
-	if err := p.b.pending.Set(key, value, pebble.NoSync); err != nil {
-		return err
-	}
-	p.buffered += len(key) + len(value)
-	if p.buffered >= p.threshold {
-		before := p.b.pending.Metrics().Levels[0].TableBytesFlushed
-		if err := p.b.pending.Flush(); err != nil {
-			return err
-		}
-		p.stats.SpillBytes += p.b.pending.Metrics().Levels[0].TableBytesFlushed - before
-		p.buffered = 0
-	}
-	return nil
+	return p.b.putRebuildScratch(key, value, 16<<20, p.threshold, &p.buffered, &p.stats.SpillBytes, "event channel")
 }
 
 func (p *rebuildEventChannel) capture(ctx context.Context, topicPrefixes []string) error {
@@ -340,10 +325,7 @@ func (p *rebuildEventChannel) prove(ctx context.Context, receipts iter.Seq2[Pars
 	}); err != nil || !wanted {
 		return err
 	}
-	for f, err := range receipts {
-		if err != nil {
-			return err
-		}
+	if err := recordRebuildScratchReceipts(receipts, func(f ParseFacts) error {
 		file, lang := pathkey.Normalize(f.File.FilePath), f.EffectiveLanguage
 		for _, n := range f.Nodes {
 			if err := ctx.Err(); err != nil {
@@ -383,8 +365,11 @@ func (p *rebuildEventChannel) prove(ctx context.Context, receipts iter.Seq2[Pars
 				return err
 			}
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	var refused RebuildUnknownProvenanceError
+	var refused rebuildScratchRefusals
 	if err := pendingVisit(ctx, p.b.pending, eventScratch('w'), func(r row) error {
 		keys, e, err := eventWinner(r.value)
 		if err != nil {
@@ -400,10 +385,7 @@ func (p *rebuildEventChannel) prove(ctx context.Context, receipts iter.Seq2[Pars
 				return err
 			}
 			if state != rebuildCapabilityWanted|rebuildCapabilityProved {
-				if refused.Count == 0 {
-					refused.First = graph.EdgeIdentityFor(e)
-				}
-				refused.Count++
+				refused.add(graph.EdgeIdentityFor(e), nil)
 				break
 			}
 		}
@@ -411,45 +393,30 @@ func (p *rebuildEventChannel) prove(ctx context.Context, receipts iter.Seq2[Pars
 	}); err != nil {
 		return err
 	}
-	if refused.Count != 0 {
-		return &refused
-	}
-	return nil
+	return refused.err()
 }
 
 func (p *rebuildEventChannel) state(key []byte) (byte, error) {
-	return pendingGet(p.b.pending, key, func(value []byte) (byte, error) {
-		if len(value) != 1 {
-			return 0, invalid("event channel receipt proof state")
-		}
-		return value[0], nil
-	})
+	return rebuildScratchState(p.b.pending, key, "event channel receipt proof state")
 }
 
 func (p *rebuildEventChannel) note(key []byte, state byte, ok bool) error {
 	if state == 0 {
 		return nil
 	}
-	bit := byte(rebuildCapabilityUnproved)
-	if ok {
-		bit = rebuildCapabilityProved
-	}
-	if state&bit == 0 {
-		return p.put(key, []byte{state | bit})
-	}
-	return nil
+	return noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(ok))
 }
 
 func (p *rebuildEventChannel) apply(ctx context.Context) error {
+	return applyRebuildScratchEdges(ctx, p.visit, p.b, rebuildProofEventChannel, &p.stats.Pairs)
+}
+
+func (p *rebuildEventChannel) visit(ctx context.Context, yield func(*graph.Edge) error) error {
 	return pendingVisit(ctx, p.b.pending, eventScratch('w'), func(r row) error {
 		_, e, err := eventWinner(r.value)
 		if err != nil {
 			return err
 		}
-		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofEventChannel}); err != nil {
-			return err
-		}
-		p.stats.Pairs++
-		return nil
+		return yield(e)
 	})
 }

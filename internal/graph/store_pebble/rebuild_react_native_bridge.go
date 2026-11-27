@@ -152,28 +152,11 @@ func rebuildExpoNames(meta map[string]any) (module, method string) {
 }
 
 func (p *rebuildReactNativeBridge) put(key, value []byte) error {
-	if len(key)+len(value) > 16<<20 {
-		return fmt.Errorf("%w: %s scratch row", ErrRebuildLinkInputSize, p.policy.label)
-	}
-	if err := p.b.pending.Set(key, value, pebble.NoSync); err != nil {
-		return err
-	}
-	p.buffered += len(key) + len(value)
-	if p.buffered >= p.threshold {
-		before := p.b.pending.Metrics().Levels[0].TableBytesFlushed
-		if err := p.b.pending.Flush(); err != nil {
-			return err
-		}
-		p.stats.SpillBytes += p.b.pending.Metrics().Levels[0].TableBytesFlushed - before
-		p.buffered = 0
-	}
-	return nil
+	return p.b.putRebuildScratch(key, value, 16<<20, p.threshold, &p.buffered, &p.stats.SpillBytes, p.policy.label)
 }
 
 func (p *rebuildReactNativeBridge) get(key []byte) ([]byte, error) {
-	return pendingGet(p.b.pending, key, func(value []byte) ([]byte, error) {
-		return bytes.Clone(value), nil
-	})
+	return pendingGet(p.b.pending, key, copyValue)
 }
 
 func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*graph.Edge) bool) (bool, error) {
@@ -451,10 +434,7 @@ func (p *rebuildReactNativeBridge) prove(ctx context.Context, receipts iter.Seq2
 		return nil
 	}
 	view := p.b.RebuildView()
-	for facts, err := range receipts {
-		if err != nil {
-			return err
-		}
+	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, n := range facts.Nodes {
 			if err := ctx.Err(); err != nil {
@@ -481,36 +461,18 @@ func (p *rebuildReactNativeBridge) prove(ctx context.Context, receipts iter.Seq2
 					bit = rebuildCapabilityProved
 				}
 			}
-			if state[0]&bit == 0 {
-				if err := p.put(key, []byte{state[0] | bit}); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	var refused RebuildUnknownProvenanceError
-	if err := p.visit(ctx, func(e *graph.Edge) error {
-		for _, id := range [...]string{e.From, e.To} {
-			state, err := p.get(rebuildRNKey('d', id))
-			if err != nil {
+			if err := noteRebuildScratchState(p.put, key, state[0], bit); err != nil {
 				return err
-			}
-			if len(state) != 1 || state[0] != rebuildCapabilityWanted|rebuildCapabilityProved {
-				if refused.Count == 0 {
-					refused.First = graph.EdgeIdentityFor(e)
-				}
-				refused.Count++
-				break
 			}
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	if refused.Count != 0 {
-		return &refused
-	}
-	return nil
+	return proveRebuildScratchEndpoints(ctx, p.visit, func(id string) (bool, error) {
+		state, err := p.get(rebuildRNKey('d', id))
+		return len(state) == 1 && state[0] == rebuildScratchExact, err
+	}, nil)
 }
 
 func (p *rebuildReactNativeBridge) visit(ctx context.Context, yield func(*graph.Edge) error) error {
@@ -530,11 +492,5 @@ func (p *rebuildReactNativeBridge) visit(ctx context.Context, yield func(*graph.
 }
 
 func (p *rebuildReactNativeBridge) apply(ctx context.Context) error {
-	return p.visit(ctx, func(e *graph.Edge) error {
-		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: p.policy.proof}); err != nil {
-			return err
-		}
-		p.stats.Edges++
-		return nil
-	})
+	return applyRebuildScratchEdges(ctx, p.visit, p.b, p.policy.proof, &p.stats.Edges)
 }

@@ -78,26 +78,11 @@ func observerScratch(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildObserverPass) put(key, value []byte) error {
-	if len(key)+len(value) > 16<<20 {
-		return fmt.Errorf("%w: Observer scratch row", ErrRebuildLinkInputSize)
-	}
-	if err := p.b.pending.Set(key, value, pebble.NoSync); err != nil {
-		return err
-	}
-	p.buffered += len(key) + len(value)
-	if p.buffered >= p.spillAt {
-		before := p.b.pending.Metrics().Levels[0].TableBytesFlushed
-		if err := p.b.pending.Flush(); err != nil {
-			return err
-		}
-		p.stats.SpillBytes += p.b.pending.Metrics().Levels[0].TableBytesFlushed - before
-		p.buffered = 0
-	}
-	return nil
+	return p.b.putRebuildScratch(key, value, 16<<20, p.spillAt, &p.buffered, &p.stats.SpillBytes, "Observer")
 }
 
 func (p *rebuildObserverPass) get(key []byte) ([]byte, error) {
-	return pendingGet(p.b.pending, key, func(raw []byte) ([]byte, error) { return bytes.Clone(raw), nil })
+	return pendingGet(p.b.pending, key, copyValue)
 }
 
 func (p *rebuildObserverPass) capture(ctx context.Context, registrar, dispatcher func(string) bool) error {
@@ -343,11 +328,10 @@ func (p *rebuildObserverPass) wantNode(id string, witness *graph.Edge) error {
 
 func (p *rebuildObserverPass) note(key []byte, bit byte) error {
 	state, err := p.get(key)
-	if err != nil || len(state) == 0 || state[0]&bit != 0 {
+	if err != nil {
 		return err
 	}
-	state[0] |= bit
-	return p.put(key, state)
+	return noteRebuildScratchPayload(p.put, key, state, bit)
 }
 
 func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
@@ -355,10 +339,7 @@ func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[Pars
 	if err != nil || !found {
 		return err
 	}
-	for facts, err := range receipts {
-		if err != nil {
-			return err
-		}
+	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, e := range facts.Edges {
 			if err := ctx.Err(); err != nil {
@@ -398,18 +379,18 @@ func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[Pars
 				return err
 			}
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	const exact = rebuildCapabilityWanted | rebuildCapabilityProved
-	var refused RebuildUnknownProvenanceError
+	var refused rebuildScratchRefusals
 	refuse := func(key []byte) error {
 		id, err := decodeLinkRecorder(key)
 		if err != nil {
 			return err
 		}
-		if refused.Count == 0 {
-			refused.First = id
-		}
-		refused.Count++
+		refused.add(id, nil)
 		return nil
 	}
 	if err := pendingVisit(ctx, p.b.pending, observerScratch('v'), func(r row) error {
@@ -432,26 +413,13 @@ func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[Pars
 	}); err != nil {
 		return err
 	}
-	if refused.Count != 0 {
-		return &refused
-	}
-	return nil
+	return refused.err()
 }
 
 func (p *rebuildObserverPass) apply(ctx context.Context) error {
-	prefix := observerScratch('w')
-	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		e, err := decodeEdge(r.value)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(r.key[len(prefix):], pendingEdgeKey(e)) {
-			return invalid("Observer staged call key")
-		}
-		if err := p.b.putEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofObserver}); err != nil {
-			return err
-		}
-		p.stats.Edges++
-		return nil
-	})
+	return applyRebuildScratchEdges(ctx, p.visit, p.b, rebuildProofObserver, &p.stats.Edges)
+}
+
+func (p *rebuildObserverPass) visit(ctx context.Context, yield func(*graph.Edge) error) error {
+	return visitRebuildScratchKeyedEdges(ctx, p.b.pending, observerScratch('w'), 0, "Observer staged call key", yield)
 }
