@@ -78,7 +78,7 @@ func ResolveGinMiddlewareCalls(g graph.Store) int {
 				if !ginMiddlewareTarget(d, h) {
 					continue
 				}
-				key := d.ID + "\x00" + h.ID
+				key := ginMiddlewareSeenKey(d.ID, h.ID)
 				if seen[key] {
 					continue
 				}
@@ -95,6 +95,10 @@ func ResolveGinMiddlewareCalls(g graph.Store) int {
 		g.AddEdge(e)
 	}
 	return len(batch)
+}
+
+func ginMiddlewareSeenKey(dispatcher, handler string) string {
+	return dispatcher + "\x00" + handler
 }
 
 func ginMiddlewareDispatcher(n *graph.Node) bool {
