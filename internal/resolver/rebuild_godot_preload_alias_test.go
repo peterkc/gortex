@@ -162,7 +162,9 @@ func TestRebuildGodotPreloadAliasDeclarationOrder(t *testing.T) {
 	script := func(path string) store_pebble.ParseFacts {
 		file := &graph.Node{ID: path, Name: path, Kind: graph.KindFile, Language: "gdscript", FilePath: path}
 		member := &graph.Node{ID: path + "::tick", Name: "tick", Kind: graph.KindMethod, Language: "gdscript", FilePath: path}
-		return rebuildEventFacts(path, "gdscript", []*graph.Node{file, member})
+		laterID := *member
+		laterID.ID = path + "::z-tick"
+		return rebuildEventFacts(path, "gdscript", []*graph.Node{file, &laterID, member})
 	}
 	facts := []store_pebble.ParseFacts{
 		rebuildEventFacts(source, "gdscript", []*graph.Node{caller, first, last}, call),
@@ -204,7 +206,8 @@ func TestRebuildGodotPreloadAliasDeclarationOrder(t *testing.T) {
 			want := rebuildEventSQLiteRows(native)
 			require.Len(t, want.edges, 1)
 			// KindVariable scans in ID order. The z-alias wins even
-			// though its receipt appears before the a-alias receipt.
+			// though its receipt appears before the a-alias receipt. The
+			// selected script then uses its lowest-ID Method, last in receipts.
 			require.Equal(t, "game/Early.gd::tick", want.edges[0].To)
 			require.Equal(t, want, saved)
 		})

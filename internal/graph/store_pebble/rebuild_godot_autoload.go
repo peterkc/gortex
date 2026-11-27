@@ -220,13 +220,17 @@ func (p *rebuildGodotScripts) recordScriptNode(raw, live *graph.Node) error {
 	if err := p.put(p.key('p', raw.ID), nil); err != nil {
 		return err
 	}
-	// For each kind, the earliest exact frozen receipt supplies the winner.
-	key := p.key('w', id, live.Name, string(live.Kind))
-	seen, err := p.present(key)
-	if err != nil || seen {
+	return p.noteMember('w', id, live)
+}
+
+// Within each kind, SQLite's node index visits IDs in ascending order.
+func (p *rebuildGodotScripts) noteMember(col byte, file string, n *graph.Node) error {
+	key := p.key(col, file, n.Name, string(n.Kind))
+	prior, err := p.get(key)
+	if err != nil || prior != nil && string(prior) <= n.ID {
 		return err
 	}
-	return p.put(key, []byte(live.ID))
+	return p.put(key, []byte(n.ID))
 }
 
 func (p *rebuildGodotAutoload) markUnproved(ctx context.Context) error {
@@ -244,7 +248,7 @@ func (p *rebuildGodotScripts) markUnprovedMember(n *graph.Node) error {
 	if err != nil || proved {
 		return err
 	}
-	return p.put(p.key('u', file, n.Name, string(n.Kind)), nil)
+	return p.noteMember('u', file, n)
 }
 
 func (p *rebuildGodotAutoload) target(recv, member string, proved bool) (id string, unproved bool, err error) {
@@ -267,15 +271,18 @@ func (p *rebuildGodotScripts) targetMember(fileID, member string, proved bool) (
 	// Method priority is native. An unproved member can matter only at the
 	// first nonempty kind, before or instead of that kind's proved winner.
 	for _, kind := range [...]graph.NodeKind{graph.KindMethod, graph.KindFunction} {
+		val, err := p.get(p.key('w', fileID, member, string(kind)))
+		if err != nil {
+			return "", false, err
+		}
 		if !proved {
-			missing, err := p.present(p.key('u', fileID, member, string(kind)))
-			if err != nil || missing {
-				return "", missing, err
+			missing, err := p.get(p.key('u', fileID, member, string(kind)))
+			if err != nil || missing != nil && (val == nil || string(missing) < string(val)) {
+				return "", missing != nil, err
 			}
 		}
-		val, err := p.get(p.key('w', fileID, member, string(kind)))
-		if err != nil || val != nil {
-			return string(val), false, err
+		if val != nil {
+			return string(val), false, nil
 		}
 	}
 	return "", false, nil

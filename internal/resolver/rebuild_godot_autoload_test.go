@@ -77,18 +77,39 @@ func TestRebuildGodotAutoloadSQLiteOracle(t *testing.T) {
 	}
 }
 
-func TestRebuildGodotAutoloadFrozenMemberOrder(t *testing.T) {
+func TestRebuildGodotAutoloadMemberIDOrder(t *testing.T) {
 	facts, _, method := rebuildGodotAutoloadFacts()
 	first := *method
 	first.ID = facts[1].File.FilePath + "::a-method"
 	facts[1] = rebuildEventFacts(facts[1].File.FilePath, "gdscript", append(facts[1].Nodes, &first))
-	build := openRebuildGRPCBuild(t, facts...)
-	changed, err := RunRebuildGodotAutoload(t.Context(), build, rebuildGRPCReceipts(facts...), rebuildGodotAutoloadSelection(t, build))
-	require.NoError(t, err)
-	require.EqualValues(t, 1, changed)
-	rows := rebuildEventSavedRows(t, build).edges
-	require.Len(t, rows, 1)
-	require.Equal(t, method.ID, rows[0].To, "receipt order, not ID order, breaks ties within a kind")
+	for _, omit := range []string{"none", "higher ID", "lowest ID"} {
+		t.Run(omit, func(t *testing.T) {
+			build, native := openRebuildEventStores(t, facts...)
+			before := rebuildEventSavedRows(t, build)
+			receipts := append([]store_pebble.ParseFacts(nil), facts...)
+			fileNode, function := facts[1].Nodes[0], facts[1].Nodes[1]
+			switch omit {
+			case "higher ID":
+				receipts[1] = rebuildEventFacts(facts[1].File.FilePath, "gdscript", []*graph.Node{fileNode, function, &first})
+			case "lowest ID":
+				receipts[1] = rebuildEventFacts(facts[1].File.FilePath, "gdscript", []*graph.Node{fileNode, function, method})
+			}
+			changed, err := RunRebuildGodotAutoload(t.Context(), build, rebuildGRPCReceipts(receipts...), rebuildGodotAutoloadSelection(t, build))
+			if omit == "lowest ID" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, changed)
+				require.Equal(t, before, rebuildEventSavedRows(t, build))
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, changed)
+			require.Equal(t, 1, ResolveGDScriptAutoloads(native))
+			want := rebuildEventSQLiteRows(native)
+			require.Len(t, want.edges, 1)
+			require.Equal(t, first.ID, want.edges[0].To, "the smallest Method ID wins over receipt order and the Function")
+			require.Equal(t, want, rebuildEventSavedRows(t, build))
+		})
+	}
 }
 
 func TestRebuildGodotAutoloadExactProof(t *testing.T) {
