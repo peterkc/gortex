@@ -226,7 +226,7 @@ func TestRebuildFnPointerReindexWindow(t *testing.T) {
 			require.Equal(t, want, got)
 			wantRows := first + 1
 			if first == 5000 {
-				wantRows-- // b is stationary for the first native chunk.
+				wantRows--                                 // b is stationary for the first native chunk.
 				require.Greater(t, stats.Spill.Flushes, 1) // The native window spans runs.
 			}
 			require.Len(t, got, wantRows)
