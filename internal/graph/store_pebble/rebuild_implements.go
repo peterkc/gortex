@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"iter"
@@ -289,7 +290,30 @@ func (b *BuildStore) RebuildImplements(ctx context.Context, receipts iter.Seq2[P
 			if prior != nil {
 				return invalid("implements insert would overwrite a saved row")
 			}
-			return b.putEdge(e)
+			if err := b.putEdge(e); err != nil {
+				return err
+			}
+			digest := sha256.Sum256(r.value)
+			return b.pending.Set(rebuildImplementsStampKey(r.key[3:]), digest[:], pebble.NoSync)
+		})
+	})
+}
+
+// This producer witness is pending-only. It is not edge custody and does not
+// change the saved edge encoding or any stage's rows.
+func rebuildImplementsStampKey(live []byte) []byte {
+	return append([]byte{'g', 'q', 'I'}, live...)
+}
+
+// A later same-key replacement must not borrow a different payload's proof.
+func rebuildImplementsStamped(reader pebble.Reader, live []byte) (bool, error) {
+	return pendingGet(reader, rebuildImplementsStampKey(live), func(stamp []byte) (bool, error) {
+		if len(stamp) != sha256.Size {
+			return false, invalid("implements producer stamp")
+		}
+		return pendingGet(reader, live, func(raw []byte) (bool, error) {
+			digest := sha256.Sum256(raw)
+			return bytes.Equal(stamp, digest[:]), nil
 		})
 	})
 }
