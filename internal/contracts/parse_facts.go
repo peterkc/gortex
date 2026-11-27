@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strconv"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -15,19 +16,34 @@ import (
 
 // FileFacts is the checked, detached contract input from one accepted parse.
 // Nil shape values explicitly record that a declaration has no native shape.
-// NeedsRawHandlerTree names the transformed Go exception without retaining raw bytes.
+// LaravelHandlerClasses holds the detached class answer at each registration site.
 // Router includes a superset of the native router census: an unresolved Go
 // route question also retains file facts. C1b must filter these facts with
 // contractRouterSupported on the resolved records before native prefix joining.
 type FileFacts struct {
-	Records             []Contract
-	Questions           []EndpointContractQuestion
-	Shapes              map[string]*Shape
-	Handlers            map[string]HandlerFacts
-	Router              *RouterFacts
-	ConfigKeys          []*graph.Node
-	NeedsRawHandlerTree bool
-	ScanSkipped         bool
+	Records               []Contract
+	Questions             []EndpointContractQuestion
+	Shapes                map[string]*Shape
+	Handlers              map[string]HandlerFacts
+	LaravelHandlerClasses map[string]string
+	Router                *RouterFacts
+	ConfigKeys            []*graph.Node
+	ScanSkipped           bool
+}
+
+// LaravelHandlerClassKey identifies the raw class question from a prepared
+// registration. Use the registration file's facts, not the winning handler's.
+// Several resource routes can share the same class and source line.
+func LaravelHandlerClassKey(c Contract) (key, class string) {
+	if c.Role != RoleProvider || c.Type != ContractHTTP || !strings.HasSuffix(c.FilePath, ".php") || c.Line <= 0 {
+		return "", ""
+	}
+	framework, _ := c.Meta["framework"].(string)
+	class, _ = c.Meta["handler_class"].(string)
+	if framework != "laravel" || class == "" {
+		return "", ""
+	}
+	return strconv.Itoa(c.Line) + ":" + class, class
 }
 
 // ErrContractFactTree indicates that a required native detector would need

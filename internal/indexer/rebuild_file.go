@@ -8,12 +8,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/languages"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/golang"
+	"github.com/zzet/gortex/internal/parser/tsitter/php"
 	"github.com/zzet/gortex/internal/pathkey"
 	"go.uber.org/zap"
 )
@@ -22,17 +28,47 @@ import (
 // matching entry remains usable even if an edit replaced the frozen bytes.
 // Only a missing entry permits extraction; corruption refuses the build.
 func (idx *Indexer) loadRebuildFile(ctx context.Context, src source.ContentSource, store rebuildParseStore, input rebuildInput, recipe rebuildDigest, bounds rebuildTransformBounds) (facts store_pebble.ParseFacts, reused bool, err error) {
-	return idx.loadRebuildFileWith(ctx, src, store, input, recipe, bounds,
-		func(ctx context.Context, rel string, ext parser.Extractor, prepared []byte) (store_pebble.ParseFacts, []byte, error) {
+	return idx.loadRebuildFileWith(ctx, src, store, input, recipe, bounds, store_pebble.DecodeParseFacts,
+		func(ctx context.Context, rel string, ext parser.Extractor, _, prepared []byte) (store_pebble.ParseFacts, []byte, error) {
 			facts, err := idx.extractPreparedRebuildFile(ctx, rel, ext, prepared)
 			return facts, nil, err
 		})
 }
 
-// The two extraction paths share the cache and the work around extraction.
-// Only a cache miss calls extract, with the exact prepared bytes.
+// The candidate key is separate from v2. C1b-2 owns the active recipe and
+// pending-worker transport, including the rest of the contract policy binding.
+func rebuildContractCandidateRecipe(recipe rebuildDigest) rebuildDigest {
+	return blake3.Sum256(append([]byte("rebuild-contract-candidate/4\x00"), recipe[:]...))
+}
+
+// loadRebuildFileWithContractFacts is the inactive candidate receipt path.
+func (idx *Indexer) loadRebuildFileWithContractFacts(ctx context.Context, src source.ContentSource, store rebuildParseStore, input rebuildInput, recipe rebuildDigest, bounds rebuildTransformBounds) (store_pebble.ParseFacts, *contracts.FileFacts, bool, error) {
+	var facts *contracts.FileFacts
+	decode := func(payload []byte) (base store_pebble.ParseFacts, err error) {
+		base, facts, _, err = store_pebble.DecodeContractParseFacts(payload)
+		return base, err
+	}
+	base, reused, err := idx.loadRebuildFileWith(ctx, src, store, input, rebuildContractCandidateRecipe(recipe), bounds, decode,
+		func(ctx context.Context, rel string, ext parser.Extractor, raw, prepared []byte) (store_pebble.ParseFacts, []byte, error) {
+			base, captured, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, rel, ext, raw, prepared)
+			if err != nil {
+				return store_pebble.ParseFacts{}, nil, err
+			}
+			payload, err := store_pebble.EncodeContractParseFacts(base, captured)
+			facts = captured
+			return base, payload, err
+		})
+	if err != nil {
+		return store_pebble.ParseFacts{}, nil, false, err
+	}
+	return base, facts, reused, nil
+}
+
+// All receipt paths share the cache and the work around extraction. Only a
+// cache miss calls extract, after verifying the accepted bytes and transforming once.
 func (idx *Indexer) loadRebuildFileWith(ctx context.Context, src source.ContentSource, store rebuildParseStore, input rebuildInput, recipe rebuildDigest, bounds rebuildTransformBounds,
-	extract func(context.Context, string, parser.Extractor, []byte) (store_pebble.ParseFacts, []byte, error),
+	decode func([]byte) (store_pebble.ParseFacts, error),
+	extract func(context.Context, string, parser.Extractor, []byte, []byte) (store_pebble.ParseFacts, []byte, error),
 ) (facts store_pebble.ParseFacts, reused bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return facts, false, err
@@ -44,7 +80,7 @@ func (idx *Indexer) loadRebuildFileWith(ctx context.Context, src source.ContentS
 	key := input.parseKey(idx.rebuildExtractorRecipe(recipe, input))
 	payload, err := store.read(key)
 	if err == nil {
-		cached, err := store_pebble.DecodeParseFacts(payload)
+		cached, err := decode(payload)
 		if err != nil {
 			return facts, false, fmt.Errorf("%w: %s: %w", errParseEntryCorrupt, input.Path, err)
 		}
@@ -90,7 +126,7 @@ func (idx *Indexer) loadRebuildFileWith(ctx context.Context, src source.ContentS
 	if spilled != 0 {
 		idx.logger.Debug("build command transform spilled", zap.String("file", rel), zap.Int64("spill_bytes", spilled))
 	}
-	facts, payload, err = extract(ctx, rel, ext, prepared)
+	facts, payload, err = extract(ctx, rel, ext, raw, prepared)
 	if err != nil {
 		return store_pebble.ParseFacts{}, false, err
 	}
@@ -134,8 +170,8 @@ func (idx *Indexer) extractPreparedRebuildFile(ctx context.Context, rel string, 
 
 // extractPreparedRebuildFileWithContractFacts is the in-memory receipt seam.
 // C1b will persist these facts alongside ordinary parse facts. This uses the
-// same parse step and ownership as the legacy receipt writer, never a later
-// source read or parser call.
+// same parse turn as the legacy writer. Only the two named transformed facts
+// need a raw parse here; neither needs a later source read or parser call.
 func (idx *Indexer) extractPreparedRebuildFileWithContractFacts(ctx context.Context, rel string, ext parser.Extractor, raw, prepared []byte) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
 	var facts *contracts.FileFacts
 	out, err := idx.extractPreparedRebuildFileInto(ctx, rel, ext, raw, prepared, &facts)
@@ -253,27 +289,8 @@ func (idx *Indexer) captureRebuildContractFacts(ctx context.Context, graphPath, 
 			callables = true
 		}
 	}
-	if callables {
-		if lang == "go" && !bytes.Equal(raw, prepared) && len(raw) != 0 {
-			// C1c owns retaining checked raw bytes and the named-fact replay.
-			c.NeedsRawHandlerTree = true
-			c.Handlers = nil
-		} else {
-			var tree *parser.ParseTree
-			if lang == "go" && len(raw) != 0 {
-				if result.Tree == nil || result.Tree.Tree() == nil || result.Tree.Lang() != "go" {
-					return nil, fmt.Errorf("%w: %s: Go handler facts", contracts.ErrContractFactTree, graphPath)
-				}
-				tree = result.Tree
-			}
-			// Native lazy handler enrichment only parses Go; other body
-			// facts use the raw-source regex detectors.
-			var err error
-			c.Handlers, err = contracts.CaptureFileHandlerFacts(ctx, result.Nodes, splitLines(raw), detectLangFromPath(graphPath), tree)
-			if err != nil {
-				return nil, err
-			}
-		}
+	if err := idx.captureRebuildContractBodies(ctx, graphPath, lang, raw, prepared, result, callables, c); err != nil {
+		return nil, err
 	}
 	routerSupported := contractRouterSupported(ContractFollowupFile{Path: graphPath, Language: lang}, c.Records)
 	for _, q := range c.Questions {
@@ -288,4 +305,71 @@ func (idx *Indexer) captureRebuildContractFacts(ctx context.Context, graphPath, 
 	}
 	c.ConfigKeys = contracts.SpringFileFacts(graphPath, raw)
 	return c, nil
+}
+
+// captureRebuildContractBodies does only the two named raw-tree operations.
+// Other lazy handler facts already use raw text and never need another tree.
+func (idx *Indexer) captureRebuildContractBodies(ctx context.Context, path, lang string, raw, prepared []byte, result *parser.ExtractionResult, callables bool, facts *contracts.FileFacts) error {
+	var grammar *sitter.Language
+	var tree *parser.ParseTree
+	switch lang {
+	case "go":
+		if callables {
+			grammar, tree = golang.GetLanguage(), result.Tree
+		}
+	case "php":
+		for _, c := range facts.Records {
+			if key, _ := contracts.LaravelHandlerClassKey(c); key != "" {
+				grammar, tree = php.GetLanguage(), result.ContractTree
+				break
+			}
+		}
+	}
+	if grammar != nil && !bytes.Equal(raw, prepared) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		start := time.Now()
+		t, err := parser.ParseFile(raw, grammar)
+		idx.logger.Debug("build contract raw parse", zap.String("language", lang), zap.Int("bytes", len(raw)), zap.Duration("elapsed", time.Since(start)), zap.Error(err))
+		if err != nil {
+			return fmt.Errorf("%w: %s: raw %s: %w", contracts.ErrContractFactTree, path, lang, err)
+		}
+		tree = parser.NewParseTree(t, raw, lang)
+		defer tree.Release()
+	}
+	if grammar != nil && (lang != "go" || len(raw) != 0) {
+		if tree == nil || tree.Tree() == nil || tree.Lang() != lang || !bytes.Equal(tree.Source(), raw) {
+			return fmt.Errorf("%w: %s: %s handler facts", contracts.ErrContractFactTree, path, lang)
+		}
+		if lang == "go" {
+			root := tree.Tree().Inner().RootNode()
+			if root == nil || root.Language().Inner != grammar.Inner {
+				return fmt.Errorf("%w: %s: Go handler grammar differs", contracts.ErrContractFactTree, path)
+			}
+		}
+	}
+	if lang == "php" && grammar != nil {
+		resolve := languages.PHPClassNameResolverWithTree(tree)
+		if resolve == nil {
+			return fmt.Errorf("%w: %s: PHP handler class facts", contracts.ErrContractFactTree, path)
+		}
+		facts.LaravelHandlerClasses = make(map[string]string)
+		for _, c := range facts.Records {
+			if key, class := contracts.LaravelHandlerClassKey(c); key != "" {
+				facts.LaravelHandlerClasses[key] = resolve(class, c.Line)
+			}
+		}
+	}
+	if !callables {
+		return nil
+	}
+	// The native Go helper supplies no tree for empty source. PHP and other
+	// languages use the regex provider facts, not their qualification tree.
+	if lang != "go" || len(raw) == 0 {
+		tree = nil
+	}
+	var err error
+	facts.Handlers, err = contracts.CaptureFileHandlerFacts(ctx, result.Nodes, splitLines(raw), detectLangFromPath(path), tree)
+	return err
 }

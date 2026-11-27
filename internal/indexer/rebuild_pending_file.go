@@ -33,8 +33,8 @@ func (idx *Indexer) loadPendingRebuildFile(ctx context.Context, src source.Conte
 	if idx.transforms == nil || bounds.FileBytes <= 0 {
 		return store_pebble.ParseFacts{}, false, fmt.Errorf("%w: %s: %w: transform policy unavailable", ErrPendingRebuildFile, input.Path, ErrBuildTransformBounds)
 	}
-	facts, reused, err := idx.loadRebuildFileWith(ctx, src, store, input, recipe, bounds,
-		func(ctx context.Context, rel string, ext parser.Extractor, prepared []byte) (store_pebble.ParseFacts, []byte, error) {
+	facts, reused, err := idx.loadRebuildFileWith(ctx, src, store, input, recipe, bounds, store_pebble.DecodeParseFacts,
+		func(ctx context.Context, rel string, ext parser.Extractor, _, prepared []byte) (store_pebble.ParseFacts, []byte, error) {
 			entry, err := idx.submitPendingRebuildFile(ctx, rel, ext, prepared, policy, parserExe, store.limit)
 			if err != nil {
 				return store_pebble.ParseFacts{}, nil, err

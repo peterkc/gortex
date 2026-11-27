@@ -62,6 +62,19 @@ func PHPClassNameResolver(src []byte) func(string, int) string {
 	return newPHPNameResolver(tree.RootNode(), src).resolve
 }
 
+// PHPClassNameResolverWithTree uses an accepted PHP tree without parsing or
+// keeping it alive. It returns nil if that tree is unavailable or not PHP.
+func PHPClassNameResolverWithTree(tree *parser.ParseTree) func(string, int) string {
+	if tree == nil || tree.Tree() == nil || tree.Lang() != "php" {
+		return nil
+	}
+	root := tree.Tree().Inner().RootNode()
+	if root == nil || root.Language().Inner != php.GetLanguage().Inner {
+		return nil
+	}
+	return newPHPNameResolver(tree.Tree().RootNode(), tree.Source()).resolve
+}
+
 // newPHPNameResolver reads a file's namespace declarations and `use` imports.
 func newPHPNameResolver(root *sitter.Node, src []byte) *phpNameResolver {
 	r := &phpNameResolver{imports: map[string]string{}, funcAliases: map[string]string{}}

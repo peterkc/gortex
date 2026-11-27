@@ -128,18 +128,6 @@ func TestContractParseFactsEmptyMissingAndInvalid(t *testing.T) {
 	switchToHandler.Nodes = []*graph.Node{{ID: "empty.go::H", Kind: graph.KindFunction, FilePath: "empty.go"}}
 	_, err = EncodeContractParseFacts(switchToHandler, &complete)
 	require.ErrorIs(t, err, errInvalidRecord)
-	pending := complete
-	pending.Handlers = nil
-	pending.NeedsRawHandlerTree = true
-	payload, err = EncodeContractParseFacts(switchToHandler, &pending)
-	require.NoError(t, err)
-	_, got, _, err = DecodeContractParseFacts(payload)
-	require.NoError(t, err)
-	require.Equal(t, &pending, got)
-	switchToHandler.EffectiveLanguage = "php"
-	_, err = EncodeContractParseFacts(switchToHandler, &pending)
-	require.ErrorIs(t, err, errInvalidRecord)
-
 	bad := complete
 	bad.ScanSkipped = false
 	bad.Questions = []contracts.EndpointContractQuestion{{
@@ -170,4 +158,31 @@ func TestContractParseFactsRefusesLossyMetadata(t *testing.T) {
 	good[pos] = metaTagJSON
 	_, _, _, err = DecodeContractParseFacts(good)
 	require.ErrorIs(t, err, errInvalidRecord)
+}
+
+func TestContractParseFactsLaravelHandlerClasses(t *testing.T) {
+	const path = "routes.php"
+	base := ParseFacts{File: graph.FileMetaRow{FilePath: path}, EffectiveLanguage: "php"}
+	f := &contracts.FileFacts{
+		Shapes: map[string]*contracts.Shape{}, Handlers: map[string]contracts.HandlerFacts{},
+		Records: []contracts.Contract{{
+			ID: "http::GET::/orders", FilePath: path, Type: contracts.ContractHTTP, Role: contracts.RoleProvider, Line: 4,
+			Meta: map[string]any{"framework": "laravel", "handler_class": "Orders"},
+		}},
+	}
+	_, err := EncodeContractParseFacts(base, f)
+	require.ErrorIs(t, err, errInvalidRecord, "an absent class answer is not built empty")
+	f.LaravelHandlerClasses = map[string]string{"4:Orders": "Acme\\Order\xff"}
+	wire, err := EncodeContractParseFacts(base, f)
+	require.NoError(t, err)
+	_, got, _, err := DecodeContractParseFacts(wire)
+	require.NoError(t, err)
+	require.Equal(t, f, got)
+
+	f.LaravelHandlerClasses["4:Other"] = "Other"
+	_, err = EncodeContractParseFacts(base, f)
+	require.ErrorIs(t, err, errInvalidRecord, "answer must belong to a registration class and line")
+	wire[0] = 3
+	_, _, _, err = DecodeContractParseFacts(wire)
+	require.ErrorIs(t, err, errInvalidRecord, "the earlier inactive layout does not supply these answers")
 }

@@ -11,7 +11,7 @@ import (
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
-const contractParseFactsFormat byte = 3
+const contractParseFactsFormat byte = 4
 
 // EncodeContractParseFacts builds a candidate contract receipt. Active v2
 // writers still use EncodeParseFacts. The outer parse-store envelope owns the
@@ -26,11 +26,11 @@ func EncodeContractParseFacts(base ParseFacts, facts *contracts.FileFacts) ([]by
 	}
 	e := contractFactsEncoder{buf: appendBytes([]byte{contractParseFactsFormat}, v2)}
 	e.boolean(facts.ScanSkipped)
-	e.boolean(facts.NeedsRawHandlerTree)
 	writeFactSlice(&e, facts.Records, writeFactRecord)
 	writeFactSlice(&e, facts.Questions, writeFactQuestion)
 	writeFactMap(&e, facts.Shapes, writeFactShape)
 	writeFactMap(&e, facts.Handlers, writeFactHandler)
+	writeFactMap(&e, facts.LaravelHandlerClasses, writeFactString)
 	writeFactRouter(&e, facts.Router)
 	writeFactSlice(&e, facts.ConfigKeys, writeFactConfigKey)
 	if e.err != nil {
@@ -56,14 +56,14 @@ func DecodeContractParseFacts(raw []byte) (base ParseFacts, facts *contracts.Fil
 	}
 	factBytes = len(d.buf)
 	facts = &contracts.FileFacts{
-		ScanSkipped:         d.boolean(),
-		NeedsRawHandlerTree: d.boolean(),
-		Records:             readFactSlice(&d, readFactRecord),
-		Questions:           readFactSlice(&d, readFactQuestion),
-		Shapes:              readFactMap(&d, readFactShape),
-		Handlers:            readFactMap(&d, readFactHandler),
-		Router:              readFactRouter(&d),
-		ConfigKeys:          readFactSlice(&d, readFactConfigKey),
+		ScanSkipped:           d.boolean(),
+		Records:               readFactSlice(&d, readFactRecord),
+		Questions:             readFactSlice(&d, readFactQuestion),
+		Shapes:                readFactMap(&d, readFactShape),
+		Handlers:              readFactMap(&d, readFactHandler),
+		LaravelHandlerClasses: readFactMap(&d, (*recordCursor).str),
+		Router:                readFactRouter(&d),
+		ConfigKeys:            readFactSlice(&d, readFactConfigKey),
 	}
 	if err := d.finish(); err != nil {
 		return ParseFacts{}, nil, 0, err
@@ -78,21 +78,30 @@ func checkContractParseFacts(base ParseFacts, f *contracts.FileFacts) error {
 	if f == nil || base.EffectiveLanguage == "" || f.Shapes == nil {
 		return invalid("missing contract facts, shapes, or effective language")
 	}
-	if f.NeedsRawHandlerTree {
-		if base.EffectiveLanguage != "go" || f.Handlers != nil {
-			return invalid("invalid pending raw Go handler facts")
-		}
-	} else if f.Handlers == nil {
+	if f.Handlers == nil {
 		return invalid("missing contract handlers")
 	}
 	if f.ScanSkipped && (len(f.Records) != 0 || len(f.Questions) != 0) {
 		return invalid("contract records on a skipped scan")
 	}
 	path := pathkey.Normalize(base.File.FilePath)
+	var classKeys map[string]struct{}
 	for _, c := range f.Records {
 		if c.ID == "" || !validFactRecord(c, path) {
 			return invalid("contract record identity")
 		}
+		if key, _ := contracts.LaravelHandlerClassKey(c); key != "" {
+			if _, ok := f.LaravelHandlerClasses[key]; !ok || base.EffectiveLanguage != "php" {
+				return invalid("missing or invalid Laravel handler class answer")
+			}
+			if classKeys == nil {
+				classKeys = make(map[string]struct{})
+			}
+			classKeys[key] = struct{}{}
+		}
+	}
+	if len(f.LaravelHandlerClasses) != len(classKeys) {
+		return invalid("unattributed Laravel handler class answers")
 	}
 	pos := 0
 	for _, q := range f.Questions {
@@ -124,23 +133,21 @@ func checkContractParseFacts(base ParseFacts, f *contracts.FileFacts) error {
 			}
 			shapes[n.ID] = struct{}{}
 		case graph.KindFunction, graph.KindMethod:
-			if !f.NeedsRawHandlerTree {
-				h, ok := f.Handlers[n.ID]
-				if !ok || h.Regex == nil || h.AST == nil {
-					return invalid("missing contract handler answer")
-				}
-				if raw, ok := h.AST["status_codes"]; ok {
-					if _, typed := raw.([]int); !typed {
-						return invalid("contract handler status codes type")
-					}
-				}
-				if raw, ok := h.AST["query_params"]; ok {
-					if _, typed := raw.([]string); !typed {
-						return invalid("contract handler query params type")
-					}
-				}
-				handlers[n.ID] = struct{}{}
+			h, ok := f.Handlers[n.ID]
+			if !ok || h.Regex == nil || h.AST == nil {
+				return invalid("missing contract handler answer")
 			}
+			if raw, ok := h.AST["status_codes"]; ok {
+				if _, typed := raw.([]int); !typed {
+					return invalid("contract handler status codes type")
+				}
+			}
+			if raw, ok := h.AST["query_params"]; ok {
+				if _, typed := raw.([]string); !typed {
+					return invalid("contract handler query params type")
+				}
+			}
+			handlers[n.ID] = struct{}{}
 		}
 	}
 	if len(f.Shapes) != len(shapes) || len(f.Handlers) != len(handlers) {

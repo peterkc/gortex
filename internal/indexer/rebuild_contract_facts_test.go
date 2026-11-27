@@ -238,16 +238,15 @@ func TestRebuildContractFactsRequiredTreeAndScanSkip(t *testing.T) {
 	require.Len(t, configFacts.ConfigKeys, 1)
 	require.Equal(t, "app.feature", configFacts.ConfigKeys[0].Name)
 	require.NotContains(t, configFacts.ConfigKeys[0].Meta, "value")
-	// A transform may change the Go AST; C1c will provide the named raw
-	// exception. Do not claim precomputation for that handler in C1a.
+	// A transform may change the Go AST. Even when capture has a prepared
+	// tree, the detached provider answer must come from the raw AST.
 	ext, ok := idx.registry.GetByLanguage("go")
 	require.True(t, ok)
 	raw := []byte("package p\nfunc H() { WriteJSON(w, 200, \"ok\") }\n")
 	prepared := []byte(strings.ReplaceAll(string(raw), `"ok"`, "42"))
 	_, transformed, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, "handler.go", ext, raw, prepared)
 	require.NoError(t, err)
-	require.True(t, transformed.NeedsRawHandlerTree)
-	require.Empty(t, transformed.Handlers)
+	require.Contains(t, transformed.Handlers, "handler.go::H")
 }
 
 func TestRebuildContractFactsRetainRequiredTrees(t *testing.T) {

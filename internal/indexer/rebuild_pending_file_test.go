@@ -123,10 +123,12 @@ func Again() { another := }
 	require.Equal(t, []string{"team::frozen"}, savedOwners)
 
 	missingExe := filepath.Join(t.TempDir(), "missing-gortex")
+	before := parser.ParseCount()
 	cached, reused, err := idx.loadPendingRebuildFile(ctx, src, store, input, recipe, bounds, missingExe)
 	require.NoError(t, err, "matching cache hit must not read the edited input or spawn a parser")
 	require.True(t, reused)
 	require.Equal(t, facts, cached)
+	require.Equal(t, before, parser.ParseCount(), "pending reuse must not parse in the owner either")
 
 	miss := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 	got, reused, err := idx.loadPendingRebuildFile(ctx, src, miss, input, recipe, bounds, missingExe)
