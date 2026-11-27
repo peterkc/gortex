@@ -396,7 +396,11 @@ func TestRebuildStoreFactoryAndReduxThunkProofGuards(t *testing.T) {
 			stage, stageErr = "Redux Thunk", ErrRebuildReduxThunk
 		}
 		t.Run(stage, func(t *testing.T) {
-			for _, guard := range []string{"receipt owner path", "no receipt for anchor", "mismatched node key"} {
+			for _, guard := range []string{
+				"receipt owner path", "raw Call file", "Call receipt without language",
+				"raw candidate file", "candidate receipt without language",
+				"no receipt for anchor", "mismatched node key",
+			} {
 				t.Run(guard, func(t *testing.T) {
 					action := storeFactoryTestAction("store.ts::reset", "store.ts", "")
 					call := storeFactoryTestCall("retired", 2)
@@ -414,6 +418,20 @@ func TestRebuildStoreFactoryAndReduxThunkProofGuards(t *testing.T) {
 					case "receipt owner path":
 						// Keep the raw edge and key unchanged. Only the enclosing receipt lies.
 						source.File.FilePath = "wrong.ts"
+					case "raw Call file":
+						// The receipt agrees with its Call, but the raw key changed.
+						raw := *call
+						raw.FilePath = "wrong.ts"
+						source.File.FilePath, source.Edges = raw.FilePath, []*graph.Edge{&raw}
+					case "Call receipt without language":
+						source.EffectiveLanguage = ""
+					case "raw candidate file":
+						// Node claims use ID, so this matches the claim, not its owner file.
+						raw := *action
+						raw.FilePath = "wrong.ts"
+						decls.Nodes = []*graph.Node{&raw}
+					case "candidate receipt without language":
+						decls.EffectiveLanguage = ""
 					case "no receipt for anchor":
 						decls.Nodes = nil
 					case "mismatched node key":
