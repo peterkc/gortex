@@ -15,7 +15,7 @@ func RunRebuildCelery(ctx context.Context, b *store_pebble.BuildStore, receipts 
 		return store_pebble.RebuildCeleryStats{}, nil
 	}
 	return b.RebuildCelery(ctx, receipts, store_pebble.RebuildCeleryRules{
-		Node:      celeryTaskNode, Call: celeryTaskCall, Getter: isStoreFactoryGetter, Rebind: rebindCeleryCall,
+		Node: celeryTaskNode, Call: celeryTaskCall, Getter: isStoreFactoryGetter, Rebind: rebindCeleryCall,
 		FanoutCap: celeryFanoutCap,
 	})
 }
