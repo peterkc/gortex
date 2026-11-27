@@ -135,34 +135,22 @@ func receiveRebuildStages(
 		if err != nil {
 			return fmt.Errorf("%w: read stage: %w", ErrRebuildWorker, err)
 		}
+		if r.MyBatisOrder != 0 || r.SQLCallsiteOrder != 0 || r.StoreFactoryOrder != 0 {
+			return fmt.Errorf("%w: retired move order count", errRebuildBuildWire)
+		}
 		if r.Refusal != 0 {
 			if int(r.Refusal) > len(rebuildFailureKinds) || r.Witness.Stage != 0 || len(r.Files) != 0 {
 				return fmt.Errorf("%w: malformed refusal", errRebuildBuildWire)
 			}
 			cause := rebuildFailureKinds[r.Refusal-1]
+			if cause == nil {
+				return fmt.Errorf("%w: retired refusal code %d", errRebuildBuildWire, r.Refusal)
+			}
 			if (cause == store_pebble.ErrRebuildAttributionChain) != (r.AttributionChains > 0) {
 				return fmt.Errorf("%w: invalid attribution chain count", errRebuildBuildWire)
 			}
 			if (cause == store_pebble.ErrRebuildUnknownProvenance) != (r.UnknownProvenance > 0) {
 				return fmt.Errorf("%w: invalid unknown provenance count", errRebuildBuildWire)
-			}
-			if (cause == store_pebble.ErrRebuildMyBatisOrder) != (r.MyBatisOrder > 0) {
-				return fmt.Errorf("%w: invalid MyBatis move order count", errRebuildBuildWire)
-			}
-			if (cause == store_pebble.ErrRebuildSQLCallsiteOrder) != (r.SQLCallsiteOrder > 0) {
-				return fmt.Errorf("%w: invalid SQL callsite move order count", errRebuildBuildWire)
-			}
-			if (cause == store_pebble.ErrRebuildStoreFactoryOrder) != (r.StoreFactoryOrder > 0) {
-				return fmt.Errorf("%w: invalid Store Factory move order count", errRebuildBuildWire)
-			}
-			if r.MyBatisOrder != 0 {
-				return fmt.Errorf("%w: %w: mybatis_order=%d: %s", ErrRebuildWorker, cause, r.MyBatisOrder, r.Detail)
-			}
-			if r.SQLCallsiteOrder != 0 {
-				return fmt.Errorf("%w: %w: sql_callsite_order=%d: %s", ErrRebuildWorker, cause, r.SQLCallsiteOrder, r.Detail)
-			}
-			if r.StoreFactoryOrder != 0 {
-				return fmt.Errorf("%w: %w: store_factory_order=%d: %s", ErrRebuildWorker, cause, r.StoreFactoryOrder, r.Detail)
 			}
 			if r.AttributionChains != 0 {
 				return fmt.Errorf("%w: %w: attribution_chains=%d: %s", ErrRebuildWorker, cause, r.AttributionChains, r.Detail)
@@ -177,15 +165,6 @@ func receiveRebuildStages(
 		}
 		if r.UnknownProvenance != 0 {
 			return fmt.Errorf("%w: unknown provenance count on a stage offer", errRebuildBuildWire)
-		}
-		if r.MyBatisOrder != 0 {
-			return fmt.Errorf("%w: MyBatis move order count on a stage offer", errRebuildBuildWire)
-		}
-		if r.SQLCallsiteOrder != 0 {
-			return fmt.Errorf("%w: SQL callsite move order count on a stage offer", errRebuildBuildWire)
-		}
-		if r.StoreFactoryOrder != 0 {
-			return fmt.Errorf("%w: Store Factory move order count on a stage offer", errRebuildBuildWire)
 		}
 		if next > store_pebble.StageSearch || r.Witness.Stage != next {
 			return fmt.Errorf("%w: expected %s, got %s", store_pebble.ErrStageOrder, next, r.Witness.Stage)

@@ -61,40 +61,44 @@ func TestRebuildSQLCallsiteWithoutFunctionsSkipsCallsAndReceipts(t *testing.T) {
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
 
-func TestRebuildSQLCallsiteCountsOnlyInteractingDestinations(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		last  string
-		count uint64
-	}{
-		{"convergence", "old-z", 1},
-		{"chain", "new-b", 1},
-		{"two interacting destinations", "old-z", 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			first := sqlCallsiteStoreEdge("old-a", "find")
-			second := sqlCallsiteStoreEdge(tc.last, "find")
-			if tc.name == "chain" {
-				second = sqlCallsiteStoreEdge(tc.last, "list")
-			}
-			edges := []*graph.Edge{first, second}
-			if tc.count == 2 {
-				edges = append(edges, sqlCallsiteStoreEdge("old-c", "list"), sqlCallsiteStoreEdge("old-d", "list"))
-			}
-			b, _ := seedSyntheticCustody(t, sqlCallsiteStoreSource(edges...),
-				sqlCallsiteStoreFunction("new-b", "find"), sqlCallsiteStoreFunction("new-c", "list"))
+func TestRebuildSQLCallsiteProvesConvergingLoser(t *testing.T) {
+	for _, omitLoser := range []bool{false, true} {
+		name := "both receipts"
+		if omitLoser {
+			name = "missing losing receipt"
+		}
+		t.Run(name, func(t *testing.T) {
+			first := sqlCallsiteStoreEdge("old-z", "find")
+			first.Meta["fixture"] = "first"
+			second := sqlCallsiteStoreEdge("old-a", "find")
+			second.Meta["fixture"] = "second"
+			source := sqlCallsiteStoreSource(first, second)
+			decl := sqlCallsiteStoreFunction("new-b", "find")
+			b, _ := seedSyntheticCustody(t, source, decl)
 			before := rebuildFrameworkCustodyRows(t, b)
-			unread := func(func(ParseFacts, error) bool) { t.Fatal("order refusal read receipts") }
-			stats, err := runSQLCallsiteStore(t, b, unread)
+			if omitLoser {
+				source.Edges = source.Edges[:1]
+			}
+			stats, err := runSQLCallsiteStore(t, b, sqlCallsiteTestReceipts(source, decl))
 			want := *first
 			want.To = "new-b"
-			var refused *RebuildSQLCallsiteOrderError
-			require.ErrorIs(t, err, ErrRebuildSQLCallsite)
-			require.ErrorIs(t, err, ErrRebuildSQLCallsiteOrder)
-			require.ErrorAs(t, err, &refused)
-			require.Equal(t, &RebuildSQLCallsiteOrderError{Count: tc.count, First: graph.EdgeIdentityFor(&want)}, refused)
-			require.Zero(t, stats)
-			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			if omitLoser {
+				requireSQLCallsiteProofRefusal(t, err, stats, &want)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, RebuildSQLCallsiteStats{Stubs: 2, Resolved: 2, Moves: 2}, stats)
+			saved, err := b.pendingEdge(pendingEdgeKey(&want))
+			require.NoError(t, err)
+			require.Equal(t, &want, saved)
+			requireRebuildLinkCustody(t, b, &want, rebuildEdgeCustody{raw: pendingEdgeKey(first)})
+			for _, loser := range []*graph.Edge{first, second} {
+				old, err := b.pendingEdge(pendingEdgeKey(loser))
+				require.NoError(t, err)
+				require.Nil(t, old)
+				requireRebuildLinkCustody(t, b, loser, rebuildEdgeCustody{})
+			}
 		})
 	}
 }

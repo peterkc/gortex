@@ -81,6 +81,34 @@ func TestRebuildSQLCallsiteSQLiteOracle(t *testing.T) {
 	}
 }
 
+func TestRebuildSQLCallsiteConvergenceSQLiteOracle(t *testing.T) {
+	const file = "app.ts"
+	app := rebuildSQLCallsiteExtract(t, languages.NewTypeScriptExtractor(), file, rebuildSQLCallsiteTS)
+	call := rebuildSQLCallsiteEdge(t, app.Edges, file)
+	first, second := *call, *call
+	first.To, second.To = "retired-z", "retired-a"
+	first.Meta, second.Meta = maps.Clone(call.Meta), maps.Clone(call.Meta)
+	first.Meta["fixture"], second.Meta["fixture"] = "first", "second"
+	app.Edges = slices.DeleteFunc(app.Edges, func(e *graph.Edge) bool { return e == call })
+	sql := rebuildSQLCallsiteFunction(t, "db/functions.sql", "public.get_user_stats")
+	native := openRebuildTemporalOracle(t, app, sql)
+	require.NoError(t, native.AddBatchChecked(nil, []*graph.Edge{&first, &second}))
+	app.Edges = append(app.Edges, &first, &second)
+	b := openRebuildGRPCBuild(t, app, sql)
+	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthSQLCallsite})
+	require.NoError(t, err)
+	stats, err := RunRebuildSQLCallsites(t.Context(), b, rebuildGRPCReceipts(app, sql), selection)
+	require.NoError(t, err)
+	require.Equal(t, store_pebble.RebuildSQLCallsiteStats{Stubs: 2, Resolved: 2, Moves: 2}, stats)
+	require.Equal(t, 2, ResolveSQLCallsites(native))
+	want := rebuildEventSQLiteRows(native)
+	winner := rebuildSQLCallsiteEdge(t, want.edges, file)
+	require.Equal(t, rebuildSQLCallsiteTarget, winner.To)
+	require.Equal(t, "first", winner.Meta["fixture"])
+	require.Equal(t, want, rebuildEventSavedRows(t, b))
+}
+
 func TestRebuildSQLCallsiteStaleSQLiteOracle(t *testing.T) {
 	const file = "app.ts"
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthSQLCallsite})

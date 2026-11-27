@@ -81,125 +81,27 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 	}
 }
 
-func TestRebuildMyBatisOrderWireRefusal(t *testing.T) {
-	cause := &store_pebble.RebuildMyBatisOrderError{
-		Count: 2,
-		First: graph.EdgeIdentity{From: "statement", To: "method", Kind: graph.EdgeCalls, FilePath: "mapper.xml", Line: 7},
-	}
-	valid := buildRefusal(fmt.Errorf("%w: %w", store_pebble.ErrRebuildMyBatis, cause))
-	require.EqualValues(t, 55, valid.Refusal)
-	require.EqualValues(t, 2, valid.MyBatisOrder)
+func TestRebuildCallMoveOrderWireCodesRetired(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		reply rebuildBuildReply
-		want  error
+		retired uint8
+		stage   error
 	}{
-		{"valid", valid, store_pebble.ErrRebuildMyBatisOrder},
-		{"missing count", rebuildBuildReply{Refusal: valid.Refusal}, errRebuildBuildWire},
-		{"wrong refusal", rebuildBuildReply{Refusal: 56, MyBatisOrder: 2}, errRebuildBuildWire},
-		{"offer with count", rebuildBuildReply{MyBatisOrder: 2}, errRebuildBuildWire},
+		{55, store_pebble.ErrRebuildMyBatis},
+		{57, store_pebble.ErrRebuildSQLCallsite},
+		{59, store_pebble.ErrRebuildStoreFactory},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(fmt.Sprint(tc.retired), func(t *testing.T) {
+			require.Nil(t, rebuildFailureKinds[tc.retired-1])
+			require.Equal(t, tc.retired+1, buildRefusal(tc.stage).Refusal)
 			var reply, acks bytes.Buffer
-			require.NoError(t, writeRebuildBuildReply(&reply, tc.reply))
+			require.NoError(t, writeRebuildBuildReply(&reply, rebuildBuildReply{Refusal: tc.retired}))
 			err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
 				func(context.Context, store_pebble.StageTables) error {
-					t.Fatal("a refusal must not publish")
+					t.Fatal("a retired refusal must not publish")
 					return nil
 				})
-			require.ErrorIs(t, err, tc.want)
-			if tc.want == store_pebble.ErrRebuildMyBatisOrder {
-				require.ErrorContains(t, err, "mybatis_order=2")
-				require.ErrorContains(t, err, `first=("statement","calls","method","mapper.xml",7)`)
-			}
-			require.Empty(t, acks.Bytes())
-		})
-	}
-}
-
-func TestRebuildSQLCallsiteOrderWireRefusal(t *testing.T) {
-	const first = `first=("caller","calls","load_calendar","calendar.ts",7)`
-	cause := &store_pebble.RebuildSQLCallsiteOrderError{
-		Count: 2,
-		First: graph.EdgeIdentity{From: "caller", To: "load_calendar", Kind: graph.EdgeCalls, FilePath: "calendar.ts", Line: 7},
-	}
-	valid := buildRefusal(fmt.Errorf("%w: %w", store_pebble.ErrRebuildSQLCallsite, cause))
-	require.EqualValues(t, 57, valid.Refusal)
-	require.EqualValues(t, 2, valid.SQLCallsiteOrder)
-	require.Zero(t, valid.MyBatisOrder)
-	require.Zero(t, valid.AttributionChains)
-	require.Zero(t, valid.UnknownProvenance)
-	for _, tc := range []struct {
-		name  string
-		reply rebuildBuildReply
-		want  error
-		text  string
-	}{
-		{"valid", valid, store_pebble.ErrRebuildSQLCallsiteOrder, "sql_callsite_order=2"},
-		{"missing count", rebuildBuildReply{Refusal: 57}, errRebuildBuildWire, "invalid SQL callsite move order count"},
-		{"wrong refusal", rebuildBuildReply{Refusal: 58, SQLCallsiteOrder: 2}, errRebuildBuildWire, "invalid SQL callsite move order count"},
-		{"MyBatis refusal with SQL count", rebuildBuildReply{Refusal: 55, MyBatisOrder: 1, SQLCallsiteOrder: 2}, errRebuildBuildWire, "invalid SQL callsite move order count"},
-		{"stage offer with count", rebuildBuildReply{Witness: store_pebble.Witness{Stage: store_pebble.StageManifest}, SQLCallsiteOrder: 2},
-			errRebuildBuildWire, "SQL callsite move order count on a stage offer"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var reply, acks bytes.Buffer
-			require.NoError(t, writeRebuildBuildReply(&reply, tc.reply))
-			err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
-				func(context.Context, store_pebble.StageTables) error {
-					t.Fatal("a refusal or invalid offer must not publish")
-					return nil
-				})
-			require.ErrorIs(t, err, tc.want)
-			require.ErrorContains(t, err, tc.text)
-			if tc.want == store_pebble.ErrRebuildSQLCallsiteOrder {
-				require.ErrorIs(t, err, ErrRebuildWorker)
-				require.ErrorContains(t, err, first)
-			}
-			require.Empty(t, acks.Bytes())
-		})
-	}
-}
-
-func TestRebuildStoreFactoryOrderWireRefusal(t *testing.T) {
-	const first = `first=("caller","calls","reset","store.ts",7)`
-	cause := &store_pebble.RebuildStoreFactoryOrderError{
-		Count: 2,
-		First: graph.EdgeIdentity{From: "caller", To: "reset", Kind: graph.EdgeCalls, FilePath: "store.ts", Line: 7},
-	}
-	valid := buildRefusal(fmt.Errorf("%w: %w", store_pebble.ErrRebuildStoreFactory, cause))
-	require.EqualValues(t, 59, valid.Refusal)
-	require.EqualValues(t, 2, valid.StoreFactoryOrder)
-	require.Zero(t, valid.MyBatisOrder)
-	require.Zero(t, valid.AttributionChains)
-	require.Zero(t, valid.UnknownProvenance)
-	for _, tc := range []struct {
-		name  string
-		reply rebuildBuildReply
-		want  error
-		text  string
-	}{
-		{"valid", valid, store_pebble.ErrRebuildStoreFactoryOrder, "store_factory_order=2"},
-		{"missing count", rebuildBuildReply{Refusal: 59}, errRebuildBuildWire, "invalid Store Factory move order count"},
-		{"wrong refusal", rebuildBuildReply{Refusal: 60, StoreFactoryOrder: 2}, errRebuildBuildWire, "invalid Store Factory move order count"},
-		{"MyBatis refusal with Store Factory count", rebuildBuildReply{Refusal: 55, MyBatisOrder: 1, StoreFactoryOrder: 2}, errRebuildBuildWire, "invalid Store Factory move order count"},
-		{"stage offer with count", rebuildBuildReply{Witness: store_pebble.Witness{Stage: store_pebble.StageManifest}, StoreFactoryOrder: 2},
-			errRebuildBuildWire, "Store Factory move order count on a stage offer"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var reply, acks bytes.Buffer
-			require.NoError(t, writeRebuildBuildReply(&reply, tc.reply))
-			err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
-				func(context.Context, store_pebble.StageTables) error {
-					t.Fatal("a refusal or invalid offer must not publish")
-					return nil
-				})
-			require.ErrorIs(t, err, tc.want)
-			require.ErrorContains(t, err, tc.text)
-			if tc.want == store_pebble.ErrRebuildStoreFactoryOrder {
-				require.ErrorIs(t, err, ErrRebuildWorker)
-				require.ErrorContains(t, err, first)
-			}
+			require.ErrorIs(t, err, errRebuildBuildWire)
+			require.ErrorContains(t, err, "retired refusal code")
 			require.Empty(t, acks.Bytes())
 		})
 	}

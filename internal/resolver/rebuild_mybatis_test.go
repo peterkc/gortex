@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"testing"
@@ -186,99 +187,105 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 	definitions := slices.DeleteFunc(slices.Clone(xml.Edges), func(e *graph.Edge) bool {
 		return e.Kind == graph.EdgeCalls
 	})
+	stub := func(to, statement, fixture string) *graph.Edge {
+		return &graph.Edge{From: from, To: to, Kind: graph.EdgeCalls, FilePath: xmlFile, Line: 2,
+			Meta: map[string]any{"via": "mybatis.mapper", "mybatis_namespace": namespace,
+				"mybatis_statement": statement, "fixture": fixture}}
+	}
 
 	for _, tc := range []struct {
 		name                       string
 		firstOld, firstStatement   string
 		secondOld, secondStatement string
-		affected                   uint64
-		firstAffected              string
+		incumbent                  string
+		split                      bool
+		want, reversedWant         map[string]string
 	}{
-		{"commuting", "stale::alpha", alpha, "stale::beta", beta, 0, ""},
-		{"convergent", "stale::alpha", alpha, "stale::beta", alpha, 1, alphaTarget},
-		{"chain", "stale::alpha", alpha, alphaTarget, beta, 1, alphaTarget},
-		// Alpha sorts before beta but is not a moving old key in this chain.
-		{"chain_descending", "stale::beta", beta, betaTarget, alpha, 1, betaTarget},
-		{"cycle", alphaTarget, beta, betaTarget, alpha, 2, alphaTarget},
+		{name: "commuting", firstOld: "stale::alpha", firstStatement: alpha, secondOld: "stale::beta", secondStatement: beta,
+			want: map[string]string{alphaTarget: "left", betaTarget: "right"}},
+		{name: "convergent", firstOld: "stale::alpha", firstStatement: alpha, secondOld: "stale::beta", secondStatement: alpha,
+			want: map[string]string{alphaTarget: "left"}, reversedWant: map[string]string{alphaTarget: "right"}},
+		{name: "convergent occupied", firstOld: "stale::alpha", firstStatement: alpha, secondOld: "stale::beta", secondStatement: alpha,
+			incumbent: alphaTarget, want: map[string]string{alphaTarget: "incumbent"}},
+		{name: "chain ascending", firstOld: "stale::alpha", firstStatement: alpha, secondOld: alphaTarget, secondStatement: beta,
+			want: map[string]string{alphaTarget: "left", betaTarget: "right"}},
+		{name: "chain descending", firstOld: "stale::beta", firstStatement: beta, secondOld: betaTarget, secondStatement: alpha,
+			want: map[string]string{betaTarget: "left", alphaTarget: "right"}},
+		{name: "chain occupied end", firstOld: "stale::alpha", firstStatement: alpha, secondOld: alphaTarget, secondStatement: beta,
+			incumbent: betaTarget, want: map[string]string{alphaTarget: "left", betaTarget: "incumbent"}},
+		{name: "cycle", firstOld: alphaTarget, firstStatement: beta, secondOld: betaTarget, secondStatement: alpha,
+			want: map[string]string{betaTarget: "left", alphaTarget: "right"}},
+		{name: "split chain", firstOld: "stale::alpha", firstStatement: alpha, secondOld: alphaTarget, secondStatement: beta,
+			split: true, want: map[string]string{betaTarget: "right"}, reversedWant: map[string]string{alphaTarget: "left", betaTarget: "right"}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// Use the same real caller and source site for two synthetic raw
-			// calls. The XML receipt carries both exact old keys and markers;
-			// the Java receipt carries every method in the affected cohorts.
-			stub := func(to, statement, fixture string) *graph.Edge {
-				return &graph.Edge{From: from, To: to, Kind: graph.EdgeCalls, FilePath: xmlFile, Line: 2,
-					Meta: map[string]any{"via": "mybatis.mapper", "mybatis_namespace": namespace,
-						"mybatis_statement": statement, "fixture": fixture}}
-			}
-			stored := xml
-			stored.Edges = append(slices.Clone(definitions), stub(tc.firstOld, tc.firstStatement, "left"),
-				stub(tc.secondOld, tc.secondStatement, "right"))
-			stored = roundTripRebuildRNBridgeFacts(t, stored)
-			if tc.affected != 0 {
-				b := openRebuildGRPCBuild(t, stored, methods)
-				before := rebuildEventSavedRows(t, b)
-				stats, err := RunRebuildMyBatis(t.Context(), b, rebuildGRPCReceipts(stored, methods), selection)
-				require.ErrorIs(t, err, store_pebble.ErrRebuildMyBatisOrder)
-				var order *store_pebble.RebuildMyBatisOrderError
-				require.ErrorAs(t, err, &order)
-				require.Equal(t, tc.affected, order.Count)
-				require.Equal(t, graph.EdgeIdentity{
-					From: from, To: tc.firstAffected, Kind: graph.EdgeCalls, FilePath: xmlFile, Line: 2,
-				}, order.First)
-				require.Zero(t, stats)
-				require.Equal(t, before, rebuildEventSavedRows(t, b))
-				return
-			}
-
-			var forward rebuildEventRows
-			for _, reversed := range []bool{false, true} {
+		for _, reversed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reversed=%t", tc.name, reversed), func(t *testing.T) {
+				first := stub(tc.firstOld, tc.firstStatement, "left")
+				second := stub(tc.secondOld, tc.secondStatement, "right")
+				wantPayloads := tc.want
 				if reversed {
-					stored.Edges = slices.Clone(stored.Edges)
-					slices.Reverse(stored.Edges[len(definitions):])
+					first, second = second, first
+					if tc.reversedWant != nil {
+						wantPayloads = tc.reversedWant
+					}
 				}
+				calls := []*graph.Edge{first}
+				if tc.split {
+					for i := 1; i < graph.SQLiteReindexChunkSize; i++ {
+						filler := stub("stale::filler", alpha, "filler")
+						filler.Line += i
+						calls = append(calls, filler)
+					}
+				}
+				calls = append(calls, second)
+				moves, resolved := len(calls), len(calls)
+				if tc.split {
+					// This marked Call is already at its target. It must not
+					// advance the move window even though it has an exact receipt.
+					stationary := stub(alphaTarget, alpha, "stationary")
+					stationary.Line += graph.SQLiteReindexChunkSize
+					calls = append([]*graph.Edge{stationary}, calls...)
+					resolved++
+				}
+				if tc.incumbent != "" {
+					incumbent := stub(tc.incumbent, alpha, "incumbent")
+					delete(incumbent.Meta, "via")
+					calls = append(calls, incumbent)
+				}
+				stored := xml
+				stored.Edges = append(slices.Clone(definitions), calls...)
+				stored = roundTripRebuildRNBridgeFacts(t, stored)
 				b := openRebuildGRPCBuild(t, stored, methods)
 				withoutCalls := stored
 				withoutCalls.Edges = definitions
 				native := openRebuildTemporalOracle(t, withoutCalls, methods)
-				var wantOrder []string
-				for _, call := range stored.Edges[len(definitions):] {
-					require.NoError(t, native.AddBatchChecked(nil, []*graph.Edge{call}))
-					wantOrder = append(wantOrder, call.To)
-				}
-				var censusOrder []string
+				require.NoError(t, native.AddBatchChecked(nil, stored.Edges[len(definitions):]))
+				var census []graph.EdgeIdentity
 				for e := range native.EdgesByKind(graph.EdgeCalls) {
-					if e.From == from {
-						censusOrder = append(censusOrder, e.To)
-					}
+					census = append(census, graph.EdgeIdentityFor(e))
 				}
-				require.Equal(t, wantOrder, censusOrder, "reversed=%t", reversed)
+				var wantOrder []graph.EdgeIdentity
+				for _, e := range calls {
+					wantOrder = append(wantOrder, graph.EdgeIdentityFor(e))
+				}
+				require.Equal(t, wantOrder, census)
 				require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
-				report := RunFrameworkSynthesizersWithSelection(native, selection)
-				require.NoError(t, report.Err)
-				require.EqualValues(t, 2, report.Total)
+				require.Equal(t, resolved, ResolveMyBatisCalls(native))
 				want := rebuildEventSQLiteRows(native)
-				var targets []string
+				payloads := map[string]string{}
 				for _, e := range want.edges {
-					if e.From == from && e.Kind == graph.EdgeCalls {
-						targets = append(targets, e.To)
+					if e.Kind == graph.EdgeCalls && e.From == from && e.Line == 2 {
+						payloads[e.To], _ = e.Meta["fixture"].(string)
 					}
 				}
-				require.Equal(t, []string{alphaTarget, betaTarget}, targets)
+				require.Equal(t, wantPayloads, payloads)
 
 				stats, err := RunRebuildMyBatis(t.Context(), b, rebuildGRPCReceipts(stored, methods), selection)
-				require.NoError(t, err, "reversed=%t", reversed)
-				require.EqualValues(t, 2, stats.Stubs)
-				require.EqualValues(t, 2, stats.Resolved)
-				require.EqualValues(t, 2, stats.Moves)
-				got := rebuildEventSavedRows(t, b)
-				require.Equal(t, want, got, "reversed=%t", reversed)
-				if reversed {
-					require.Equal(t, forward, got)
-				} else {
-					forward = got
-				}
-			}
-		})
+				require.NoError(t, err)
+				require.Equal(t, store_pebble.RebuildMyBatisStats{Stubs: uint64(resolved), Resolved: uint64(resolved), Moves: uint64(moves)}, stats)
+				require.Equal(t, want, rebuildEventSavedRows(t, b))
+			})
+		}
 	}
 }
 

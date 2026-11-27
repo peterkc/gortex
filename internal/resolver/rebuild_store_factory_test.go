@@ -177,7 +177,7 @@ func TestRebuildStoreFactorySQLiteNoMatch(t *testing.T) {
 
 func TestRebuildStoreFactoryOrder(t *testing.T) {
 	// Surgical facts: two distinct old keys for one caller and source site
-	// would converge on the same action. Neither old key may be deleted.
+	// converge on the same action. The first receipt supplies the winner.
 	const file = "order.ts"
 	caller := rebuildEventNode(file, "call", "typescript", "")
 	action := rebuildStoreFactoryAction(file, "")
@@ -186,9 +186,8 @@ func TestRebuildStoreFactoryOrder(t *testing.T) {
 	bare.Meta["fixture"] = "first payload"
 	wildcard.Meta["fixture"] = "second payload"
 	facts := roundTripRebuildRNBridgeFacts(t, rebuildEventFacts(file, "typescript", []*graph.Node{caller, action}, bare, wildcard))
-	b := openRebuildGRPCBuild(t, facts)
-	before := rebuildEventSavedRows(t, b)
-	require.Len(t, before.edges, 2)
+	b, native := openRebuildEventStores(t, facts)
+	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthStoreFactory})
 	require.NoError(t, err)
 	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
@@ -196,15 +195,14 @@ func TestRebuildStoreFactoryOrder(t *testing.T) {
 	require.True(t, frozen.allows(SynthStoreFactory))
 
 	stats, err := RunRebuildStoreFactory(t.Context(), b, rebuildGRPCReceipts(facts), frozen)
-	require.ErrorIs(t, err, store_pebble.ErrRebuildStoreFactoryOrder)
-	var order *store_pebble.RebuildStoreFactoryOrderError
-	require.ErrorAs(t, err, &order)
-	require.EqualValues(t, 1, order.Count)
-	destination := graph.EdgeIdentityFor(bare)
-	destination.To = action.ID
-	require.Equal(t, destination, order.First)
-	require.Zero(t, stats)
-	require.Equal(t, before, rebuildEventSavedRows(t, b))
+	require.NoError(t, err)
+	require.EqualValues(t, 2, stats.Moves)
+	require.Equal(t, 2, ResolveStoreFactoryCalls(native))
+	want := rebuildEventSQLiteRows(native)
+	require.Len(t, want.edges, 1)
+	require.Equal(t, action.ID, want.edges[0].To)
+	require.Equal(t, "first payload", want.edges[0].Meta["fixture"])
+	require.Equal(t, want, rebuildEventSavedRows(t, b))
 }
 
 func TestRebuildStoreFactoryRefusesUnprovedMove(t *testing.T) {

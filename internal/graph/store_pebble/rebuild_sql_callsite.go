@@ -12,24 +12,7 @@ import (
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
-var (
-	ErrRebuildSQLCallsite      = errors.New("pebble rebuild SQL callsite stage failed")
-	ErrRebuildSQLCallsiteOrder = errors.New("rebuild SQL callsite conservatively refuses interacting moves")
-)
-
-// RebuildSQLCallsiteOrderError conservatively refuses interacting moves.
-// Count is the number of distinct interacting destinations. First is the
-// lowest complete destination key. This does not prove order dependence.
-type RebuildSQLCallsiteOrderError struct {
-	Count uint64
-	First graph.EdgeIdentity
-}
-
-func (e *RebuildSQLCallsiteOrderError) Unwrap() error { return ErrRebuildSQLCallsiteOrder }
-
-func (e *RebuildSQLCallsiteOrderError) Error() string {
-	return fmt.Sprintf("%s: count=%d first=%s", ErrRebuildSQLCallsiteOrder, e.Count, attributionIdentityText(e.First))
-}
+var ErrRebuildSQLCallsite = errors.New("pebble rebuild SQL callsite stage failed")
 
 var rebuildSQLCallsitePrefix = []byte{'g', 'P'}
 
@@ -89,22 +72,17 @@ func (b *BuildStore) RebuildSQLCallsites(ctx context.Context, receipts iter.Seq2
 	if err := p.plan(ctx); err != nil || p.stats.Moves == 0 {
 		return p.stats, err
 	}
-	if err := p.checkOrder(ctx, func(count uint64, first graph.EdgeIdentity) error {
-		return &RebuildSQLCallsiteOrderError{Count: count, First: first}
-	}); err != nil {
-		return stats, err
-	}
 	if err := p.prove(ctx, receipts); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx, p.present) })
+	err = b.withWrites(func() error { return p.apply(ctx, p.stats.Moves, p.present) })
 	return p.stats, err
 }
 
 // c: SQL Function proof and name by ID; a: unique ID or ambiguity by name;
 // u: affected name, storing 1 plus the exact member count (capped at two);
 // r: raw-key claims.
-// m: new payload by old key; d: seen destinations; x: interacting destinations.
+// m: new payload by old key; o: raw receipt key in move order.
 func rebuildSQLCallsiteKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildSQLCallsitePrefix), col), fields...)
 }
@@ -305,7 +283,7 @@ func (p *rebuildSQLCallsitePass) record(ctx context.Context, facts ParseFacts) e
 		}
 		// Native uses the Call marker and name, not the caller node or repo.
 		ok := lang != "" && raw.FilePath == file && p.fn(raw) == p.fn(live)
-		if err := noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(ok)); err != nil {
+		if err := p.noteReceipt(key, claim, ok); err != nil {
 			return err
 		}
 	}

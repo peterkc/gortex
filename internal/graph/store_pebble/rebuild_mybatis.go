@@ -12,23 +12,7 @@ import (
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
-var (
-	ErrRebuildMyBatis      = errors.New("pebble rebuild MyBatis stage failed")
-	ErrRebuildMyBatisOrder = errors.New("rebuild MyBatis conservatively refuses interacting moves")
-)
-
-// RebuildMyBatisOrderError counts distinct destinations of interacting moves.
-// First names the lowest such complete edge key.
-type RebuildMyBatisOrderError struct {
-	Count uint64
-	First graph.EdgeIdentity
-}
-
-func (e *RebuildMyBatisOrderError) Unwrap() error { return ErrRebuildMyBatisOrder }
-
-func (e *RebuildMyBatisOrderError) Error() string {
-	return fmt.Sprintf("%s: count=%d first=%s", ErrRebuildMyBatisOrder, e.Count, attributionIdentityText(e.First))
-}
+var ErrRebuildMyBatis = errors.New("pebble rebuild MyBatis stage failed")
 
 var rebuildMyBatisPrefix = []byte{'g', 'I'}
 
@@ -98,15 +82,10 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 	if err := p.plan(ctx, rules); err != nil || p.stats.Moves == 0 {
 		return p.stats, err
 	}
-	if err := p.checkOrder(ctx, func(count uint64, first graph.EdgeIdentity) error {
-		return &RebuildMyBatisOrderError{Count: count, First: first}
-	}); err != nil {
-		return stats, err
-	}
 	if err := p.prove(ctx, receipts, rules); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx, p.validatedPresent) })
+	err = b.withWrites(func() error { return p.apply(ctx, p.stats.Moves, p.validatedPresent) })
 	return p.stats, err
 }
 
@@ -114,7 +93,7 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 // c: candidate by cohort and ID; e: election aggregate by cohort and repo
 // (empty repo is workspace); q: join with a unique nonempty repo cohort;
 // n: node proof by ID; u: affected cohort proof.
-// m: new payload by old out-key; d: destinations seen; x: conflicting outputs;
+// m: new payload by old out-key; o: raw receipt key in move order;
 // r: raw recorder proof and claiming old key.
 func rebuildMyBatisKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildMyBatisPrefix), col), fields...)
@@ -426,7 +405,7 @@ func (p *rebuildMyBatisPass) record(ctx context.Context, facts ParseFacts, rules
 		ns, stmt := rules.Stub(live)
 		rawNS, rawStmt := rules.Stub(raw)
 		ok := facts.EffectiveLanguage == "mybatis" && raw.FilePath == file && ns == rawNS && stmt == rawStmt
-		if err := noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(ok)); err != nil {
+		if err := p.noteReceipt(key, claim, ok); err != nil {
 			return err
 		}
 	}

@@ -150,9 +150,9 @@ type rebuildBuildReply struct {
 	Detail            string
 	AttributionChains uint64 // present only on a refused attribution pass
 	UnknownProvenance uint64 // present only on a refused provenance check
-	MyBatisOrder      uint64 // present only on a refused MyBatis order; conservative interacting-move count
-	SQLCallsiteOrder  uint64 // code 57 conservatively refuses interacting SQL callsite moves
-	StoreFactoryOrder uint64 // interacting Store Factory move destinations on refusal
+	MyBatisOrder      uint64 // retired code 55; reject a legacy nonzero count
+	SQLCallsiteOrder  uint64 // retired code 57; reject a legacy nonzero count
+	StoreFactoryOrder uint64 // retired code 59; reject a legacy nonzero count
 }
 
 var rebuildFailureKinds = [...]error{
@@ -183,11 +183,11 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildKMPExpectActual,
 	store_pebble.ErrRebuildExpoModuleBridge,
 	store_pebble.ErrRebuildFabric,
-	store_pebble.ErrRebuildMyBatisOrder,
+	nil, // 55: retired MyBatis order refusal
 	store_pebble.ErrRebuildMyBatis,
-	store_pebble.ErrRebuildSQLCallsiteOrder,
+	nil, // 57: retired SQLCallsite order refusal
 	store_pebble.ErrRebuildSQLCallsite,
-	store_pebble.ErrRebuildStoreFactoryOrder,
+	nil, // 59: retired StoreFactory order refusal
 	store_pebble.ErrRebuildStoreFactory,
 }
 
@@ -202,7 +202,7 @@ func buildRefusal(err error) rebuildBuildReply {
 		r.Detail = r.Detail[:limit]
 	}
 	for i, kind := range rebuildFailureKinds[1:] {
-		if errors.Is(err, kind) {
+		if kind != nil && errors.Is(err, kind) {
 			r.Refusal = uint8(i + 2)
 			// The view wraps reducer errors as well as read failures.
 			// Keep its code only when there is no more specific cause.
@@ -216,15 +216,6 @@ func buildRefusal(err error) rebuildBuildReply {
 	}
 	if unknown, ok := errors.AsType[*store_pebble.RebuildUnknownProvenanceError](err); ok {
 		r.UnknownProvenance = unknown.Count
-	}
-	if order, ok := errors.AsType[*store_pebble.RebuildMyBatisOrderError](err); ok {
-		r.MyBatisOrder = order.Count
-	}
-	if order, ok := errors.AsType[*store_pebble.RebuildSQLCallsiteOrderError](err); ok {
-		r.SQLCallsiteOrder = order.Count
-	}
-	if order, ok := errors.AsType[*store_pebble.RebuildStoreFactoryOrderError](err); ok {
-		r.StoreFactoryOrder = order.Count
 	}
 	return r
 }

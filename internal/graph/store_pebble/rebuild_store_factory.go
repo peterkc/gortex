@@ -12,23 +12,7 @@ import (
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
-var (
-	ErrRebuildStoreFactory      = errors.New("pebble rebuild Store Factory stage failed")
-	ErrRebuildStoreFactoryOrder = errors.New("rebuild Store Factory conservatively refuses interacting moves")
-)
-
-// RebuildStoreFactoryOrderError counts distinct interacting destinations.
-// First names the lowest complete output key.
-type RebuildStoreFactoryOrderError struct {
-	Count uint64
-	First graph.EdgeIdentity
-}
-
-func (e *RebuildStoreFactoryOrderError) Unwrap() error { return ErrRebuildStoreFactoryOrder }
-
-func (e *RebuildStoreFactoryOrderError) Error() string {
-	return fmt.Sprintf("%s: count=%d first=%s", ErrRebuildStoreFactoryOrder, e.Count, attributionIdentityText(e.First))
-}
+var ErrRebuildStoreFactory = errors.New("pebble rebuild Store Factory stage failed")
 
 var rebuildStoreFactoryPrefix = []byte{'g', 'V'}
 
@@ -95,22 +79,18 @@ func (b *BuildStore) RebuildStoreFactory(ctx context.Context, receipts iter.Seq2
 	if err := p.plan(ctx); err != nil || p.stats.Moves == 0 {
 		return p.stats, err
 	}
-	if err := p.checkOrder(ctx, func(count uint64, first graph.EdgeIdentity) error {
-		return &RebuildStoreFactoryOrderError{Count: count, First: first}
-	}); err != nil {
-		return stats, err
-	}
 	if err := p.prove(ctx, receipts); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx, p.validatedPresent) })
+	err = b.withWrites(func() error { return p.apply(ctx, p.stats.Moves, p.validatedPresent) })
 	return p.stats, err
 }
 
 // b: binding has an action; c/g: action/getter proof with affected key by ID.
 // a/w: global/workspace action singleton; f/s: their file singletons.
 // t: getter file singleton by binding. u/v: affected action/getter proof.
-// n: affected caller proof; r: raw-key claims; m/d/x: staged moves and order.
+// n: affected caller proof; r: raw-key claims;
+// m: new payload by old key; o: raw receipt key in move order.
 func rebuildStoreFactoryKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildStoreFactoryPrefix), col), fields...)
 }
@@ -443,7 +423,7 @@ func (p *rebuildStoreFactoryPass) record(ctx context.Context, facts ParseFacts) 
 		liveBinding, liveMember := p.rules.Stub(live)
 		source := lang == "javascript" || lang == "typescript"
 		ok := source && raw.FilePath == file && binding == liveBinding && member == liveMember
-		if err := noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(ok)); err != nil {
+		if err := p.noteReceipt(key, claim, ok); err != nil {
 			return err
 		}
 	}

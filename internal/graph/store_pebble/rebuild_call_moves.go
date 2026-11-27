@@ -3,12 +3,13 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// rebuildCallMoves plans noninteracting Call rebinds under one stage's scratch
+// rebuildCallMoves plans ordered Call rebinds under one stage's scratch
 // prefix. The caller owns scratch cleanup, receipt proof, and error wrapping.
 type rebuildCallMoves struct {
 	b        *BuildStore
@@ -16,6 +17,7 @@ type rebuildCallMoves struct {
 	rowBytes int
 	label    string
 	edgeRow  string
+	ordered  uint64
 }
 
 func (p *rebuildCallMoves) column(col byte) []byte {
@@ -35,18 +37,6 @@ func (p *rebuildCallMoves) stage(old []byte, e *graph.Edge) error {
 	if err != nil {
 		return err
 	}
-	dest := pendingEdgeKey(e)
-	key := append(p.column('d'), dest...)
-	seen, err := p.present(key)
-	if err != nil {
-		return err
-	}
-	if seen {
-		key = append(p.column('x'), dest...)
-	}
-	if err := p.put(key, nil); err != nil {
-		return err
-	}
 	return p.put(append(p.column('m'), old...), val)
 }
 
@@ -61,40 +51,47 @@ func (p *rebuildCallMoves) moves(ctx context.Context, yield func([]byte, *graph.
 	})
 }
 
-func (p *rebuildCallMoves) checkOrder(ctx context.Context, refuse func(uint64, graph.EdgeIdentity) error) error {
-	// With unique destinations and no destination among the moving old keys,
-	// every incumbent stays put. No mover can affect another's SQLite result,
-	// even across a 5,000-move window boundary.
-	if err := p.moves(ctx, func(_ []byte, e *graph.Edge) error {
-		dest := pendingEdgeKey(e)
-		occupiedByMover, err := p.present(append(p.column('m'), dest...))
-		if err != nil || !occupiedByMover {
+// noteReceipt updates a raw-key claim and indexes the first exact receipt for an
+// actual mover. Frozen receipt order matches SQLite rowid order only for
+// rows inserted and retained in that order. Stationary calls take no slot.
+func (p *rebuildCallMoves) noteReceipt(key, claim []byte, exact bool) error {
+	if exact && claim[0] == rebuildCapabilityWanted {
+		moving, err := p.present(append(p.column('m'), claim[1:]...))
+		if err != nil {
 			return err
 		}
-		return p.put(append(p.column('x'), dest...), nil)
-	}); err != nil {
-		return err
-	}
-	prefix := p.column('x')
-	var count uint64
-	var first graph.EdgeIdentity
-	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		if count == 0 {
-			var err error
-			first, err = decodeLinkRecorder(r.key[len(prefix):])
-			if err != nil {
+		if moving {
+			order := binary.BigEndian.AppendUint64(p.window(p.ordered), p.ordered)
+			if err := p.put(order, key[len(p.prefix)+1:]); err != nil {
 				return err
 			}
+			p.ordered++
 		}
-		count++
-		return nil
-	}); err != nil {
-		return err
 	}
-	if count != 0 {
-		return refuse(count, first)
-	}
-	return nil
+	return noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(exact))
+}
+
+func (p *rebuildCallMoves) window(ordinal uint64) []byte {
+	return binary.BigEndian.AppendUint64(p.column('o'), ordinal/graph.SQLiteReindexChunkSize)
+}
+
+func (p *rebuildCallMoves) visitWindow(ctx context.Context, ordinal uint64, visit func(old, raw []byte) error) error {
+	return pendingVisit(ctx, p.b.pending, p.window(ordinal), func(r row) error {
+		key := append(p.column('r'), r.value...)
+		old, err := pendingGet(p.b.pending, key, func(claim []byte) ([]byte, error) {
+			if len(claim) < 2 || claim[0] != rebuildScratchExact {
+				return nil, invalid(p.label + " ordered move has no exact receipt")
+			}
+			return bytes.Clone(claim[1:]), nil
+		})
+		if err != nil {
+			return err
+		}
+		if old == nil {
+			return invalid(p.label + " ordered move has no receipt claim")
+		}
+		return visit(old, r.value)
+	})
 }
 
 func (p *rebuildCallMoves) edgeInput(key, val []byte) error {
@@ -126,27 +123,42 @@ func (p *rebuildCallMoves) validatedPresent(key []byte) (bool, error) {
 	return e != nil, err
 }
 
-// apply must run inside the caller's write scope after order and custody checks.
-func (p *rebuildCallMoves) apply(ctx context.Context, hasIncumbent func([]byte) (bool, error)) error {
-	return p.moves(ctx, func(old []byte, e *graph.Edge) error {
-		prior, err := p.edge(old)
-		if err != nil {
+// apply runs inside the caller's write scope, after every move has proved.
+// Each window first frees all old keys, then admits claims in receipt order.
+// Read the planned payload and raw key from scratch, not from an earlier window.
+func (p *rebuildCallMoves) apply(ctx context.Context, planned uint64, hasIncumbent func([]byte) (bool, error)) error {
+	if p.ordered != planned {
+		return invalid(p.label + " ordered move count does not match plan")
+	}
+	for ordinal := uint64(0); ordinal < p.ordered; ordinal += graph.SQLiteReindexChunkSize {
+		if err := p.visitWindow(ctx, ordinal, func(old, _ []byte) error {
+			prior, err := p.edge(old)
+			if err != nil {
+				return err
+			}
+			if prior == nil {
+				return invalid(p.label + " move has no old edge")
+			}
+			return p.b.deleteEdge(old, prior)
+		}); err != nil {
 			return err
 		}
-		if prior == nil {
-			return invalid(p.label + " move has no old edge")
-		}
-		incumbent, err := hasIncumbent(pendingEdgeKey(e))
-		if err != nil {
+		if err := p.visitWindow(ctx, ordinal, func(old, raw []byte) error {
+			e, err := pendingGet(p.b.pending, append(p.column('m'), old...), decodeEdge)
+			if err != nil {
+				return err
+			}
+			if e == nil {
+				return invalid(p.label + " ordered move has no planned edge")
+			}
+			occupied, err := hasIncumbent(pendingEdgeKey(e))
+			if err != nil || occupied {
+				return err
+			}
+			return p.b.addEdgeWithCustody(e, rebuildEdgeCustody{raw: raw})
+		}); err != nil {
 			return err
 		}
-		raw, err := rebuildReceiptKey(p.b.pending, old)
-		if err != nil {
-			return err
-		}
-		if err := p.b.deleteEdge(old, prior); err != nil || incumbent {
-			return err
-		}
-		return p.b.addEdgeWithCustody(e, rebuildEdgeCustody{raw: raw})
-	})
+	}
+	return nil
 }
