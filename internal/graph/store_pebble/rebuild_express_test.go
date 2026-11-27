@@ -158,3 +158,51 @@ func TestRebuildExpressRoleSizeLimits(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildExpressReceiptOnlyCandidatePresence(t *testing.T) {
+	const file, lang = "src/routes.js", "javascript"
+	caller := &graph.Node{ID: "route", Name: "route", FilePath: file, Language: lang, Kind: graph.KindFunction}
+	target := &graph.Node{ID: "handler", Name: "auth", FilePath: "middleware/auth.js", Language: lang, Kind: graph.KindFunction}
+	live := &graph.Node{ID: "extra", Name: "unrelated", FilePath: "other/extra.js", Language: lang, Kind: graph.KindType,
+		Meta: map[string]any{"padding": strings.Repeat("x", 16<<20)}}
+	call := &graph.Edge{From: caller.ID, To: "unresolved::auth", FilePath: file, Kind: graph.EdgeCalls, Line: 2,
+		Meta: map[string]any{"handler": "auth"}}
+	source := producerProofFacts(caller)
+	source.Edges = []*graph.Edge{call}
+	facts := []ParseFacts{source, producerProofFacts(target)}
+	rules := testExpressRules()
+	rules.Preferred = func(file, _ string) bool {
+		return path.Dir(file) == "middleware"
+	}
+	for _, tc := range []struct {
+		file   string
+		refuse bool
+	}{
+		{"other/extra.js", false},
+		{"middleware/extra.js", true},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			b, _ := seedSyntheticCustody(t, facts...)
+			b.AddNode(live)
+			before := rebuildFrameworkCustodyRows(t, b)
+			raw := &graph.Node{ID: live.ID, Name: target.Name, FilePath: tc.file, Language: lang, Kind: graph.KindFunction}
+			receipts := sqlCallsiteTestReceipts(facts[0], facts[1], producerProofFacts(raw))
+			stats, err := b.RebuildExpress(t.Context(), receipts, rules)
+			if tc.refuse {
+				require.ErrorIs(t, err, ErrRebuildExpress)
+				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+				require.NotErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, RebuildExpressStats{Stubs: 1, Moves: 1}, stats)
+			want := *call
+			want.To = target.ID
+			saved, err := b.pendingEdge(pendingEdgeKey(&want))
+			require.NoError(t, err)
+			require.Equal(t, &want, saved)
+		})
+	}
+}

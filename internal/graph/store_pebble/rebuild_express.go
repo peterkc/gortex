@@ -311,16 +311,23 @@ func (p *rebuildExpress) recordNode(raw *graph.Node, file, language string) erro
 	if err != nil || state == 0 && !candidate && !method && !potential {
 		return err
 	}
-	live, err := p.storeReceiptNode(raw.ID)
-	if err != nil || live == nil {
-		return err
-	}
 	if state != 0 {
+		live, err := p.storeReceiptNode(raw.ID)
+		if err != nil || live == nil {
+			return err
+		}
 		dir := p.rules.Directory(file)
 		if err := p.put(p.key('N', raw.ID), appendKeyString(nil, dir)); err != nil {
 			return err
 		}
 		if err := noteRebuildScratchState(p.put, caller, state, rebuildScratchProofBit(dir == p.rules.Directory(live.FilePath))); err != nil {
+			return err
+		}
+	} else {
+		// Candidate replay uses the receipt's role and path. The live row
+		// supplies only existence, not any of its node payload.
+		present, err := p.present(pendingNodeKey(raw.ID))
+		if err != nil || !present {
 			return err
 		}
 	}
