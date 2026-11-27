@@ -483,16 +483,19 @@ func TestRebuildObjectRegistryAnchorProof(t *testing.T) {
 	facts := rebuildEventFacts(file, "javascript", []*graph.Node{caller, method}, member, call)
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObjectRegistry})
 	require.NoError(t, err)
-	for _, mode := range []string{"missing", "unpositioned"} {
+	for _, mode := range []string{"missing", "unpositioned", "positioned"} {
 		t.Run(mode, func(t *testing.T) {
 			private := openRebuildGRPCBuild(t, facts)
 			before := rebuildEventSavedRows(t, private)
 			proof := rebuildEventFacts(file, "javascript", nil, call)
-			if mode == "unpositioned" {
+			switch mode {
+			case "unpositioned":
 				proof.Nodes = []*graph.Node{method}
+			case "positioned":
+				proof = facts
 			}
 			stats, err := RunRebuildObjectRegistry(t.Context(), private, rebuildGRPCReceipts(proof), selection)
-			if mode == "missing" {
+			if mode != "positioned" {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, private))

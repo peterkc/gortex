@@ -251,7 +251,7 @@ func (p *rebuildObjectRegistryPass) collectCandidates(ctx context.Context) (bool
 		// this one. Extra buckets cannot certify a unique or empty pool.
 		certain := last != 0
 		hasClass := class != ""
-		anchorPossible := hasClass
+		anchorPossible := certain && hasClass
 		if unpositioned {
 			if err := p.memberships(ctx, n.ID, func(other string, order uint64) error {
 				if order != 0 || other == class {
