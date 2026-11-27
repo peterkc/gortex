@@ -70,6 +70,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Vapor", "moves", 1},
 		{"GoFrame", "moves", 1},
 		{"factory chain", "moves", 1},
+		{"function-value callbacks", "adds", 1},
 	}
 	for _, tc := range []struct {
 		name        string
@@ -818,6 +819,13 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		edge(factoryCaller, "unresolved::UnboundFactory.RunFactoryHarness", graph.EdgeCalls, 2,
 			map[string]any{"receiver_expr": "MakeFactoryHarness()"}))
 
+	const callbackPath = "CallbackHarness.ts"
+	callbackSite := node(callbackPath, "typescript", "registerCallback", graph.KindFunction, 2)
+	callbackTarget := node(callbackPath, "typescript", "B2CallbackTarget", graph.KindFunction, 4)
+	callbackFacts := receipt([]*graph.Node{callbackSite, callbackTarget},
+		edge(callbackSite, graph.FnValuePlaceholderMarker+callbackTarget.Name, graph.EdgeReferences, 3,
+			map[string]any{"via": "callback_candidate", "fn_value_name": callbackTarget.Name}))
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -829,6 +837,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
 		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts, railsFacts,
-		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, uikitFacts, vaporFacts, goFrameFacts, factoryFacts,
+		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, uikitFacts, vaporFacts, goFrameFacts, factoryFacts, callbackFacts,
 	}
 }

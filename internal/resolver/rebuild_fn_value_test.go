@@ -1,0 +1,175 @@
+package resolver
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
+)
+
+func rebuildFnValueTestNode(id, name, file string) *graph.Node {
+	return &graph.Node{ID: id, Name: name, FilePath: file, Kind: graph.KindFunction, Language: "typescript"}
+}
+
+func rebuildFnValueTestSite(from *graph.Node, name string, line int) *graph.Edge {
+	return &graph.Edge{From: from.ID, To: graph.FnValuePlaceholderMarker + name, Kind: graph.EdgeReferences, FilePath: from.FilePath, Line: line,
+		Meta: map[string]any{"via": fnValueCandidateVia, metaFnValueName: name}}
+}
+
+func rebuildFnValueTestSelection(t *testing.T) FrameworkSynthesizerSelection {
+	t.Helper()
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthFnValue})
+	require.NoError(t, err)
+	return selection
+}
+
+func TestRebuildFnValueSQLiteOracle(t *testing.T) {
+	const file, other = "site.ts", "other.ts"
+	caller := rebuildFnValueTestNode("caller", "register", file)
+	local := rebuildFnValueTestSite(caller, "local", 1)
+	member := rebuildFnValueTestSite(caller, "member", 2)
+	member.Meta["fn_ref_recv_hint"], member.Meta["fn_ref_form"] = "Owner", "method_reference"
+	global := rebuildFnValueTestSite(caller, "global", 3)
+	global.Meta["fn_value_ungated"] = true
+	first := rebuildFnValueTestNode("a-local", "local", file)
+	second := rebuildFnValueTestNode("z-local", "local", file)
+	m1 := rebuildFnValueTestNode("m1", "member", other)
+	m2 := rebuildFnValueTestNode("m2", "member", other)
+	for _, m := range []*graph.Node{m1, m2} {
+		m.Kind = graph.KindMethod
+		m.Meta = map[string]any{"receiver": "Owner"}
+	}
+	remote := rebuildFnValueTestNode("remote", "global", other)
+	prototype := rebuildFnValueTestNode("proto", "global", other)
+	prototype.Meta = map[string]any{"prototype": true}
+	static := rebuildFnValueTestNode("static", "global", other)
+	static.Meta = map[string]any{"scope_static": true}
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(file, caller.Language, []*graph.Node{caller, second, first}, local, member, global),
+		rebuildEventFacts(other, caller.Language, []*graph.Node{m2, m1, remote, prototype, static}),
+	}
+	b, native := openRebuildEventStores(t, facts...)
+	require.Equal(t, 4, ResolveFnValueCallbacks(native))
+	want := rebuildEventSQLiteRows(native)
+	require.Contains(t, want.edges, local)
+	for _, e := range want.edges {
+		if e.Meta["via"] != fnValueRegistrationVia {
+			continue
+		}
+		switch e.Line {
+		case 1:
+			require.Equal(t, first.ID, e.To, "SQLite node order is not receipt order")
+		case 2:
+			require.Contains(t, []string{m1.ID, m2.ID}, e.To)
+			require.EqualValues(t, 2, e.Meta["overload_set"])
+			require.Equal(t, "method_reference", e.Meta["fn_ref_form"])
+			require.Equal(t, 0.6, e.Confidence)
+		case 3:
+			require.Equal(t, remote.ID, e.To)
+			require.Equal(t, 0.45, e.Confidence)
+		}
+	}
+	selection := rebuildFnValueTestSelection(t)
+	for _, expected := range []uint64{4, 0} {
+		count, err := RunRebuildFnValueCallbacks(t.Context(), b, rebuildGRPCReceipts(facts...), selection)
+		require.NoError(t, err)
+		require.Equal(t, expected, count)
+		require.Equal(t, want, rebuildEventSavedRows(t, b))
+	}
+}
+
+func TestRebuildFnValueReceiptEntrant(t *testing.T) {
+	const file = "site.ts"
+	caller := rebuildFnValueTestNode("caller", "register", file)
+	winner := rebuildFnValueTestNode("z", "target", file)
+	entrant := rebuildFnValueTestNode("a", "other", file)
+	call := rebuildFnValueTestSite(caller, "target", 1)
+	facts := rebuildEventFacts(file, caller.Language, []*graph.Node{caller, winner, entrant}, call)
+	b := openRebuildGRPCBuild(t, facts)
+	before := rebuildEventSavedRows(t, b)
+	raw := *entrant
+	raw.Name = winner.Name
+	facts.Nodes = []*graph.Node{caller, winner, &raw}
+	_, oracle := openRebuildEventStores(t, facts)
+	require.Equal(t, 1, ResolveFnValueCallbacks(oracle))
+	want := fnValueRegistration(call, "target", entrant.ID, 0.6, graph.OriginASTInferred, 1)
+	require.Contains(t, rebuildEventSQLiteRows(oracle).edges, want)
+	count, err := RunRebuildFnValueCallbacks(t.Context(), b, rebuildGRPCReceipts(facts), rebuildFnValueTestSelection(t))
+	requireRebuildFnValueRefusal(t, b, before, call, count, err)
+}
+
+func TestRebuildFnValueSharedRawClaim(t *testing.T) {
+	const file = "site.ts"
+	caller := rebuildFnValueTestNode("caller", "register", file)
+	target := rebuildFnValueTestNode("target", "target", file)
+	call := rebuildFnValueTestSite(caller, target.Name, 1)
+	facts := rebuildEventFacts(file, caller.Language, []*graph.Node{caller, target}, call)
+	b, oracle := openRebuildEventStores(t, facts)
+	settled := *call
+	settled.To = "settled"
+	require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: &settled, OldTo: call.To}}))
+	b.AddEdge(call)
+	oracle.AddEdge(&settled)
+	require.Equal(t, 1, ResolveFnValueCallbacks(oracle))
+	before := rebuildEventSavedRows(t, b)
+	count, err := RunRebuildFnValueCallbacks(t.Context(), b, rebuildGRPCReceipts(facts), rebuildFnValueTestSelection(t))
+	requireRebuildFnValueRefusal(t, b, before, call, count, err)
+}
+
+func TestRebuildFnValueUnprovedGlobalTie(t *testing.T) {
+	const file = "site.ts"
+	caller := rebuildFnValueTestNode("caller", "register", file)
+	call := rebuildFnValueTestSite(caller, "target", 1)
+	call.Meta["skip_gate"] = true
+	a := rebuildFnValueTestNode("a", "target", "one.ts")
+	z := rebuildFnValueTestNode("z", "target", "two.ts")
+	site := rebuildEventFacts(file, caller.Language, []*graph.Node{caller}, call)
+	first := rebuildEventFacts(a.FilePath, a.Language, []*graph.Node{a})
+	second := rebuildEventFacts(z.FilePath, z.Language, []*graph.Node{z})
+	b, oracle := openRebuildEventStores(t, site, first, second)
+	require.Zero(t, ResolveFnValueCallbacks(oracle))
+	_, one := openRebuildEventStores(t, site, first)
+	require.Equal(t, 1, ResolveFnValueCallbacks(one), "one of the optional definitions can change the result")
+	before := rebuildEventSavedRows(t, b)
+	count, err := RunRebuildFnValueCallbacks(t.Context(), b, rebuildGRPCReceipts(site), rebuildFnValueTestSelection(t))
+	requireRebuildFnValueRefusal(t, b, before, call, count, err)
+}
+
+func TestRebuildFnValueCapsRoleRows(t *testing.T) {
+	const file = "site.ts"
+	padding := strings.Repeat("x", 16<<20)
+	for _, name := range []string{"target", "unrelated"} {
+		t.Run(name, func(t *testing.T) {
+			caller := rebuildFnValueTestNode("caller", "register", file)
+			call := rebuildFnValueTestSite(caller, "target", 1)
+			candidate := rebuildFnValueTestNode("large", name, file)
+			candidate.Meta = map[string]any{"padding": padding}
+			known := rebuildFnValueTestNode("z", "target", file)
+			facts := rebuildEventFacts(file, caller.Language, []*graph.Node{caller, candidate, known}, call)
+			b, oracle := openRebuildEventStores(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			require.Equal(t, 1, ResolveFnValueCallbacks(oracle))
+			count, err := RunRebuildFnValueCallbacks(t.Context(), b, rebuildGRPCReceipts(facts), rebuildFnValueTestSelection(t))
+			if name == "target" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.Zero(t, count)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, count)
+			require.Equal(t, rebuildEventSQLiteRows(oracle), rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func requireRebuildFnValueRefusal(t *testing.T, b *store_pebble.BuildStore, before rebuildEventRows, site *graph.Edge, count uint64, err error) {
+	t.Helper()
+	var refused *store_pebble.RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(site)}, refused)
+	require.Zero(t, count)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
+}

@@ -62,6 +62,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"Vapor", store_pebble.ErrRebuildVapor, 87},
 		{"GoFrame", store_pebble.ErrRebuildGoFrame, 88},
 		{"factory chain", store_pebble.ErrRebuildFactoryChain, 91},
+		{"function-value callbacks", store_pebble.ErrRebuildFnValue, 92},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {
