@@ -1,7 +1,6 @@
 package store_pebble
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
