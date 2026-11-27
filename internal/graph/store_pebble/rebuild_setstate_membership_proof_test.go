@@ -164,8 +164,8 @@ func TestRebuildReactSetStateUsesAnotherGateWhenProducerDigestIsStale(t *testing
 			checkSetStateProofOutput(t, b, setStateProofOutput(caller, render, owner), rebuildProofReactSetState)
 			after := rebuildFrameworkCustodyRows(t, b)
 			require.Equal(t, before[string(key)], after[string(key)])
-			recorder := string(rebuildLinkRecorderKey(key))
-			require.Equal(t, before[recorder], after[recorder])
+			recorder := rebuildLinkRecorderKey(key)
+			require.Equal(t, before[string(recorder)], after[string(recorder)])
 		})
 	}
 }
