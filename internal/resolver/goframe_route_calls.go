@@ -1,7 +1,6 @@
 package resolver
 
 import (
-	"sort"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -121,81 +120,40 @@ func goframeRouteRebind(e *graph.Edge, reqType string, target *graph.Node) (grap
 	}
 }
 
-// goframePickMethod selects the handler for a route from the methods of a
-// request type: candidates are first narrowed to the route's request-struct
-// package (so a same-named request type in another package can never claim the
-// route), then a bound controller (addonRoot) wins, then a method in the
-// route's directory, then a unique match.
+// goframePickMethod elects the sole highest-ranked handler for a request type.
 func goframePickMethod(g graph.Store, route *graph.Edge, cands []*graph.Node) *graph.Node {
-	cands = sameBoundaryCandidates(g, route.From, cands)
-	cands = goframeSamePackage(route, cands)
-	if len(cands) == 0 {
-		return nil
-	}
-	if len(cands) == 1 {
-		return cands[0]
-	}
-	// addonRoot: prefer bound controllers.
-	var boundCands []*graph.Node
-	for _, c := range cands {
-		if _, _, bound := goframeMethodShape(c); bound {
-			boundCands = append(boundCands, c)
-		}
-	}
-	if len(boundCands) == 1 {
-		return boundCands[0]
-	}
-	if len(boundCands) > 1 {
-		cands = boundCands
-	}
-	// Then a same-directory method.
+	source := g.GetNode(route.From)
+	routePkg, _ := route.Meta["goframe_request_pkg"].(string)
 	routeDir := goframeDir(route.FilePath)
-	var sameDir []*graph.Node
-	for _, c := range cands {
-		if goframeDir(c.FilePath) == routeDir {
-			sameDir = append(sameDir, c)
+	var winner *graph.Node
+	best := -1
+	for _, candidate := range cands {
+		_, pkg, bound := goframeMethodShape(candidate)
+		rank := goframeHandlerRank(source, routePkg, routeDir, candidate.WorkspaceID, pkg, goframeDir(candidate.FilePath), bound)
+		switch {
+		case rank > best:
+			winner, best = candidate, rank
+		case rank == best:
+			winner = nil
 		}
 	}
-	if len(sameDir) == 1 {
-		return sameDir[0]
-	}
-	if len(sameDir) > 1 {
-		cands = sameDir
-	}
-	sort.Slice(cands, func(i, j int) bool { return cands[i].ID < cands[j].ID })
-	if len(cands) == 1 {
-		return cands[0]
-	}
-	return nil
+	return winner
 }
 
-// goframeSamePackage narrows candidates to those whose request-struct package
-// matches the route's. A route materialised from `pkg.CreateReq` must bind only
-// to a handler taking `*pkg.CreateReq` — never to a same-named `CreateReq` in
-// another package. The package qualifier is the extractor's `goframe_request_pkg`
-// stamp; when the route carries none (a same-package, bare-name binding the
-// extractor could not qualify), candidates pass through unfiltered so existing
-// single-package resolution is never weakened.
-func goframeSamePackage(route *graph.Edge, cands []*graph.Node) []*graph.Node {
-	routePkg := ""
-	if route.Meta != nil {
-		routePkg, _ = route.Meta["goframe_request_pkg"].(string)
+// goframeHandlerRank excludes other workspaces and qualified packages. A
+// bound controller outranks every unbound controller, then directory breaks ties.
+func goframeHandlerRank(source *graph.Node, routePkg, routeDir, workspace, pkg, dir string, bound bool) int {
+	if source != nil && source.WorkspaceID != workspace || routePkg != "" && routePkg != pkg {
+		return -1
 	}
-	if routePkg == "" {
-		return cands
+	rank := 0
+	if bound {
+		rank = 2
 	}
-	out := make([]*graph.Node, 0, len(cands))
-	for _, c := range cands {
-		if c == nil || c.Meta == nil {
-			continue
-		}
-		// A candidate with no package qualifier cannot be proven to belong to
-		// the route's package, so it is excluded once the route is qualified.
-		if _, pkg, _ := goframeMethodShape(c); pkg == routePkg {
-			out = append(out, c)
-		}
+	if routeDir == dir {
+		rank++
 	}
-	return out
+	return rank
 }
 
 func goframeDir(path string) string {
