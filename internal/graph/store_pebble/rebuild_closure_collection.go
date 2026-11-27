@@ -23,8 +23,8 @@ type RebuildClosureCollectionStats struct {
 
 // RebuildClosureCollection streams the native callable field join. Count both
 // raw roles before filtering pairs, then prove only the endpoints of new calls
-// and the Apple witness. Preserve occupied SQLite durable keys. makeEdge
-// builds a call from the dispatcher to the registrar for each distinct pair.
+// and the Apple witness. Preserve occupied SQLite durable keys. sameBoundary
+// and makeEdge use only node fields outside Meta.
 func (b *BuildStore) RebuildClosureCollection(ctx context.Context, contractIDs map[string]string, receipts iter.Seq2[ParseFacts, error],
 	maxFanout int, sameBoundary func(*graph.Node, *graph.Node) bool, makeEdge func(*graph.Node, *graph.Node, string) *graph.Edge,
 	appleLanguage func(string) bool,
@@ -103,9 +103,6 @@ func (p *rebuildClosurePass) pair(ctx context.Context, maxFanout int,
 		if dispatch == "" && appendField == "" {
 			return nil
 		}
-		if len(r.key)+len(r.value) > 16<<20 {
-			return fmt.Errorf("%w: closure collection input row", ErrRebuildLinkInputSize)
-		}
 		if dispatch != "" {
 			if err := p.put(rebuildClosureKey('f', dispatch), nil); err != nil {
 				return err
@@ -141,12 +138,12 @@ func (p *rebuildClosurePass) pair(ctx context.Context, maxFanout int,
 		if counts[1] == 0 || counts[0] > maxFanout || counts[1] > maxFanout {
 			return nil
 		}
-		return p.visitRole(ctx, 'd', field, func(d *graph.Node) error {
-			return p.visitRole(ctx, 'r', field, func(r *graph.Node) error {
+		return p.visitRole(ctx, 'd', field, func(d *graph.Node, dispatchLarge bool) error {
+			return p.visitRole(ctx, 'r', field, func(r *graph.Node, registerLarge bool) error {
 				if d.ID == r.ID || !sameBoundary(d, r) {
 					return nil
 				}
-				return p.propose(makeEdge(d, r, field))
+				return p.propose(makeEdge(d, r, field), dispatchLarge || registerLarge)
 			})
 		})
 	})
@@ -172,38 +169,41 @@ func (p *rebuildClosurePass) visitRoleIDs(ctx context.Context, col byte, field s
 	})
 }
 
-func (p *rebuildClosurePass) roleNode(id string) (*graph.Node, error) {
+func (p *rebuildClosurePass) roleNode(id string, decode func([]byte) (*graph.Node, error)) (*graph.Node, bool, error) {
 	key := pendingNodeKey(id)
-	return pendingGet(p.b.pending, key, func(value []byte) (*graph.Node, error) {
-		if len(key)+len(value) > 16<<20 {
-			return nil, fmt.Errorf("%w: closure collection input row", ErrRebuildLinkInputSize)
-		}
-		n, err := decodeNode(value)
+	var tooLarge bool
+	n, err := pendingGet(p.b.pending, key, func(value []byte) (*graph.Node, error) {
+		tooLarge = len(key)+len(value) > 16<<20
+		n, err := decode(value)
 		if err == nil && n.ID != id {
 			return nil, invalid("closure collection node identity")
 		}
 		return n, err
 	})
+	return n, tooLarge, err
 }
 
-func (p *rebuildClosurePass) visitRole(ctx context.Context, col byte, field string, yield func(*graph.Node) error) error {
+func (p *rebuildClosurePass) visitRole(ctx context.Context, col byte, field string, yield func(*graph.Node, bool) error) error {
 	return p.visitRoleIDs(ctx, col, field, func(id string) error {
-		n, err := p.roleNode(id)
+		n, tooLarge, err := p.roleNode(id, decodeNodeLight)
 		if err != nil {
 			return err
 		}
 		if n == nil {
 			return invalid("closure collection lost a role")
 		}
-		return yield(n)
+		return yield(n, tooLarge)
 	})
 }
 
-func (p *rebuildClosurePass) propose(e *graph.Edge) error {
+func (p *rebuildClosurePass) propose(e *graph.Edge, tooLarge bool) error {
 	key := pendingEdgeKey(e)
 	prior, err := p.b.pendingEdge(key)
 	if err != nil || prior != nil {
 		return err
+	}
+	if tooLarge {
+		return fmt.Errorf("%w: closure collection input row", ErrRebuildLinkInputSize)
 	}
 	raw, err := encodeEdge(e)
 	if err != nil {
@@ -261,7 +261,7 @@ func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[Parse
 			if state == 0 {
 				continue
 			}
-			live, err := p.roleNode(n.ID)
+			live, _, err := p.roleNode(n.ID, decodeNode)
 			if err != nil {
 				return err
 			}

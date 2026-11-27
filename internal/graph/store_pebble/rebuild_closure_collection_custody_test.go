@@ -78,6 +78,48 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 	}
 }
 
+func TestRebuildClosureCollectionIgnoresOversizedRolesWithoutNewCall(t *testing.T) {
+	padding := strings.Repeat("x", 16<<20)
+	for _, mode := range []string{"no registrar", "fanout", "self", "other workspace", "occupied"} {
+		t.Run(mode, func(t *testing.T) {
+			const field = "listeners"
+			dispatch, registrar := closureProofPair("a", field)
+			nodes := []*graph.Node{dispatch, registrar}
+			var edges []*graph.Edge
+			large := dispatch
+			switch mode {
+			case "no registrar":
+				nodes = nodes[:1]
+			case "fanout":
+				peer, _ := closureProofPair("b", field)
+				nodes = append(nodes, peer)
+			case "self":
+				dispatch.Meta["cc_append_field"] = field
+				nodes = nodes[:1]
+			case "other workspace":
+				registrar.WorkspaceID = "foreign"
+				large = registrar
+			case "occupied":
+				incumbent := setStateProofOutput(dispatch, registrar, field)
+				incumbent.Meta["fixture"] = "durable payload"
+				edges = append(edges, incumbent)
+				large = registrar
+			}
+			large.Meta["padding"] = padding
+			b, _ := seedSyntheticCustody(t, setStateProofFacts(nodes, edges...))
+			noReceipts := func(func(ParseFacts, error) bool) {
+				t.Fatal("replayed receipts without a new call")
+			}
+			boundary := func(d, r *graph.Node) bool { return d.WorkspaceID == r.WorkspaceID }
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildClosureCollection(t.Context(), nil, noReceipts, 1, boundary, setStateProofOutput, closureTestApple)
+			require.NoError(t, err)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
 func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
 	for _, mode := range []string{"fanout", "nil receipts", "nil boundary", "nil builder", "nil Apple predicate", "scratch occupied", "input row", "proposal row"} {
 		t.Run(mode, func(t *testing.T) {
