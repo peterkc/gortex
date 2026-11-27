@@ -10,6 +10,7 @@ import (
 	"github.com/zzet/gortex/internal/clones"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/resolver"
 )
 
 func TestRebuildCloneRelationsNativeParity(t *testing.T) {
@@ -272,6 +273,64 @@ func TestRebuildCloneDynamicIDPredecessors(t *testing.T) {
 	requireRebuildTestFileRows(t, build, []*graph.Node{
 		facts[0].Nodes[0], facts[1].Nodes[0], facts[2].Nodes[0], facts[3].Nodes[0],
 	}, nil)
+}
+
+func TestRebuildCloneGoBuiltinIncumbent(t *testing.T) {
+	// Portable receipts have no RepoPrefix, so an ordinary Go caller selects this ID.
+	const id = "builtin::go::len"
+	for _, name := range []string{"len", "cap"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			signed := rebuildCloneRelationFixture(t)[1]
+			signed.Nodes[0].ID = id
+			// A plugin may supply an explicit ID and a valid native signature.
+			// Exercise the same reply check that rejects explicit KindBuiltin.
+			prepared := []byte("fixture")
+			signed.File.Size, signed.File.ContentHash = len(prepared), contentHashForSource(prepared)
+			input := rebuildInput{Path: signed.File.FilePath, Language: signed.EffectiveLanguage}
+			key := input.parseKey(rebuildDigest{1})
+			payload := encodeRebuildTestParseFacts(t, signed)
+			header := makeRebuildParseEntryHeader(key, payload)
+			_, err := checkPendingRebuildReply(header[:], payload, key, input.Path, input.Language, prepared)
+			require.NoError(t, err)
+
+			use := &graph.Node{ID: "a.go::Use", Name: "Use", FilePath: "a.go", Language: "go", Kind: graph.KindFunction}
+			call := &graph.Edge{From: use.ID, To: "unresolved::" + name, Kind: graph.EdgeCalls, FilePath: use.FilePath, Line: 2}
+			goFile := store_pebble.ParseFacts{File: graph.FileMetaRow{FilePath: use.FilePath, NodeCount: 1}, EffectiveLanguage: "go",
+				Nodes: []*graph.Node{use}, Edges: []*graph.Edge{call}}
+			native := newFTSStore(t)
+			require.NoError(t, native.AddBatchChecked(signed.Nodes, nil))
+			require.NoError(t, native.AddBatchChecked(goFile.Nodes, goFile.Edges))
+			require.Equal(t, graph.KindFunction, native.GetNode(id).Kind)
+			stats, err := resolver.New(native).ResolveAllContext(ctx)
+			require.NoError(t, err)
+			require.False(t, stats.Incomplete)
+
+			build, dir := openRebuildTestFileStore(t)
+			receipts := seedRebuildCloneInputReceipts(t, build, goFile, signed)
+			err = resolver.RunRebuildMain(ctx, build, store_pebble.RebuildLinkOptions{ScratchParent: dir, SpillBytes: 1 << 20}, resolver.RebuildMainInputs{
+				SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) { return page, nil },
+				Receipts:      receipts,
+			})
+			if name == "len" {
+				require.Equal(t, graph.KindBuiltin, native.GetNode(id).Kind)
+				var refusal *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.EqualValues(t, 1, refusal.Count)
+				require.Equal(t, graph.EdgeIdentityFor(call), refusal.First)
+				raw, err := build.RebuildView().Edge(ctx, refusal.First)
+				require.NoError(t, err)
+				require.NotNil(t, raw, "refuse before applying the attribution moves")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, graph.KindFunction, native.GetNode(id).Kind)
+			require.Equal(t, graph.KindBuiltin, native.GetNode("builtin::go::cap").Kind)
+			cloned, err := applyRebuildCloneRelations(ctx, build, receipts, rebuildClonePredecessors{}, 0.82)
+			require.NoError(t, err)
+			require.Equal(t, 1, cloned.Signatures.Signed, "the unused builtin ID is still an ordinary clone input")
+		})
+	}
 }
 
 func rebuildCloneRelationFixture(t *testing.T) []store_pebble.ParseFacts {

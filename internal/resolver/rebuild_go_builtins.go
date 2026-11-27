@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
@@ -31,8 +32,18 @@ func runRebuildGoBuiltins(ctx context.Context, build *store_pebble.BuildStore, r
 			}
 			name, repo, _ := goBuiltinSource(e, sources)
 			id, _, _ := goBuiltinTarget(repo, name)
-			if _, ok := graph.LookupPlatformBuiltin(graph.PlatformCatalogRevision, id); !ok {
+			if id == "" {
 				return "", nil
+			}
+			// Native writes the sentinel even if a stationary target wins the
+			// edge move. A node-free build must not retain that incumbent.
+			incumbent, err := readSource(id)
+			if err != nil {
+				return "", err
+			}
+			if incumbent != nil {
+				return "", fmt.Errorf("rebuild Go builtin attribution would replace a live node: %w",
+					&store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(e)})
 			}
 			return id, nil
 		})
