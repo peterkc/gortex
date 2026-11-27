@@ -20,7 +20,9 @@ var (
 
 var rebuildReactNativePrefix = []byte{'g', 'K'}
 
-// RebuildReactNativeBridgeStats describes installed Calls and physical spill.
+// RebuildReactNativeBridgeStats describes installed Calls.
+// SpillBytes counts physical bytes of closed threshold SST runs consumed by
+// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildReactNativeBridgeStats struct {
 	Edges, SpillBytes uint64
 }
@@ -49,7 +51,7 @@ func (b *BuildStore) RebuildReactNativeBridge(ctx context.Context, receipts iter
 	}, isCall, buildCall)
 }
 
-// RebuildExpoModuleBridgeStats describes installed Calls and physical spill.
+// RebuildExpoModuleBridgeStats reports the same counters as the React Native turn.
 type RebuildExpoModuleBridgeStats = RebuildReactNativeBridgeStats
 
 // RebuildExpoModuleBridge joins live RN call markers to Expo declarations.
@@ -111,7 +113,7 @@ func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts ite
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildReactNativePrefix, prefixEnd(rebuildReactNativePrefix), pebble.NoSync))
 	}()
-	p := rebuildReactNativeBridge{b: b, threshold: spillAt, policy: policy}
+	p := rebuildReactNativeBridge{b: b, policy: policy}
 	ready, err := p.capture(ctx, isCall)
 	if err != nil || !ready {
 		return p.stats, err
@@ -130,12 +132,10 @@ func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts ite
 }
 
 type rebuildReactNativeBridge struct {
-	b         *BuildStore
-	threshold int
-	buffered  int
-	changes   bool
-	stats     RebuildReactNativeBridgeStats
-	policy    rebuildNativeModuleBridgePolicy
+	b       *BuildStore
+	changes bool
+	stats   RebuildReactNativeBridgeStats
+	policy  rebuildNativeModuleBridgePolicy
 }
 
 // Scratch columns (all under g/K):
@@ -165,7 +165,7 @@ func rebuildExpoNames(meta map[string]any) (module, method string) {
 }
 
 func (p *rebuildReactNativeBridge) put(key, value []byte) error {
-	return p.b.putRebuildScratch(key, value, 16<<20, p.threshold, &p.buffered, &p.stats.SpillBytes, p.policy.label)
+	return p.b.putRebuildScratch(key, value, 16<<20, p.policy.label)
 }
 
 func (p *rebuildReactNativeBridge) get(key []byte) ([]byte, error) {

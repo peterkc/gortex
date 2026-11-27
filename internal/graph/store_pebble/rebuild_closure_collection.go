@@ -17,7 +17,9 @@ var ErrRebuildClosureCollection = errors.New("pebble rebuild closure collection 
 
 var rebuildClosurePrefix = []byte{'g', 'U'}
 
-// RebuildClosureCollectionStats reports installed edges and physical spill bytes.
+// RebuildClosureCollectionStats reports installed edges.
+// SpillBytes counts physical bytes of closed threshold SST runs consumed by
+// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildClosureCollectionStats struct {
 	Edges, SpillBytes uint64
 }
@@ -48,7 +50,7 @@ func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildClosurePrefix, prefixEnd(rebuildClosurePrefix), pebble.NoSync))
 	}()
-	p := rebuildClosurePass{b: b, spillAt: spillAt}
+	p := rebuildClosurePass{b: b}
 	if err := p.pair(ctx, maxFanout, sameBoundary, makeEdge); err != nil {
 		return stats, err
 	}
@@ -65,12 +67,10 @@ func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter
 }
 
 type rebuildClosurePass struct {
-	b        *BuildStore
-	spillAt  int
-	buffered int
-	changed  bool
-	wants    bool
-	stats    RebuildClosureCollectionStats
+	b       *BuildStore
+	changed bool
+	wants   bool
+	stats   RebuildClosureCollectionStats
 }
 
 func rebuildClosureKey(col byte, fields ...string) []byte {
@@ -78,7 +78,7 @@ func rebuildClosureKey(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildClosurePass) put(key, value []byte) error {
-	return p.b.putRebuildScratch(key, value, 16<<20, p.spillAt, &p.buffered, &p.stats.SpillBytes, "closure collection")
+	return p.b.putRebuildScratch(key, value, 16<<20, "closure collection")
 }
 
 func (p *rebuildClosurePass) pair(ctx context.Context, maxFanout int,

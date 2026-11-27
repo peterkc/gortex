@@ -19,7 +19,9 @@ var ErrRebuildEventChannel = errors.New("pebble rebuild event channel stage fail
 
 var rebuildEventPrefix = []byte{'g', 'X'}
 
-// RebuildEventChannelStats reports actual added pairs and scratch table bytes.
+// RebuildEventChannelStats reports actual added pairs.
+// SpillBytes counts physical bytes of closed threshold SST runs consumed by
+// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildEventChannelStats struct {
 	Pairs, SpillBytes uint64
 }
@@ -54,7 +56,7 @@ func (b *BuildStore) RebuildEventChannel(ctx context.Context, receipts iter.Seq2
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildEventPrefix, prefixEnd(rebuildEventPrefix), pebble.NoSync))
 	}()
-	p := rebuildEventChannel{b: b, threshold: spillAt}
+	p := rebuildEventChannel{b: b}
 	if err := p.capture(ctx, topicPrefixes); err != nil {
 		return stats, err
 	}
@@ -108,10 +110,8 @@ func (b *BuildStore) hasRebuildEventTopic(ctx context.Context, prefixes []string
 }
 
 type rebuildEventChannel struct {
-	b         *BuildStore
-	threshold int
-	buffered  int
-	stats     RebuildEventChannelStats
+	b     *BuildStore
+	stats RebuildEventChannelStats
 }
 
 func eventScratch(col byte, fields ...string) []byte {
@@ -119,7 +119,7 @@ func eventScratch(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildEventChannel) put(key, value []byte) error {
-	return p.b.putRebuildScratch(key, value, 16<<20, p.threshold, &p.buffered, &p.stats.SpillBytes, "event channel")
+	return p.b.putRebuildScratch(key, value, 16<<20, "event channel")
 }
 
 func (p *rebuildEventChannel) capture(ctx context.Context, topicPrefixes []string) error {

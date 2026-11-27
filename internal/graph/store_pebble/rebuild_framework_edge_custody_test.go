@@ -122,8 +122,6 @@ func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 			switch name {
 			case "raw receipt before competitor", "raw receipt after competitor":
 				require.NoError(t, err)
-				require.Positive(t, stats.SpillBytes)
-				stats.SpillBytes = 0
 				wantStats := RebuildGRPCStats{Stubs: 2, Registrations: 1, Resolved: 2, Moves: 2}
 				require.Equal(t, wantStats, stats)
 				var edges []*graph.Edge
@@ -137,8 +135,6 @@ func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 				require.Equal(t, rebuildEdgeCustody{raw: pendingEdgeKey(winnerRaw)}, custody)
 			case "unproved stationary", "synthetic stationary", "untracked stationary":
 				require.NoError(t, err)
-				require.Positive(t, stats.SpillBytes)
-				stats.SpillBytes = 0
 				require.Equal(t, RebuildGRPCStats{Stubs: 1, Registrations: 1, Resolved: 1}, stats)
 				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 			default:
@@ -194,7 +190,7 @@ func rebuildFrameworkCustodyRows(t *testing.T, b *BuildStore) map[string][]byte 
 	return rows
 }
 
-func TestRebuildGRPCWindowSpillsInheritedProof(t *testing.T) {
+func TestRebuildGRPCWindowPreservesInheritedProof(t *testing.T) {
 	ctx := t.Context()
 	b := newBuild(t, FullProfile)
 	raw := graph.Edge{
@@ -211,10 +207,10 @@ func TestRebuildGRPCWindowSpillsInheritedProof(t *testing.T) {
 	value = append(keyStrings(nil, string(pendingEdgeKey(&old)), next.To), value...)
 	require.NoError(t, b.pending.Set(move, value, pebble.NoSync))
 
-	pass := rebuildGRPC{b: b, threshold: 1, stats: RebuildGRPCStats{Moves: 1}}
+	pass := rebuildGRPC{b: b, stats: RebuildGRPCStats{Moves: 1}}
 	require.NoError(t, b.withWrites(func() error { return pass.apply(ctx) }))
 	// The inherited raw key is the only window scratch write.
-	require.Positive(t, pass.stats.SpillBytes)
+	require.Zero(t, pass.stats.SpillBytes)
 	stored, err := b.pendingEdge(pendingEdgeKey(&old))
 	require.NoError(t, err)
 	require.Nil(t, stored)

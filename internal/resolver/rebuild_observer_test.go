@@ -76,7 +76,7 @@ func TestRebuildObserverSQLiteOracle(t *testing.T) {
 
 		stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1)
 		require.NoError(t, err)
-		require.Positive(t, stats.SpillBytes)
+		require.Zero(t, stats.SpillBytes)
 		require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 	}
 }
@@ -244,9 +244,7 @@ func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
 			stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(receipts...), selection, 1<<20)
 			require.NoError(t, err)
 			require.Equal(t, uint64(tc.want), stats.Edges)
-			if tc.want > 0 {
-				require.Positive(t, stats.SpillBytes)
-			}
+			require.Zero(t, stats.SpillBytes)
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 			if tc.want == 0 {
 				before := rebuildEventSavedRows(t, b)

@@ -23,7 +23,7 @@ func TestRebuildReactNativeNativePairingSQLiteOracle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			module := "Calendar"
 			if tc.spillAt > 1 {
-				// The join key itself exceeds the threshold, even without row overhead.
+				// Exercise a join key larger than 1 MiB.
 				module += strings.Repeat("x", tc.spillAt)
 			}
 			ios := []*graph.Node{
@@ -100,10 +100,7 @@ func TestRebuildReactNativeNativePairingSQLiteOracle(t *testing.T) {
 					for _, wantNew := range []uint64{7, 0} {
 						stats, err := RunRebuildReactNativeNativePairing(t.Context(), private, rebuildGRPCReceipts(ordered...), selection, tc.spillAt)
 						require.NoError(t, err)
-						if wantNew != 0 || tc.spillAt == 1 {
-							// The one-byte replay still spills candidate postings, even with no new edges.
-							require.Positive(t, stats.SpillBytes)
-						}
+						require.Zero(t, stats.SpillBytes)
 						require.Equal(t, wantNew, stats.Edges)
 						require.Equal(t, want, rebuildEventSavedRows(t, private))
 					}

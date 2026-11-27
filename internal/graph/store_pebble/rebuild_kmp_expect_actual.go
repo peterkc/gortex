@@ -22,7 +22,9 @@ var rebuildKMPPrefix = []byte{'g', 'M'}
 
 const rebuildKMPRowLimit = 16 << 20
 
-// RebuildKMPExpectActualStats reports installed edges and physical spill bytes.
+// RebuildKMPExpectActualStats reports installed edges.
+// SpillBytes counts physical bytes of closed threshold SST runs consumed by
+// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildKMPExpectActualStats struct {
 	Edges, SpillBytes uint64
 }
@@ -56,7 +58,7 @@ func (b *BuildStore) RebuildKMPExpectActual(ctx context.Context, receipts iter.S
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildKMPPrefix, prefixEnd(rebuildKMPPrefix), pebble.NoSync))
 	}()
-	p := rebuildKMPPass{b: b, spillAt: spillAt}
+	p := rebuildKMPPass{b: b}
 	if err := p.collect(ctx, view); err != nil {
 		return stats, err
 	}
@@ -74,8 +76,6 @@ func (b *BuildStore) RebuildKMPExpectActual(ctx context.Context, receipts iter.S
 
 type rebuildKMPPass struct {
 	b         *BuildStore
-	spillAt   int
-	buffered  int
 	proposals uint64
 	stats     RebuildKMPExpectActualStats
 }
@@ -88,7 +88,7 @@ func rebuildKMPKey(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildKMPPass) put(key, value []byte) error {
-	return p.b.putRebuildScratch(key, value, rebuildKMPRowLimit, p.spillAt, &p.buffered, &p.stats.SpillBytes, "KMP expect/actual")
+	return p.b.putRebuildScratch(key, value, rebuildKMPRowLimit, "KMP expect/actual")
 }
 
 func rebuildKMPCheckNodeSize(r row) error {

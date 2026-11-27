@@ -9,27 +9,13 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// putRebuildScratch keeps the flush checkpoint and byte counter pass-local.
-// A failed flush leaves both the buffered bytes and spill count unchanged
-// from their values immediately before the flush.
-func (b *BuildStore) putRebuildScratch(key, value []byte, limit, threshold int, buffered *int, spill *uint64, label string) error {
-	size := len(key) + len(value)
-	if size > limit {
+// putRebuildScratch keeps mutable proof and election rows in the pending
+// overlay, where later point and prefix reads can see them immediately.
+func (b *BuildStore) putRebuildScratch(key, value []byte, limit int, label string) error {
+	if len(key)+len(value) > limit {
 		return fmt.Errorf("%w: %s scratch row", ErrRebuildLinkInputSize, label)
 	}
-	if err := b.pending.Set(key, value, pebble.NoSync); err != nil {
-		return err
-	}
-	*buffered += size
-	if *buffered >= threshold {
-		before := b.pending.Metrics().Levels[0].TableBytesFlushed
-		if err := b.pending.Flush(); err != nil {
-			return err
-		}
-		*spill += b.pending.Metrics().Levels[0].TableBytesFlushed - before
-		*buffered = 0
-	}
-	return nil
+	return b.pending.Set(key, value, pebble.NoSync)
 }
 
 const rebuildScratchExact = rebuildCapabilityWanted | rebuildCapabilityProved

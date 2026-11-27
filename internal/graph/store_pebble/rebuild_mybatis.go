@@ -34,16 +34,16 @@ var rebuildMyBatisPrefix = []byte{'g', 'I'}
 
 const rebuildMyBatisRowBytes = 16 << 20
 
-// RebuildMyBatisStats describes the live census, planned moves and spill.
+// RebuildMyBatisStats describes the live census and planned moves.
+// SpillBytes counts physical bytes of closed threshold SST runs consumed by
+// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildMyBatisStats struct {
 	Stubs, Resolved, Moves, SpillBytes uint64
 }
 
 type rebuildMyBatisPass struct {
-	b        *BuildStore
-	spillAt  int
-	buffered int
-	stats    RebuildMyBatisStats
+	b     *BuildStore
+	stats RebuildMyBatisStats
 }
 
 type rebuildMyBatisRules struct {
@@ -78,7 +78,7 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildMyBatisPrefix, prefixEnd(rebuildMyBatisPrefix), pebble.NoSync))
 	}()
-	p := rebuildMyBatisPass{b: b, spillAt: spillAt}
+	p := rebuildMyBatisPass{b: b}
 	rules := rebuildMyBatisRules{methodKey: methodKey, stub: stub, join: join, rebind: rebind}
 	if err := p.collect(ctx, methodKey); err != nil {
 		return stats, err
@@ -105,7 +105,7 @@ func rebuildMyBatisKey(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildMyBatisPass) put(key, val []byte) error {
-	return p.b.putRebuildScratch(key, val, rebuildMyBatisRowBytes, p.spillAt, &p.buffered, &p.stats.SpillBytes, "MyBatis")
+	return p.b.putRebuildScratch(key, val, rebuildMyBatisRowBytes, "MyBatis")
 }
 
 func rebuildMyBatisInput(key, val []byte) error {

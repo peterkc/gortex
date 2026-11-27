@@ -16,8 +16,7 @@ import (
 )
 
 func TestRebuildBuildFrameworkOrder(t *testing.T) {
-	// The private tail must follow native registry order. Work counters
-	// distinguish applied passes from logs caused only by scratch spill.
+	// The private tail must follow native registry order and report each pass's work.
 	applied := []struct {
 		pass, counter string
 		count         int

@@ -26,7 +26,7 @@ func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			module := "Calendar"
 			if tc.spillAt > 1 {
-				// The join key alone exceeds this threshold, regardless of row overhead.
+				// Exercise a join key larger than 1 MiB.
 				module += strings.Repeat("x", tc.spillAt)
 			}
 			facts := rebuildRNBridgeFacts(t, module)
@@ -61,7 +61,7 @@ func TestRebuildReactNativeBridgeSQLiteOracle(t *testing.T) {
 				require.Equal(t, 3, report.Total) // Native counts the attempt on the existing key too.
 				stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, tc.spillAt)
 				require.NoError(t, err)
-				require.Positive(t, stats.SpillBytes)
+				require.Zero(t, stats.SpillBytes)
 				require.Equal(t, wantNew, stats.Edges)
 
 				want := rebuildEventSQLiteRows(native)

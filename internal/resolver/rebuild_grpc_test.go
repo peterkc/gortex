@@ -141,7 +141,7 @@ func rebuildGRPCSavedCalls(t *testing.T, b *store_pebble.BuildStore) []*graph.Ed
 	return got
 }
 
-func TestRebuildGRPCNativeRowsAndSpill(t *testing.T) {
+func TestRebuildGRPCNativeRowsWithoutSpill(t *testing.T) {
 	for _, spillAt := range []int{1, 1 << 20} {
 		t.Run(fmt.Sprint(spillAt), func(t *testing.T) {
 			var extra int
@@ -167,7 +167,7 @@ func TestRebuildGRPCNativeRowsAndSpill(t *testing.T) {
 			require.Equal(t, uint64(2), stats.Registrations)
 			require.Equal(t, uint64(5+extra), stats.Resolved)
 			require.Equal(t, uint64(5+extra), stats.Moves)
-			require.Positive(t, stats.SpillBytes)
+			require.Zero(t, stats.SpillBytes)
 			got := rebuildGRPCSavedCalls(t, b)
 			require.Equal(t, want, got)
 			at := make(map[int]*graph.Edge)

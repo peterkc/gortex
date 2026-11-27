@@ -19,7 +19,9 @@ var (
 
 var rebuildSetStatePrefix = []byte{'g', 'W'}
 
-// RebuildReactSetStateStats reports installed calls and physical spill bytes.
+// RebuildReactSetStateStats reports installed calls.
+// SpillBytes counts physical bytes of closed threshold SST runs consumed by
+// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildReactSetStateStats struct {
 	Edges, SpillBytes uint64
 }
@@ -72,7 +74,7 @@ func (b *BuildStore) rebuildSetState(ctx context.Context, receipts iter.Seq2[Par
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildSetStatePrefix, prefixEnd(rebuildSetStatePrefix), pebble.NoSync))
 	}()
-	p := rebuildSetStatePass{b: b, spillAt: spillAt, proof: proof}
+	p := rebuildSetStatePass{b: b, proof: proof}
 	active, err := p.capture(ctx, lifecycle, isSetState)
 	if err != nil || !active {
 		return p.stats, err
@@ -88,11 +90,9 @@ func (b *BuildStore) rebuildSetState(ctx context.Context, receipts iter.Seq2[Par
 }
 
 type rebuildSetStatePass struct {
-	b        *BuildStore
-	spillAt  int
-	buffered int
-	proof    rebuildEdgeProof
-	stats    RebuildReactSetStateStats
+	b     *BuildStore
+	proof rebuildEdgeProof
+	stats RebuildReactSetStateStats
 }
 
 // c: lifecycle classes; m: candidate methods; q: possible owners of gated
@@ -106,7 +106,7 @@ func setStateScratch(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildSetStatePass) put(key, value []byte) error {
-	return p.b.putRebuildScratch(key, value, 16<<20, p.spillAt, &p.buffered, &p.stats.SpillBytes, "setState")
+	return p.b.putRebuildScratch(key, value, 16<<20, "setState")
 }
 
 func (p *rebuildSetStatePass) get(key []byte) ([]byte, error) {

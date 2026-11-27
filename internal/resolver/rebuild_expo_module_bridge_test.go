@@ -78,9 +78,7 @@ func TestRebuildExpoModuleBridgeSQLiteOracle(t *testing.T) {
 		stats, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
 		require.NoError(t, err)
 		require.Equal(t, wantNew, stats.Edges)
-		if wantNew != 0 {
-			require.Positive(t, stats.SpillBytes)
-		}
+		require.Zero(t, stats.SpillBytes)
 		require.Equal(t, want, rebuildEventSavedRows(t, private))
 	}
 }
@@ -201,7 +199,7 @@ func TestRebuildExpoModuleBridgeRejectsUnprovedParticipants(t *testing.T) {
 	}
 }
 
-func TestRebuildExpoModuleBridgeSQLiteSpillAtMiB(t *testing.T) {
+func TestRebuildExpoModuleBridgeSQLiteLargeScratch(t *testing.T) {
 	const extraTargets = 12
 	facts := rebuildExpoModuleBridgeFacts(t)
 	const file, lang = "overflow.kt", "kotlin"
@@ -225,7 +223,7 @@ func TestRebuildExpoModuleBridgeSQLiteSpillAtMiB(t *testing.T) {
 	stats, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1<<20)
 	require.NoError(t, err)
 	require.EqualValues(t, 2+extraTargets, stats.Edges)
-	require.Positive(t, stats.SpillBytes)
+	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
 }
 

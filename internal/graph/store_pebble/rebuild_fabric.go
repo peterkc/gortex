@@ -20,7 +20,9 @@ const rebuildFabricRowBytes = 16 << 20
 
 type rebuildFabricCandidate func(*graph.Node) (component, normalized string, native bool)
 
-// RebuildFabricStats reports installed edges and physical spill bytes.
+// RebuildFabricStats reports installed edges.
+// SpillBytes counts physical bytes of closed threshold SST runs consumed by
+// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildFabricStats struct {
 	Edges, SpillBytes uint64
 }
@@ -49,7 +51,7 @@ func (b *BuildStore) RebuildFabric(ctx context.Context, receipts iter.Seq2[Parse
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildFabricPrefix, prefixEnd(rebuildFabricPrefix), pebble.NoSync))
 	}()
-	p := rebuildFabricPass{b: b, spillAt: spillAt}
+	p := rebuildFabricPass{b: b}
 	if err := p.collect(ctx, candidate); err != nil {
 		return stats, err
 	}
@@ -66,11 +68,9 @@ func (b *BuildStore) RebuildFabric(ctx context.Context, receipts iter.Seq2[Parse
 }
 
 type rebuildFabricPass struct {
-	b        *BuildStore
-	spillAt  int
-	buffered int
-	changes  bool
-	stats    RebuildFabricStats
+	b       *BuildStore
+	changes bool
+	stats   RebuildFabricStats
 }
 
 // s: spec by ID; m: manager by component and ID; n: endpoint proof by ID;
@@ -80,7 +80,7 @@ func rebuildFabricKey(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildFabricPass) put(key, value []byte) error {
-	return p.b.putRebuildScratch(key, value, rebuildFabricRowBytes, p.spillAt, &p.buffered, &p.stats.SpillBytes, "Fabric")
+	return p.b.putRebuildScratch(key, value, rebuildFabricRowBytes, "Fabric")
 }
 
 func (p *rebuildFabricPass) collect(ctx context.Context, candidate rebuildFabricCandidate) error {

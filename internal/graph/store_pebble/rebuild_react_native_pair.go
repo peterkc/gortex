@@ -17,7 +17,9 @@ var ErrRebuildReactNativeNativePairing = errors.New("pebble rebuild React Native
 
 var rebuildRNPairPrefix = []byte{'g', 'Q'}
 
-// RebuildReactNativeNativePairingStats reports installed edges and physical spill bytes.
+// RebuildReactNativeNativePairingStats reports installed edges.
+// SpillBytes counts physical bytes of closed threshold SST runs consumed by
+// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildReactNativeNativePairingStats struct {
 	Edges, SpillBytes uint64
 }
@@ -47,7 +49,7 @@ func (b *BuildStore) RebuildReactNativeNativePairing(ctx context.Context, receip
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildRNPairPrefix, prefixEnd(rebuildRNPairPrefix), pebble.NoSync))
 	}()
-	p := rebuildRNPairPass{b: b, spillAt: spillAt}
+	p := rebuildRNPairPass{b: b}
 	if err := p.pair(ctx, platform, makeEdge); err != nil {
 		return stats, err
 	}
@@ -62,11 +64,9 @@ func (b *BuildStore) RebuildReactNativeNativePairing(ctx context.Context, receip
 }
 
 type rebuildRNPairPass struct {
-	b        *BuildStore
-	spillAt  int
-	buffered int
-	changed  bool
-	stats    RebuildReactNativeNativePairingStats
+	b       *BuildStore
+	changed bool
+	stats   RebuildReactNativeNativePairingStats
 }
 
 func rebuildRNPairKey(col byte, fields ...string) []byte {
@@ -74,7 +74,7 @@ func rebuildRNPairKey(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildRNPairPass) put(key, value []byte) error {
-	return p.b.putRebuildScratch(key, value, 16<<20, p.spillAt, &p.buffered, &p.stats.SpillBytes, "React Native native pairing")
+	return p.b.putRebuildScratch(key, value, 16<<20, "React Native native pairing")
 }
 
 func (p *rebuildRNPairPass) pair(ctx context.Context, platform func(string) string,

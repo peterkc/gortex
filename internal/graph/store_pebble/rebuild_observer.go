@@ -15,7 +15,9 @@ var ErrRebuildObserver = errors.New("pebble rebuild Observer stage failed")
 
 var rebuildObserverPrefix = []byte{'g', 'O'}
 
-// RebuildObserverStats reports installed calls and physical spill bytes.
+// RebuildObserverStats reports installed calls.
+// SpillBytes counts physical bytes of closed threshold SST runs consumed by
+// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildObserverStats struct {
 	Edges, SpillBytes uint64
 }
@@ -48,7 +50,7 @@ func (b *BuildStore) RebuildObserver(ctx context.Context, receipts iter.Seq2[Par
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildObserverPrefix, prefixEnd(rebuildObserverPrefix), pebble.NoSync))
 	}()
-	p := rebuildObserverPass{b: b, view: b.RebuildView(), spillAt: spillAt}
+	p := rebuildObserverPass{b: b, view: b.RebuildView()}
 	if err := p.capture(ctx, registrar, dispatcher); err != nil {
 		return stats, err
 	}
@@ -70,11 +72,9 @@ func (b *BuildStore) RebuildObserver(ctx context.Context, receipts iter.Seq2[Par
 }
 
 type rebuildObserverPass struct {
-	b        *BuildStore
-	view     RebuildView
-	spillAt  int
-	buffered int
-	stats    RebuildObserverStats
+	b     *BuildStore
+	view  RebuildView
+	stats RebuildObserverStats
 }
 
 // f: field IDs; r/d: access rows by field/role; c: distinct callbacks by
@@ -86,7 +86,7 @@ func observerScratch(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildObserverPass) put(key, value []byte) error {
-	return p.b.putRebuildScratch(key, value, 16<<20, p.spillAt, &p.buffered, &p.stats.SpillBytes, "Observer")
+	return p.b.putRebuildScratch(key, value, 16<<20, "Observer")
 }
 
 func (p *rebuildObserverPass) get(key []byte) ([]byte, error) {

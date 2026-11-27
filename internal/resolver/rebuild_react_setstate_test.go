@@ -58,9 +58,9 @@ func TestRebuildReactSetStateSQLiteOracle(t *testing.T) {
 				}
 				stats, err := RunRebuildReactSetState(t.Context(), b, rebuildGRPCReceipts(proof...), selection, spillAt)
 				require.NoError(t, err)
+				require.Zero(t, stats.SpillBytes)
 				if run == 0 {
 					require.Positive(t, stats.Edges)
-					require.Positive(t, stats.SpillBytes)
 				}
 				require.Equal(t, oracle, rebuildEventSavedRows(t, b))
 			}
@@ -97,7 +97,7 @@ func (w *Widget) noop() {}
 	stats, err := RunRebuildReactSetState(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stats.Edges)
-	require.Positive(t, stats.SpillBytes)
+	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, oracle, rebuildEventSavedRows(t, b))
 }
 

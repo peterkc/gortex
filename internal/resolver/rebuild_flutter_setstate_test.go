@@ -70,7 +70,7 @@ func TestRebuildFlutterSetStateAfterReact(t *testing.T) {
 		stats, err := RunRebuildFlutterSetState(ctx, b, receipts, selection, 1)
 		require.NoError(t, err)
 		require.EqualValues(t, 1-i, stats.Edges)
-		require.Positive(t, stats.SpillBytes)
+		require.Zero(t, stats.SpillBytes)
 		require.Equal(t, want, rebuildEventSavedRows(t, b))
 	}
 }
@@ -156,7 +156,7 @@ func TestRebuildFlutterSetStateKeepsNativeBuildElection(t *testing.T) {
 	stats, err := RunRebuildFlutterSetState(t.Context(), b, receipts, selection, 1<<20)
 	require.NoError(t, err)
 	require.EqualValues(t, 41, stats.Edges)
-	require.Positive(t, stats.SpillBytes)
+	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, want, rebuildEventSavedRows(t, b))
 }
 

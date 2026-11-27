@@ -86,7 +86,7 @@ func TestRebuildReactNativeNativePairingProvesExactDeclarationMetadata(t *testin
 			if tc.refuse {
 				// The join needs nonempty module and method names. Stage the demand
 				// directly to test absence and zero values at the receipt boundary.
-				p := rebuildRNPairPass{b: b, spillAt: 1}
+				p := rebuildRNPairPass{b: b}
 				require.NoError(t, p.propose(e))
 				err := p.prove(t.Context(), receipts)
 				requireProducerProofRefusal(t, b, err, RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(e)})

@@ -62,9 +62,9 @@ func TestRebuildClosureCollectionSQLiteOracle(t *testing.T) {
 				require.NoError(t, err)
 				got := rebuildEventSavedRows(t, b)
 				require.Equal(t, want, got)
+				require.Zero(t, stats.SpillBytes)
 				if run == 0 {
 					require.Positive(t, stats.Edges)
-					require.Positive(t, stats.SpillBytes)
 					first = got
 					continue
 				}

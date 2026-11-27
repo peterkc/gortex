@@ -23,17 +23,16 @@ const rebuildGRPCWindow = 5000
 
 const rebuildGRPCRowLimit = 16 << 20
 
-// RebuildGRPCStats describe the candidate and mutation rows at the first
-// registry turn, and actual table bytes written at its scratch threshold.
+// RebuildGRPCStats reports candidates and mutations in the first registry turn.
+// SpillBytes counts physical bytes of closed threshold SST runs consumed by
+// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildGRPCStats struct {
 	Stubs, Registrations, Resolved, Moves, SpillBytes uint64
 }
 
 type rebuildGRPC struct {
-	b         *BuildStore
-	threshold int
-	unflushed int
-	stats     RebuildGRPCStats
+	b     *BuildStore
+	stats RebuildGRPCStats
 }
 
 // RebuildGRPC runs on a quiet private graph at the first framework turn.
@@ -61,7 +60,7 @@ func (b *BuildStore) RebuildGRPC(ctx context.Context, receipts iter.Seq2[ParseFa
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildGRPCPrefix, prefixEnd(rebuildGRPCPrefix), pebble.NoSync))
 	}()
-	p := rebuildGRPC{b: b, threshold: spillAt}
+	p := rebuildGRPC{b: b}
 	if err := p.capture(ctx); err != nil {
 		return stats, err
 	}
@@ -88,7 +87,7 @@ func rebuildGRPCKey(column byte, fields ...string) []byte {
 }
 
 func (p *rebuildGRPC) put(key, value []byte) error {
-	return p.b.putRebuildScratch(key, value, rebuildGRPCRowLimit, p.threshold, &p.unflushed, &p.stats.SpillBytes, "gRPC")
+	return p.b.putRebuildScratch(key, value, rebuildGRPCRowLimit, "gRPC")
 }
 
 func rebuildGRPCInput(key, value []byte) error {

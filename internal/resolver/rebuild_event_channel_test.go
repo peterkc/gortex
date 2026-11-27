@@ -68,7 +68,7 @@ func TestRebuildEventChannelSQLiteOracle(t *testing.T) {
 		ResolveEventChannelCalls(native)
 		stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts...), selection, 1)
 		require.NoError(t, err)
-		require.Positive(t, stats.SpillBytes)
+		require.Zero(t, stats.SpillBytes)
 		require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 		calls := slices.Collect(native.EdgesByKind(graph.EdgeCalls))
 		require.Len(t, calls, 3)
@@ -138,7 +138,7 @@ func TestRebuildEventChannelFirstNonemptyTransport(t *testing.T) {
 	stats, err := RunRebuildEventChannel(t.Context(), b, rebuildGRPCReceipts(facts), AllFrameworkSynthesizers(), 1<<20)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stats.Pairs)
-	require.Positive(t, stats.SpillBytes)
+	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 }
 

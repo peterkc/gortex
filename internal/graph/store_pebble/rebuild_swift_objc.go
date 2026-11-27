@@ -16,13 +16,15 @@ var ErrRebuildSwiftObjC = errors.New("pebble rebuild Swift/ObjC stage failed")
 
 var rebuildSwiftObjCPrefix = []byte{'g', 'J'}
 
-// RebuildSwiftObjCStats reports installed edges and physical spill bytes.
+// RebuildSwiftObjCStats reports installed edges.
+// SpillBytes counts physical bytes of closed threshold SST runs consumed by
+// the pass. It is zero because this pass uses only the pending overlay.
 type RebuildSwiftObjCStats struct {
 	Edges, SpillBytes uint64
 }
 
 // RebuildSwiftObjC stages selector and protocol join results from the
-// resolver in spillable scratch. Preserve existing durable keys for SQLite
+// resolver in the pending overlay. Preserve existing durable keys for SQLite
 // parity and prove every new edge before applying any of them. All language
 // declarations remain available.
 func (b *BuildStore) RebuildSwiftObjC(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
@@ -47,7 +49,7 @@ func (b *BuildStore) RebuildSwiftObjC(ctx context.Context, receipts iter.Seq2[Pa
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildSwiftObjCPrefix, prefixEnd(rebuildSwiftObjCPrefix), pebble.NoSync))
 	}()
-	p := rebuildSwiftObjCPass{b: b, spillAt: spillAt}
+	p := rebuildSwiftObjCPass{b: b}
 	if err := reduce(b.RebuildView(), p.propose); err != nil {
 		return stats, err
 	}
@@ -62,11 +64,9 @@ func (b *BuildStore) RebuildSwiftObjC(ctx context.Context, receipts iter.Seq2[Pa
 }
 
 type rebuildSwiftObjCPass struct {
-	b        *BuildStore
-	spillAt  int
-	buffered int
-	changed  bool
-	stats    RebuildSwiftObjCStats
+	b       *BuildStore
+	changed bool
+	stats   RebuildSwiftObjCStats
 }
 
 func rebuildSwiftObjCKey(col byte, fields ...string) []byte {
@@ -74,7 +74,7 @@ func rebuildSwiftObjCKey(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildSwiftObjCPass) put(key, value []byte) error {
-	return p.b.putRebuildScratch(key, value, 16<<20, p.spillAt, &p.buffered, &p.stats.SpillBytes, "Swift/ObjC")
+	return p.b.putRebuildScratch(key, value, 16<<20, "Swift/ObjC")
 }
 
 func (p *rebuildSwiftObjCPass) propose(e *graph.Edge) error {

@@ -58,7 +58,7 @@ func TestRebuildEventChannelRejectsInvalidScratch(t *testing.T) {
 	require.NoError(t, b.pending.Delete(key, pebble.NoSync))
 
 	large := make([]byte, 16<<20)
-	scratch := rebuildEventChannel{b: b, threshold: 1 << 20}
+	scratch := rebuildEventChannel{b: b}
 	err = scratch.put(eventScratch('t', "oversized"), large)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 	require.ErrorContains(t, err, "event channel scratch row")

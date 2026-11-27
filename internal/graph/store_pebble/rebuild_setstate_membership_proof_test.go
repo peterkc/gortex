@@ -296,7 +296,7 @@ func TestRebuildSetStateMovesAndOutputRefusals(t *testing.T) {
 					checkSetStateProofOutput(t, b, setStateProofOutput(second, target, owner), tc.proof)
 					return
 				case "non-method caller", "non-method lifecycle":
-					// No output, but the census may still have spilled scratch.
+					// The census can write scratch rows without emitting output.
 					require.NoError(t, err)
 					require.Zero(t, stats.Edges)
 					require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))

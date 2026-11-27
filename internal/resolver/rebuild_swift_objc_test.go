@@ -101,7 +101,7 @@ func rebuildSwiftObjCPrivateEdges(t *testing.T, b *store_pebble.BuildStore) map[
 	return rows
 }
 
-func TestRebuildSwiftObjCNativeRowsAndSpill(t *testing.T) {
+func TestRebuildSwiftObjCNativeRowsWithoutSpill(t *testing.T) {
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthSwiftObjC})
 	require.NoError(t, err)
 	for _, spillAt := range []int{1, 1 << 20} {
@@ -121,7 +121,7 @@ func TestRebuildSwiftObjCNativeRowsAndSpill(t *testing.T) {
 			slices.Reverse(live)
 			b := openRebuildGRPCBuild(t, live...)
 			receipts := rebuildGRPCReceipts(facts...)
-			for pass := range 2 {
+			for range 2 {
 				report := RunFrameworkSynthesizersWithSelection(native, selection)
 				require.NoError(t, report.Err)
 				require.Len(t, report.Per, 1)
@@ -136,9 +136,7 @@ func TestRebuildSwiftObjCNativeRowsAndSpill(t *testing.T) {
 				require.Len(t, want, 9+2*extra)
 				stats, err := RunRebuildSwiftObjC(t.Context(), b, receipts, selection, spillAt)
 				require.NoError(t, err)
-				if pass == 0 {
-					require.Positive(t, stats.SpillBytes)
-				}
+				require.Zero(t, stats.SpillBytes)
 				got := rebuildSwiftObjCPrivateEdges(t, b)
 				require.Equal(t, want, got)
 				require.Equal(t, stationary, got[graph.EdgeIdentityFor(stationary)])

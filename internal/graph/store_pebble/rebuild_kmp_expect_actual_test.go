@@ -153,7 +153,7 @@ func TestRebuildKMPExpectActualLightScanAndCandidateRowLimit(t *testing.T) {
 
 func TestRebuildKMPExpectActualScratchGuards(t *testing.T) {
 	b := newBuild(t, FullProfile)
-	p := rebuildKMPPass{b: b, spillAt: goldBufferBytes}
+	p := rebuildKMPPass{b: b}
 	n := &graph.Node{ID: "expect", Kind: graph.KindFunction, Name: "clock", FilePath: "common.go",
 		Meta: map[string]any{"kmp_role": "expect"}}
 	b.AddNode(n)

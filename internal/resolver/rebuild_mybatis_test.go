@@ -102,9 +102,7 @@ func TestRebuildMyBatisSQLiteOracle(t *testing.T) {
 				require.EqualValues(t, 1, stats.Stubs)
 				require.EqualValues(t, tc.resolved, stats.Resolved)
 				require.EqualValues(t, wantMoves, stats.Moves)
-				if wantMoves != 0 {
-					require.Positive(t, stats.SpillBytes)
-				}
+				require.Zero(t, stats.SpillBytes)
 				require.Equal(t, gotNative, rebuildEventSavedRows(t, private))
 			}
 		})
@@ -248,7 +246,7 @@ func TestRebuildMyBatisOrder(t *testing.T) {
 				require.EqualValues(t, 2, stats.Stubs)
 				require.EqualValues(t, 2, stats.Resolved)
 				require.EqualValues(t, 2, stats.Moves)
-				require.Positive(t, stats.SpillBytes)
+				require.Zero(t, stats.SpillBytes)
 				got := rebuildEventSavedRows(t, b)
 				require.Equal(t, want, got, "reversed=%t", reversed)
 				if reversed {

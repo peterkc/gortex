@@ -98,9 +98,7 @@ func TestRebuildKMPExpectActualSQLiteOracle(t *testing.T) {
 		stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
 		require.NoError(t, err)
 		require.Equal(t, wantNew, stats.Edges)
-		if wantNew != 0 {
-			require.Positive(t, stats.SpillBytes)
-		}
+		require.Zero(t, stats.SpillBytes)
 		require.Equal(t, want, rebuildEventSavedRows(t, private))
 	}
 }
@@ -193,7 +191,7 @@ func TestRebuildKMPExpectActualRejectsUnprovedDeclaration(t *testing.T) {
 	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), stats.Edges)
-	require.Positive(t, stats.SpillBytes)
+	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
 }
 
@@ -294,7 +292,7 @@ func TestRebuildKMPExpectActualNeedsProvedKotlinMarker(t *testing.T) {
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
 }
 
-func TestRebuildKMPExpectActualSQLiteSpillAtMiB(t *testing.T) {
+func TestRebuildKMPExpectActualSQLiteLargeScratch(t *testing.T) {
 	const pairs = 12
 	expect := rebuildKMPNode("common.kt", "kotlin", "Clock", "expect", graph.KindType, 2)
 	facts := []store_pebble.ParseFacts{rebuildEventFacts(expect.FilePath, expect.Language, []*graph.Node{expect})}
@@ -316,7 +314,7 @@ func TestRebuildKMPExpectActualSQLiteSpillAtMiB(t *testing.T) {
 	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1<<20)
 	require.NoError(t, err)
 	require.EqualValues(t, 2*pairs, stats.Edges)
-	require.Positive(t, stats.SpillBytes)
+	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, private))
 }
 

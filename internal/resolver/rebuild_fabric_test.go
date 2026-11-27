@@ -177,16 +177,14 @@ public class ColorViewManager extends SimpleViewManager<ColorView> {
 		stats, err := RunRebuildFabric(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1)
 		require.NoError(t, err)
 		require.Equal(t, wantNew, stats.Edges)
-		if wantNew != 0 {
-			require.Positive(t, stats.SpillBytes)
-		}
+		require.Zero(t, stats.SpillBytes)
 		require.Equal(t, want, rebuildEventSavedRows(t, private))
 	}
 }
 
-func TestRebuildFabricSQLiteSpillAtMiB(t *testing.T) {
-	// 23 x 23 pairs give 1,058 proposals. The disk join is not bounded
-	// by the separate sorted-run helper's 1,024-run cap.
+func TestRebuildFabricSQLiteLargeScratch(t *testing.T) {
+	// 23 x 23 pairs give 1,058 proposals. The pending overlay is not
+	// bounded by the separate sorted-run helper's 1,024-run cap.
 	const count = 23
 	const specFile, managerFile = "specs.ts", "Managers.java"
 	specs, managers := make([]*graph.Node, 0, count), make([]*graph.Node, 0, count)
@@ -226,7 +224,7 @@ func TestRebuildFabricSQLiteSpillAtMiB(t *testing.T) {
 	stats, err := RunRebuildFabric(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1<<20)
 	require.NoError(t, err)
 	require.EqualValues(t, 2*count*count, stats.Edges)
-	require.Positive(t, stats.SpillBytes)
+	require.Zero(t, stats.SpillBytes)
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
 }
 
