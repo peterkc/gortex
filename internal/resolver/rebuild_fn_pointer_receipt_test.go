@@ -66,15 +66,25 @@ func TestRebuildFnPointerStageBindingOnlyForElection(t *testing.T) {
 			report := RunFrameworkSynthesizersWithSelection(native, selected)
 			require.NoError(t, report.Err)
 			want := rebuildEventSQLiteRows(native)
-			require.Equal(t, target.ID, rebuildFnPointerSavedAt(t, want.edges, graph.EdgeCalls, caller.ID, 3).To)
+			call := rebuildFnPointerSavedAt(t, want.edges, graph.EdgeCalls, caller.ID, 3)
+			require.Equal(t, target.ID, call.To)
 			stats, err := RunRebuildFnPointerStage(t.Context(), b, rebuildGRPCReceipts(raw...), frozen)
 			if tc.refuse {
+				require.Equal(t, target.ID, rebuildFnPointerSavedAt(t, want.edges, graph.EdgeReferences, reg.From, reg.Line).To)
+				rawNative := rebuildGRPCNative(t, raw[0])
+				require.NoError(t, rawNative.AddBatchChecked(raw[1].Nodes, raw[1].Edges))
+				rawReport := RunFrameworkSynthesizersWithSelection(rawNative, selected)
+				require.NoError(t, rawReport.Err)
+				rawRows := rebuildEventSQLiteRows(rawNative)
+				require.Equal(t, homonym.ID, rebuildFnPointerSavedAt(t, rawRows.edges, graph.EdgeReferences, reg.From, reg.Line).To)
+				require.Equal(t, homonym.ID, rebuildFnPointerSavedAt(t, rawRows.edges, graph.EdgeCalls, caller.ID, 3).To)
+
 				var refused *store_pebble.RebuildUnknownProvenanceError
 				require.ErrorAs(t, err, &refused)
 				require.ErrorIs(t, err, store_pebble.ErrRebuildFnPointer)
-				wantFirst := graph.EdgeIdentityFor(reg)
-				wantFirst.To = target.ID
-				require.Equal(t, wantFirst, refused.First)
+				// Count both Reference destinations and the affected Call. The
+				// Call's destination key sorts first for the same source.
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 3, First: graph.EdgeIdentityFor(call)}, refused)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, b))
 				return

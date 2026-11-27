@@ -50,12 +50,24 @@ func (p *rebuildFnPointerStage) captureReceiptRole(raw *graph.Edge) error {
 	old := key
 	if len(claim) > 1 {
 		old = claim[1:]
-	} else if raw.Kind == graph.EdgeReferences {
-		if _, source, name := p.decide.Registration(raw); source == "" && name == "" {
+	}
+	var rawRole bool
+	if raw.Kind == graph.EdgeReferences {
+		_, source, name := p.decide.Registration(raw)
+		rawRole = source != "" || name != ""
+	} else {
+		_, _, rawRole = p.decide.Dispatch(raw)
+	}
+	if !rawRole {
+		if len(claim) == 0 {
 			return nil
 		}
-	} else if _, _, ok := p.decide.Dispatch(raw); !ok {
-		return nil
+		// A frozen via-only row can claim raw lineage without having a
+		// role. If neither side has a role, do not apply the row bound.
+		admitted, err := moves.present(append(moves.column('h'), old...))
+		if err != nil || !admitted {
+			return err
+		}
 	}
 	live, err := moves.edge(old)
 	if err != nil || live == nil {
