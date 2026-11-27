@@ -467,7 +467,7 @@ func (p *rebuildFnPointerStage) finishRegistrations(ctx context.Context) error {
 		if source == "" || slot == source {
 			return nil
 		}
-		tuple := appendKeyLine(p.key('x', e.From, string(e.Kind), e.To, e.FilePath), e.Line)
+		tuple := appendKeyLine(p.key('X', e.From, string(e.Kind), e.To, e.FilePath), e.Line)
 		return p.put(tuple, keyStrings(nil, slot, source))
 	})
 }
@@ -486,7 +486,7 @@ func (p *rebuildFnPointerStage) members(ctx context.Context, slot string, visit 
 func (p *rebuildFnPointerStage) propagate(ctx context.Context) error {
 	for range p.decide.Sweeps {
 		changed := false
-		err := p.visit(ctx, p.column('x'), func(r row) error {
+		err := p.visit(ctx, p.column('X'), func(r row) error {
 			to, rest, err := readKeyString(r.value)
 			if err != nil {
 				return err

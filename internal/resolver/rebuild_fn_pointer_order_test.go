@@ -139,3 +139,36 @@ func TestRebuildFnPointerStageSQLiteReceiptOrder(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildFnPointerStageGetterWithCopy(t *testing.T) {
+	const file, targetFile, lang = "saved.c", "target.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	homonym := rebuildEventNode(file, "work", lang, "")
+	target := rebuildEventNode(targetFile, homonym.Name, lang, "")
+	getter := &graph.Node{ID: targetFile + "::getSlot", Name: "getSlot", Kind: graph.KindVariable, Language: lang, FilePath: targetFile}
+	const stub = "unresolved::*.fn"
+	reg := rebuildFnPointerReg(caller.ID, "unresolved::*.work", 1, "root", target.Name)
+	reg.Meta["store_binding"] = getter.Name
+	copyRef := rebuildFnPointerReg(caller.ID, stub, 2, "branch", "")
+	copyRef.Meta["fnptr_copy_struct"], copyRef.Meta["fnptr_copy_field"] = "root", "fn"
+	dispatch := rebuildFnPointerCall(caller.ID, stub, 3, "branch")
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(file, lang, []*graph.Node{caller, homonym}, reg, copyRef, dispatch),
+		rebuildEventFacts(targetFile, lang, []*graph.Node{target, getter}),
+	}
+	b, native := openRebuildEventStores(t, facts...)
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthFnPointerDispatch})
+	require.NoError(t, err)
+	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selected)
+	require.NoError(t, err)
+	require.NoError(t, FreezeRebuildFnPointerInputs(t.Context(), b, frozen))
+	report := RunFrameworkSynthesizersWithSelection(native, selected)
+	require.NoError(t, report.Err)
+	want := rebuildEventSQLiteRows(native)
+	require.Equal(t, target.ID, rebuildFnPointerSavedAt(t, want.edges, graph.EdgeCalls, caller.ID, 3).To)
+	stats, err := RunRebuildFnPointerStage(t.Context(), b, rebuildGRPCReceipts(facts...), frozen)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, stats.RefMoves)
+	require.EqualValues(t, 1, stats.CallMoves)
+	require.Equal(t, want, rebuildEventSavedRows(t, b))
+}
