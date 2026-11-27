@@ -2,12 +2,62 @@ package resolver
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
+
+func TestRebuildFrameworkCensusOversizedEdge(t *testing.T) {
+	const file, language = "gate.ts", "typescript"
+	caller := rebuildEventNode(file, "caller", language, "")
+	render := rebuildEventNode(file, "render", language, "")
+	render.Kind = graph.KindMethod
+	build := rebuildEventNode(file, "build", language, "")
+	build.Kind = graph.KindMethod
+	large := strings.Repeat("x", 16<<20)
+	for _, tc := range []struct {
+		name, stage, to, via string
+		kind                 graph.EdgeKind
+		refuse               bool
+	}{
+		{"ordinary Call", SynthGRPCStub, "unresolved::read", "", graph.EdgeCalls, false},
+		{"unselected stage", SynthGRPCStub, "unresolved::read", rtkQueryVia, graph.EdgeCalls, false},
+		{"gRPC", SynthGRPCStub, "unresolved::read", "grpc.stub", graph.EdgeCalls, true},
+		{"Temporal Call", SynthTemporalStub, "unresolved::read", "temporal.await", graph.EdgeCalls, true},
+		{"Temporal annotation", SynthTemporalStub, "annotation::java::WorkflowMethod", "", graph.EdgeAnnotated, true},
+		{"other annotation", SynthTemporalStub, "annotation::java::Deprecated", "", graph.EdgeAnnotated, false},
+		{"React setState", SynthReactSetState, "unresolved::setState", "", graph.EdgeCalls, true},
+		{"Flutter setState", SynthFlutterSetState, "unresolved::setState", "", graph.EdgeCalls, true},
+		{"Redux", SynthReduxThunk, "unresolved::read", reduxThunkVia, graph.EdgeCalls, true},
+		{"Object Registry", SynthObjectRegistry, "unresolved::read", objectRegistryVia, graph.EdgeCalls, true},
+		{"RTK Query", SynthRTKQuery, "unresolved::read", rtkQueryVia, graph.EdgeCalls, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selection, err := NewFrameworkSynthesizerSelection([]string{tc.stage})
+			require.NoError(t, err)
+			b := openRebuildGRPCBuild(t, rebuildEventFacts(file, language, []*graph.Node{caller, render, build}))
+			e := graph.Edge{From: caller.ID, To: tc.to, Kind: tc.kind, FilePath: file, Line: 2,
+				Meta: map[string]any{"via": tc.via, "grpc_service": "Orders", "grpc_method": "Read", "registry_value": "Command"}}
+			b.AddEdge(&e)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.Equal(t, tc.refuse, frozen.allows(tc.stage), "small-row control")
+			e.Context = large
+			b.AddEdge(&e)
+			frozen, err = FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			if tc.refuse {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "framework census edge")
+				return
+			}
+			require.NoError(t, err)
+			require.False(t, frozen.allows(tc.stage))
+		})
+	}
+}
 
 func TestRebuildFrameworkCensusSetStateUsesPreLoopCalls(t *testing.T) {
 	const (

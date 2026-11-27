@@ -7,6 +7,7 @@ import "iter"
 // identity and the fixed metadata fields those read-only predicates inspect.
 type FrameworkCensusEdge struct {
 	EdgeIdentity
+	Oversized            bool // The encoded row exceeds the rebuild census limit.
 	Via                  string
 	RegistryValue        string
 	GRPCRegisterService  string

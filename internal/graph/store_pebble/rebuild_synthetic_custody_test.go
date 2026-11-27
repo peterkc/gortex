@@ -185,6 +185,26 @@ func TestRebuildSyntheticCustodyReactNative(t *testing.T) {
 	})
 }
 
+func TestRebuildFrameworkGateEdgesProjectRegistryAndSize(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	e := &graph.Edge{From: "caller", To: "unresolved::register", Kind: graph.EdgeCalls, FilePath: "gate.ts", Line: 2,
+		Meta: map[string]any{"via": "object-registry", "registry_value": "AddCommand"}}
+	b.AddEdge(e)
+	large := *e
+	large.Line++
+	large.Context = strings.Repeat("x", rebuildFrameworkGateRowBytes)
+	b.AddEdge(&large)
+	var got []graph.FrameworkCensusEdge
+	require.NoError(t, b.RebuildView().VisitFrameworkGateEdges(t.Context(), false, func(row graph.FrameworkCensusEdge) error {
+		got = append(got, row)
+		return nil
+	}))
+	require.ElementsMatch(t, []graph.FrameworkCensusEdge{
+		{EdgeIdentity: graph.EdgeIdentityFor(e), Via: "object-registry", RegistryValue: "AddCommand"},
+		{EdgeIdentity: graph.EdgeIdentityFor(&large), Via: "object-registry", RegistryValue: "AddCommand", Oversized: true},
+	}, got)
+}
+
 func seedSyntheticCustody(t *testing.T, facts ...ParseFacts) (*BuildStore, iter.Seq2[ParseFacts, error]) {
 	t.Helper()
 	b := newBuild(t, FullProfile)

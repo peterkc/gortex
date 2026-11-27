@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -69,18 +70,28 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 	if grpc || temporal || react || flutter || redux || registry || rtk {
 		if err := view.VisitFrameworkGateEdges(ctx, temporal, func(e graph.FrameworkCensusEdge) error {
 			if e.Kind == graph.EdgeCalls {
-				if (redux && e.Via == reduxThunkVia) || (rtk && e.Via == rtkQueryVia) {
+				via := (redux && e.Via == reduxThunkVia) || (rtk && e.Via == rtkQueryVia)
+				setState := (react || flutter) && isSetStateTarget(e.To)
+				grpcStub := grpc && e.Via == "grpc.stub" && e.GRPCService != "" && e.GRPCMethod != ""
+				temporalVia := temporal && strings.HasPrefix(e.Via, "temporal.")
+				objectRegistry := registry && e.Via == objectRegistryVia && e.RegistryValue != ""
+				if e.Oversized && (via || setState || grpcStub || temporalVia || objectRegistry) {
+					return fmt.Errorf("%w: framework census edge", store_pebble.ErrRebuildLinkInputSize)
+				}
+				if via {
 					edges.via[e.Via] = true
 				}
-				if registry && e.Via == objectRegistryVia && e.RegistryValue != "" {
-					edges.objectRegistryValue = true
-				}
-				edges.setStateTarget = edges.setStateTarget || isSetStateTarget(e.To)
-				edges.grpcStub = edges.grpcStub || e.Via == "grpc.stub" && e.GRPCService != "" && e.GRPCMethod != ""
-				edges.temporalVia = edges.temporalVia || strings.HasPrefix(e.Via, "temporal.")
+				edges.objectRegistryValue = edges.objectRegistryValue || objectRegistry
+				edges.setStateTarget = edges.setStateTarget || setState
+				edges.grpcStub = edges.grpcStub || grpcStub
+				edges.temporalVia = edges.temporalVia || temporalVia
 			} else {
 				role, member := temporalRoleForJavaAnnotation(e.To)
-				edges.temporalAnnotation = edges.temporalAnnotation || role != "" || member != ""
+				annotation := role != "" || member != ""
+				if e.Oversized && annotation {
+					return fmt.Errorf("%w: framework census edge", store_pebble.ErrRebuildLinkInputSize)
+				}
+				edges.temporalAnnotation = edges.temporalAnnotation || annotation
 			}
 			return nil
 		}); err != nil {

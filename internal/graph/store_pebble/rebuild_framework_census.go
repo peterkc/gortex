@@ -46,9 +46,6 @@ func (v RebuildView) VisitFrameworkGateEdges(ctx context.Context, annotations bo
 		if kind != graph.EdgeCalls && (!annotations || kind != graph.EdgeAnnotated) {
 			return nil
 		}
-		if len(r.key)+len(r.value) > rebuildFrameworkGateRowBytes {
-			return fmt.Errorf("%w: framework census edge", ErrRebuildLinkInputSize)
-		}
 		decode := decodeEdgeLight
 		if kind == graph.EdgeCalls {
 			decode = decodeEdge
@@ -65,6 +62,7 @@ func (v RebuildView) VisitFrameworkGateEdges(ctx context.Context, annotations bo
 		row.GRPCService, _ = e.Meta["grpc_service"].(string)
 		row.GRPCMethod, _ = e.Meta["grpc_method"].(string)
 		row.RegistryValue, _ = e.Meta["registry_value"].(string)
+		row.Oversized = len(r.key)+len(r.value) > rebuildFrameworkGateRowBytes
 		return yield(row)
 	})
 }
