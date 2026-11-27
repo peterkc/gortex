@@ -156,7 +156,7 @@ func TestRebuildClosureCollectionSkipsReceiptsWithoutRegistrars(t *testing.T) {
 }
 
 func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
-	for _, mode := range []string{"complete", "missing", "changed field", "absent versus nil", "nil versus absent", "absent versus empty", "absent versus non-string", "different non-strings"} {
+	for _, mode := range []string{"complete", "missing", "changed field", "changed dispatch field", "absent versus nil", "nil versus absent", "absent versus empty", "absent versus non-string", "different non-strings"} {
 		t.Run(mode, func(t *testing.T) {
 			const earlyFile, lateFile, language = "early.swift", "late.swift", "swift"
 			earlyDispatch := rebuildClosureCollectionNode(earlyFile, "dispatch", language, rebuildCCDispatch, "alpha")
@@ -186,6 +186,8 @@ func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
 				proof[1].File.NodeCount = 1
 			case "changed field":
 				proof[1].Nodes[1].Meta[rebuildCCAppend] = "different"
+			case "changed dispatch field":
+				proof[1].Nodes[0].Meta[rebuildCCDispatch] = "different"
 			case "absent versus nil":
 				proof[1].Nodes[1].Meta[rebuildCCDispatch] = nil
 			case "nil versus absent":
@@ -200,7 +202,7 @@ func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
 				proof[1].Nodes[1].Meta[rebuildCCDispatch] = []string{"other"}
 			}
 			stats, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
-			if mode != "missing" && mode != "changed field" {
+			if mode != "missing" && mode != "changed field" && mode != "changed dispatch field" {
 				require.NoError(t, err)
 				require.Equal(t, uint64(2), stats.Edges)
 				require.Equal(t, want, rebuildEventSavedRows(t, b))
@@ -242,6 +244,7 @@ func TestRebuildClosureCollectionProvesFrozenAppleAdmission(t *testing.T) {
 		{name: "exact", claims: []string{"exact"}, wantEdge: true},
 		{name: "missing"},
 		{name: "wrong-id", claims: []string{"wrong-id"}},
+		{name: "wrong-node-file", claims: []string{"wrong-node-file"}},
 		{name: "exact-then-wrong-language", claims: []string{"exact", "wrong-language"}},
 		{name: "wrong-language-then-exact", claims: []string{"wrong-language", "exact"}},
 		{name: "exact-then-wrong-file", claims: []string{"exact", "wrong-file"}},
@@ -276,11 +279,17 @@ func TestRebuildClosureCollectionProvesFrozenAppleAdmission(t *testing.T) {
 					// The claim is still Apple-family, but not the same language.
 					n.Language = "objc"
 					f.EffectiveLanguage = n.Language
-				case "wrong-file":
+				case "wrong-file", "wrong-node-file":
 					n.FilePath = "remote/other.swift"
-					f.File.FilePath = n.FilePath
+					if claim == "wrong-file" {
+						f.File.FilePath = n.FilePath
+					}
 				}
 				f.Nodes = []*graph.Node{&n}
+				if claim == "wrong-node-file" {
+					// The codec retains the node path independently of the receipt path.
+					f = roundTripRebuildRNBridgeFacts(t, f)
+				}
 				receipts = append(receipts, f)
 			}
 			stats, err := RunRebuildClosureCollection(ctx, b, rebuildGRPCReceipts(receipts...), frozen)

@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"maps"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -77,6 +78,7 @@ func TestRebuildReactNativeNativePairingProvesNativeMetadata(t *testing.T) {
 		{"empty module", "rn_module", "", true, false},
 		{"nil method", "rn_method", nil, true, false},
 		{"typed method", "rn_method", []string{"now"}, true, false},
+		{"changed module", "rn_module", "Calendar", false, true},
 		{"changed method", "rn_method", "later", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,13 +97,20 @@ func TestRebuildReactNativeNativePairingProvesNativeMetadata(t *testing.T) {
 			b.AddNode(&live)
 			e := &graph.Edge{From: ios.ID, To: android.ID, Kind: graph.EdgeReferences, FilePath: ios.FilePath}
 			if tc.zero || tc.refuse {
-				// A projected-zero value cannot elect a pair. Stage the same
-				// demand directly to check both values at the receipt boundary.
+				// A zero or changed join key cannot elect a pair. Stage the
+				// demand directly to isolate receipt proof from pair selection.
+				before := rebuildFrameworkCustodyRows(t, b)
 				p := rebuildRNPairPass{b: b}
 				require.NoError(t, p.propose(e))
 				err := p.prove(t.Context(), receipts)
 				if tc.refuse {
 					requireProducerProofRefusal(t, b, err, RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(e)})
+					after := rebuildFrameworkCustodyRows(t, b)
+					// The public stage, not the direct proof call, clears scratch.
+					maps.DeleteFunc(after, func(key string, _ []byte) bool {
+						return strings.HasPrefix(key, string(rebuildRNPairPrefix))
+					})
+					require.Equal(t, before, after)
 				} else {
 					require.NoError(t, err)
 				}
@@ -129,25 +138,41 @@ func TestRebuildReactNativeNativePairingProvesNativeMetadata(t *testing.T) {
 func TestRebuildSwiftObjCProvesNativeMetadata(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
+		kind   graph.NodeKind
+		objc   bool
 		live   map[string]any
 		refuse bool
 	}{
-		{"exact", nil, false},
-		{"unrelated", map[string]any{"note": "changed"}, false},
-		{"empty selector", map[string]any{"objc_selector": ""}, false},
-		{"typed setter", map[string]any{"objc_setter_selector": []string{"setClock:"}}, false},
-		{"nil protocols", map[string]any{"objc_protocols": nil}, false},
-		{"false objc", map[string]any{"objc": false}, false},
-		{"changed selector", map[string]any{"objc_selector": "clock"}, true},
-		{"changed objc", map[string]any{"objc": true}, true},
+		{name: "exact"},
+		{name: "unrelated", live: map[string]any{"note": "changed"}},
+		{name: "empty selector", live: map[string]any{"objc_selector": ""}},
+		{name: "typed setter", live: map[string]any{"objc_setter_selector": []string{"setClock:"}}},
+		{name: "nil protocols", live: map[string]any{"objc_protocols": nil}},
+		{name: "false objc", kind: graph.KindInterface, live: map[string]any{"objc": false}},
+		{name: "changed selector", live: map[string]any{"objc_selector": "clock"}, refuse: true},
+		{name: "changed setter", kind: graph.KindField, live: map[string]any{"objc_setter_selector": "setClock:"}, refuse: true},
+		{name: "Swift interface objc bit", kind: graph.KindInterface, live: map[string]any{"objc": true}, refuse: true},
+		{name: "Swift method ignores protocols and objc bit", live: map[string]any{"objc_protocols": "Clock", "objc": true}},
+		{name: "ObjC method ignores Swift selectors and protocols", objc: true, live: map[string]any{
+			"objc_selector": "clock", "objc_setter_selector": "setClock:", "objc_protocols": "Clock",
+		}},
+		{name: "ObjC class protocols", objc: true, kind: graph.KindType, live: map[string]any{"objc_protocols": "Clock"}, refuse: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			swift := &graph.Node{ID: "swift", Name: "clock", Kind: graph.KindMethod, Language: "swift", FilePath: "clock.swift"}
 			objc := &graph.Node{ID: "objc", Name: "clock", Kind: graph.KindMethod, Language: "objc", FilePath: "clock.m"}
+			changed := swift
+			if tc.objc {
+				changed = objc
+			}
+			if tc.kind != "" {
+				changed.Kind = tc.kind
+			}
 			b, receipts := seedSyntheticCustody(t, producerProofFacts(swift), producerProofFacts(objc))
-			live := *swift
+			live := *changed
 			live.Meta = tc.live
 			b.AddNode(&live)
+			before := rebuildFrameworkCustodyRows(t, b)
 			e := &graph.Edge{From: swift.ID, To: objc.ID, Kind: graph.EdgeReferences, FilePath: swift.FilePath}
 			stats, err := b.RebuildSwiftObjC(t.Context(), receipts, func(_ RebuildView, propose func(*graph.Edge) error) error {
 				return propose(e)
@@ -157,6 +182,7 @@ func TestRebuildSwiftObjCProvesNativeMetadata(t *testing.T) {
 				require.ErrorIs(t, err, ErrRebuildSwiftObjC)
 				requireProducerProofRefusal(t, b, err, RebuildUnknownProvenanceError{Count: 1, First: id})
 				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 				return
 			}
 			require.NoError(t, err)

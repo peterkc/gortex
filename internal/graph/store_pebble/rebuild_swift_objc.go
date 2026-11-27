@@ -143,16 +143,28 @@ func sameRebuildSwiftObjCInput(raw, live *graph.Node) bool {
 		live.Name != raw.Name || live.FilePath != raw.FilePath || live.StartLine != raw.StartLine || live.RepoPrefix != raw.RepoPrefix {
 		return false
 	}
-	for _, key := range [...]string{"objc_selector", "objc_setter_selector", "objc_protocols"} {
-		rawValue, _ := raw.Meta[key].(string)
-		liveValue, _ := live.Meta[key].(string)
-		if rawValue != liveValue {
-			return false
+	switch raw.Language {
+	case "swift":
+		for _, key := range [...]string{"objc_selector", "objc_setter_selector"} {
+			rawValue, _ := raw.Meta[key].(string)
+			liveValue, _ := live.Meta[key].(string)
+			if rawValue != liveValue {
+				return false
+			}
+		}
+		if raw.Kind == graph.KindInterface {
+			rawObjC, _ := raw.Meta["objc"].(bool)
+			liveObjC, _ := live.Meta["objc"].(bool)
+			return rawObjC == liveObjC
+		}
+	case "objc":
+		if raw.Kind == graph.KindType {
+			rawProtocols, _ := raw.Meta["objc_protocols"].(string)
+			liveProtocols, _ := live.Meta["objc_protocols"].(string)
+			return rawProtocols == liveProtocols
 		}
 	}
-	rawObjC, _ := raw.Meta["objc"].(bool)
-	liveObjC, _ := live.Meta["objc"].(bool)
-	return rawObjC == liveObjC
+	return true
 }
 
 func (p *rebuildSwiftObjCPass) visit(ctx context.Context, yield func(*graph.Edge) error) error {
