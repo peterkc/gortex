@@ -50,8 +50,8 @@ func (o *rebuildMemberOwners) elect(p *rebuildCallMoves, id string, lastCol byte
 	if err != nil || !o.different {
 		return o.class, o.exact, false, err
 	}
-	// Known in-place repairs keep their receipt position. Other rewrites
-	// can append or retain their position; don't guess when the winner changes.
+	// Known in-place repairs keep their receipt position. An unordered row
+	// may append, so it must agree with the last owner in receipt order.
 	last, err := p.get(p.key(lastCol, id))
 	if err != nil {
 		return "", false, false, err
@@ -95,13 +95,6 @@ func (p *rebuildCallMoves) recordOwnerEdge(e *graph.Edge, admitted bool, order u
 				return err
 			}
 		} else {
-			retained, err := p.memberOrderRetained(raw, claim[1:])
-			if err != nil {
-				return err
-			}
-			if !retained {
-				return noteRebuildScratchPayload(p.put, key, claim, rebuildCapabilityProved)
-			}
 			class, ok := owner(live)
 			if !ok {
 				return invalid(p.label + " member role changed")

@@ -420,7 +420,7 @@ func (p *rebuildExpress) recordEdge(e *graph.Edge, admitted bool, order uint64) 
 	a, matched := p.query(e)
 	b, ok := p.query(live)
 	if !matched || !ok || a != b {
-		if err := p.put(append(p.column('j'), old...), nil); err != nil {
+		if err := p.put(append(p.column('j'), old...), []byte{rebuildScratchProofBit(matched)}); err != nil {
 			return err
 		}
 		admitted = false
@@ -716,11 +716,11 @@ func (p *rebuildExpress) plan(ctx context.Context) error {
 				return err
 			}
 		}
-		changed, err := p.present(append(p.column('j'), old...))
+		differentQuery, err := rebuildScratchState(p.b.pending, append(p.column('j'), old...), "express first receipt query")
 		if err != nil {
 			return err
 		}
-		if changed {
+		if differentQuery == rebuildCapabilityProved {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil
 		}
@@ -740,17 +740,8 @@ func (p *rebuildExpress) plan(ctx context.Context) error {
 		if !liveUncertain && !rawUncertain && live.target == "" && proved.target == "" {
 			return nil
 		}
-		exact := live == proved && !liveUncertain && !rawUncertain
-		for _, id := range [...]string{live.classID, live.target} {
-			if id == "" {
-				continue
-			}
-			conflict, err := p.present(p.key('D', id))
-			if err != nil {
-				return err
-			}
-			exact = exact && !conflict
-		}
+		// A first non-handler receipt can only agree on no move.
+		exact := differentQuery == 0 && live == proved && !liveUncertain && !rawUncertain
 		if live.local || proved.local {
 			key := pendingNodeKey(e.From)
 			if _, err := pendingGet(p.b.pending, key, func(val []byte) (bool, error) {

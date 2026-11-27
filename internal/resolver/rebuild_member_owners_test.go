@@ -45,24 +45,28 @@ func TestRebuildMemberOwnerSQLiteOrder(t *testing.T) {
 				facts = rebuildEventFacts(php, "php", []*graph.Node{caller, provider, witness}, call)
 			}
 			for _, tc := range []struct {
-				name         string
-				first, last  *graph.Edge
-				want         int
-				unknownOrder bool
+				name        string
+				first, last *graph.Edge
+				want        int
+				unmarked    bool
+				refuse      bool
 			}{
 				{name: "repair first", first: repair, last: &stationary},
 				{name: "repair last", first: &stationary, last: repair, want: 1},
-				{name: "unmarked move", first: repair, last: &stationary, unknownOrder: true},
+				{name: "unmarked move first", first: repair, last: &stationary, unmarked: true, refuse: true},
+				{name: "unmarked move last", first: &stationary, last: repair, want: 1, unmarked: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					methodFacts := rebuildEventFacts(methodFile, "go", []*graph.Node{method}, tc.first, tc.last)
 					typeFacts := rebuildEventFacts(typeFile, "go", []*graph.Node{wanted, other})
 					b, native := openRebuildEventStores(t, facts, methodFacts, typeFacts)
 					receipts := rebuildGRPCReceipts(facts, methodFacts, typeFacts)
-					if tc.unknownOrder {
+					if tc.unmarked {
 						moved := *repair
 						moved.To = wanted.ID
-						require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: &moved, OldTo: repair.To}}))
+						reindex := []graph.EdgeReindex{{Edge: &moved, OldTo: repair.To}}
+						require.NoError(t, b.ApplyLinkReindexes(t.Context(), reindex))
+						require.True(t, native.ReindexEdgesApplied(reindex))
 					} else {
 						changed, err := native.RebindGoMethodReceivers("")
 						require.NoError(t, err)
@@ -81,7 +85,7 @@ func TestRebuildMemberOwnerSQLiteOrder(t *testing.T) {
 					} else {
 						_, err = RunRebuildLaravelEvent(t.Context(), b, receipts, frozen)
 					}
-					if tc.unknownOrder {
+					if tc.refuse {
 						require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 						require.Equal(t, before, rebuildEventSavedRows(t, b))
 						return

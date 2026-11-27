@@ -97,7 +97,7 @@ func TestRebuildExpressScratchAndCustody(t *testing.T) {
 func TestRebuildExpressRoleSizeLimits(t *testing.T) {
 	const file, lang = "src/routes.js", "javascript"
 	large := strings.Repeat("x", 16<<20)
-	for _, role := range []string{"candidate", "method", "caller", "member", "unrelated member", "unrelated call"} {
+	for _, role := range []string{"candidate", "method", "caller", "member", "call", "unrelated member", "unrelated call", "unrelated node", "unrelated caller directory"} {
 		t.Run(role, func(t *testing.T) {
 			ctx := t.Context()
 			caller := &graph.Node{ID: "route", Name: "route", FilePath: file, Language: lang, Kind: graph.KindFunction}
@@ -126,8 +126,12 @@ func TestRebuildExpressRoleSizeLimits(t *testing.T) {
 					unknown.To, unknown.Meta = "Unrelated", oversized
 					edges = []*graph.Edge{call, &unknown, member}
 				}
-			case "caller":
+			case "caller", "unrelated caller directory":
 				caller.Meta = oversized
+			case "call":
+				call.Meta["large"] = large
+			case "unrelated node":
+				other.Name, other.Meta = "unused", oversized
 			case "unrelated call":
 				edges = append(edges, &graph.Edge{From: caller.ID, To: "settled", FilePath: file, Kind: graph.EdgeCalls, Line: 9, Meta: oversized})
 			}
@@ -137,7 +141,7 @@ func TestRebuildExpressRoleSizeLimits(t *testing.T) {
 				Nodes:             []*graph.Node{caller, method, target},
 				Edges:             edges,
 			})
-			if role == "caller" {
+			if role == "caller" || role == "unrelated node" {
 				b.AddNode(other)
 			}
 			stats, err := b.RebuildExpress(ctx, receipts, testExpressRules())

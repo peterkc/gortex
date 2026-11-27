@@ -39,8 +39,10 @@ func TestRebuildExpressConventionProof(t *testing.T) {
 		{name: "receipt relocates lower tier into preferred tie", routeDir: "src/routes", firstDir: "src/middleware", secondDir: "other/ordinary", change: "second moved", want: 1, refuse: true},
 		{name: "admission requires recording file", routeDir: "src/routes", firstDir: "src/middleware", change: "wrong recording file", want: 1, refuse: true},
 		{name: "admission requires effective language", routeDir: "src/routes", firstDir: "src/middleware", change: "no language", want: 1, refuse: true},
+		{name: "Call admission requires recording file", routeDir: "src/routes", firstDir: "src/middleware", change: "wrong Call recording file", want: 1, refuse: true},
+		{name: "Call admission requires effective language", routeDir: "src/routes", firstDir: "src/middleware", change: "no Call language", want: 1, refuse: true},
 		{name: "node language is not a handler role", routeDir: "src/routes", firstDir: "src/middleware", change: "node language", want: 1},
-		{name: "conflicting winning declaration", routeDir: "src/routes", firstDir: "src/middleware", change: "duplicate declaration", want: 1, refuse: true},
+		{name: "duplicate declaration keeps winner", routeDir: "src/routes", firstDir: "src/middleware", change: "duplicate declaration", want: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			caller := rebuildEventNode(tc.routeDir+"/routes.js", "route", lang, "")
@@ -76,6 +78,10 @@ func TestRebuildExpressConventionProof(t *testing.T) {
 				receipts[1].File.FilePath = "wrong/first.js"
 			case "no language":
 				receipts[1].EffectiveLanguage = ""
+			case "wrong Call recording file":
+				receipts[0].File.FilePath = "wrong/routes.js"
+			case "no Call language":
+				receipts[0].EffectiveLanguage = ""
 			case "node language":
 				changed := *first
 				changed.Language = "typescript"
@@ -83,7 +89,7 @@ func TestRebuildExpressConventionProof(t *testing.T) {
 			case "duplicate declaration":
 				changed := *first
 				changed.FilePath = "other/middleware/first.js"
-				// Still wins by ID. A final-ID comparison alone cannot detect the conflict.
+				// The last copy still wins. Receipt disagreement alone changes no edge.
 				receipts = append(receipts, rebuildEventFacts(changed.FilePath, lang, []*graph.Node{&changed}))
 			}
 			before := rebuildEventSavedRows(t, b)
@@ -164,6 +170,8 @@ func TestRebuildExpressFirstCallReceipt(t *testing.T) {
 	method.Kind, method.Name = graph.KindMethod, "list"
 	member := &graph.Edge{From: method.ID, To: file + "::B", Kind: graph.EdgeMemberOf, FilePath: file, Line: 3}
 	a, b := rebuildExpressTestCall(caller, "A", "list"), rebuildExpressTestCall(caller, "B", "list")
+	untagged := *a
+	untagged.Meta = nil
 	for _, tc := range []struct {
 		name        string
 		first, last *graph.Edge
@@ -172,13 +180,16 @@ func TestRebuildExpressFirstCallReceipt(t *testing.T) {
 		{"private move disagrees", a, b, true},
 		{"private miss disagrees", b, a, true},
 		{"identical duplicates", b, b, false},
+		{"first non-handler and last misses", &untagged, a, false},
+		{"first non-handler and last binds", &untagged, b, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := rebuildEventFacts(file, lang, []*graph.Node{caller, method}, member, tc.first, tc.last)
 			build, native := openRebuildEventStores(t, facts)
 			before := rebuildEventSavedRows(t, build)
+			nativeBefore := rebuildEventSQLiteRows(native)
 			var firstClass, lastClass any
-			for _, e := range rebuildEventSQLiteRows(native).edges {
+			for _, e := range nativeBefore.edges {
 				if e.Kind == graph.EdgeCalls {
 					firstClass = e.Meta["express_ref_class"]
 				}
@@ -199,6 +210,13 @@ func TestRebuildExpressFirstCallReceipt(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			if tc.first == &untagged {
+				require.Equal(t, store_pebble.RebuildExpressStats{Stubs: 1}, stats)
+				require.Zero(t, ResolveExpressHandlers(native))
+				require.Equal(t, nativeBefore, rebuildEventSQLiteRows(native))
+				require.Equal(t, before, rebuildEventSavedRows(t, build))
+				return
+			}
 			require.Equal(t, store_pebble.RebuildExpressStats{Stubs: 1, Moves: 1}, stats)
 			require.Equal(t, 1, ResolveExpressHandlers(native))
 			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, build))
