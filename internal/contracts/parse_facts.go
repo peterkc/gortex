@@ -183,13 +183,7 @@ func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []s
 			bf = &goBodyFacts{tree: tree, src: tree.Source(), handler: n, body: body, bindings: map[string]Binding{}}
 			bf.walk(body)
 		}
-		c := Contract{
-			Role:     RoleProvider,
-			SymbolID: n.ID,
-			FilePath: n.FilePath,
-			Line:     n.StartLine,
-			Meta:     map[string]any{},
-		}
+		c := Contract{Role: RoleProvider, SymbolID: n.ID, FilePath: n.FilePath, Line: n.StartLine, Meta: map[string]any{}}
 		start, end := handlerNodeBodyRange(first, c.Line, lines)
 		enrichProviderBody(&c, lines, nodes, lang, start, end)
 		f := HandlerFacts{Regex: c.Meta}

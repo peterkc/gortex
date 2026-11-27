@@ -22,9 +22,6 @@ func writeRebuildReply(w io.Writer, seq uint64, header, entry []byte, failure er
 		text := failure.Error()
 		meta, entry = []byte(text[:min(len(text), math.MaxUint16)]), nil
 	}
-	if len(meta) > math.MaxUint16 {
-		return fmt.Errorf("crashpool: rebuild reply header has %d bytes, limit %d", len(meta), math.MaxUint16)
-	}
 	prefix := rebuildReplyPrefix{Seq: seq, EntrySize: uint64(len(entry)), MetaSize: uint16(len(meta))}
 	if err := binary.Write(w, binary.BigEndian, prefix); err != nil {
 		return err

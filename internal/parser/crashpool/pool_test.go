@@ -335,24 +335,27 @@ func TestPoolFullFactsMatchesNativeFileReceipt(t *testing.T) {
 
 func TestRebuildReplySizeBoundary(t *testing.T) {
 	header, entry := []byte("stamp"), []byte("entry")
+	const seq = 7
 	for _, tc := range []struct {
-		name  string
-		limit int
+		name    string
+		limit   int
+		readSeq uint64
+		wantErr string
 	}{
-		{"below", len(entry) + 1},
-		{"exact", len(entry)},
-		{"oversized", len(entry) - 1},
+		{name: "below", limit: len(entry) + 1, readSeq: seq},
+		{name: "exact", limit: len(entry), readSeq: seq},
+		{name: "oversized", limit: len(entry) - 1, readSeq: seq, wantErr: "crashpool: rebuild entry has 5 bytes, limit 4"},
+		{name: "wrong sequence", limit: len(entry), readSeq: 8, wantErr: "crashpool: response seq 7 != request seq 8"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var wire bytes.Buffer
-			const seq = 7
 			require.NoError(t, writeRebuildReply(&wire, seq, header, entry, nil))
 			var resp extractResponse
-			err := readRebuildReply(&wire, seq, tc.limit, &resp)
-			if tc.limit < len(entry) {
-				require.ErrorContains(t, err, "crashpool: rebuild entry has 5 bytes, limit 4")
+			err := readRebuildReply(&wire, tc.readSeq, tc.limit, &resp)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
 				require.Empty(t, resp)
-				require.Equal(t, "stampentry", wire.String(), "oversized frame must be rejected without reading its body")
+				require.Equal(t, "stampentry", wire.String(), "invalid frame must be rejected without reading its body")
 				return
 			}
 			require.NoError(t, err)

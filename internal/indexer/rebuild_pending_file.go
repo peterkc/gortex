@@ -78,15 +78,12 @@ func (idx *Indexer) submitPendingRebuildFile(ctx context.Context, input rebuildI
 	if resp.Bad() {
 		return nil, fmt.Errorf("parser worker: %s", resp.Err)
 	}
-	return checkPendingRebuildReply(resp.RebuildHeader, resp.RebuildEntry, key, input.Path, ext.Language(), prepared, entryLimit)
+	return checkPendingRebuildReply(resp.RebuildHeader, resp.RebuildEntry, key, input.Path, ext.Language(), prepared)
 }
 
-func checkPendingRebuildReply(header, entry []byte, key rebuildDigest, path, language string, prepared []byte, entryLimit int) ([]byte, error) {
+func checkPendingRebuildReply(header, entry []byte, key rebuildDigest, path, language string, prepared []byte) ([]byte, error) {
 	if len(entry) == 0 {
 		return nil, fmt.Errorf("%w: parser worker returned no rebuild entry", errParseEntryCorrupt)
-	}
-	if len(entry) > entryLimit {
-		return nil, fmt.Errorf("%w: worker returned %d bytes, limit %d", errParseEntryTooLarge, len(entry), entryLimit)
 	}
 	if len(header) != parseEntryHeader {
 		return nil, fmt.Errorf("%w: parser worker returned a missing or incomplete entry header", errParseEntryCorrupt)
