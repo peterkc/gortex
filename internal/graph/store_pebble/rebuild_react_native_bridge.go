@@ -53,28 +53,30 @@ func (b *BuildStore) RebuildReactNativeBridge(ctx context.Context, receipts iter
 type RebuildExpoModuleBridgeStats = RebuildReactNativeBridgeStats
 
 // RebuildExpoModuleBridge joins live RN call markers to Expo declarations.
-// The family census applies to the whole pass: web is bit 1 and either
-// Apple or JVM is bit 2. Neither bit filters individual endpoints.
+// The family census applies to the whole pass, not individual endpoints.
+// The resolver supplies one required bit per native registry family group.
 func (b *BuildStore) RebuildExpoModuleBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
-	family func(string) uint8, isCall func(*graph.Edge) bool, buildCall func(*graph.Edge, *graph.Node) *graph.Edge,
+	required uint8, family func(string) uint8, isCall func(*graph.Edge) bool, buildCall func(*graph.Edge, *graph.Node) *graph.Edge,
 ) (RebuildExpoModuleBridgeStats, error) {
 	return b.rebuildNativeModuleBridge(ctx, receipts, spillAt, rebuildNativeModuleBridgePolicy{
-		stage:    ErrRebuildExpoModuleBridge,
-		label:    "Expo module bridge",
-		proof:    rebuildProofExpoModules,
-		names:    rebuildExpoNames,
-		family:   family,
-		required: 3,
+		stage:            ErrRebuildExpoModuleBridge,
+		label:            "Expo module bridge",
+		proof:            rebuildProofExpoModules,
+		names:            rebuildExpoNames,
+		family:           family,
+		required:         required,
+		precheckFamilies: true,
 	}, isCall, buildCall)
 }
 
 type rebuildNativeModuleBridgePolicy struct {
-	stage    error
-	label    string
-	proof    rebuildEdgeProof
-	names    func(map[string]any) (string, string)
-	family   func(string) uint8
-	required uint8
+	stage            error
+	label            string
+	proof            rebuildEdgeProof
+	names            func(map[string]any) (string, string)
+	family           func(string) uint8
+	required         uint8
+	precheckFamilies bool
 }
 
 func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
@@ -95,6 +97,16 @@ func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts ite
 	}
 	if busy {
 		return stats, invalid(policy.label + " scratch range occupied")
+	}
+	if policy.precheckFamilies && policy.required != 0 {
+		var families uint8
+		ready, err := b.RebuildView().hasLightNode(ctx, policy.label, func(n *graph.Node) bool {
+			families |= policy.family(n.Language)
+			return families&policy.required == policy.required
+		})
+		if err != nil || !ready {
+			return stats, err
+		}
 	}
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(rebuildReactNativePrefix, prefixEnd(rebuildReactNativePrefix), pebble.NoSync))
@@ -134,7 +146,7 @@ type rebuildReactNativeBridge struct {
 // o: big-endian receipt ordinal -> live edge key.
 // g: caller,module,method -> 1 (first site already elected).
 // w: caller,native ID -> 0 for a stationary key, 1+encoded edge for a
-// proposal; before an order refusal this column holds affected output keys.
+// proposal; before a capture or order refusal it holds affected output keys.
 // d: declaration ID -> proof-state byte.
 func rebuildRNKey(col byte, fields ...string) []byte {
 	return keyStrings([]byte{'g', 'K', col}, fields...)
@@ -160,9 +172,52 @@ func (p *rebuildReactNativeBridge) get(key []byte) ([]byte, error) {
 	return pendingGet(p.b.pending, key, copyValue)
 }
 
+// hasLightNode stops the live node scan when match reports enough evidence.
+func (v RebuildView) hasLightNode(ctx context.Context, label string, match func(*graph.Node) bool) (bool, error) {
+	var found bool
+	err := v.read(ctx, func(snap *pebble.Snapshot) (err error) {
+		prefix := []byte{familyNode}
+		it, err := snap.NewIterWithContext(ctx, &pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
+		if err != nil {
+			return err
+		}
+		defer func() { err = errors.Join(err, it.Close()) }()
+		for ok := it.First(); ok; ok = it.Next() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			value, err := it.ValueAndErr()
+			if err != nil {
+				return err
+			}
+			n, err := checkedRebuildLightNode(row{it.Key(), value}, label)
+			if err != nil {
+				return err
+			}
+			if match(n) {
+				found = true
+				break
+			}
+		}
+		return it.Error()
+	})
+	return found, err
+}
+
+func checkedRebuildLightNode(r row, label string) (*graph.Node, error) {
+	n, err := decodeNodeLight(r.value)
+	if err == nil && !bytes.Equal(r.key, pendingNodeKey(n.ID)) {
+		err = invalid(label + " node identity")
+	}
+	return n, err
+}
+
 func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*graph.Edge) bool) (bool, error) {
 	view := p.b.RebuildView()
 	var families uint8
+	if p.policy.precheckFamilies {
+		families = p.policy.required
+	}
 	var methods bool
 	if err := view.VisitNodes(ctx, func(n *graph.Node) error {
 		if families&p.policy.required != p.policy.required {
@@ -209,10 +264,7 @@ func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*gra
 		custody, err := readRebuildEdgeCustody(p.b.pending, live)
 		if err != nil {
 			if errors.Is(err, ErrRebuildUnknownProvenance) {
-				if err := p.affected(ctx, e); err != nil {
-					return err
-				}
-				return p.refusedOutputs(ctx)
+				return p.affected(ctx, e)
 			}
 			return err
 		}
@@ -220,10 +272,7 @@ func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*gra
 		if raw == nil {
 			// Synthetic and untracked moves have no raw receipt ordinal.
 			if custody.proof != 0 {
-				if err := p.affected(ctx, e); err != nil {
-					return err
-				}
-				return p.refusedOutputs(ctx)
+				return p.affected(ctx, e)
 			}
 			raw = live
 		}
@@ -243,10 +292,7 @@ func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*gra
 			if err := p.affected(ctx, previous); err != nil {
 				return err
 			}
-			if err := p.affected(ctx, e); err != nil {
-				return err
-			}
-			return p.refusedOutputs(ctx)
+			return p.affected(ctx, e)
 		}
 		if err := p.put(key, append([]byte{rebuildCapabilityWanted}, live...)); err != nil {
 			return err
@@ -256,9 +302,15 @@ func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*gra
 		}
 		return nil
 	})
+	if err != nil {
+		return false, err
+	}
+	if err := p.refusedOutputs(ctx); err != nil {
+		return false, err
+	}
 	// Replay receipts even without a live marker: a duplicate payload may
 	// have hidden the only eligible call.
-	return true, err
+	return true, nil
 }
 
 func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2[ParseFacts, error], isCall func(*graph.Edge) bool) error {

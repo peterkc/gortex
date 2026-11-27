@@ -197,6 +197,45 @@ func TestRebuildKMPExpectActualRejectsUnprovedDeclaration(t *testing.T) {
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
 }
 
+func TestRebuildKMPExpectActualCountsDistinctUnprovedOutputs(t *testing.T) {
+	alphaExpect := rebuildKMPNode("y-common.kt", "kotlin", "Alpha", "expect", graph.KindFunction, 3)
+	alphaActual := rebuildKMPNode("z-platform.kt", "kotlin", "Alpha", "actual", graph.KindFunction, 7)
+	zuluExpect := rebuildKMPNode("a-common.kt", "kotlin", "Zulu", "expect", graph.KindFunction, 11)
+	zuluActual := rebuildKMPNode("b-platform.kt", "kotlin", "Zulu", "actual", graph.KindFunction, 17)
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(alphaExpect.FilePath, alphaExpect.Language, []*graph.Node{alphaExpect}),
+		rebuildEventFacts(alphaActual.FilePath, alphaActual.Language, []*graph.Node{alphaActual}),
+		rebuildEventFacts(zuluExpect.FilePath, zuluExpect.Language, []*graph.Node{zuluExpect}),
+		rebuildEventFacts(zuluActual.FilePath, zuluActual.Language, []*graph.Node{zuluActual}),
+	}
+	private := openRebuildGRPCBuild(t, facts...)
+	before := rebuildEventSavedRows(t, private)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthKMPExpectActual})
+	require.NoError(t, err)
+	conflict := *zuluActual
+	conflict.StartLine++
+	bad := rebuildEventFacts(conflict.FilePath, conflict.Language, []*graph.Node{&conflict})
+	// Neither Alpha endpoint is proved. A valid and a conflicting Zulu
+	// receipt must refuse both directions, regardless of receipt order.
+	// Zulu's reverse row is visited last but its source ID sorts first.
+	first := rebuildKMPExpectedEdge(zuluExpect, zuluActual, graph.EdgeReferences)
+	for _, proof := range [][]store_pebble.ParseFacts{
+		{facts[2], facts[3], bad},
+		{bad, facts[3], facts[2]},
+	} {
+		stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
+		require.ErrorIs(t, err, store_pebble.ErrRebuildKMPExpectActual)
+		var refused *store_pebble.RebuildUnknownProvenanceError
+		require.ErrorAs(t, err, &refused)
+		require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 4, First: graph.EdgeIdentityFor(first)}, refused)
+		require.Zero(t, stats)
+		require.Equal(t, before, rebuildEventSavedRows(t, private))
+	}
+	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+	require.NoError(t, err)
+	require.EqualValues(t, 4, stats.Edges)
+}
+
 func TestRebuildKMPExpectActualNeedsProvedKotlinMarker(t *testing.T) {
 	expect := rebuildKMPNode("common.go", "go", "clock", "expect", graph.KindFunction, 3)
 	actual := rebuildKMPNode("platform.ts", "typescript", "clock", "actual", graph.KindFunction, 7)
@@ -233,6 +272,8 @@ func TestRebuildKMPExpectActualNeedsProvedKotlinMarker(t *testing.T) {
 		var refused *store_pebble.RebuildUnknownProvenanceError
 		require.ErrorAs(t, err, &refused)
 		require.EqualValues(t, 2, refused.Count)
+		first := rebuildKMPExpectedEdge(expect, actual, graph.EdgeReferences)
+		require.Equal(t, graph.EdgeIdentityFor(first), refused.First)
 		require.Zero(t, stats)
 		require.Equal(t, before, rebuildEventSavedRows(t, private))
 	}

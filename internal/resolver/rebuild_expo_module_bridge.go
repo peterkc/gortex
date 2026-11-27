@@ -15,7 +15,8 @@ func RunRebuildExpoModuleBridge(ctx context.Context, b *store_pebble.BuildStore,
 	if !selection.allows(SynthExpoModules) {
 		return store_pebble.RebuildExpoModuleBridgeStats{}, nil
 	}
-	return b.RebuildExpoModuleBridge(ctx, receipts, spillAt, expoBridgeFamily, func(e *graph.Edge) bool {
+	required, family := expoBridgeFamilyMask()
+	return b.RebuildExpoModuleBridge(ctx, receipts, spillAt, required, family, func(e *graph.Edge) bool {
 		return e.Kind == graph.EdgeCalls && e.From != "" && e.Meta["via"] == rnNativeVia
 	}, func(e *graph.Edge, native *graph.Node) *graph.Edge {
 		return &graph.Edge{
@@ -39,13 +40,17 @@ func RunRebuildExpoModuleBridge(ctx context.Context, b *store_pebble.BuildStore,
 	})
 }
 
-func expoBridgeFamily(language string) uint8 {
-	switch frameworkLanguageFamily(language) {
-	case "web":
-		return 1
-	case "apple", "jvm":
-		return 2
-	default:
-		return 0
+func expoBridgeFamilyMask() (uint8, func(string) uint8) {
+	var required uint8
+	families := map[string]uint8{}
+	for i, group := range frameworkSynthFamilyConjunctions[SynthExpoModules] {
+		bit := uint8(1) << i
+		required |= bit
+		for _, family := range group {
+			families[family] |= bit
+		}
+	}
+	return required, func(language string) uint8 {
+		return families[frameworkLanguageFamily(language)]
 	}
 }

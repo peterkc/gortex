@@ -28,6 +28,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"closure collection", store_pebble.ErrRebuildClosureCollection, 49},
 		{"react setState", store_pebble.ErrRebuildReactSetState, 50},
 		{"flutter setState", store_pebble.ErrRebuildFlutterSetState, 51},
+		{"kmp expect/actual", store_pebble.ErrRebuildKMPExpectActual, 52},
 		{"expo module bridge", store_pebble.ErrRebuildExpoModuleBridge, 53},
 	} {
 		t.Run(stage.name, func(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -82,64 +83,48 @@ type rebuildKMPPass struct {
 // proof by ID; k: Kotlin marker proof by ID; w: proposal by traversal
 // ordinal then full edge key.
 func rebuildKMPKey(col byte, fields ...string) []byte {
-	return keyStrings([]byte{'g', 'M', col}, fields...)
+	return keyStrings(append(bytes.Clone(rebuildKMPPrefix), col), fields...)
 }
 
 func (p *rebuildKMPPass) put(key, value []byte) error {
 	return p.b.putRebuildScratch(key, value, rebuildKMPRowLimit, p.spillAt, &p.buffered, &p.stats.SpillBytes, "KMP expect/actual")
 }
 
-func rebuildKMPNodeLight(r row) (*graph.Node, error) {
+func rebuildKMPCheckNodeSize(r row) error {
 	if len(r.key)+len(r.value) > rebuildKMPRowLimit {
-		return nil, fmt.Errorf("%w: KMP expect/actual node row", ErrRebuildLinkInputSize)
+		return fmt.Errorf("%w: KMP expect/actual node row", ErrRebuildLinkInputSize)
 	}
-	n, err := decodeNodeLight(r.value)
-	if err == nil && !bytes.Equal(r.key, pendingNodeKey(n.ID)) {
-		err = invalid("KMP expect/actual node identity")
-	}
-	return n, err
+	return nil
 }
 
 func rebuildKMPHasKotlin(ctx context.Context, view RebuildView) (bool, error) {
-	// The native registry requires JVM plus a Kotlin marker anywhere in
-	// the node census. A normalized Kotlin label satisfies both tests.
-	// This is a pass-level check, not an endpoint language restriction.
-	found := false
-	err := view.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
-		if found {
-			return nil
-		}
-		n, err := rebuildKMPNodeLight(r)
-		if err == nil {
-			found = isRebuildKotlin(n.Language)
-		}
-		return err
+	// A normalized Kotlin marker supplies both native registry gates:
+	// the JVM family and the Kotlin marker. Neither restricts endpoints.
+	return view.hasLightNode(ctx, "KMP expect/actual", func(n *graph.Node) bool {
+		return isRebuildKotlin(n.Language)
 	})
-	return found, err
 }
 
 func isRebuildKotlin(language string) bool {
-	return strings.ToLower(strings.TrimSpace(language)) == "kotlin"
+	return strings.ToLower(strings.TrimSpace(language)) == graph.KMPKotlinLanguage
 }
 
 func (p *rebuildKMPPass) collect(ctx context.Context, view RebuildView) error {
+	kinds := graph.KMPExpectActualKinds()
 	return view.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
-		light, err := rebuildKMPNodeLight(r)
-		if err != nil || light.Name == "" {
+		light, err := checkedRebuildLightNode(r, "KMP expect/actual")
+		if err != nil || light.Name == "" || !slices.Contains(kinds, light.Kind) {
 			return err
 		}
-		switch light.Kind {
-		case graph.KindFunction, graph.KindMethod, graph.KindType, graph.KindInterface:
-		default:
-			return nil
+		if err := rebuildKMPCheckNodeSize(r); err != nil {
+			return err
 		}
 		n, err := decodeNode(r.value)
 		if err != nil {
 			return err
 		}
-		role, _ := n.Meta["kmp_role"].(string)
 		var col byte
-		switch role {
+		switch graph.KMPExpectActualRole(n) {
 		case "expect":
 			col = 'e'
 		case "actual":
@@ -169,7 +154,7 @@ func (p *rebuildKMPPass) pair(ctx context.Context, makeEdge func(*graph.Node, st
 		prefix := rebuildKMPKey('a', expect.Name, string(expect.Kind))
 		return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 			actual, err := decodeNodeLight(r.value)
-			if err != nil || expect.ID == actual.ID {
+			if err != nil {
 				return err
 			}
 			if err := p.propose(makeEdge(actual, expect.ID, graph.EdgeImplements)); err != nil {
@@ -219,8 +204,11 @@ func (p *rebuildKMPPass) prove(ctx context.Context, receipts iter.Seq2[ParseFact
 	// A live Kotlin label can open the census, but cannot authorize a
 	// proposed row. One exact receipt marker suffices for every pair.
 	if err := p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
-		n, err := rebuildKMPNodeLight(r)
+		n, err := checkedRebuildLightNode(r, "KMP expect/actual")
 		if err != nil || !isRebuildKotlin(n.Language) {
+			return err
+		}
+		if err := rebuildKMPCheckNodeSize(r); err != nil {
 			return err
 		}
 		return p.put(rebuildKMPKey('k', n.ID), []byte{rebuildCapabilityWanted})

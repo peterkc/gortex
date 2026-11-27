@@ -85,6 +85,77 @@ func TestRebuildExpoModuleBridgeSQLiteOracle(t *testing.T) {
 	}
 }
 
+func TestRebuildExpoModuleBridgeFamilyGroups(t *testing.T) {
+	required, family := expoBridgeFamilyMask()
+	for _, tc := range []struct {
+		name      string
+		languages []string
+		want      bool
+	}{
+		{"web and Apple", []string{"TypeScript", " Swift "}, true},
+		{"web and JVM", []string{"tsx", "Java"}, true},
+		{"web only", []string{"javascript", "go"}, false},
+		{"Apple and JVM without web", []string{"swift", "kotlin", "go"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			present := map[string]int{}
+			var seen uint8
+			for _, language := range tc.languages {
+				seen |= family(language)
+				present[frameworkLanguageFamily(language)]++
+			}
+			require.Equal(t, tc.want, frameworkSynthNodeGatesPass(SynthExpoModules, present, nil))
+			require.Equal(t, tc.want, seen&required == required)
+		})
+	}
+}
+
+func TestRebuildExpoModuleBridgePreservesReactNativeCollision(t *testing.T) {
+	caller := &graph.Node{ID: "app.ts::open", Kind: graph.KindFunction, Name: "open", FilePath: "app.ts", Language: "typescript"}
+	target := &graph.Node{ID: "native.swift::open", Kind: graph.KindMethod, Name: "open", FilePath: "native.swift", Language: "swift",
+		Meta: map[string]any{"rn_module": "Widget", "rn_method": "open", "expo_module": "Widget", "expo_method": "open"}}
+	marker := &graph.Edge{From: caller.ID, To: "unresolved::rn::Widget::open", Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: 4,
+		Meta: map[string]any{"via": "rn.native", "rn_module": "Widget", "rn_method": "open"}}
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(caller.FilePath, caller.Language, []*graph.Node{caller}, marker),
+		rebuildEventFacts(target.FilePath, target.Language, []*graph.Node{target}),
+	}
+	native := openRebuildTemporalOracle(t, facts...)
+	private := openRebuildGRPCBuild(t, facts...)
+	before := rebuildEventSavedRows(t, private)
+	require.Equal(t, rebuildEventSQLiteRows(native), before)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative, SynthExpoModules})
+	require.NoError(t, err)
+	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), private.RebuildView(), selection)
+	require.NoError(t, err)
+	require.True(t, frozen.allows(SynthReactNative))
+	require.True(t, frozen.allows(SynthExpoModules))
+
+	report := RunFrameworkSynthesizersWithSelection(native, selection)
+	require.NoError(t, report.Err)
+	require.Equal(t, 2, report.Total) // Both passes try the same key.
+	want := rebuildEventSQLiteRows(native)
+	require.Len(t, want.edges, len(before.edges)+1)
+	var winner *graph.Edge
+	for _, e := range want.edges {
+		if e.To == target.ID {
+			winner = e
+		}
+	}
+	require.NotNil(t, winner)
+	require.Equal(t, rnBridgeVia, winner.Meta["via"])
+	require.Equal(t, SynthReactNative, winner.Meta[MetaSynthesizedBy])
+
+	rn, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, rn.Edges)
+	require.Equal(t, want, rebuildEventSavedRows(t, private))
+	expo, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1)
+	require.NoError(t, err)
+	require.Zero(t, expo.Edges)
+	require.Equal(t, want, rebuildEventSavedRows(t, private))
+}
+
 func TestRebuildExpoModuleBridgeRejectsUnprovedParticipants(t *testing.T) {
 	facts := rebuildExpoModuleBridgeFacts(t)
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthExpoModules})
@@ -113,7 +184,17 @@ func TestRebuildExpoModuleBridgeRejectsUnprovedParticipants(t *testing.T) {
 			}
 			stats, err := RunRebuildExpoModuleBridge(t.Context(), private, rebuildGRPCReceipts(proof...), selection, 1)
 			require.ErrorIs(t, err, store_pebble.ErrRebuildExpoModuleBridge)
-			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			firstSite := facts[0].Edges[2]
+			want := store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(firstSite)}
+			want.First.To = "ios/MathModule.swift::expo:Math:add"
+			if name == "missing first raw site" {
+				// Lost receipt order affects all three pairs, even the incumbent.
+				want.Count = 3
+				want.First.To = "android/MathModule.kt::expo:Math:add"
+			}
+			require.Equal(t, &want, refused)
 			require.Zero(t, stats)
 			require.Equal(t, before, rebuildEventSavedRows(t, private))
 		})

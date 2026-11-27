@@ -1,8 +1,10 @@
 package store_pebble
 
 import (
+	"fmt"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -39,14 +41,19 @@ func TestRebuildExpoModuleBridgeCensusAndCustody(t *testing.T) {
 			Origin: graph.OriginASTInferred}
 	}
 	ctx := t.Context()
-	stats, err := b.RebuildExpoModuleBridge(ctx, receipts, 1, family, isCall, makeCall)
+	before := rebuildFrameworkCustodyRows(t, b)
+	flushed := b.pending.Metrics().Levels[0].TableBytesFlushed
+	noReceipts := func(func(ParseFacts, error) bool) { t.Fatal("rejected families must not read receipts") }
+	stats, err := b.RebuildExpoModuleBridge(ctx, noReceipts, 1, 3, family, isCall, makeCall)
 	require.NoError(t, err)
-	require.Zero(t, stats.Edges)
+	require.Zero(t, stats)
+	require.Equal(t, flushed, b.pending.Metrics().Levels[0].TableBytesFlushed)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 
 	// An unrelated native-family marker admits the pass, not just the
 	// marker's own declarations. The tagged Go target can then win.
 	b.AddNode(&graph.Node{ID: "marker.swift", Kind: graph.KindFile, FilePath: "marker.swift", Language: "swift"})
-	stats, err = b.RebuildExpoModuleBridge(ctx, receipts, 1, family, isCall, makeCall)
+	stats, err = b.RebuildExpoModuleBridge(ctx, receipts, 1, 3, family, isCall, makeCall)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, stats.Edges)
 	want := makeCall(marker, target)
@@ -54,4 +61,84 @@ func TestRebuildExpoModuleBridgeCensusAndCustody(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, live)
 	requireSyntheticCustody(t, b, map[graph.EdgeIdentity]rebuildEdgeProof{graph.EdgeIdentityFor(want): rebuildProofExpoModules})
+}
+
+func TestRebuildReactNativeBridgeRejectsNilFamilyAdapter(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	receipts := func(func(ParseFacts, error) bool) { t.Fatal("must not read receipts") }
+	stats, err := b.RebuildReactNativeBridge(t.Context(), receipts, 1, nil,
+		func(*graph.Edge) bool { return false }, func(*graph.Edge, *graph.Node) *graph.Edge { return nil })
+	require.ErrorIs(t, err, ErrRebuildReactNativeBridge)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.Zero(t, stats)
+}
+
+func TestRebuildNativeModuleBridgeCaptureCountsLostCustodyOutputs(t *testing.T) {
+	for _, name := range []string{"React Native", "Expo"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			b := newBuild(t, FullProfile)
+			b.AddNode(&graph.Node{ID: "caller", Kind: graph.KindFunction, FilePath: "app.ts", Language: "typescript"})
+			for _, id := range []string{"a-native", "b-native", "c-native", "z-native"} {
+				b.AddNode(&graph.Node{ID: id, Kind: graph.KindMethod, Name: "open", FilePath: "native.swift", Language: "swift",
+					Meta: map[string]any{"rn_module": id, "rn_method": "open", "expo_module": id, "expo_method": "open"}})
+			}
+			// View order sorts by marker target, not output target. The first
+			// two sites affect the same pair. Two later sites claim one raw
+			// recorder. The last pair sorts first, and its later site
+			// has the smaller complete edge key.
+			sharedRaw := pendingEdgeKey(&graph.Edge{From: "caller", To: "raw", Kind: graph.EdgeCalls, FilePath: "app.ts", Line: 1})
+			for i, tc := range []struct {
+				module  string
+				custody rebuildEdgeCustody
+			}{
+				{"z-native", rebuildEdgeCustody{proof: rebuildProofDirect}},
+				{"z-native", rebuildEdgeCustody{proof: rebuildProofReceiver}},
+				{"b-native", rebuildEdgeCustody{raw: sharedRaw}},
+				{"c-native", rebuildEdgeCustody{raw: sharedRaw}},
+				{"a-native", rebuildEdgeCustody{proof: rebuildProofUntrackedMove}},
+				{"a-native", rebuildEdgeCustody{proof: rebuildProofReceiver}},
+			} {
+				e := &graph.Edge{From: "caller", To: fmt.Sprintf("marker-%d", i), Kind: graph.EdgeCalls, FilePath: "app.ts", Line: 10 - i,
+					Meta: map[string]any{"via": "rn.native", "rn_module": tc.module, "rn_method": "open"}}
+				require.NoError(t, b.withWrites(func() error { return b.putEdgeWithCustody(e, tc.custody) }))
+				if i == 0 {
+					// Stale proof, with the trigger and key intact.
+					e.Confidence = 0.6
+					value, err := encodeEdge(e)
+					require.NoError(t, err)
+					require.NoError(t, b.pending.Set(pendingEdgeKey(e), value, pebble.NoSync))
+				}
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			receipts := func(func(ParseFacts, error) bool) { t.Fatal("capture refusal must not read receipts") }
+			isCall := func(e *graph.Edge) bool { return e.Kind == graph.EdgeCalls && e.Meta["via"] == "rn.native" }
+			makeCall := func(*graph.Edge, *graph.Node) *graph.Edge {
+				t.Fatal("capture refusal must not elect an output")
+				return nil
+			}
+			var stats RebuildReactNativeBridgeStats
+			var err error
+			if name == "Expo" {
+				stats, err = b.RebuildExpoModuleBridge(ctx, receipts, 1, 3, func(language string) uint8 {
+					if language == "typescript" {
+						return 1
+					}
+					return 2
+				}, isCall, makeCall)
+				require.ErrorIs(t, err, ErrRebuildExpoModuleBridge)
+			} else {
+				stats, err = b.RebuildReactNativeBridge(ctx, receipts, 1, func(language string) bool {
+					return language == "typescript" || language == "swift"
+				}, isCall, makeCall)
+				require.ErrorIs(t, err, ErrRebuildReactNativeBridge)
+			}
+			var refused *RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			first := graph.EdgeIdentity{From: "caller", To: "a-native", Kind: graph.EdgeCalls, FilePath: "app.ts", Line: 5}
+			require.Equal(t, &RebuildUnknownProvenanceError{Count: 4, First: first}, refused)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
 }

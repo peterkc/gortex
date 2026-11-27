@@ -1,8 +1,12 @@
 package store_pebble
 
 import (
+	"encoding/binary"
+	"iter"
+	"strings"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -35,7 +39,10 @@ func TestRebuildKMPExpectActualMuxAndCustody(t *testing.T) {
 	marker := &graph.Node{ID: "marker.kt", Kind: graph.KindFile, FilePath: "marker.kt", Language: " Kotlin "}
 	b.AddNode(marker)
 	stats, err = b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
-	require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+	var refused *RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	first := graph.EdgeIdentityFor(makeEdge(actual, expect.ID, graph.EdgeImplements))
+	require.Equal(t, &RebuildUnknownProvenanceError{Count: 2, First: first}, refused)
 	require.Zero(t, stats)
 	unproved, err := b.pendingEdge(pendingEdgeKey(makeEdge(actual, expect.ID, graph.EdgeImplements)))
 	require.NoError(t, err)
@@ -62,4 +69,130 @@ func TestRebuildKMPExpectActualMuxAndCustody(t *testing.T) {
 		graph.EdgeIdentityFor(makeEdge(actual, expect.ID, graph.EdgeImplements)):    rebuildProofKMPExpectActual,
 		graph.EdgeIdentityFor(makeEdge(protected, actual.ID, graph.EdgeReferences)): rebuildProofKMPExpectActual,
 	})
+}
+
+func TestRebuildKMPExpectActualRejectsInputsAndOccupiedScratch(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	ctx := t.Context()
+	receipts := func(func(ParseFacts, error) bool) { t.Fatal("must not read receipts") }
+	makeEdge := func(*graph.Node, string, graph.EdgeKind) *graph.Edge {
+		t.Fatal("must not propose edges")
+		return nil
+	}
+	for _, tc := range []struct {
+		name     string
+		receipts iter.Seq2[ParseFacts, error]
+		spillAt  int
+		makeEdge func(*graph.Node, string, graph.EdgeKind) *graph.Edge
+	}{
+		{"nil receipts", nil, 1, makeEdge},
+		{"zero spill threshold", receipts, 0, makeEdge},
+		{"oversize spill threshold", receipts, goldBufferBytes + 1, makeEdge},
+		{"nil edge builder", receipts, 1, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stats, err := b.RebuildKMPExpectActual(t.Context(), tc.receipts, tc.spillAt, tc.makeEdge)
+			require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
+			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+			require.Zero(t, stats)
+		})
+	}
+	key, value := rebuildKMPKey('w'), []byte("occupied")
+	require.NoError(t, b.pending.Set(key, value, pebble.NoSync))
+	stats, err := b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "scratch range occupied")
+	require.Zero(t, stats)
+	got, err := pendingGet(b.pending, key, copyValue)
+	require.NoError(t, err)
+	require.Equal(t, value, got)
+}
+
+func TestRebuildKMPExpectActualLightScanAndCandidateRowLimit(t *testing.T) {
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	b.AddNode(&graph.Node{ID: "a-marker", Language: " Kotlin ", Kind: graph.KindFile})
+	receipts := func(func(ParseFacts, error) bool) { t.Fatal("must not read receipts") }
+	makeEdge := func(*graph.Node, string, graph.EdgeKind) *graph.Edge {
+		t.Fatal("must not propose edges")
+		return nil
+	}
+	key := pendingNodeKey("z-row")
+	n := &graph.Node{ID: "different", Name: "clock", Kind: graph.KindVariable, Language: "go"}
+	raw, err := encodeNode(n)
+	require.NoError(t, err)
+	require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+	found, err := rebuildKMPHasKotlin(ctx, b.RebuildView())
+	require.NoError(t, err) // The probe must stop before the bad row.
+	require.True(t, found)
+	stats, err := b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "KMP expect/actual node identity")
+	require.Zero(t, stats)
+
+	n.ID = "z-row"
+	n.Meta = map[string]any{"kmp_role": "actual", "pad": strings.Repeat("x", rebuildKMPRowLimit)}
+	raw, err = encodeNode(n)
+	require.NoError(t, err)
+	require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+	stats, err = b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	require.NoError(t, err) // The cap does not cover excluded kinds.
+	require.Zero(t, stats)
+
+	n.Kind = graph.KindFunction
+	raw, err = encodeNode(n)
+	require.NoError(t, err)
+	require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+	stats, err = b.RebuildKMPExpectActual(ctx, receipts, 1, makeEdge)
+	require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.Zero(t, stats)
+}
+
+func TestRebuildKMPExpectActualScratchGuards(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	p := rebuildKMPPass{b: b, spillAt: goldBufferBytes}
+	n := &graph.Node{ID: "expect", Kind: graph.KindFunction, Name: "clock", FilePath: "common.go",
+		Meta: map[string]any{"kmp_role": "expect"}}
+	b.AddNode(n)
+	proof := rebuildKMPKey('n', n.ID)
+	require.NoError(t, p.put(proof, []byte{rebuildCapabilityWanted}))
+	require.NoError(t, p.noteReceipt(n, n.FilePath, ""))
+	state, err := p.state(proof)
+	require.NoError(t, err)
+	require.Equal(t, byte(rebuildCapabilityWanted|rebuildCapabilityUnproved), state)
+	require.NoError(t, p.put(proof, []byte{rebuildCapabilityWanted, 0}))
+	_, err = p.state(proof)
+	require.ErrorIs(t, err, errInvalidRecord)
+
+	marker := rebuildKMPKey('k', "marker")
+	require.NoError(t, p.put(marker, []byte{rebuildCapabilityWanted, 0}))
+	err = p.prove(t.Context(), func(func(ParseFacts, error) bool) {})
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "KMP Kotlin marker proof state")
+
+	proxy := graph.ProxyNodeID("other", "remote-declaration")
+	for _, e := range []*graph.Edge{
+		{From: proxy, To: "live", Kind: graph.EdgeReferences},
+		{From: "live", To: proxy, Kind: graph.EdgeReferences},
+	} {
+		require.NoError(t, p.propose(e))
+	}
+	require.Zero(t, p.proposals)
+	require.ErrorIs(t, p.put(rebuildKMPKey('w'), make([]byte, rebuildKMPRowLimit)), ErrRebuildLinkInputSize)
+
+	e := &graph.Edge{From: "actual", To: n.ID, Kind: graph.EdgeImplements}
+	raw, err := encodeEdge(e)
+	require.NoError(t, err)
+	wrongKey := binary.BigEndian.AppendUint64(rebuildKMPKey('w'), 0)
+	wrongKey = append(wrongKey, pendingEdgeKey(&graph.Edge{From: "other", To: n.ID, Kind: e.Kind})...)
+	require.NoError(t, p.put(wrongKey, raw))
+	err = p.visitProposals(t.Context(), func(*graph.Edge) error {
+		t.Fatal("must not yield a mismatched proposal")
+		return nil
+	})
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "KMP expect/actual proposal key")
 }
