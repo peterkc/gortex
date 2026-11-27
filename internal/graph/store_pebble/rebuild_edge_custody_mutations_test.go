@@ -50,6 +50,63 @@ func TestRebuildCustodyGenericReindex(t *testing.T) {
 	}
 }
 
+func TestRebuildGoExternalMembershipHasNoReceiptCustody(t *testing.T) {
+	const symbolID, moduleID = "dep::example.test/ui::update", "module::go:example.test/ui"
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	caller := setStateProofMethod(symbolID, "update", 4)
+	render := setStateProofMethod("widget.go::render", "render", 10)
+	module := &graph.Node{ID: moduleID, Kind: graph.KindModule, Name: "ui", Language: "go"}
+	externalCall := setStateProofCall(render, caller.ID)
+	setStateCall := setStateProofCall(caller, "unresolved::Widget.setState")
+	b.AddBatch([]*graph.Node{caller, render, module}, []*graph.Edge{
+		externalCall, setStateCall, setStateProofMember(render, module.ID),
+	})
+	// The external pass proposes a function at the symbol ID but retains the
+	// existing method. That method can now enter the setState owner census.
+	symbol := *caller
+	symbol.Kind = graph.KindFunction
+	desired := func(e *graph.Edge) (*graph.Node, *graph.Node, error) {
+		if graph.EdgeIdentityFor(e) == graph.EdgeIdentityFor(externalCall) {
+			return module, &symbol, nil
+		}
+		return nil, nil, nil
+	}
+	before := rebuildFrameworkCustodyRows(t, b)
+	applyExternal := func() {
+		t.Helper()
+		require.NoError(t, b.RebuildGoExternalCalls(ctx, desired, func(any) int { return 0 }))
+	}
+	applyExternal()
+	want := &graph.Edge{From: caller.ID, To: module.ID, Kind: graph.EdgeMemberOf, Origin: graph.OriginASTResolved}
+	key := pendingEdgeKey(want)
+	after := rebuildFrameworkCustodyRows(t, b)
+	payload, err := encodeEdge(want)
+	require.NoError(t, err)
+	require.Equal(t, payload, after[string(key)])
+	require.Equal(t, key, after[string(pendingReverseKey(want, key))])
+
+	stats, err := b.RebuildReactSetState(ctx, func(func(ParseFacts, error) bool) {
+		t.Fatal("setState must reject the untracked membership before raw receipt replay")
+	}, setStateProofTarget, setStateProofOutput)
+	require.ErrorIs(t, err, ErrRebuildReactSetState)
+	var refusal *RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(want)}, refusal)
+	require.Zero(t, stats)
+	require.Equal(t, after, rebuildFrameworkCustodyRows(t, b))
+	custody, err := readRebuildEdgeCustody(b.pending, key)
+	require.NoError(t, err)
+	require.Equal(t, rebuildEdgeCustody{proof: rebuildProofUntrackedMove}, custody)
+
+	applyExternal()
+	require.Equal(t, after, rebuildFrameworkCustodyRows(t, b), "a repeat keeps the incumbent")
+	delete(after, string(key))
+	delete(after, string(pendingReverseKey(want, key)))
+	delete(after, string(rebuildLinkRecorderKey(key)))
+	require.Equal(t, before, after, "no other pending row changed")
+}
+
 func TestRebuildCustodyGenericMoveDropsStageProof(t *testing.T) {
 	b, old := seedClosureMutationCustody(t)
 	live := old

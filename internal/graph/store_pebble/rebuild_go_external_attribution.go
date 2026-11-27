@@ -138,7 +138,8 @@ func (b *BuildStore) RebuildGoExternalCalls(ctx context.Context,
 			if err != nil || exists {
 				return err
 			}
-			return b.addEdge(&graph.Edge{From: from, To: to, Kind: graph.EdgeMemberOf, Origin: graph.OriginASTResolved})
+			e := &graph.Edge{From: from, To: to, Kind: graph.EdgeMemberOf, Origin: graph.OriginASTResolved}
+			return b.addEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofUntrackedMove})
 		})
 	})
 }
