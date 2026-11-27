@@ -23,7 +23,8 @@ type RebuildClosureCollectionStats struct {
 
 // RebuildClosureCollection streams the native callable field join. Count both
 // raw roles before filtering pairs, then prove only the endpoints of new calls
-// and the Apple witness. Preserve occupied SQLite durable keys.
+// and the Apple witness. Preserve occupied SQLite durable keys. makeEdge
+// builds a call from the dispatcher to the registrar for each distinct pair.
 func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	maxFanout int, sameBoundary func(*graph.Node, *graph.Node) bool, makeEdge func(*graph.Node, *graph.Node, string) *graph.Edge,
 	appleLanguage func(string) bool,
@@ -183,17 +184,11 @@ func (p *rebuildClosurePass) propose(e *graph.Edge) error {
 	if err != nil || prior != nil {
 		return err
 	}
-	proposal := append(rebuildClosureKey('e'), key...)
-	exists, err := pendingGet(p.b.pending, proposal, func([]byte) (bool, error) { return true, nil })
-	if err != nil || exists {
-		// Repeated complete keys have identical payload.
-		return err
-	}
 	raw, err := encodeEdge(e)
 	if err != nil {
 		return err
 	}
-	if err := p.put(proposal, raw); err != nil {
+	if err := p.put(append(rebuildClosureKey('e'), key...), raw); err != nil {
 		return err
 	}
 	for _, id := range [...]string{e.From, e.To} {

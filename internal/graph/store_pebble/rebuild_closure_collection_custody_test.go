@@ -14,14 +14,17 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 	// fails both endpoint proofs but contributes only one count.
 	for _, mutate := range []struct {
 		name string
-		run  func(*graph.Node)
+		node func(*graph.Node)
+		file func(*ParseFacts)
 	}{
-		{"kind", func(n *graph.Node) { n.Kind = graph.KindFunction }},
-		{"name", func(n *graph.Node) { n.Name = "replacement" }},
-		{"language", func(n *graph.Node) { n.Language = "typescript" }},
-		{"file", func(n *graph.Node) { n.FilePath = "wrong.go" }},
-		{"line", func(n *graph.Node) { n.StartLine++ }},
-		{"repo", func(n *graph.Node) { n.RepoPrefix = "other" }},
+		{name: "kind", node: func(n *graph.Node) { n.Kind = graph.KindFunction }},
+		{name: "name", node: func(n *graph.Node) { n.Name = "replacement" }},
+		{name: "language", node: func(n *graph.Node) { n.Language = "typescript" }},
+		{name: "file", node: func(n *graph.Node) { n.FilePath = "wrong.go" }},
+		{name: "line", node: func(n *graph.Node) { n.StartLine++ }},
+		{name: "repo", node: func(n *graph.Node) { n.RepoPrefix = "other" }},
+		{name: "receipt language", file: func(f *ParseFacts) { f.EffectiveLanguage = "typescript" }},
+		{name: "receipt file", file: func(f *ParseFacts) { f.File.FilePath = "wrong.go" }},
 	} {
 		for _, conflictFirst := range []bool{true, false} {
 			order := "valid then conflicting"
@@ -38,8 +41,13 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 				bad := setStateProofFacts(nil)
 				for _, n := range []*graph.Node{d1, r1, r2} {
 					changed := *n
-					mutate.run(&changed)
+					if mutate.node != nil {
+						mutate.node(&changed)
+					}
 					bad.Nodes = append(bad.Nodes, &changed)
+				}
+				if mutate.file != nil {
+					mutate.file(&bad)
 				}
 				receipts := func(yield func(ParseFacts, error) bool) {
 					first, last := facts, bad
@@ -71,12 +79,15 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 }
 
 func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
-	for _, mode := range []string{"fanout", "nil boundary", "nil builder", "nil Apple predicate", "scratch occupied", "input row", "proposal row"} {
+	for _, mode := range []string{"fanout", "nil receipts", "nil boundary", "nil builder", "nil Apple predicate", "scratch occupied", "input row", "proposal row"} {
 		t.Run(mode, func(t *testing.T) {
 			dispatch, register := closureProofPair("one", "listeners")
 			facts := setStateProofFacts([]*graph.Node{dispatch, register})
 			b, _ := seedSyntheticCustody(t, facts)
 			cap := 8
+			receipts := func(func(ParseFacts, error) bool) {
+				t.Fatal("replayed receipts before validating closure input and proposals")
+			}
 			boundary := func(_, _ *graph.Node) bool { return true }
 			makeCall := setStateProofOutput
 			isApple := closureTestApple
@@ -84,6 +95,8 @@ func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
 			switch mode {
 			case "fanout":
 				cap = 0
+			case "nil receipts":
+				receipts = nil
 			case "nil boundary":
 				boundary = nil
 			case "nil builder":
@@ -109,9 +122,7 @@ func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
 				}
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
-			stats, err := b.RebuildClosureCollection(t.Context(), func(func(ParseFacts, error) bool) {
-				t.Fatal("replayed receipts before validating closure input and proposals")
-			}, cap, boundary, makeCall, isApple)
+			stats, err := b.RebuildClosureCollection(t.Context(), receipts, cap, boundary, makeCall, isApple)
 			require.ErrorIs(t, err, ErrRebuildClosureCollection)
 			require.ErrorContains(t, err, want)
 			if mode != "scratch occupied" {
