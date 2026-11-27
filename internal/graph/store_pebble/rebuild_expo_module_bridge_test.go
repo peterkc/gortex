@@ -199,6 +199,49 @@ func TestRebuildReactNativeBridgeRejectsNilFamilyAdapter(t *testing.T) {
 	require.Zero(t, stats)
 }
 
+func TestRebuildNativeModuleBridgeFamilyPrecheckRejectsNodeIdentity(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	b.AddNode(&graph.Node{ID: "a-web", Kind: graph.KindFile, Language: "typescript"})
+	raw, err := encodeNode(&graph.Node{ID: "different", Kind: graph.KindFile, Language: "swift"})
+	require.NoError(t, err)
+	require.NoError(t, b.pending.Set(pendingNodeKey("z-apple"), raw, pebble.NoSync))
+	before := rebuildFrameworkCustodyRows(t, b)
+	receipts := func(func(ParseFacts, error) bool) {
+		t.Fatal("family precheck must not read receipts")
+	}
+	isCall := func(*graph.Edge) bool {
+		t.Fatal("family precheck must not read Calls")
+		return false
+	}
+	makeCall := func(*graph.Edge, *graph.Node) *graph.Edge {
+		t.Fatal("family precheck must not elect an output")
+		return nil
+	}
+	isApple := func(language string) bool { return language == "swift" }
+	rn, err := b.RebuildReactNativeBridge(t.Context(), receipts, isApple, isCall, makeCall)
+	require.ErrorIs(t, err, ErrRebuildReactNativeBridge)
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "React Native bridge node identity")
+	require.Zero(t, rn)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+
+	expo, err := b.RebuildExpoModuleBridge(t.Context(), receipts, 3, func(language string) uint8 {
+		switch language {
+		case "typescript":
+			return 1
+		case "swift":
+			return 2
+		default:
+			return 0
+		}
+	}, isCall, makeCall)
+	require.ErrorIs(t, err, ErrRebuildExpoModuleBridge)
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "Expo module bridge node identity")
+	require.Zero(t, expo)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
 func TestRebuildNativeModuleBridgeCaptureCountsLostCustodyOutputs(t *testing.T) {
 	for _, name := range []string{"React Native", "Expo"} {
 		t.Run(name, func(t *testing.T) {

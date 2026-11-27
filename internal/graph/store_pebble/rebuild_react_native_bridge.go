@@ -59,24 +59,22 @@ func (b *BuildStore) RebuildExpoModuleBridge(ctx context.Context, receipts iter.
 	required uint8, family func(string) uint8, isCall func(*graph.Edge) bool, buildCall func(*graph.Edge, *graph.Node) *graph.Edge,
 ) (RebuildExpoModuleBridgeStats, error) {
 	return b.rebuildNativeModuleBridge(ctx, receipts, rebuildNativeModuleBridgePolicy{
-		stage:            ErrRebuildExpoModuleBridge,
-		label:            "Expo module bridge",
-		proof:            rebuildProofExpoModules,
-		names:            rebuildExpoNames,
-		family:           family,
-		required:         required,
-		precheckFamilies: true,
+		stage:    ErrRebuildExpoModuleBridge,
+		label:    "Expo module bridge",
+		proof:    rebuildProofExpoModules,
+		names:    rebuildExpoNames,
+		family:   family,
+		required: required,
 	}, isCall, buildCall)
 }
 
 type rebuildNativeModuleBridgePolicy struct {
-	stage            error
-	label            string
-	proof            rebuildEdgeProof
-	names            func(map[string]any) (string, string)
-	family           func(string) uint8
-	required         uint8
-	precheckFamilies bool
+	stage    error
+	label    string
+	proof    rebuildEdgeProof
+	names    func(map[string]any) (string, string)
+	family   func(string) uint8
+	required uint8
 }
 
 func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
@@ -98,7 +96,7 @@ func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts ite
 	if busy {
 		return stats, invalid(policy.label + " scratch range occupied")
 	}
-	if policy.precheckFamilies && policy.required != 0 {
+	if policy.required != 0 {
 		var families uint8
 		ready, err := b.RebuildView().hasLightNode(ctx, policy.label, func(n *graph.Node) bool {
 			families |= policy.family(n.Language)
@@ -212,15 +210,8 @@ func checkedRebuildLightNode(r row, label string) (*graph.Node, error) {
 
 func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*graph.Edge) bool) (bool, error) {
 	view := p.b.RebuildView()
-	var families uint8
-	if p.policy.precheckFamilies {
-		families = p.policy.required
-	}
 	var methods bool
 	if err := view.VisitNodes(ctx, func(n *graph.Node) error {
-		if families&p.policy.required != p.policy.required {
-			families |= p.policy.family(n.Language)
-		}
 		mod, method := p.policy.names(n.Meta)
 		if n.Kind != graph.KindMethod || n.ID == "" || mod == "" || method == "" {
 			return nil
@@ -241,7 +232,7 @@ func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*gra
 			}
 		}
 		return p.put(rebuildRNKey('n', mod, method, n.ID), nil)
-	}); err != nil || families&p.policy.required != p.policy.required || !methods {
+	}); err != nil || !methods {
 		return false, err
 	}
 	err := view.VisitEdges(ctx, func(e *graph.Edge) error {
