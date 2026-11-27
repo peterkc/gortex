@@ -233,3 +233,54 @@ func TestRebuildFrozenMainGoExtern(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildFrozenMainGoReceiverReceiptOrder(t *testing.T) {
+	const methodFile, pluginFile, typeFile = "pkg/m.go", "pkg/a.go", "pkg/types.go"
+	const pythonFile = "deferred.py"
+	method := &graph.Node{ID: methodFile + "::T.M", Name: "M", Kind: graph.KindMethod, FilePath: methodFile, Language: "go"}
+	receiver := &graph.Node{ID: typeFile + "::T", Name: "T", Kind: graph.KindType, FilePath: typeFile, Language: "go"}
+	first := &graph.Edge{From: method.ID, To: methodFile + "::T", Kind: graph.EdgeMemberOf, FilePath: methodFile, Line: 2,
+		Meta: map[string]any{"producer": "parser"}}
+	second := *first
+	second.To = pluginFile + "::T"
+	second.Meta = map[string]any{"producer": "plugin"}
+	require.True(t, first.To > second.To)
+	// An original pending edge enables the native main tail even when the
+	// extractor census leaves that deferred caller out of main linking.
+	deferred := &graph.Edge{From: pythonFile + "::run", To: "unresolved::Target", Kind: graph.EdgeCalls, FilePath: pythonFile, Line: 3}
+	deferredCaller := &graph.Node{ID: deferred.From, Name: "run", Kind: graph.KindFunction, FilePath: pythonFile, Language: "python"}
+	facts := []store_pebble.ParseFacts{
+		{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: methodFile, NodeCount: 1}, Nodes: []*graph.Node{method}, Edges: []*graph.Edge{first}},
+		{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: pluginFile}, Edges: []*graph.Edge{&second}},
+		{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: typeFile, NodeCount: 1}, Nodes: []*graph.Node{receiver}},
+		{EffectiveLanguage: "python", File: graph.FileMetaRow{FilePath: pythonFile, NodeCount: 1}, Nodes: []*graph.Node{deferredCaller}, Edges: []*graph.Edge{deferred}},
+	}
+	lease := t.TempDir()
+	build, err := store_pebble.OpenBuild(filepath.Join(lease, "working"), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, build.Close()) })
+	census := &rebuildExtractorCensus{
+		admitted:          uint64(len(facts)),
+		byPath:            map[string]string{methodFile: "go", pluginFile: "go", typeFile: "go", pythonFile: "python"},
+		originByGraphPath: map[string]string{methodFile: methodFile, pluginFile: pluginFile, typeFile: typeFile, pythonFile: pythonFile},
+		receipts: func(yield func(store_pebble.ParseFacts, error) bool) {
+			for _, f := range facts {
+				if !yield(f, nil) {
+					return
+				}
+			}
+		},
+	}
+	for _, f := range facts {
+		require.NoError(t, build.AddParsedFile("", f))
+	}
+	require.NoError(t, runRebuildFrozenMain(t.Context(), lease, rebuildDigest{}, build, census, rebuildTestLinkOptions(t), false))
+	winner := *first
+	winner.To = receiver.ID
+	var saved []*graph.Edge
+	require.NoError(t, build.RebuildView().VisitEdges(t.Context(), func(e *graph.Edge) error {
+		saved = append(saved, e)
+		return nil
+	}))
+	require.ElementsMatch(t, []*graph.Edge{&winner, deferred}, saved)
+}
