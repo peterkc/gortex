@@ -37,8 +37,8 @@ func TestContractParseFactsPreserveBytesAndTypes(t *testing.T) {
 		Meta: map[string]any{
 			"status_codes": []int{203, 200}, "nil_codes": []int(nil), "empty_codes": []int{},
 			"response_envelope": []map[string]any{nil, {}, {"type": dto, "note": "\xf5"}},
-			"guards":           []map[string]string{{"field": "\xfe", "value": "x"}, nil, {}},
-			"nested":           []any{nil, []string(nil), []string{}, map[string]any(nil), map[string]any{}, int64(-8), uint64(9)},
+			"guards":            []map[string]string{{"field": "\xfe", "value": "x"}, nil, {}},
+			"nested":            []any{nil, []string(nil), []string{}, map[string]any(nil), map[string]any{}, int64(-8), uint64(9)},
 		},
 	}
 	question := contracts.EndpointContractQuestion{
