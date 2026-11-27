@@ -61,15 +61,11 @@ func resolveReactHooksContext(g graph.Store, cands *frameworkPassCandidates) int
 	var reindex []graph.EdgeReindex
 	for _, stream := range []iter.Seq[*graph.Edge]{callsStream, refsStream, g.EdgesByKind(graph.EdgeRendersChild)} {
 		for e := range stream {
-			if e == nil || !graph.IsUnresolvedTarget(e.To) {
+			if e == nil {
 				continue
 			}
-			head := graph.UnresolvedName(e.To)
-			if i := strings.IndexByte(head, '.'); i >= 0 { // member expr `AuthContext.Provider`
-				head = head[:i]
-			}
 			via, _ := e.Meta["via"].(string)
-			suffix, preferDirs, ok := reactResolveShape(head, via)
+			head, suffix, preferDirs, ok := reactResolveEdgeShape(e.To, via)
 			if !ok {
 				continue
 			}
@@ -84,13 +80,7 @@ func resolveReactHooksContext(g graph.Store, cands *frameworkPassCandidates) int
 			if targetID == "" {
 				continue
 			}
-			oldTo := e.To
-			e.To = targetID
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = conf
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, conf)
-			StampSynthesized(e, SynthReactResolve)
-			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+			reindex = append(reindex, reactResolveRebind(e, targetID, conf))
 			resolved++
 		}
 	}
@@ -98,6 +88,30 @@ func resolveReactHooksContext(g graph.Store, cands *frameworkPassCandidates) int
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func reactResolveRebind(e *graph.Edge, targetID string, conf float64) graph.EdgeReindex {
+	oldTo := e.To
+	e.To = targetID
+	e.Origin = graph.OriginASTInferred
+	e.Confidence = conf
+	e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, conf)
+	StampSynthesized(e, SynthReactResolve)
+	return graph.EdgeReindex{Edge: e, OldTo: oldTo}
+}
+
+// reactResolveEdgeShape is shared by admission and the live pass. The caller
+// supplies its own via extraction, so the census still uses its projection.
+func reactResolveEdgeShape(target, via string) (head, suffix string, preferDirs []string, ok bool) {
+	if !graph.IsUnresolvedTarget(target) {
+		return "", "", nil, false
+	}
+	head = graph.UnresolvedName(target)
+	if i := strings.IndexByte(head, '.'); i >= 0 { // member expr `AuthContext.Provider`
+		head = head[:i]
+	}
+	suffix, preferDirs, ok = reactResolveShape(head, via)
+	return head, suffix, preferDirs, ok
 }
 
 // reactResolveShape classifies an unresolved reference head into the

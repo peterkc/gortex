@@ -396,14 +396,7 @@ func uikitCandidateEdge(e graph.FrameworkCensusEdge) bool {
 }
 
 func reactCandidateEdge(e graph.FrameworkCensusEdge) bool {
-	if !graph.IsUnresolvedTarget(e.To) {
-		return false
-	}
-	head := graph.UnresolvedName(e.To)
-	if i := strings.IndexByte(head, '.'); i >= 0 {
-		head = head[:i]
-	}
-	_, _, ok := reactResolveShape(head, e.Via)
+	_, _, _, ok := reactResolveEdgeShape(e.To, e.Via)
 	return ok
 }
 
