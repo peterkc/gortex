@@ -23,6 +23,8 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 		SynthReactSetState, SynthFlutterSetState, SynthKMPExpectActual, SynthExpoModules, SynthFabric, SynthMyBatis,
 		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthNgRxEffect,
 		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery, SynthSpringEvent, SynthMediatR, SynthCSharpDIIfaces, SynthCSharpIfaceDispatch, SynthCSharpEFCoreModels, SynthSidekiq, SynthLaravelEvent, SynthFnPointerDispatch, SynthMacroExpansion, SynthGinMiddleware, SynthExpressResolve, SynthReactResolve, SynthFastAPIResolve, SynthRailsResolve, SynthGodotAutoload, SynthGodotPreloadAlias, SynthSwiftUIResolve, SynthUIKitResolve, SynthVaporResolve, SynthGoFrameRoute, SynthSvelteKitLoad, SynthFactoryChain, SynthFnValue, SynthValueRefName,
+		// Wire 99 reads the native admission verdict for these skipped turns.
+		SynthGodotConnection, SynthRustScope, SynthPascalFormName,
 	} {
 		if selection.allows(name) {
 			frozen.names[name] = struct{}{}

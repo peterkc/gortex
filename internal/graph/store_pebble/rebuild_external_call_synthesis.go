@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/pathkey"
 )
 
 // ErrRebuildExternalCallSynthesis marks a failed private external-call pass.
@@ -25,12 +27,16 @@ type RebuildExternalCallCandidate struct {
 }
 
 // RebuildExternalCallRules supplies native classification and the uncertain
-// effects of skipped producers. The callbacks do not mutate the working graph.
+// effects of skipped producers. Candidate reads the edge identity and caller
+// language. Maybe's payload predicates may veto but not add a lexical result.
+// MayChangeLive distinguishes a terminal removal from an in-place refresh.
+// The callbacks do not mutate the working graph.
 type RebuildExternalCallRules struct {
-	Candidate func(*graph.Edge, *graph.Node) (RebuildExternalCallCandidate, bool)
-	Maybe     func(e *graph.Edge, caller *graph.Node, receiptLanguage string, live bool) []RebuildExternalCallCandidate
-	Rebind    func(*graph.Edge, string, string) graph.EdgeReindex
-	Extra     func(context.Context, RebuildView, func(*graph.Edge, RebuildExternalCallCandidate) error) error
+	Candidate     func(*graph.Edge, *graph.Node) (RebuildExternalCallCandidate, bool)
+	Maybe         func(e *graph.Edge, caller *graph.Node, receiptLanguage string) []RebuildExternalCallCandidate
+	MayChangeLive func(context.Context, RebuildView, *graph.Edge, *graph.Node) (remove, refresh bool, err error)
+	Rebind        func(*graph.Edge, string, string) graph.EdgeReindex
+	Extra         func(context.Context, RebuildView, func(*graph.Edge, RebuildExternalCallCandidate) error) error
 }
 
 const rebuildExternalCallRowBytes = 16 << 20
@@ -50,8 +56,8 @@ type rebuildExternalCallPass struct {
 // RebuildExternalCallSynthesis runs under the worker's exclusive stage
 // ownership. The pending index stores receipt keys, ordered votes and mutation
 // plans on disk. All retained-effect proof finishes before any graph write.
-// The count is native's selected rebind attempts, including occupied targets
-// but not converging loser deletes or rows already pointing at a package node.
+// The count matches native: stationary package edges and selected rebind
+// attempts, including occupied targets but not converging loser deletes.
 func (b *BuildStore) RebuildExternalCallSynthesis(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules RebuildExternalCallRules) (count uint64, err error) {
 	defer func() {
 		if err != nil {
@@ -65,7 +71,7 @@ func (b *BuildStore) RebuildExternalCallSynthesis(ctx context.Context, receipts 
 	if err := view.mutationError(); err != nil {
 		return 0, err
 	}
-	prefix := rebuildExternalCallColumn(0)[:2]
+	prefix := rebuildExternalCallColumn(0)[:rebuildExternalCallColumnBytes-1]
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, prefix)
 	if err != nil {
 		return 0, err
@@ -92,17 +98,30 @@ func (b *BuildStore) RebuildExternalCallSynthesis(ctx context.Context, receipts 
 	if err := p.groups(ctx); err != nil {
 		return 0, err
 	}
+	if err := p.checkChunkCallers(ctx); err != nil {
+		return 0, err
+	}
 	if err := p.packages(ctx); err != nil {
 		return 0, err
 	}
 	return p.count, b.withWrites(func() error { return p.apply(ctx) })
 }
 
-// Scratch columns: file authority f, exact receipts r, absent receipt inputs h,
+// Scratch columns: file authority f, first receipt digests r and raw inputs h,
+// caller languages a, incumbent node digests i, duplicate receipts j,
 // consumed raw keys c, deferred receipt keys u, site votes g, package votes p,
-// retained packages t, and the checked mutation plan (node n, delete d, move m,
-// custody l).
-func rebuildExternalCallColumn(column byte) []byte { return []byte{'g', '9', column} }
+// missing synthetic callers w, retained packages t, payload refreshes y, and
+// the checked mutation
+// plan (node n, delete d, move m, custody l).
+const rebuildExternalCallColumnBytes = 4
+
+func rebuildExternalCallColumn(column byte) []byte { return []byte{'g', '9', 'x', column} }
+
+// The prior stage's exact node digest lives outside the temporary columns.
+// It is private to the build and proves a package on an idempotent rerun.
+func rebuildExternalCallPackageProofKey(id string) []byte {
+	return keyStrings([]byte{'g', '9', 's'}, id)
+}
 
 func (p *rebuildExternalCallPass) put(key, value []byte) error {
 	return p.b.putRebuildScratch(key, value, rebuildExternalCallRowBytes, "external-call synthesis")
@@ -134,12 +153,13 @@ func rebuildExternalCallTarget(to string) bool {
 		graph.IsStdlibStub(to) || strings.HasPrefix(to, "external::") || graph.IsUnresolvedTarget(to))
 }
 
-func rebuildExternalCallRetained(lang string) bool {
+// IsRebuildExternalCallRetained reports the extractor languages retained by the link projection.
+func IsRebuildExternalCallRetained(lang string) bool {
 	return lang == "go" || lang == "javascript" || lang == "typescript"
 }
 
 func (p *rebuildExternalCallPass) fileLanguage(file string) (string, bool, error) {
-	raw, err := pendingGet(p.b.pending, keyStrings(rebuildExternalCallColumn('f'), file), copyValue)
+	raw, err := pendingGet(p.b.pending, keyStrings(rebuildExternalCallColumn('f'), pathkey.Normalize(file)), copyValue)
 	if err != nil || raw == nil {
 		return "", false, err
 	}
@@ -147,7 +167,6 @@ func (p *rebuildExternalCallPass) fileLanguage(file string) (string, bool, error
 }
 
 func (p *rebuildExternalCallPass) receipts(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
-	var ordinal uint64
 	for f, err := range receipts {
 		if err != nil {
 			return err
@@ -156,7 +175,8 @@ func (p *rebuildExternalCallPass) receipts(ctx context.Context, receipts iter.Se
 			return err
 		}
 		lang := f.EffectiveLanguage
-		prev, seen, err := p.fileLanguage(f.File.FilePath)
+		file := pathkey.Normalize(f.File.FilePath)
+		prev, seen, err := p.fileLanguage(file)
 		if err != nil {
 			return err
 		}
@@ -164,57 +184,90 @@ func (p *rebuildExternalCallPass) receipts(ctx context.Context, receipts iter.Se
 			return invalid("conflicting external-call receipt file languages")
 		}
 		if !seen {
-			if err := p.put(keyStrings(rebuildExternalCallColumn('f'), f.File.FilePath), append([]byte{1}, lang...)); err != nil {
+			if err := p.put(keyStrings(rebuildExternalCallColumn('f'), file), append([]byte{1}, lang...)); err != nil {
 				return err
+			}
+		}
+		for _, n := range f.Nodes {
+			if n == nil {
+				continue
+			}
+			// Native nodes upsert, unlike converging edge rebinds. The caller
+			// classification needs only Language, not the rest of its payload.
+			if err := p.put(keyStrings(rebuildExternalCallColumn('a'), n.ID), append([]byte{1}, n.Language...)); err != nil {
+				return err
+			}
+			if strings.HasPrefix(n.ID, "external-call::") {
+				digest, err := rebuildExternalCallNodeDigest(n)
+				if err != nil {
+					return err
+				}
+				if err := p.put(keyStrings(rebuildExternalCallColumn('i'), n.ID), digest[:]); err != nil {
+					return err
+				}
 			}
 		}
 		for _, e := range f.Edges {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if e == nil || !rebuildReceiptInputKind(e.Kind) {
+			if e == nil || !rebuildExternalCallKind(e.Kind) {
 				continue
 			}
 			key := pendingEdgeKey(e)
-			if err := p.put(append(rebuildExternalCallColumn('r'), key...), nil); err != nil {
-				return err
-			}
-			if !rebuildExternalCallKind(e.Kind) || !rebuildExternalCallTarget(e.To) {
-				continue
-			}
-			exact, err := p.present(key)
+			receipt := append(rebuildExternalCallColumn('r'), key...)
+			first, err := pendingGet(p.b.pending, receipt, copyValue)
 			if err != nil {
 				return err
-			}
-			if lang != "" && !rebuildExternalCallRetained(lang) {
-				// A configured extractor can record an edge at another file's
-				// path. File language alone cannot prove its terminal survived.
-				if err := p.put(append(rebuildExternalCallColumn('u'), key...), []byte(lang)); err != nil {
-					return err
-				}
-			}
-			if exact {
-				// The live scan owns this incarnation, not a receipt ghost.
-				continue
 			}
 			raw, err := encodeEdge(e)
 			if err != nil {
 				return err
 			}
-			// An ordinal preserves multiple absent witnesses at one raw key.
-			key = binary.BigEndian.AppendUint64(rebuildExternalCallColumn('h'), ordinal)
-			if err := p.put(key, append(appendKeyString(nil, lang), raw...)); err != nil {
+			digest := sha256.Sum256(raw)
+			if first != nil {
+				if !bytes.Equal(first, digest[:]) {
+					if err := p.put(append(rebuildExternalCallColumn('j'), key...), nil); err != nil {
+						return err
+					}
+				}
+				// Native rebind keeps the first payload at a duplicate identity.
+				continue
+			}
+			if err := p.put(receipt, digest[:]); err != nil {
 				return err
 			}
-			ordinal++
+			deferred := lang != "" && !IsRebuildExternalCallRetained(lang)
+			if deferred {
+				// This authority belongs to the extractor, not necessarily the
+				// file recorded by its edge or the caller node's language.
+				if err := p.put(append(rebuildExternalCallColumn('u'), key...), []byte(lang)); err != nil {
+					return err
+				}
+			}
+			if !rebuildExternalCallTarget(e.To) && !strings.HasPrefix(e.To, "external-call::") {
+				continue
+			}
+			// Store first raw inputs even when live: a deferred receipt can
+			// have reached a different, non-terminal native successor.
+			h := append(rebuildExternalCallColumn('h'), key...)
+			value := appendKeyString(nil, lang)
+			if len(h)+len(value)+len(raw) <= rebuildExternalCallRowBytes {
+				value = append(value, raw...)
+			}
+			// Keep an oversized-input marker. Only a consulted receipt can
+			// refuse; a stationary, non-voting stdlib row cannot.
+			if err := p.put(h, value); err != nil {
+				return err
+			}
 		}
 	}
 	return ctx.Err()
 }
 
-func (p *rebuildExternalCallPass) node(id string, decode decodeRow[*graph.Node]) (*graph.Node, error) {
+func readRebuildExternalCallNode(reader pebble.Reader, id string, decode decodeRow[*graph.Node]) (*graph.Node, error) {
 	key := pendingNodeKey(id)
-	return pendingGet(p.b.pending, key, func(value []byte) (*graph.Node, error) {
+	return pendingGet(reader, key, func(value []byte) (*graph.Node, error) {
 		if err := rebuildExternalCallInput(key, value); err != nil {
 			return nil, err
 		}
@@ -224,6 +277,22 @@ func (p *rebuildExternalCallPass) node(id string, decode decodeRow[*graph.Node])
 		}
 		return n, err
 	})
+}
+
+// caller reads the classification projection without charging unrelated
+// metadata. A voting row must subsequently charge the bytes it consulted.
+func (p *rebuildExternalCallPass) caller(id string) (*graph.Node, bool, error) {
+	key := pendingNodeKey(id)
+	var oversized bool
+	n, err := pendingGet(p.b.pending, key, func(value []byte) (*graph.Node, error) {
+		oversized = len(key)+len(value) > rebuildExternalCallRowBytes
+		n, err := decodeNodeLight(value)
+		if err == nil && n.ID != id {
+			return nil, invalid("external-call node does not match key")
+		}
+		return n, err
+	})
+	return n, oversized, err
 }
 
 func (p *rebuildExternalCallPass) edge(key []byte) (*graph.Edge, error) {
@@ -244,6 +313,10 @@ func (p *rebuildExternalCallPass) edge(key []byte) (*graph.Edge, error) {
 // to the live payload; untracked moves never prove receipt or producer custody.
 func (p *rebuildExternalCallPass) custody(key []byte) (rebuildEdgeCustody, bool, error) {
 	c, err := readRebuildEdgeCustody(p.b.pending, key)
+	var stale *RebuildUnknownProvenanceError
+	if errors.As(err, &stale) {
+		return rebuildEdgeCustody{proof: rebuildProofUntrackedMove}, false, nil
+	}
 	if err != nil || c.proof != 0 {
 		return c, err == nil && c.proof != rebuildProofUntrackedMove, err
 	}
@@ -257,20 +330,30 @@ func (p *rebuildExternalCallPass) custody(key []byte) (rebuildEdgeCustody, bool,
 	return c, true, err
 }
 
+// receiptCaller returns the native parse caller's language, if a receipt
+// establishes it. An absent receipt is not a claim about a generated caller.
+func (p *rebuildExternalCallPass) receiptCaller(id string) (*graph.Node, error) {
+	raw, err := pendingGet(p.b.pending, keyStrings(rebuildExternalCallColumn('a'), id), copyValue)
+	if err != nil || raw == nil {
+		return nil, err
+	}
+	return &graph.Node{ID: id, Language: string(raw[1:])}, nil
+}
+
 func (p *rebuildExternalCallPass) receiptEntrants(ctx context.Context) error {
 	if err := pendingVisit(ctx, p.b.pending, rebuildLinkRecorderPrefix, func(r row) error {
 		if len(r.value) < 2 || r.value[0] != familyEdge || r.value[1] != edgeOut {
 			return nil
 		}
 		raw, err := decodeLinkRecorder(r.value)
-		if err != nil || !rebuildExternalCallKind(raw.Kind) || !rebuildExternalCallTarget(raw.To) {
+		if err != nil || !rebuildExternalCallKind(raw.Kind) {
 			return err
 		}
 		live, err := p.present(r.key[len(rebuildLinkRecorderPrefix):])
 		if err != nil || !live {
 			return err
 		}
-		return p.put(append(rebuildExternalCallColumn('c'), r.value...), nil)
+		return p.put(append(rebuildExternalCallColumn('c'), r.value...), r.key[len(rebuildLinkRecorderPrefix):])
 	}); err != nil {
 		return err
 	}
@@ -279,20 +362,76 @@ func (p *rebuildExternalCallPass) receiptEntrants(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		e, err := decodeEdge(raw)
+		key := r.key[rebuildExternalCallColumnBytes:]
+		exact, err := p.present(key)
+		if err != nil || exact {
+			return err
+		}
+		consumed, err := pendingGet(p.b.pending, append(rebuildExternalCallColumn('c'), key...), copyValue)
 		if err != nil {
 			return err
 		}
-		consumed, err := p.present(append(rebuildExternalCallColumn('c'), pendingEdgeKey(e)...))
-		if err != nil || consumed {
-			return err
+		deferred := lang != "" && !IsRebuildExternalCallRetained(lang)
+		if consumed != nil {
+			id, err := decodeLinkRecorder(consumed)
+			if err != nil {
+				return err
+			}
+			if !deferred || strings.HasPrefix(id.To, "external-call::") {
+				return nil
+			}
 		}
-		caller, err := p.node(e.From, decodeNodeLight)
+		id, err := decodeLinkRecorder(key)
 		if err != nil {
 			return err
 		}
-		for _, candidate := range p.rules.Maybe(e, caller, lang, false) {
-			if err := p.possible(e, candidate); err != nil {
+		e := &graph.Edge{From: id.From, To: id.To, Kind: id.Kind, FilePath: id.FilePath, Line: id.Line}
+		if len(raw) != 0 {
+			e, err = decodeEdge(raw)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(key, pendingEdgeKey(e)) {
+				return invalid("external-call receipt edge does not match key")
+			}
+		}
+		caller, err := p.receiptCaller(e.From)
+		if err != nil {
+			return err
+		}
+		if caller == nil {
+			caller, err = readRebuildExternalCallNode(p.b.pending, e.From, decodeNodeLight)
+			if err != nil {
+				return err
+			}
+		}
+		if len(raw) == 0 {
+			_, eligible := p.rules.Candidate(e, caller)
+			if eligible || len(p.rules.Maybe(e, caller, lang)) != 0 {
+				return fmt.Errorf("%w: external-call receipt input", ErrRebuildLinkInputSize)
+			}
+			return nil
+		}
+		// A retained receipt can be missing without a proved consuming move.
+		// A deferred predecessor can also survive at its original terminal.
+		if candidate, ok := p.rules.Candidate(e, caller); ok {
+			if err := p.possibleInput(e, candidate, consumed != nil); err != nil {
+				return err
+			}
+		}
+		for _, candidate := range p.rules.Maybe(e, caller, lang) {
+			if consumed != nil {
+				id, err := decodeLinkRecorder(consumed)
+				if err != nil {
+					return err
+				}
+				// The exact same native landing is already represented by the
+				// live vote. It is not a second deletion obligation.
+				if id.From == e.From && id.Kind == e.Kind && id.FilePath == e.FilePath && id.Line == e.Line && id.To == candidate.OldTo {
+					continue
+				}
+			}
+			if err := p.possibleInput(e, candidate, consumed != nil); err != nil {
 				return err
 			}
 		}
@@ -312,39 +451,56 @@ func (p *rebuildExternalCallPass) live(ctx context.Context, view RebuildView) er
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			_, rest, err := readKeyString(it.Key()[len(prefix):])
+			id, err := decodeLinkRecorder(it.Key())
 			if err != nil {
 				return err
 			}
-			kind, rest, err := readKeyString(rest)
-			if err != nil {
-				return err
-			}
-			if !rebuildExternalCallKind(graph.EdgeKind(kind)) {
+			if !rebuildExternalCallKind(id.Kind) {
 				continue
 			}
-			to, _, err := readKeyString(rest)
+			key := it.Key()
+			custody, exact, err := p.custody(key)
 			if err != nil {
 				return err
 			}
-			if !rebuildExternalCallTarget(to) {
+			rawKey := key
+			if custody.raw != nil {
+				rawKey = custody.raw
+			}
+			deferred, err := pendingGet(p.b.pending, append(rebuildExternalCallColumn('u'), rawKey...), copyValue)
+			if err != nil {
+				return err
+			}
+			stationary := strings.HasPrefix(id.To, "external-call::")
+			// Read extractor authority before testing the live target. A raw
+			// deferred call can already point at a non-terminal main result.
+			if !stationary && !rebuildExternalCallTarget(id.To) && len(deferred) == 0 {
+				continue
+			}
+			// Non-terminal moved inputs are handled via their raw receipt in
+			// receiptEntrants; don't decode a live row that cannot vote here.
+			if !stationary && !rebuildExternalCallTarget(id.To) && !bytes.Equal(key, rawKey) {
 				continue
 			}
 			value, err := it.ValueAndErr()
 			if err != nil {
 				return err
 			}
-			if err := rebuildExternalCallInput(it.Key(), value); err != nil {
-				return err
-			}
-			e, err := decodeEdge(value)
+			e, err := decodeEdgeLight(value)
 			if err != nil {
 				return err
 			}
-			if !bytes.Equal(it.Key(), pendingEdgeKey(e)) {
+			if !bytes.Equal(key, pendingEdgeKey(e)) {
 				return invalid("external-call live edge does not match key")
 			}
-			if err := p.liveEdge(it.Key(), e); err != nil {
+			lang, _, err := p.fileLanguage(e.FilePath)
+			if err != nil {
+				return err
+			}
+			if len(deferred) != 0 {
+				lang = string(deferred)
+			}
+			if err := p.liveEdge(ctx, view, key, rawKey, value, e, lang, exact); err != nil {
 				return err
 			}
 		}
@@ -352,64 +508,223 @@ func (p *rebuildExternalCallPass) live(ctx context.Context, view RebuildView) er
 	})
 }
 
-func (p *rebuildExternalCallPass) liveEdge(key []byte, e *graph.Edge) error {
-	caller, err := p.node(e.From, decodeNodeLight)
+func (p *rebuildExternalCallPass) liveEdge(ctx context.Context, view RebuildView, key, rawKey, value []byte, e *graph.Edge, lang string, exact bool) error {
+	caller, callerLarge, err := p.caller(e.From)
 	if err != nil {
 		return err
 	}
-	lang, _, err := p.fileLanguage(e.FilePath)
+	retained, err := p.retained(e, caller)
 	if err != nil {
 		return err
+	}
+	if strings.HasPrefix(e.To, "external-call::") {
+		p.count++
+		if retained {
+			if !exact {
+				return fmt.Errorf("unproved retained external-call incumbent: %+v", graph.EdgeIdentityFor(e))
+			}
+			if err := rebuildExternalCallInput(key, value); err != nil {
+				return err
+			}
+			if err := p.put(keyStrings(rebuildExternalCallColumn('t'), e.To), nil); err != nil {
+				return err
+			}
+			if bytes.Equal(rawKey, key) {
+				return p.checkDuplicate(rawKey, value, e, "", "")
+			}
+		}
+		return nil
 	}
 	actual, eligible := p.rules.Candidate(e, caller)
-	custody, exact, err := p.custody(key)
-	if err != nil {
+	// Candidate and Maybe's initial lexical check need only light rows.
+	// Edge metadata can veto a Maybe result, but cannot add one.
+	if eligible || len(p.rules.Maybe(e, caller, lang)) != 0 {
+		if err := rebuildExternalCallInput(key, value); err != nil {
+			return err
+		}
+		e, err = decodeEdge(value)
+		if err != nil {
+			return err
+		}
+	}
+	var alternates []RebuildExternalCallCandidate
+	var mayChange, mayRefresh bool
+	if eligible && p.rules.MayChangeLive != nil {
+		mayChange, mayRefresh, err = p.rules.MayChangeLive(ctx, view, e, caller)
+		if err != nil {
+			return err
+		}
+	} else if !eligible {
+		alternates = p.rules.Maybe(e, caller, lang)
+	}
+	if rawCaller, err := p.receiptCaller(e.From); err != nil {
 		return err
+	} else if rawCaller != nil {
+		alternate, rawEligible := p.rules.Candidate(e, rawCaller)
+		if eligible != rawEligible || eligible && actual.Language != alternate.Language {
+			mayChange = true
+			if rawEligible {
+				alternates = append(alternates, alternate)
+			}
+		}
 	}
-	if custody.raw != nil {
-		key = custody.raw
+	if eligible || len(alternates) != 0 {
+		if callerLarge {
+			return fmt.Errorf("%w: external-call caller input", ErrRebuildLinkInputSize)
+		}
+		if err := rebuildExternalCallInput(key, value); err != nil {
+			return err
+		}
 	}
-	deferred, err := pendingGet(p.b.pending, append(rebuildExternalCallColumn('u'), key...), copyValue)
-	if err != nil {
-		return err
+	// Native resolves callers in mutation chunks. A missing caller with a
+	// package ID can be created by an earlier chunk of this same pass.
+	if caller == nil && strings.HasPrefix(e.From, "external-call::") && !graph.IsUnresolvedTarget(e.To) {
+		if err := p.put(append(rebuildExternalCallColumn('w'), key...), nil); err != nil {
+			return err
+		}
 	}
-	if len(deferred) != 0 {
-		lang = string(deferred)
-	}
-	alternates := p.rules.Maybe(e, caller, lang, true)
 	if eligible {
 		if actual.OldTo != "" && actual.OldTo != e.To {
 			return invalid("external-call live terminal changed by candidate classifier")
 		}
 		state := externalCallCertain
-		if !exact || len(alternates) != 0 {
+		if !exact || mayChange {
 			state = externalCallOptional
 		}
-		if err := p.vote(e, actual, state); err != nil {
+		if mayRefresh && retained {
+			if err := p.put(append(rebuildExternalCallColumn('y'), key...), nil); err != nil {
+				return err
+			}
+		}
+		if err := p.vote(e, actual, state, false); err != nil {
 			return err
 		}
 	}
 	for _, alt := range alternates {
-		// A live Maybe at exactly the actual tuple described possible
-		// disappearance above, not a second way to add that same row.
+		// An identical caller vote is not a second deletion obligation.
 		if eligible && alt.Node != nil && alt.Node.ID == actual.Node.ID && alt.Language == actual.Language &&
 			(alt.OldTo == "" || alt.OldTo == e.To) {
 			continue
 		}
-		if err := p.possible(e, alt); err != nil {
+		if err := p.possibleInput(e, alt, true); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func (p *rebuildExternalCallPass) retained(e *graph.Edge, caller *graph.Node) (bool, error) {
+	lang, found, err := p.fileLanguage(e.FilePath)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		if caller != nil {
+			lang = caller.Language
+		}
+		if IsRebuildExternalCallRetained(lang) {
+			return true, nil
+		}
+		raw, err := p.receiptCaller(e.From)
+		if err != nil {
+			return false, err
+		}
+		if raw != nil {
+			lang = raw.Language
+		}
+	}
+	return IsRebuildExternalCallRetained(lang), nil
+}
+
+// Only the winning payload (or a stationary incumbent) needs duplicate
+// proof. Later losers are deleted regardless of their payload.
+func (p *rebuildExternalCallPass) checkDuplicate(rawKey, liveRaw []byte, live *graph.Edge, node, lang string) error {
+	dup, err := p.present(append(rebuildExternalCallColumn('j'), rawKey...))
+	if err != nil || !dup {
+		return err
+	}
+	first, err := pendingGet(p.b.pending, append(rebuildExternalCallColumn('r'), rawKey...), copyValue)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(liveRaw)
+	if bytes.Equal(first, digest[:]) {
+		return nil
+	}
+	if node != "" && bytes.Equal(rawKey, pendingEdgeKey(live)) {
+		// Rebind overwrites provenance/confidence and removes import hints.
+		// Compare the output payload, not those erased raw fields.
+		value, err := pendingGet(p.b.pending, append(rebuildExternalCallColumn('h'), rawKey...), copyValue)
+		if err != nil {
+			return err
+		}
+		if value != nil {
+			_, firstRaw, err := readKeyString(value)
+			if err != nil {
+				return err
+			}
+			if len(firstRaw) == 0 {
+				return fmt.Errorf("%w: external-call duplicate receipt", ErrRebuildLinkInputSize)
+			}
+			a, err := decodeEdge(firstRaw)
+			if err != nil {
+				return err
+			}
+			b, err := decodeEdge(liveRaw)
+			if err != nil {
+				return err
+			}
+			firstMove, liveMove := p.rules.Rebind(a, node, lang), p.rules.Rebind(b, node, lang)
+			if firstMove.Edge != nil && liveMove.Edge != nil {
+				left, err := encodeEdge(firstMove.Edge)
+				if err != nil {
+					return err
+				}
+				right, err := encodeEdge(liveMove.Edge)
+				if err != nil {
+					return err
+				}
+				if bytes.Equal(left, right) {
+					return nil
+				}
+			}
+		}
+	}
+	return fmt.Errorf("uncertain retained external-call duplicate payload: %+v", graph.EdgeIdentityFor(live))
+}
+
 func (p *rebuildExternalCallPass) possible(e *graph.Edge, c RebuildExternalCallCandidate) error {
-	return p.vote(e, c, externalCallPossible)
+	if e == nil || c.OldTo == "" || c.OldTo == e.To {
+		return p.possibleInput(e, c, false)
+	}
+	key := pendingEdgeKey(e)
+	exists, err := p.present(key)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		live, err := pendingGet(p.b.pending, append(rebuildExternalCallColumn('c'), key...), copyValue)
+		if err != nil {
+			return err
+		}
+		if live != nil {
+			id, err := decodeLinkRecorder(live)
+			if err != nil {
+				return err
+			}
+			exists = id.To != c.OldTo && !strings.HasPrefix(id.To, "external-call::")
+		}
+	}
+	return p.possibleInput(e, c, exists)
+}
+
+func (p *rebuildExternalCallPass) possibleInput(e *graph.Edge, c RebuildExternalCallCandidate, liveInput bool) error {
+	return p.vote(e, c, externalCallPossible, liveInput)
 }
 
 // Ordered as native: From, Kind, FilePath, signed Line, package ID, old To.
 // The final flag and language do not take part in the native comparison.
-func (p *rebuildExternalCallPass) vote(e *graph.Edge, c RebuildExternalCallCandidate, state byte) error {
+func (p *rebuildExternalCallPass) vote(e *graph.Edge, c RebuildExternalCallCandidate, state byte, liveInput bool) error {
 	if e == nil || !rebuildExternalCallKind(e.Kind) || e.From == "" || c.Node == nil ||
 		!strings.HasPrefix(c.Node.ID, "external-call::") || graph.IsProxyID(e.From) {
 		return invalid("external-call candidate identity")
@@ -428,10 +743,17 @@ func (p *rebuildExternalCallPass) vote(e *graph.Edge, c RebuildExternalCallCandi
 		// Match the whole native identity and language, not just the package.
 		key[len(key)-1] = externalCallCertain
 		exact, err := p.present(key)
-		if err != nil || exact {
+		if err != nil || exact && !liveInput {
 			return err
 		}
 		key[len(key)-1] = state
+		if liveInput {
+			return p.put(key, []byte{1})
+		}
+		seen, err := p.present(key)
+		if err != nil || seen {
+			return err
+		}
 		return p.put(key, nil)
 	}
 	if c.Node.Language != c.Language || c.Node.Kind != graph.KindModule {
@@ -494,42 +816,36 @@ func (p *rebuildExternalCallPass) groups(ctx context.Context) error {
 	var retained, occupied bool
 	var firstOld string
 	return p.visit(ctx, 'g', func(r row) error {
-		v, err := readRebuildExternalCallVote(r.key[3:])
+		voteKey := r.key[rebuildExternalCallColumnBytes:]
+		v, err := readRebuildExternalCallVote(voteKey)
 		if err != nil {
 			return err
 		}
 		if !bytes.Equal(group, v.group) {
 			group = bytes.Clone(v.group)
 			winner, first, firstOld = false, true, ""
-			lang, found, err := p.fileLanguage(v.edge.FilePath)
+			caller, _, err := p.caller(v.edge.From)
 			if err != nil {
 				return err
 			}
-			if !found {
-				caller, err := p.node(v.edge.From, decodeNodeLight)
-				if err != nil {
-					return err
-				}
-				if caller != nil {
-					lang = caller.Language
-				}
+			retained, err = p.retained(&v.edge, caller)
+			if err != nil {
+				return err
 			}
-			retained = rebuildExternalCallRetained(lang)
 			incumbent := v.edge
 			incumbent.To = v.node
 			key := pendingEdgeKey(&incumbent)
-			stored, err := p.edge(key)
+			occupied, err = p.present(key)
 			if err != nil {
 				return err
 			}
-			occupied = stored != nil
 			if occupied && retained {
 				_, exact, err := p.custody(key)
 				if err != nil {
 					return err
 				}
 				if !exact {
-					return fmt.Errorf("unproved external-call incumbent: %+v", graph.EdgeIdentityFor(stored))
+					return fmt.Errorf("unproved external-call incumbent: %+v", graph.EdgeIdentityFor(&incumbent))
 				}
 			}
 		}
@@ -537,8 +853,13 @@ func (p *rebuildExternalCallPass) groups(ctx context.Context) error {
 			if v.state == externalCallOptional {
 				return fmt.Errorf("uncertain retained external-call terminal: %+v", graph.EdgeIdentityFor(&v.edge))
 			}
-			if v.state == externalCallPossible && !occupied && (!winner || v.edge.To == firstOld) {
-				return fmt.Errorf("uncertain retained external-call winner: %+v", graph.EdgeIdentityFor(&v.edge))
+			if v.state == externalCallPossible {
+				if !occupied && (!winner || v.edge.To == firstOld) {
+					return fmt.Errorf("uncertain retained external-call winner: %+v", graph.EdgeIdentityFor(&v.edge))
+				}
+				if len(r.value) != 0 {
+					return fmt.Errorf("uncertain retained external-call deletion: %+v", graph.EdgeIdentityFor(&v.edge))
+				}
 			}
 			if first {
 				if err := p.put(keyStrings(rebuildExternalCallColumn('t'), v.node), nil); err != nil {
@@ -546,7 +867,7 @@ func (p *rebuildExternalCallPass) groups(ctx context.Context) error {
 				}
 			}
 		}
-		if err := p.put(append(keyStrings(rebuildExternalCallColumn('p'), v.node), r.key[3:]...), r.value); err != nil {
+		if err := p.put(append(keyStrings(rebuildExternalCallColumn('p'), v.node), voteKey...), r.value); err != nil {
 			return err
 		}
 		first = false
@@ -565,11 +886,11 @@ func (p *rebuildExternalCallPass) groups(ctx context.Context) error {
 		if occupied {
 			return nil
 		}
-		return p.planMove(v, old)
+		return p.planMove(v, old, retained)
 	})
 }
 
-func (p *rebuildExternalCallPass) planMove(v rebuildExternalCallVote, old []byte) error {
+func (p *rebuildExternalCallPass) planMove(v rebuildExternalCallVote, old []byte, retained bool) error {
 	e, err := p.edge(old)
 	if err != nil {
 		return err
@@ -580,6 +901,26 @@ func (p *rebuildExternalCallPass) planMove(v rebuildExternalCallVote, old []byte
 	custody, _, err := p.custody(old)
 	if err != nil {
 		return err
+	}
+	if retained {
+		refresh, err := p.present(append(rebuildExternalCallColumn('y'), old...))
+		if err != nil {
+			return err
+		}
+		if refresh {
+			return fmt.Errorf("uncertain retained external-call winner payload: %+v", graph.EdgeIdentityFor(e))
+		}
+		rawKey := old
+		if custody.raw != nil {
+			rawKey = custody.raw
+		}
+		raw, err := encodeEdge(e)
+		if err != nil {
+			return err
+		}
+		if err := p.checkDuplicate(rawKey, raw, e, v.node, v.lang); err != nil {
+			return err
+		}
 	}
 	if custody.proof != 0 && custody.proof != rebuildProofUntrackedMove {
 		custody.proof = rebuildProofExternalCallSynthesis
@@ -602,6 +943,53 @@ func (p *rebuildExternalCallPass) planMove(v rebuildExternalCallVote, old []byte
 	return p.put(append(rebuildExternalCallColumn('l'), key...), rebuildMoveCustodyBytes(custody))
 }
 
+// Native collects all terminal edges before the pass but looks up their
+// caller nodes in each mutation chunk. If a possible earlier vote could
+// create a previously missing caller, later classification is not frozen.
+// A later creator cannot affect this caller; we conservatively include any
+// earlier site (even when native might keep it in the same chunk).
+func (p *rebuildExternalCallPass) checkChunkCallers(ctx context.Context) error {
+	return p.visit(ctx, 'w', func(r row) error {
+		e, err := p.edge(r.key[rebuildExternalCallColumnBytes:])
+		if err != nil || e == nil {
+			return err
+		}
+		actual, eligible := p.rules.Candidate(e, nil)
+		retained, err := p.retained(e, nil)
+		if err != nil {
+			return err
+		}
+		if !retained && eligible {
+			retained, err = p.present(keyStrings(rebuildExternalCallColumn('t'), actual.Node.ID))
+			if err != nil {
+				return err
+			}
+		}
+		prefix := keyStrings(rebuildExternalCallColumn('p'), e.From)
+		return pendingVisit(ctx, p.b.pending, prefix, func(vote row) error {
+			v, err := readRebuildExternalCallVote(vote.key[len(prefix):])
+			if err != nil || v.edge.From > e.From {
+				return err
+			}
+			alt, ok := p.rules.Candidate(e, &graph.Node{ID: e.From, Language: v.lang})
+			if eligible == ok && (!ok || actual.Language == alt.Language) {
+				return nil
+			}
+			relevant := retained
+			if !relevant && ok {
+				relevant, err = p.present(keyStrings(rebuildExternalCallColumn('t'), alt.Node.ID))
+				if err != nil {
+					return err
+				}
+			}
+			if relevant {
+				return fmt.Errorf("uncertain retained external-call chunk caller: %q", e.From)
+			}
+			return nil
+		})
+	})
+}
+
 // A possible first creator is any vote before (or at) the first certain
 // actual row. Track the whole frontier: removing an optional early creator
 // can expose a different language even with no entrant before the live winner.
@@ -616,7 +1004,7 @@ func (p *rebuildExternalCallPass) packages(ctx context.Context) error {
 		return nil
 	}
 	if err := p.visit(ctx, 'p', func(r row) error {
-		node, rest, err := readKeyString(r.key[3:])
+		node, rest, err := readKeyString(r.key[rebuildExternalCallColumnBytes:])
 		if err != nil {
 			return err
 		}
@@ -626,12 +1014,11 @@ func (p *rebuildExternalCallPass) packages(ctx context.Context) error {
 			}
 			id, lang, certainOrder = node, "", nil
 			voted, different, actual = false, false, false
-			n, err := p.node(id, decodeNode)
+			retained, err = p.present(keyStrings(rebuildExternalCallColumn('t'), id))
 			if err != nil {
 				return err
 			}
-			existing = n != nil
-			retained, err = p.present(keyStrings(rebuildExternalCallColumn('t'), id))
+			existing, err = p.present(pendingNodeKey(id))
 			if err != nil {
 				return err
 			}
@@ -660,7 +1047,64 @@ func (p *rebuildExternalCallPass) packages(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	return finish()
+	if err := finish(); err != nil {
+		return err
+	}
+	return p.visit(ctx, 't', func(r row) error {
+		id, _, err := readKeyString(r.key[rebuildExternalCallColumnBytes:])
+		if err != nil {
+			return err
+		}
+		return p.provePackage(id)
+	})
+}
+
+func rebuildExternalCallNodeDigest(n *graph.Node) ([sha256.Size]byte, error) {
+	portable := *n
+	portable.RepoPrefix, portable.WorkspaceID, portable.ProjectID, portable.AbsoluteFilePath = "", "", "", ""
+	portable.FilePath = pathkey.Normalize(portable.FilePath)
+	raw, err := encodeNode(&portable)
+	return sha256.Sum256(raw), err
+}
+
+func (p *rebuildExternalCallPass) provePackage(id string) error {
+	receipt, err := pendingGet(p.b.pending, keyStrings(rebuildExternalCallColumn('i'), id), copyValue)
+	if err != nil {
+		return err
+	}
+	n, err := readRebuildExternalCallNode(p.b.pending, id, decodeNode)
+	if err != nil {
+		return err
+	}
+	if n == nil && receipt == nil {
+		return nil
+	}
+	if receipt != nil && n != nil {
+		digest, err := rebuildExternalCallNodeDigest(n)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(receipt, digest[:]) {
+			return nil
+		}
+	}
+	if receipt == nil && n != nil {
+		prior, err := pendingGet(p.b.pending, rebuildExternalCallPackageProofKey(id), copyValue)
+		if err != nil {
+			return err
+		}
+		if prior != nil {
+			raw, err := encodeNode(n)
+			if err != nil {
+				return err
+			}
+			digest := sha256.Sum256(raw)
+			if bytes.Equal(prior, digest[:]) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("unproved retained external-call package incumbent: %q", id)
 }
 
 func (p *rebuildExternalCallPass) apply(ctx context.Context) error {
@@ -669,12 +1113,16 @@ func (p *rebuildExternalCallPass) apply(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		return p.b.writeNode(n)
+		if err := p.b.writeNode(n); err != nil {
+			return err
+		}
+		digest := sha256.Sum256(r.value)
+		return p.b.pending.Set(rebuildExternalCallPackageProofKey(n.ID), digest[:], pebble.NoSync)
 	}); err != nil {
 		return err
 	}
 	if err := p.visit(ctx, 'd', func(r row) error {
-		key := r.key[3:]
+		key := r.key[rebuildExternalCallColumnBytes:]
 		e, err := p.edge(key)
 		if err != nil {
 			return err
@@ -687,7 +1135,7 @@ func (p *rebuildExternalCallPass) apply(ctx context.Context) error {
 		return err
 	}
 	return p.visit(ctx, 'm', func(r row) error {
-		key := r.key[3:]
+		key := r.key[rebuildExternalCallColumnBytes:]
 		e, err := decodeEdge(r.value)
 		if err != nil {
 			return err
@@ -697,5 +1145,69 @@ func (p *rebuildExternalCallPass) apply(ctx context.Context) error {
 			return err
 		}
 		return p.b.putEdgeWithCustody(e, custody)
+	})
+}
+
+// ExternalCallNode returns the bounded light caller projection used by the
+// skipped-producer checks. It does not read unrelated node metadata.
+func (v RebuildView) ExternalCallNode(ctx context.Context, id string) (*graph.Node, error) {
+	return v.externalCallNode(ctx, id, decodeNodeLight)
+}
+
+// ExternalCallTarget returns a bounded full row for a skipped producer that
+// reads target metadata rather than just caller language.
+func (v RebuildView) ExternalCallTarget(ctx context.Context, id string) (*graph.Node, error) {
+	return v.externalCallNode(ctx, id, decodeNode)
+}
+
+func (v RebuildView) externalCallNode(ctx context.Context, id string, decode decodeRow[*graph.Node]) (*graph.Node, error) {
+	var n *graph.Node
+	err := v.read(ctx, func(snap *pebble.Snapshot) error {
+		var err error
+		n, err = readRebuildExternalCallNode(snap, id, decode)
+		return err
+	})
+	return n, err
+}
+
+// VisitExternalCallEdges filters by key identity before bounding and decoding
+// a potentially relevant skipped-producer edge.
+func (v RebuildView) VisitExternalCallEdges(ctx context.Context, selectEdge func(graph.EdgeIdentity) bool, yield func(*graph.Edge) error) error {
+	return v.visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
+		id, err := decodeLinkRecorder(r.key)
+		if err != nil || !selectEdge(id) {
+			return err
+		}
+		if err := rebuildExternalCallInput(r.key, r.value); err != nil {
+			return err
+		}
+		e, err := decodeEdge(r.value)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(r.key, pendingEdgeKey(e)) {
+			return invalid("external-call live edge does not match key")
+		}
+		return yield(e)
+	})
+}
+
+// VisitExternalCallNodes filters a light node before charging the row bound.
+func (v RebuildView) VisitExternalCallNodes(ctx context.Context, selectNode func(*graph.Node) bool, yield func(*graph.Node) error) error {
+	return v.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
+		n, err := decodeNodeLight(r.value)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(r.key, pendingNodeKey(n.ID)) {
+			return invalid("external-call node does not match key")
+		}
+		if !selectNode(n) {
+			return nil
+		}
+		if err := rebuildExternalCallInput(r.key, r.value); err != nil {
+			return err
+		}
+		return yield(n)
 	})
 }
