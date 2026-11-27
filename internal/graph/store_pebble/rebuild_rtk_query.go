@@ -61,7 +61,7 @@ func (b *BuildStore) RebuildRTKQuery(ctx context.Context, receipts iter.Seq2[Par
 	}()
 	p := rebuildRTKQueryPass{
 		rebuildCallMoves: rebuildCallMoves{b: b, prefix: prefix, rowBytes: 16 << 20, label: "RTK Query", inputRow: "edge row"},
-		rules: rules,
+		rules:            rules,
 	}
 	haveEndpoints, err := p.collect(ctx)
 	if err != nil || !haveEndpoints {

@@ -63,7 +63,7 @@ func (b *BuildStore) RebuildObjectRegistry(ctx context.Context, receipts iter.Se
 	}()
 	p := rebuildObjectRegistryPass{
 		rebuildCallMoves: rebuildCallMoves{b: b, prefix: prefix, rowBytes: 16 << 20, label: "Object Registry", inputRow: "edge row"},
-		rules: rules,
+		rules:            rules,
 	}
 	if err := p.collectEdges(ctx, graph.EdgeCalls); err != nil || p.stats.Stubs == 0 {
 		return p.stats, err
