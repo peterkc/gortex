@@ -39,16 +39,9 @@ func ResolveObjectRegistryCalls(g graph.Store) int {
 	// collection see the identical graph, so the run case is unchanged.
 	var placeholders []*graph.Edge
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil {
-			continue
+		if className, _ := objectRegistryCall(e); className != "" {
+			placeholders = append(placeholders, e)
 		}
-		if v, _ := e.Meta["via"].(string); v != objectRegistryVia {
-			continue
-		}
-		if className, _ := e.Meta["registry_value"].(string); className == "" {
-			continue
-		}
-		placeholders = append(placeholders, e)
 	}
 	if len(placeholders) == 0 {
 		return 0
@@ -99,37 +92,18 @@ func ResolveObjectRegistryCalls(g graph.Store) int {
 	claimed := map[string]bool{}
 	var reindex []graph.EdgeReindex
 	for _, e := range placeholders {
-		className, _ := e.Meta["registry_value"].(string)
-		method, _ := e.Meta["registry_method"].(string)
+		className, method := objectRegistryCall(e)
 		target := pickRegistryMethod(g, e, className, method, methodIndex)
-
-		want := "unresolved::*." + className
-		if target != nil {
-			want = target.ID
-		}
-		if e.To == want {
-			if target != nil {
-				resolved++
-				claimed[registrySiteKey(e.From, e.Line)] = true
-			}
-			continue
-		}
 		oldTo := e.To
-		e.To = want
+		var id string
 		if target != nil {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = ConfidenceHeuristic
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceHeuristic)
-			StampSynthesized(e, SynthObjectRegistry)
+			id = target.ID
 			resolved++
 			claimed[registrySiteKey(e.From, e.Line)] = true
-		} else {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = 0
-			e.ConfidenceLabel = ""
-			UnstampSynthesized(e)
 		}
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		if rebindObjectRegistryCall(e, className, id, target != nil) {
+			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		}
 	}
 	for site := range claimed {
 		for _, de := range dynBySite[site] {
@@ -145,6 +119,39 @@ func ResolveObjectRegistryCalls(g graph.Store) int {
 	return resolved
 }
 
+func objectRegistryCall(e *graph.Edge) (className, method string) {
+	if e == nil {
+		return "", ""
+	}
+	if via, _ := e.Meta["via"].(string); via != objectRegistryVia {
+		return "", ""
+	}
+	className, _ = e.Meta["registry_value"].(string)
+	method, _ = e.Meta["registry_method"].(string)
+	return className, method
+}
+
+func rebindObjectRegistryCall(e *graph.Edge, className, target string, matched bool) bool {
+	if !matched {
+		target = "unresolved::*." + className
+	}
+	if e.To == target {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	if matched {
+		e.Confidence = ConfidenceHeuristic
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceHeuristic)
+		StampSynthesized(e, SynthObjectRegistry)
+	} else {
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		UnstampSynthesized(e)
+	}
+	return true
+}
+
 // pickRegistryMethod resolves a registered class + dispatch method to the
 // method node. It prefers the method invoked at the dispatch site, falling
 // back to the execute/run/handle convention, with same-file-then-unique
@@ -154,16 +161,20 @@ func pickRegistryMethod(g graph.Store, call *graph.Edge, className, method strin
 	if methods == nil {
 		return nil
 	}
-	order := []string{"execute", "run", "handle"}
-	if method != "" {
-		order = append([]string{method}, order...)
-	}
-	for _, m := range order {
+	for _, m := range objectRegistryMethodOrder(method) {
 		if t := pickStoreAction(g, call, sameBoundaryCandidates(g, call.From, methods[m])); t != nil {
 			return t
 		}
 	}
 	return nil
+}
+
+func objectRegistryMethodOrder(method string) []string {
+	order := []string{"execute", "run", "handle"}
+	if method != "" {
+		order = append([]string{method}, order...)
+	}
+	return order
 }
 
 // registryClassName returns the class-name segment of a class node ID
