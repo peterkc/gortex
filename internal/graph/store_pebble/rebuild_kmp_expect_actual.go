@@ -114,9 +114,6 @@ func (p *rebuildKMPPass) collect(ctx context.Context, view RebuildView) error {
 		if err != nil || light.Name == "" || !slices.Contains(kinds, light.Kind) {
 			return err
 		}
-		if err := rebuildKMPCheckNodeSize(r); err != nil {
-			return err
-		}
 		n, err := decodeNode(r.value)
 		if err != nil {
 			return err
@@ -129,6 +126,9 @@ func (p *rebuildKMPPass) collect(ctx context.Context, view RebuildView) error {
 			col = 'a'
 		default:
 			return nil
+		}
+		if err := rebuildKMPCheckNodeSize(r); err != nil {
+			return err
 		}
 		// Only the fields read by kmpEdge or the join need to enter scratch.
 		projection, err := encodeNode(&graph.Node{

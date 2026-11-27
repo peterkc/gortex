@@ -139,6 +139,15 @@ func TestRebuildKMPExpectActualLightScanAndCandidateRowLimit(t *testing.T) {
 	require.Zero(t, stats)
 
 	n.Kind = graph.KindFunction
+	delete(n.Meta, "kmp_role")
+	raw, err = encodeNode(n)
+	require.NoError(t, err)
+	require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
+	stats, err = b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
+	require.NoError(t, err) // A named function without a role is not a candidate.
+	require.Zero(t, stats)
+
+	n.Meta["kmp_role"] = "actual"
 	raw, err = encodeNode(n)
 	require.NoError(t, err)
 	require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
