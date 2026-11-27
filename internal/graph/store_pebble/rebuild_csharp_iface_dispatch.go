@@ -78,7 +78,7 @@ func (b *BuildStore) RebuildCSharpIfaceDispatch(ctx context.Context, receipts it
 	if changed || p.poolGap {
 		// Re-elect only when receipt roles or an unresolved pool can differ.
 		raw := p
-		raw.rebuildCallMoves.prefix = append(bytes.Clone(prefix), 'R')
+		raw.prefix = append(bytes.Clone(prefix), 'R')
 		raw.replay, raw.families, raw.adds = true, 0, 0
 		if err := raw.run(ctx, receipts); err != nil {
 			return 0, err
