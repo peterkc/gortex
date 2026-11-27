@@ -267,3 +267,49 @@ func rebuildFabricExpectedEdge(from, to *graph.Node, component string) *graph.Ed
 		},
 	}
 }
+
+func TestRebuildFabricFrozenFamilyAndDisabledSelection(t *testing.T) {
+	spec := &graph.Node{ID: "host.go::View", Kind: graph.KindType, FilePath: "host.go", Language: "go", StartLine: 2,
+		Meta: map[string]any{"fabric_component": "View"}}
+	manager := &graph.Node{ID: "View.java::RCTView", Kind: graph.KindType, FilePath: "View.java", Language: "java", StartLine: 3,
+		Meta: map[string]any{"fabric_component": "RCTView", "fabric_native": "java"}}
+	web := &graph.Node{ID: "marker.ts", Kind: graph.KindFile, FilePath: "marker.ts", Language: "typescript"}
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(spec.FilePath, spec.Language, []*graph.Node{spec}),
+		rebuildEventFacts(manager.FilePath, manager.Language, []*graph.Node{manager}),
+		rebuildEventFacts(web.FilePath, web.Language, []*graph.Node{web}),
+	}
+	b := openRebuildGRPCBuild(t, facts[:2]...)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthFabric})
+	require.NoError(t, err)
+	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.False(t, frozen.allows(SynthFabric))
+	require.NoError(t, b.AddParsedFile("", facts[2]))
+
+	disabled, err := NewFrameworkSynthesizerSelection(nil)
+	require.NoError(t, err)
+	before := rebuildEventSavedRows(t, b)
+	for _, excluded := range []FrameworkSynthesizerSelection{frozen, disabled} {
+		stats, err := RunRebuildFabric(t.Context(), b, func(func(store_pebble.ParseFacts, error) bool) {
+			t.Fatal("ineligible Fabric selection read receipts")
+		}, excluded, 1)
+		require.NoError(t, err)
+		require.Zero(t, stats)
+		require.Equal(t, before, rebuildEventSavedRows(t, b))
+	}
+
+	// This is the same live graph. Only taking a new census can admit it.
+	fresh, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.True(t, fresh.allows(SynthFabric))
+	native := openRebuildTemporalOracle(t, facts...)
+	report := RunFrameworkSynthesizersWithSelection(native, selection)
+	require.NoError(t, report.Err)
+	want := rebuildEventSQLiteRows(native)
+	require.Len(t, want.edges, 2)
+	stats, err := RunRebuildFabric(t.Context(), b, rebuildGRPCReceipts(facts...), fresh, 1)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, stats.Edges)
+	require.Equal(t, want, rebuildEventSavedRows(t, b))
+}
