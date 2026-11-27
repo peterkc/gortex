@@ -264,21 +264,10 @@ func prepareRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 // Main has already selected the recording file and exhausted ordinary bindings.
 // Only a name that native would mark builtin can get a different target here.
 func settleRebuildWebMember(e *graph.Edge, repo, language, name string) {
-	const revision = graph.PlatformCatalogRevision
-	entry, ok := graph.LookupPlatformCandidate(revision, language, name)
-	if !ok {
+	hint, _ := e.BuiltinReceiverHint()
+	entry, status := graph.LookupPlatformCall(graph.PlatformCatalogRevision, language, name, hint)
+	if status == "" || status == graph.LinkStatusUnresolved {
 		return
-	}
-	status := graph.LinkStatusProbablePlatform
-	hint, ok := e.BuiltinReceiverHint()
-	if ok && (language == "js" && hint.Language == "javascript" || language == "ts" && hint.Language == "typescript") {
-		switch hint.Form {
-		case "import", "shadowed", "user":
-			return
-		}
-		if exact, ok := graph.LookupPlatformMember(revision, hint, name); ok {
-			entry, status = exact, graph.LinkStatusPlatform
-		}
 	}
 	e.To = entry.ID(repo)
 	e.Meta = maps.Clone(e.Meta)

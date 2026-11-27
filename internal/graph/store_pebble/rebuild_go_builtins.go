@@ -64,9 +64,8 @@ func (b *BuildStore) rebuildHasNamedGo(ctx context.Context) (bool, error) {
 			if err != nil {
 				return err
 			}
-			if len(it.Key())+len(raw) > maxRowBytes {
-				return fmt.Errorf("%w: Go builtin language probe", ErrRebuildLinkInputSize)
-			}
+			// The light decoder skips metadata. Only a row that can open the
+			// Go pass belongs to its candidate byte bound.
 			n, err := decodeNodeLight(raw)
 			if err != nil {
 				return err
@@ -75,6 +74,9 @@ func (b *BuildStore) rebuildHasNamedGo(ctx context.Context) (bool, error) {
 				return invalid("Go builtin language probe node identity does not match key")
 			}
 			if n.Language == "go" && n.Name != "" {
+				if len(it.Key())+len(raw) > maxRowBytes {
+					return fmt.Errorf("%w: Go builtin language probe", ErrRebuildLinkInputSize)
+				}
 				hasGo = true
 				break
 			}

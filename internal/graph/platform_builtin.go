@@ -124,6 +124,30 @@ func LookupPlatformCandidate(revision uint32, language, name string) (PlatformBu
 	return PlatformBuiltin{Language: lang, Category: category, Name: name}, true
 }
 
+// LookupPlatformCall applies the legacy name gate and the checked receiver
+// evidence for a JS/TS Call. An empty status means no legacy candidate;
+// unresolved means a same-language hint contradicts the builtin fallback.
+func LookupPlatformCall(revision uint32, language, name string, hint BuiltinReceiverHint) (PlatformBuiltin, LinkStatus) {
+	lang := catalogLanguage(language)
+	if lang != "js" && lang != "ts" {
+		return PlatformBuiltin{}, ""
+	}
+	candidate, ok := LookupPlatformCandidate(revision, lang, name)
+	if !ok {
+		return PlatformBuiltin{}, ""
+	}
+	if catalogLanguage(hint.Language) == lang {
+		switch hint.Form {
+		case "import", "shadowed", "user":
+			return PlatformBuiltin{}, LinkStatusUnresolved
+		}
+		if exact, ok := LookupPlatformMember(revision, hint, name); ok {
+			return exact, LinkStatusPlatform
+		}
+	}
+	return candidate, LinkStatusProbablePlatform
+}
+
 // LookupPlatformBuiltin checks a canonical exact ID. It does not validate the
 // repository boundary, site, or syntax evidence needed to admit an edge.
 func LookupPlatformBuiltin(revision uint32, id string) (PlatformBuiltin, bool) {

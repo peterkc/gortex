@@ -20,11 +20,15 @@ type rebuildPlatformReader interface {
 // private linker turns. Web Calls classify only after ordinary lookup in main.
 func (b *BuildStore) SettleRebuildPlatformCalls(ctx context.Context, extractorOf func(string) string) error {
 	const revision = graph.PlatformCatalogRevision
+	const maxRowBytes = 16 << 20
 	view := b.RebuildView()
 	return view.visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
 		kind, err := rebuildAttributionEdgeKind(r.key)
 		if err != nil || kind != graph.EdgeCalls {
 			return err
+		}
+		if len(r.key)+len(r.value) > maxRowBytes {
+			return fmt.Errorf("%w: platform Call", ErrRebuildLinkInputSize)
 		}
 		e, err := decodeEdge(r.value)
 		if err != nil {
@@ -61,6 +65,9 @@ func (b *BuildStore) SettleRebuildPlatformCalls(ctx context.Context, extractorOf
 func (b *BuildStore) ValidateRebuildCallDelta(ctx context.Context, edge *graph.Edge, revision uint32, extractorOf func(string) string) error {
 	if edge == nil || edge.Kind != graph.EdgeCalls {
 		return invalid("expected a retained Call")
+	}
+	if graph.IsProxyID(edge.From) || graph.IsProxyID(edge.To) {
+		return invalid("proxy retained Call endpoint")
 	}
 	return b.RebuildView().read(ctx, func(snap *pebble.Snapshot) error {
 		if err := b.validateRebuildPlatformEdge(ctx, snap, edge, revision, extractorOf); err != nil {
@@ -202,8 +209,9 @@ func checkRebuildWebBuiltinTarget(reader rebuildPlatformReader, e *graph.Edge, r
 	if extractorOf == nil {
 		return invalid("builtin target has no recording extractor")
 	}
+	recordingLanguage := extractorOf(e.FilePath)
 	var language string
-	switch extractorOf(e.FilePath) {
+	switch recordingLanguage {
 	case "javascript":
 		language = "js"
 	case "typescript":
@@ -232,29 +240,37 @@ func checkRebuildWebBuiltinTarget(reader rebuildPlatformReader, e *graph.Edge, r
 	if source == nil || source.ID != e.From || source.Kind == graph.KindBuiltin {
 		return invalid("builtin target has no ordinary source owner")
 	}
-	candidate, ok := graph.LookupPlatformCandidate(revision, language, name)
-	if !ok {
-		return invalid("unknown builtin target name")
+	if e.Kind != graph.EdgeCalls {
+		candidate, ok := graph.LookupPlatformCandidate(revision, language, name)
+		if !ok {
+			return invalid("unknown builtin target name")
+		}
+		switch e.Kind {
+		case graph.EdgeReads, graph.EdgeReferences, graph.EdgeWrites, graph.EdgeArgOf, graph.EdgeValueFlow:
+			if e.To == candidate.ID(source.RepoPrefix) {
+				return nil // Keep the existing non-Call legacy classification.
+			}
+		}
+		return invalid("builtin target role, scope or status differs")
 	}
-	switch e.Kind {
-	case graph.EdgeReads, graph.EdgeReferences, graph.EdgeWrites, graph.EdgeArgOf, graph.EdgeValueFlow:
-		if e.To == candidate.ID(source.RepoPrefix) {
-			return nil // Keep the existing non-Call legacy classification.
-		}
-	case graph.EdgeCalls:
-		want := graph.LinkStatusProbablePlatform
-		if hint, ok := e.BuiltinReceiverHint(); ok {
-			switch hint.Form {
-			case "import", "shadowed", "user":
-				return invalid("builtin call has contrary receiver evidence")
-			}
-			if exact, ok := graph.LookupPlatformMember(revision, hint, name); ok && exact.Language == language {
-				candidate, want = exact, graph.LinkStatusPlatform
-			}
-		}
-		if got, ok := e.LinkStatus(); ok && got == want && e.To == candidate.ID(source.RepoPrefix) {
-			return nil
-		}
+	file, err := pendingGet(reader, pendingNodeKey(e.FilePath), decodeNodeLight)
+	if err != nil {
+		return err
+	}
+	if file == nil || file.ID != e.FilePath || file.FilePath != e.FilePath || file.Kind != graph.KindFile ||
+		file.Language != recordingLanguage || file.RepoPrefix != source.RepoPrefix {
+		return invalid("web builtin target recording scope differs")
+	}
+	hint, _ := e.BuiltinReceiverHint()
+	candidate, want := graph.LookupPlatformCall(revision, language, name, hint)
+	switch want {
+	case "":
+		return invalid("unknown builtin target name")
+	case graph.LinkStatusUnresolved:
+		return invalid("builtin call has contrary receiver evidence")
+	}
+	if got, ok := e.LinkStatus(); ok && got == want && e.To == candidate.ID(file.RepoPrefix) {
+		return nil
 	}
 	return invalid("builtin target role, scope or status differs")
 }
