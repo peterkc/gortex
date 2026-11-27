@@ -33,6 +33,7 @@ func TestRebuildSQLCallsiteSQLiteOracle(t *testing.T) {
 	}{
 		{"app.js", "function load() {\n  return supabase.rpc('get_user_stats');\n}\n", languages.NewJavaScriptExtractor()},
 		{"app.ts", rebuildSQLCallsiteTS, languages.NewTypeScriptExtractor()},
+		{"App.vue", `<script lang="ts">` + rebuildSQLCallsiteTS + `</script>`, languages.NewVueExtractor()},
 		{"app.py", "def load(db):\n    return db.execute(select(func.get_user_stats(1)))\n", languages.NewPythonExtractor()},
 	} {
 		t.Run(tc.extractor.Language(), func(t *testing.T) {
@@ -234,7 +235,11 @@ func TestRebuildSQLCallsiteRejectsUnprovedMove(t *testing.T) {
 			before := rebuildEventSavedRows(t, b)
 			stats, err := RunRebuildSQLCallsites(t.Context(), b, rebuildGRPCReceipts(tc.proof...), frozen)
 			require.ErrorIs(t, err, store_pebble.ErrRebuildSQLCallsite)
-			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			want := graph.EdgeIdentityFor(stub)
+			want.To = rebuildSQLCallsiteTarget
+			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
 			require.Zero(t, stats)
 			require.Equal(t, before, rebuildEventSavedRows(t, b))
 		})
@@ -278,7 +283,11 @@ func rebuildSQLCallsiteEdge(t *testing.T, edges []*graph.Edge, file string) *gra
 	}
 	require.Len(t, calls, 1)
 	e := calls[0]
-	require.Equal(t, file+"::load", e.From)
+	caller := file + "::load"
+	if strings.HasSuffix(file, ".vue") {
+		caller = file + "#script:1::load"
+	}
+	require.Equal(t, caller, e.From)
 	require.Equal(t, graph.EdgeCalls, e.Kind)
 	require.Equal(t, file, e.FilePath)
 	require.Equal(t, 2, e.Line)

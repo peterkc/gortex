@@ -17,8 +17,9 @@ var (
 	ErrRebuildSQLCallsiteOrder = errors.New("rebuild SQL callsite conservatively refuses interacting moves")
 )
 
-// RebuildSQLCallsiteOrderError counts distinct interacting destinations.
-// First names the lowest complete output key.
+// RebuildSQLCallsiteOrderError conservatively refuses interacting moves.
+// Count is the number of distinct interacting destinations. First is the
+// lowest complete destination key. This does not prove order dependence.
 type RebuildSQLCallsiteOrderError struct {
 	Count uint64
 	First graph.EdgeIdentity
@@ -96,19 +97,25 @@ func (b *BuildStore) RebuildSQLCallsites(ctx context.Context, receipts iter.Seq2
 	if err := p.prove(ctx, receipts); err != nil {
 		return stats, err
 	}
-	err = b.withWrites(func() error { return p.apply(ctx, p.validatedPresent) })
+	err = b.withWrites(func() error { return p.apply(ctx, p.present) })
 	return p.stats, err
 }
 
 // c: SQL Function proof and name by ID; a: unique ID or ambiguity by name;
-// u: affected name proof; r: raw-key claims.
+// u: affected name, storing 1 plus the exact member count (capped at two);
+// r: raw-key claims.
 // m: new payload by old key; d: seen destinations; x: interacting destinations.
 func rebuildSQLCallsiteKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildSQLCallsitePrefix), col), fields...)
 }
 
-func (p *rebuildSQLCallsitePass) state(key []byte) (byte, error) {
-	return rebuildScratchState(p.b.pending, key, "SQL callsite receipt proof")
+func (p *rebuildSQLCallsitePass) cohort(name string) (byte, error) {
+	return pendingGet(p.b.pending, rebuildSQLCallsiteKey('u', name), func(val []byte) (byte, error) {
+		if len(val) != 1 || val[0] < 1 || val[0] > 3 {
+			return 0, invalid("SQL callsite receipt proof")
+		}
+		return val[0], nil
+	})
 }
 
 func (p *rebuildSQLCallsitePass) marked(key []byte) ([]byte, error) {
@@ -208,7 +215,7 @@ func (p *rebuildSQLCallsitePass) plan(ctx context.Context) error {
 			return nil
 		}
 		if seen {
-			if err := p.put(rebuildSQLCallsiteKey('u', name), []byte{rebuildCapabilityWanted}); err != nil {
+			if err := p.put(rebuildSQLCallsiteKey('u', name), []byte{1}); err != nil {
 				return err
 			}
 		} else {
@@ -266,7 +273,6 @@ func (p *rebuildSQLCallsitePass) prove(ctx context.Context, receipts iter.Seq2[P
 func (p *rebuildSQLCallsitePass) record(ctx context.Context, facts ParseFacts) error {
 	file := pathkey.Normalize(facts.File.FilePath)
 	lang := facts.EffectiveLanguage
-	source := lang == "javascript" || lang == "typescript" || lang == "python"
 	for _, raw := range facts.Nodes {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -298,7 +304,7 @@ func (p *rebuildSQLCallsitePass) record(ctx context.Context, facts ParseFacts) e
 			return invalid("SQL callsite recorder has no old call")
 		}
 		// Native uses the Call marker and name, not the caller node or repo.
-		ok := source && raw.FilePath == file && p.fn(raw) == p.fn(live)
+		ok := lang != "" && raw.FilePath == file && p.fn(raw) == p.fn(live)
 		if err := noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(ok)); err != nil {
 			return err
 		}
@@ -313,7 +319,7 @@ func (p *rebuildSQLCallsitePass) recordNode(raw *graph.Node, file, lang string) 
 		return err
 	}
 	if !p.needsAnchor {
-		state, err := p.state(rebuildSQLCallsiteKey('u', string(claim[1:])))
+		state, err := p.cohort(string(claim[1:]))
 		if err != nil || state == 0 {
 			return err
 		}
@@ -338,16 +344,16 @@ func (p *rebuildSQLCallsitePass) proveCohorts(ctx context.Context) (anchor bool,
 		if len(r.value) < 2 {
 			return invalid("SQL callsite candidate proof")
 		}
-		if r.value[0] == rebuildScratchExact {
-			anchor = true
+		if r.value[0] != rebuildScratchExact {
 			return nil
 		}
-		key := rebuildSQLCallsiteKey('u', string(r.value[1:]))
-		state, err := p.state(key)
-		if err != nil || state == 0 {
+		anchor = true
+		name := string(r.value[1:])
+		count, err := p.cohort(name)
+		if err != nil || count == 0 || count == 3 {
 			return err
 		}
-		return noteRebuildScratchState(p.put, key, state, rebuildCapabilityUnproved)
+		return p.put(rebuildSQLCallsiteKey('u', name), []byte{count + 1})
 	})
 	return anchor, err
 }
@@ -364,8 +370,19 @@ func (p *rebuildSQLCallsitePass) proved(old []byte, e *graph.Edge, anchor bool) 
 	if err != nil || len(claim) <= 1 || claim[0] != rebuildScratchExact || !bytes.Equal(claim[1:], old) {
 		return false, err
 	}
-	cohort, err := p.state(rebuildSQLCallsiteKey('u', p.fn(e)))
-	// An empty cohort may reset a stale Call only if some other exact SQL
-	// Function proves that native does not take its early return.
-	return cohort == rebuildCapabilityWanted || (cohort == 0 && anchor), err
+	name := p.fn(e)
+	count, err := p.cohort(name)
+	if err != nil {
+		return false, err
+	}
+	if count == 0 {
+		// A different exact SQL function proves native reaches the Call pass.
+		return anchor, nil
+	}
+	target, _, err := p.elect(name)
+	if target != "" {
+		return count == 2, err // the unique live member must be exact
+	}
+	// Two exact members rule out a unique target even if others are missing.
+	return count == 3, err
 }

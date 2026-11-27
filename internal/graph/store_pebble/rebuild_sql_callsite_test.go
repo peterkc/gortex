@@ -55,11 +55,13 @@ func TestRebuildSQLCallsiteWithoutFunctionsSkipsCallsAndReceipts(t *testing.T) {
 
 func TestRebuildSQLCallsiteCountsOnlyInteractingDestinations(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		last string
+		name  string
+		last  string
+		count uint64
 	}{
-		{"convergence", "old-z"},
-		{"chain", "new-b"},
+		{"convergence", "old-z", 1},
+		{"chain", "new-b", 1},
+		{"two interacting destinations", "old-z", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			first := sqlCallsiteStoreEdge("old-a", "find")
@@ -67,7 +69,11 @@ func TestRebuildSQLCallsiteCountsOnlyInteractingDestinations(t *testing.T) {
 			if tc.name == "chain" {
 				second = sqlCallsiteStoreEdge(tc.last, "list")
 			}
-			b, _ := seedSyntheticCustody(t, sqlCallsiteStoreSource(first, second),
+			edges := []*graph.Edge{first, second}
+			if tc.count == 2 {
+				edges = append(edges, sqlCallsiteStoreEdge("old-c", "list"), sqlCallsiteStoreEdge("old-d", "list"))
+			}
+			b, _ := seedSyntheticCustody(t, sqlCallsiteStoreSource(edges...),
 				sqlCallsiteStoreFunction("new-b", "find"), sqlCallsiteStoreFunction("new-c", "list"))
 			before := rebuildFrameworkCustodyRows(t, b)
 			unread := func(func(ParseFacts, error) bool) { t.Fatal("order refusal read receipts") }
@@ -78,7 +84,7 @@ func TestRebuildSQLCallsiteCountsOnlyInteractingDestinations(t *testing.T) {
 			require.ErrorIs(t, err, ErrRebuildSQLCallsite)
 			require.ErrorIs(t, err, ErrRebuildSQLCallsiteOrder)
 			require.ErrorAs(t, err, &refused)
-			require.Equal(t, &RebuildSQLCallsiteOrderError{Count: 1, First: graph.EdgeIdentityFor(&want)}, refused)
+			require.Equal(t, &RebuildSQLCallsiteOrderError{Count: tc.count, First: graph.EdgeIdentityFor(&want)}, refused)
 			require.Zero(t, stats)
 			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})
@@ -172,6 +178,170 @@ func TestRebuildSQLCallsiteStaleStampIsNotAClaim(t *testing.T) {
 			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})
 	}
+}
+
+func TestRebuildSQLCallsiteRestubProof(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cohort     int
+		exact      int
+		anchor     bool
+		wantRestub bool
+	}{
+		{name: "empty without exact anchor"},
+		{name: "empty with exact anchor", anchor: true, wantRestub: true},
+		{name: "ambiguous with zero exact members", cohort: 3, anchor: true},
+		{name: "ambiguous with one exact member", cohort: 3, exact: 1, anchor: true},
+		{name: "ambiguous with two exact members", cohort: 3, exact: 2, wantRestub: true},
+		{name: "ambiguous with all exact members", cohort: 3, exact: 3, wantRestub: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := sqlCallsiteStoreEdge("retired", "find")
+			source := sqlCallsiteStoreSource(old)
+			anchor := sqlCallsiteStoreFunction("anchor", "other")
+			facts := []ParseFacts{source, anchor}
+			proof := []ParseFacts{source}
+			if tc.anchor {
+				proof = append(proof, anchor)
+			}
+			ids := []string{"find-a", "find-b", "find-c"}
+			for i, id := range ids[:tc.cohort] {
+				candidate := sqlCallsiteStoreFunction(id, "find")
+				facts = append(facts, candidate)
+				if i < tc.exact {
+					proof = append(proof, candidate)
+				}
+			}
+			b, _ := seedSyntheticCustody(t, facts...)
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := runSQLCallsiteStore(t, b, sqlCallsiteTestReceipts(proof...))
+			want := *old
+			want.To = "unresolved::sqlfn::find"
+			if !tc.wantRestub {
+				requireSQLCallsiteProofRefusal(t, err, stats, &want)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, RebuildSQLCallsiteStats{Stubs: 1, Moves: 1}, stats)
+			key := pendingEdgeKey(&want)
+			saved, err := b.pendingEdge(key)
+			require.NoError(t, err)
+			require.Equal(t, &want, saved)
+			custody, err := readRebuildEdgeCustody(b.pending, key)
+			require.NoError(t, err)
+			require.Equal(t, rebuildEdgeCustody{raw: pendingEdgeKey(old)}, custody)
+		})
+	}
+}
+
+func TestRebuildSQLCallsitePreservesOversizedIncumbent(t *testing.T) {
+	old := sqlCallsiteStoreEdge("unresolved::sqlfn::find", "find")
+	incumbent := *sqlCallsiteStoreEdge("new-b", "find")
+	incumbent.Meta = map[string]any{"via": "other.producer"}
+	incumbent.Context = strings.Repeat("x", rebuildSQLCallsiteRowBytes)
+	b, receipts := seedSyntheticCustody(t, sqlCallsiteStoreSource(old), sqlCallsiteStoreFunction("new-b", "find"))
+	require.NoError(t, b.withWrites(func() error {
+		return b.addEdgeWithCustody(&incumbent, rebuildEdgeCustody{proof: rebuildProofReceiver})
+	}))
+	before := rebuildFrameworkCustodyRows(t, b)
+	key := pendingEdgeKey(&incumbent)
+	require.Greater(t, len(key)+len(before[string(key)]), rebuildSQLCallsiteRowBytes)
+	stats, err := runSQLCallsiteStore(t, b, receipts)
+	require.NoError(t, err)
+	require.Equal(t, RebuildSQLCallsiteStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+	delete(before, string(pendingEdgeKey(old)))
+	delete(before, string(pendingReverseKey(old, pendingEdgeKey(old))))
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b), "keep the incumbent bytes and custody")
+}
+
+func TestRebuildSQLCallsiteRejectsStationaryRawClaimCollision(t *testing.T) {
+	// The stationary key sorts between these two aliases, so each run
+	// exercises a different order of claims against the same receipt.
+	for _, alias := range []string{"a-mover", "z-mover"} {
+		t.Run(alias, func(t *testing.T) {
+			const target = "middle"
+			raw := sqlCallsiteStoreEdge(target, "find")
+			b, receipts := seedSyntheticCustody(t, sqlCallsiteStoreSource(raw), sqlCallsiteStoreFunction(target, "find"))
+			mover := *raw
+			mover.To = alias
+			require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: &mover, OldTo: raw.To}}))
+			b.AddEdge(raw)
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := runSQLCallsiteStore(t, b, receipts)
+			requireSQLCallsiteProofRefusal(t, err, stats, raw)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildSQLCallsiteReceiptOwnershipFields(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*ParseFacts, *ParseFacts)
+	}{
+		{name: "raw call file", change: func(app, _ *ParseFacts) { app.File.FilePath = "other.ts" }},
+		{name: "raw call function", change: func(app, _ *ParseFacts) { app.Edges[0].Meta["sql_function"] = "other" }},
+		{name: "node receipt language", change: func(_, sql *ParseFacts) { sql.EffectiveLanguage = "typescript" }},
+		{name: "node receipt file", change: func(_, sql *ParseFacts) { sql.File.FilePath = "other.sql" }},
+		{name: "node file", change: func(_, sql *ParseFacts) { sql.Nodes[0].FilePath = "other.sql" }},
+		{name: "node language", change: func(_, sql *ParseFacts) { sql.Nodes[0].Language = "typescript" }},
+		{name: "node kind", change: func(_, sql *ParseFacts) { sql.Nodes[0].Kind = graph.KindMethod }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := sqlCallsiteStoreEdge("unresolved::sqlfn::find", "find")
+			app, sql := sqlCallsiteStoreSource(old), sqlCallsiteStoreFunction("new-b", "find")
+			b, _ := seedSyntheticCustody(t, app, sql)
+			before := rebuildFrameworkCustodyRows(t, b)
+			tc.change(&app, &sql)
+			stats, err := runSQLCallsiteStore(t, b, sqlCallsiteTestReceipts(app, sql))
+			want := *old
+			want.To = "new-b"
+			requireSQLCallsiteProofRefusal(t, err, stats, &want)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildSQLCallsiteOccupiedScratch(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	require.NoError(t, b.pending.Set(rebuildSQLCallsiteKey('z'), []byte("sentinel"), pebble.NoSync))
+	before := rebuildFrameworkCustodyRows(t, b)
+	stats, err := runSQLCallsiteStore(t, b, func(func(ParseFacts, error) bool) { t.Fatal("read receipts with occupied scratch") })
+	require.ErrorIs(t, err, ErrRebuildSQLCallsite)
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "SQL callsite scratch range occupied")
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func TestRebuildSQLCallsiteStationarySkipsReceipts(t *testing.T) {
+	incumbent := sqlCallsiteStoreEdge("new-b", "find")
+	b, _ := seedSyntheticCustody(t, sqlCallsiteStoreSource(incumbent), sqlCallsiteStoreFunction("new-b", "find"))
+	before := rebuildFrameworkCustodyRows(t, b)
+	stats, err := runSQLCallsiteStore(t, b, func(func(ParseFacts, error) bool) { t.Fatal("read receipts without moves") })
+	require.NoError(t, err)
+	require.Equal(t, RebuildSQLCallsiteStats{Stubs: 1, Resolved: 1}, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func sqlCallsiteTestReceipts(facts ...ParseFacts) iter.Seq2[ParseFacts, error] {
+	return func(yield func(ParseFacts, error) bool) {
+		for _, f := range facts {
+			if !yield(f, nil) {
+				return
+			}
+		}
+	}
+}
+
+func requireSQLCallsiteProofRefusal(t *testing.T, err error, stats RebuildSQLCallsiteStats, want *graph.Edge) {
+	t.Helper()
+	require.ErrorIs(t, err, ErrRebuildSQLCallsite)
+	var refused *RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(want)}, refused)
+	require.Zero(t, stats)
 }
 
 func sqlCallsiteStoreEdge(to, name string) *graph.Edge {
