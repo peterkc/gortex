@@ -77,11 +77,7 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 		if err := loadGlob(); err != nil {
 			return err
 		}
-		npm = newRebuildNpmLookup(ctx, rebuildNpmInputs{
-			namespace: ns, manifests: manifests, followedRoot: followed,
-			isFile:    func(_ context.Context, key string) (bool, error) { return ns.probeFile(key) },
-			matchDirs: glob.matchDirs,
-		})
+		npm = newRebuildNpmLookupFromNamespace(ctx, ns, manifests, followed, glob)
 		return nil
 	}
 	var workspaceMembers map[string]struct{} // nil until one checked lookup builds the membership index

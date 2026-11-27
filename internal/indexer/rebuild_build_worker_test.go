@@ -785,6 +785,23 @@ func TestRebuildBuildCppIncludeRefusal(t *testing.T) {
 	require.Empty(t, acks.Bytes())
 }
 
+func TestRebuildExternalCallSynthesisWireRefusal(t *testing.T) {
+	cause := store_pebble.ErrRebuildExternalCallSynthesis
+	r := buildRefusal(fmt.Errorf("candidate proof: %w", cause))
+	require.Equal(t, uint8(99), r.Refusal)
+	var reply, acks bytes.Buffer
+	require.NoError(t, writeRebuildBuildReply(&reply, r))
+	err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
+		func(context.Context, store_pebble.StageTables) error {
+			t.Fatal("an external-call synthesis refusal must not publish")
+			return nil
+		})
+	require.ErrorIs(t, err, ErrRebuildWorker)
+	require.ErrorIs(t, err, cause)
+	require.ErrorContains(t, err, "candidate proof")
+	require.Empty(t, acks.Bytes())
+}
+
 func TestRunRebuildCheckout(t *testing.T) {
 	for _, tc := range []struct {
 		name                             string

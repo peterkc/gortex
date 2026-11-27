@@ -282,8 +282,13 @@ func (req rebuildBuildRequest) projectRecipe(cloneThreshold float64) store_pebbl
 	h := blake3.New()
 	// The tracked set is exactly empty, so no dependency export was read.
 	// Bind that policy alongside the inputs, not an unverified locator.
-	_, _ = h.Write([]byte("gortex/rebuild/project-name/v6\x00tracked-set:0\x00dependency-exports:ABSENT\x00"))
+	_, _ = h.Write([]byte("gortex/rebuild/project-name/v7\x00tracked-set:0\x00dependency-exports:ABSENT\x00"))
 	if req.SkipPlaceholderSources {
+		_, _ = h.Write([]byte{1})
+	} else {
+		_, _ = h.Write([]byte{0})
+	}
+	if req.ExternalCallsEnabled {
 		_, _ = h.Write([]byte{1})
 	} else {
 		_, _ = h.Write([]byte{0})
@@ -324,7 +329,7 @@ func (req rebuildBuildRequest) checkProjectRecipe() error {
 		return err
 	}
 	if req.BaseRecipe == (store_pebble.HeadDigest{}) || req.Witness.Recipe != req.projectRecipe(threshold) {
-		return fmt.Errorf("%w: project name, frozen inputs, clone cutoff and witness recipe do not match", errRebuildBuildWire)
+		return fmt.Errorf("%w: project name, frozen inputs, build settings and witness recipe do not match", errRebuildBuildWire)
 	}
 	return nil
 }

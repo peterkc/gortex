@@ -99,10 +99,7 @@ func (idx *Indexer) runRebuildCheckout(ctx context.Context, src *source.Filesyst
 	if err := checkRebuildGitWorktreeRoot(root); err != nil {
 		return err
 	}
-	// The owner seals the recipe from the same config the child receives.
-	var err error
-	req.Config, err = json.Marshal(idx.config)
-	if err != nil {
+	if err := idx.freezeRebuildBuildConfig(&req); err != nil {
 		return err
 	}
 	gate := idx.newContentAdmissionGate()
@@ -114,6 +111,18 @@ func (idx *Indexer) runRebuildCheckout(ctx context.Context, src *source.Filesyst
 		}, func(lease string, bound rebuildBuildRequest, inputs []rebuildInput) error {
 			return runRebuildBuild(ctx, exe, args, lease, headDir, bound, idx.config, inputs, publish)
 		})
+}
+
+// freezeRebuildBuildConfig captures the config and effective synthesis setting
+// before the owner binds the recipe. The child never re-evaluates the override.
+func (idx *Indexer) freezeRebuildBuildConfig(req *rebuildBuildRequest) error {
+	cfg, err := json.Marshal(idx.config)
+	if err != nil {
+		return err
+	}
+	req.Config = cfg
+	req.ExternalCallsEnabled = idx.externalCallSynthesisEnabled()
+	return nil
 }
 
 func withRebuildInputLease(leases string, use func(string) error) (err error) {

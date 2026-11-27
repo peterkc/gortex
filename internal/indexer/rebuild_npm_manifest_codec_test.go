@@ -93,6 +93,42 @@ func TestRebuildNpmManifestCodecNative(t *testing.T) {
 	require.Zero(t, followed)
 }
 
+func TestRebuildExternalNpmRewriteUsesCapturedEdgePath(t *testing.T) {
+	// Only the frozen namespace and manifest rows exist. There is no parse
+	// receipt or live checkout source to establish the importer path.
+	boundary := []rebuildNamespaceRow{
+		{"package.json", rebuildNamespaceRegular},
+		{"app", rebuildNamespaceDirectory},
+		{"app/package.json", rebuildNamespaceRegular},
+		{"app/caller.ts", rebuildNamespaceRegular},
+		{"app", rebuildNamespaceCloseExact},
+		{"denied", rebuildNamespaceDenied},
+		{".", rebuildNamespaceCloseExact},
+	}
+	left := int64(rebuildCppRawLimit)
+	root := rebuildNpmCodecTestRow(t, "package.json", `{"dependencies":{"alias":"npm:wrong@1"}}`, &left)
+	app := rebuildNpmCodecTestRow(t, "app/package.json", `{"dependencies":{"alias":"npm:@demo/real@1"}}`, &left)
+	lease, digest := writeRebuildNpmCodecTestSidecar(t, boundary, root, app)
+	ctx := t.Context()
+	rewrite := rebuildExternalNpmRewrite(ctx, lease, digest)
+	got, err := rewrite("app/caller.ts", "alias/sub")
+	require.NoError(t, err)
+	require.Equal(t, "@demo/real/sub", got)
+
+	got, err = rewrite("app/missing.ts", "alias/sub")
+	require.NoError(t, err)
+	require.Equal(t, "@demo/real/sub", got)
+	got, err = rewrite("denied/caller.ts", "alias/sub")
+	require.ErrorIs(t, err, errRebuildResolverInputDenied)
+	require.Empty(t, got)
+
+	badDigest := digest
+	badDigest[0] ^= 1
+	got, err = rebuildExternalNpmRewrite(ctx, lease, badDigest)("app/caller.ts", "alias/sub")
+	require.ErrorIs(t, err, errRebuildInputSidecar)
+	require.Empty(t, got)
+}
+
 func TestRebuildNpmManifestCodecAuthority(t *testing.T) {
 	const key = "package.json"
 	left := int64(rebuildCppRawLimit)

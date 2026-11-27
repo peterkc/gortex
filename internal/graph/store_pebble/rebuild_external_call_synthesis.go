@@ -99,8 +99,9 @@ func (b *BuildStore) RebuildExternalCallSynthesis(ctx context.Context, receipts 
 }
 
 // Scratch columns: file authority f, exact receipts r, absent receipt inputs h,
-// consumed raw keys c, site votes g, package votes p, retained packages t, and
-// the checked mutation plan (node n, delete d, move m, custody l).
+// consumed raw keys c, deferred receipt keys u, site votes g, package votes p,
+// retained packages t, and the checked mutation plan (node n, delete d, move m,
+// custody l).
 func rebuildExternalCallColumn(column byte) []byte { return []byte{'g', '9', column} }
 
 func (p *rebuildExternalCallPass) put(key, value []byte) error {
@@ -184,6 +185,13 @@ func (p *rebuildExternalCallPass) receipts(ctx context.Context, receipts iter.Se
 			exact, err := p.present(key)
 			if err != nil {
 				return err
+			}
+			if lang != "" && !rebuildExternalCallRetained(lang) {
+				// A configured extractor can record an edge at another file's
+				// path. File language alone cannot prove its terminal survived.
+				if err := p.put(append(rebuildExternalCallColumn('u'), key...), []byte(lang)); err != nil {
+					return err
+				}
 			}
 			if exact {
 				// The live scan owns this incarnation, not a receipt ghost.
@@ -354,14 +362,24 @@ func (p *rebuildExternalCallPass) liveEdge(key []byte, e *graph.Edge) error {
 		return err
 	}
 	actual, eligible := p.rules.Candidate(e, caller)
+	custody, exact, err := p.custody(key)
+	if err != nil {
+		return err
+	}
+	if custody.raw != nil {
+		key = custody.raw
+	}
+	deferred, err := pendingGet(p.b.pending, append(rebuildExternalCallColumn('u'), key...), copyValue)
+	if err != nil {
+		return err
+	}
+	if len(deferred) != 0 {
+		lang = string(deferred)
+	}
 	alternates := p.rules.Maybe(e, caller, lang, true)
 	if eligible {
 		if actual.OldTo != "" && actual.OldTo != e.To {
 			return invalid("external-call live terminal changed by candidate classifier")
-		}
-		_, exact, err := p.custody(key)
-		if err != nil {
-			return err
 		}
 		state := externalCallCertain
 		if !exact || len(alternates) != 0 {

@@ -431,6 +431,82 @@ func TestRebuildFrozenPlaceholderPolicy(t *testing.T) {
 	require.ErrorIs(t, replay.checkProjectRecipe(), errRebuildBuildWire)
 }
 
+func TestRebuildFrozenExternalCallSynthesis(t *testing.T) {
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	req := rebuildBuildRequest{
+		Root: root, ParseDir: t.TempDir(), ParseLimit: 1024, Incarnation: rebuildTestIncarnation,
+		Bounds:  rebuildTransformBounds{CaptureBytes: 10, FileBytes: 1024},
+		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2}},
+	}
+	manifests := map[string]*rebuildInput{"go.mod": nil, "package.json": nil}
+	t.Setenv("GORTEX_RESOLVE_FROM_RECONCILE", "")
+	on, off := true, false
+	versions := make(map[bool]store_pebble.HeadDigest)
+	for _, tc := range []struct {
+		name    string
+		setting *bool
+		env     string
+		want    bool
+	}{
+		{name: "unset defaults on", want: true},
+		{name: "explicit off", setting: &off},
+		{name: "explicit on", setting: &on, want: true},
+		{name: "zero overrides on", setting: &on, env: "0"},
+		{name: "one overrides off", setting: &off, env: "1", want: true},
+		{name: "mixed case true overrides off", setting: &off, env: "TrUe", want: true},
+		{name: "nonempty unrecognized override disables", setting: &on, env: " true "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GORTEX_SYNTH_EXTERNAL_CALLS", tc.env)
+			cfg := config.Default().Index
+			cfg.SynthesizeExternalCalls = tc.setting
+			owner := &Indexer{config: cfg}
+			input := req
+			require.NoError(t, owner.freezeRebuildBuildConfig(&input))
+			bound, err := captureProjectNameTest(t, src, manifests, input)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, bound.ExternalCallsEnabled)
+			version := bound.Witness.Version()
+			if same, ok := versions[tc.want]; ok {
+				require.Equal(t, same, version, "only the effective setting belongs in the recipe")
+			}
+			versions[tc.want] = version
+
+			if tc.want {
+				t.Setenv("GORTEX_SYNTH_EXTERNAL_CALLS", "0")
+			} else {
+				t.Setenv("GORTEX_SYNTH_EXTERNAL_CALLS", "1")
+			}
+			lease := t.TempDir()
+			require.NoError(t, writeRebuildBuildRequest(ctx, lease, bound, cfg, nil))
+			got, _, err := readRebuildBuildRequest(ctx, lease)
+			require.NoError(t, err)
+			require.Equal(t, version, got.Witness.Version())
+			require.Equal(t, tc.want, got.ExternalCallsEnabled)
+
+			if tc.setting != nil {
+				return
+			}
+			got.ExternalCallsEnabled = false
+			badLease := t.TempDir()
+			require.ErrorIs(t, writeRebuildBuildRequest(ctx, badLease, got, cfg, nil), errRebuildBuildWire)
+			badPath := filepath.Join(badLease, rebuildRequestName)
+			_, err = os.Stat(badPath)
+			require.ErrorIs(t, err, os.ErrNotExist)
+			f, err := os.Create(badPath)
+			require.NoError(t, err)
+			encodeErr := gob.NewEncoder(f).Encode(got)
+			require.NoError(t, f.Close())
+			require.NoError(t, encodeErr)
+			_, _, err = readRebuildBuildRequest(ctx, badLease)
+			require.ErrorIs(t, err, errRebuildBuildWire)
+		})
+	}
+	require.Len(t, versions, 2)
+	require.NotEqual(t, versions[false], versions[true], "opposite settings must not reuse the same build")
+}
+
 func TestRebuildCloneCutoffRecipe(t *testing.T) {
 	ctx := t.Context()
 	root, src := rebuildInputFixture(t)

@@ -860,6 +860,14 @@ func buildRebuildStages(
 		if gdDemotions != 0 {
 			logger.Info("rebuild GDScript receiver gate applied to private build", zap.Uint64("demotions", gdDemotions))
 		}
+		rewriteNpm := rebuildExternalNpmRewrite(ctx, lease, rebuildDigest(req.Witness.FrozenInputs))
+		externalCalls, err := resolver.RunRebuildExternalCallSynthesis(ctx, private, receipts, req.ExternalCallsEnabled, rewriteNpm)
+		if err != nil {
+			return err
+		}
+		if externalCalls != 0 {
+			logger.Info("rebuild external-call synthesis applied to private build", zap.Uint64("external_calls", externalCalls))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

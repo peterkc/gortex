@@ -47,6 +47,7 @@ type rebuildBuildRequest struct {
 	Files                  int
 	TrackedRepos           []string // b2 accepts only the frozen empty set
 	SkipPlaceholderSources bool
+	ExternalCallsEnabled   bool // owner-frozen effective synthesis setting
 	ProvidersOff           bool // required D2 semantic and resolver-LSP policy
 }
 
@@ -224,6 +225,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildDjangoDescriptor,
 	nil, // 97: deferred C# receiver demotion
 	store_pebble.ErrRebuildGDScriptReceiverGate,
+	store_pebble.ErrRebuildExternalCallSynthesis,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
