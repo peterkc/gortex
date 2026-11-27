@@ -356,3 +356,69 @@ func TestRebuildMacroExpansionProvesFirstAndLastProposal(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildMacroExpansionRequiresDeclarationAndBody(t *testing.T) {
+	const file, lang = "proof.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	callee := rebuildEventNode(file, "work", lang, "")
+	macro := &graph.Node{ID: file + "::ACTIVE", Name: "ACTIVE", Kind: graph.KindMacro, FilePath: file, Language: lang,
+		Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
+	dormant := &graph.Node{ID: file + "::DORMANT", Name: "DORMANT", Kind: graph.KindMacro, FilePath: file, Language: lang,
+		Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
+	call := func(from, to string, line int) *graph.Edge {
+		return &graph.Edge{From: from, To: to, Kind: graph.EdgeCalls, FilePath: file, Line: line}
+	}
+	body := call(macro.ID, callee.ID, 1)
+	use := call(caller.ID, "unresolved::ACTIVE", 3)
+	stale := call(caller.ID, "unresolved::ACTIVE", 4)
+	facts := rebuildEventFacts(file, lang, []*graph.Node{caller, callee, macro, dormant}, body, use, stale,
+		call(caller.ID, dormant.ID, 5), call(file+"::missing", "unresolved::ACTIVE", 6))
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	for _, what := range []string{"declaration", "body", "complete"} {
+		t.Run(what, func(t *testing.T) {
+			ctx := t.Context()
+			b, native := openRebuildEventStores(t, facts)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, frozen))
+			moved := *stale
+			moved.To = macro.ID
+			moves := []graph.EdgeReindex{{Edge: &moved, OldTo: stale.To}}
+			require.NoError(t, b.ApplyLinkReindexes(ctx, moves))
+			before := rebuildEventSavedRows(t, b)
+			receipt := facts
+			switch what {
+			case "declaration":
+				receipt.Nodes = slices.DeleteFunc(slices.Clone(facts.Nodes), func(n *graph.Node) bool { return n == macro })
+			case "body":
+				receipt.Edges = slices.DeleteFunc(slices.Clone(facts.Edges), func(e *graph.Edge) bool { return e == body })
+			}
+			stats, err := RunRebuildMacroExpansion(ctx, b, rebuildGRPCReceipts(receipt), frozen)
+			add := macroExpansionEdge(caller.ID, callee.ID, file, use.Line, macro.Name)
+			if what != "complete" {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(add)}, refused)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildMacroExpansionStats{Sites: 1, Owned: 1, Adds: 1}, stats)
+			// Native freezes the same keys before the move and refetches only
+			// those keys at its turn, not the newly created replacement.
+			streams := newFrameworkStreamCandidates(native, map[string]int{"c": 1}, nil)
+			collectFrameworkEdgeCensus(native, streams)
+			keys := streams.perPass[SynthMacroExpansion]
+			require.NotNil(t, keys)
+			require.True(t, native.ReindexEdgesApplied(moves))
+			bundle := refetchFrameworkCandidates(native, keys)
+			require.NotNil(t, bundle)
+			require.Equal(t, 1, runLegacyFrameworkSynth(native, func(g graph.Store) int { return resolveMacroExpansionCalls(g, bundle) }))
+			want := rebuildEventSQLiteRows(native)
+			require.Contains(t, want.edges, add)
+			require.Equal(t, want, rebuildEventSavedRows(t, b))
+		})
+	}
+}

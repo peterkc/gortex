@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -55,5 +56,52 @@ func TestRebuildMacroExpansionProposalWinnerAndCustody(t *testing.T) {
 	require.Equal(t, incumbent, saved)
 	requireSyntheticCustody(t, b, map[graph.EdgeIdentity]rebuildEdgeProof{
 		graph.EdgeIdentityFor(winner): rebuildProofMacroExpansion,
+	})
+}
+
+func TestRebuildMacroExpansionClaimInput(t *testing.T) {
+	live := graph.Edge{From: "caller", To: "macro", Kind: graph.EdgeCalls, FilePath: "saved.c", Line: 1}
+	original := live
+	original.To = "unresolved::APPLY"
+	for _, tc := range []struct {
+		name   string
+		change func(*graph.Edge)
+	}{
+		{"target may move", nil},
+		{"foreign kind", func(e *graph.Edge) { e.Kind = graph.EdgeReferences }},
+		{"foreign caller", func(e *graph.Edge) { e.From = "other" }},
+		{"foreign file", func(e *graph.Edge) { e.FilePath = "other.c" }},
+		{"foreign line", func(e *graph.Edge) { e.Line++ }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			p := rebuildMacroExpansion{rebuildCallMoves: rebuildMacroExpansionScratch(b)}
+			raw := original
+			if tc.change != nil {
+				tc.change(&raw)
+			}
+			key, receipt := pendingEdgeKey(&live), pendingEdgeKey(&raw)
+			require.NoError(t, b.pending.Set(rebuildLinkRecorderKey(key), receipt, pebble.NoSync))
+			if tc.change == nil {
+				// The same live key can be a use and a body. It must not
+				// become a duplicate claimant when seen a second time.
+				require.NoError(t, p.claimInput(key))
+			}
+			require.NoError(t, p.claimInput(key))
+			claim, err := p.marked(append(p.column('r'), receipt...))
+			require.NoError(t, err)
+			if tc.change == nil {
+				require.Equal(t, append([]byte{rebuildCapabilityWanted}, key...), claim)
+			} else {
+				require.Nil(t, claim)
+			}
+		})
+	}
+	t.Run("malformed recorder", func(t *testing.T) {
+		b := newBuild(t, FullProfile)
+		p := rebuildMacroExpansion{rebuildCallMoves: rebuildMacroExpansionScratch(b)}
+		key := pendingEdgeKey(&live)
+		require.NoError(t, b.pending.Set(rebuildLinkRecorderKey(key), []byte{1}, pebble.NoSync))
+		require.ErrorContains(t, p.claimInput(key), "edge custody format")
 	})
 }
