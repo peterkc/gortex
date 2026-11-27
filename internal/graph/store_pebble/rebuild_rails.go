@@ -366,6 +366,14 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		differentQuery, err := rebuildScratchState(p.b.pending, append(p.column('j'), old...), "rails first receipt query")
+		if err != nil {
+			return err
+		}
+		if differentQuery == rebuildCapabilityProved {
+			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
+			return nil
+		}
 		q, _ := p.query(e)
 		var live rebuildRailsDecision
 		var uncertain bool
@@ -418,14 +426,6 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 		if live.target == "" {
 			return nil
 		}
-		var conflict bool
-		for _, id := range [...]string{live.class, live.target} {
-			changed, err := p.present(p.key('D', id))
-			if err != nil {
-				return err
-			}
-			conflict = conflict || changed
-		}
 		var claim []byte
 		if len(r.value) != 0 {
 			claim, err = p.marked(append(p.column('r'), r.value...))
@@ -433,7 +433,7 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 				return err
 			}
 		}
-		if !sourceSeen || conflict ||
+		if !sourceSeen || differentQuery != 0 ||
 			len(claim) <= 1 || claim[0] != rebuildScratchExact || !bytes.Equal(claim[1:], old) {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil

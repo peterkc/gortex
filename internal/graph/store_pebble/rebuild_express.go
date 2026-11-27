@@ -356,9 +356,6 @@ func (p *rebuildExpress) recordNode(raw *graph.Node, file, language string) erro
 		return nil
 	}
 	if prior != nil {
-		if err := p.put(p.key('D', raw.ID), nil); err != nil {
-			return err
-		}
 		if prior[0]&1 != 0 {
 			oldName, _, err := readKeyString(prior[1:])
 			if err != nil {

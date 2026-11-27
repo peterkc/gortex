@@ -336,7 +336,7 @@ func TestRebuildRailsElectionProofGuards(t *testing.T) {
 			before := rebuildFrameworkCustodyRows(t, b)
 			require.NoError(t, b.FreezeRailsInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
 			stats, err := b.RebuildRails(t.Context(), sqlCallsiteTestReceipts(append(extra, proof)...), rebuildRailsReviewRules())
-			if scenario == "exact" {
+			if scenario == "exact" || scenario == "class conflict" || scenario == "member conflict" {
 				require.NoError(t, err)
 				require.Equal(t, RebuildRailsStats{Stubs: 1, Moves: 1}, stats)
 				want := *call
@@ -372,4 +372,36 @@ func TestRebuildRailsFreezeIgnoresReferences(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
+
+func TestRebuildRailsFirstReceiptQuery(t *testing.T) {
+	const file = "routes.rb"
+	caller := &graph.Node{ID: "caller", Kind: graph.KindFunction, FilePath: file, Language: "ruby"}
+	class := &graph.Node{ID: "foo", Name: "Foo", Kind: graph.KindType, FilePath: file, Language: "ruby"}
+	live := &graph.Edge{From: caller.ID, To: "unresolved::find", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
+		Meta: map[string]any{"recv_const": "Bar"}}
+	for _, first := range []string{"Foo", "Bar", ""} {
+		t.Run(first, func(t *testing.T) {
+			facts := producerProofFacts(caller)
+			facts.Nodes = append(facts.Nodes, class)
+			facts.Edges = []*graph.Edge{live}
+			b, _ := seedSyntheticCustody(t, facts)
+			before := rebuildFrameworkCustodyRows(t, b)
+			raw := *live
+			raw.Meta = map[string]any{"recv_const": first}
+			facts.Edges = []*graph.Edge{&raw, live}
+			require.NoError(t, b.FreezeRailsInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
+			stats, err := b.RebuildRails(t.Context(), sqlCallsiteTestReceipts(facts), rebuildRailsReviewRules())
+			if first == "Foo" {
+				var refusal *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(live)}, refusal)
+				require.Zero(t, stats)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, RebuildRailsStats{Stubs: 1}, stats)
+			}
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
 }
