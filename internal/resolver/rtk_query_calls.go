@@ -28,16 +28,14 @@ func ResolveRTKQueryCalls(g graph.Store) int {
 	// hookByName: generated-hook name → nodes.
 	hookByName := map[string][]*graph.Node{}
 	for _, n := range nodesByKindsOrAll(g, graph.KindFunction) {
-		if n == nil || n.Meta == nil {
-			continue
-		}
-		if ep, _ := n.Meta["rtk_endpoint"].(string); ep != "" {
+		ep, generated := rtkQueryNode(n)
+		if ep != "" {
 			if endpointByFileName[n.FilePath] == nil {
 				endpointByFileName[n.FilePath] = map[string]*graph.Node{}
 			}
 			endpointByFileName[n.FilePath][ep] = n
 		}
-		if gen, _ := n.Meta["rtk_generated_hook"].(bool); gen {
+		if generated {
 			hookByName[n.Name] = append(hookByName[n.Name], n)
 		}
 	}
@@ -52,32 +50,30 @@ func ResolveRTKQueryCalls(g graph.Store) int {
 			continue
 		}
 		// (1) generated-hook → endpoint placeholder.
-		if e.Meta != nil {
-			if v, _ := e.Meta["via"].(string); v == rtkQueryVia {
-				ep, _ := e.Meta["rtk_endpoint"].(string)
-				hookFile := ""
-				if hn := g.GetNode(e.From); hn != nil {
-					hookFile = hn.FilePath
-				}
-				var target *graph.Node
-				if m := endpointByFileName[hookFile]; m != nil {
-					target = m[ep]
-				}
-				rtkRebind(e, target, "unresolved::*."+ep, &reindex, &resolved)
-				continue
+		name, tagged := rtkQueryCall(e)
+		if tagged {
+			hookFile := ""
+			if hn := g.GetNode(e.From); hn != nil {
+				hookFile = hn.FilePath
 			}
+			var target *graph.Node
+			if m := endpointByFileName[hookFile]; m != nil {
+				target = m[name]
+			}
+			rtkRebind(e, target, &reindex, &resolved)
+			continue
 		}
 		// (2) component → generated-hook call the generic resolver left
 		// unresolved (e.g. the hook is imported cross-file).
 		if !graph.IsUnresolvedTarget(e.To) {
 			continue
 		}
-		cands := hookByName[graph.UnresolvedName(e.To)]
+		cands := hookByName[name]
 		if len(cands) == 0 {
 			continue
 		}
 		if target := pickStoreAction(g, e, sameBoundaryCandidates(g, e.From, cands)); target != nil {
-			rtkRebind(e, target, e.To, &reindex, &resolved)
+			rtkRebind(e, target, &reindex, &resolved)
 		}
 	}
 	if len(reindex) > 0 {
@@ -86,32 +82,64 @@ func ResolveRTKQueryCalls(g graph.Store) int {
 	return resolved
 }
 
-// rtkRebind points e at target (typed tier) or re-orphans it to
-// unresolvedTo, recording the reindex and bumping resolved on a hit.
-func rtkRebind(e *graph.Edge, target *graph.Node, unresolvedTo string, reindex *[]graph.EdgeReindex, resolved *int) {
-	want := unresolvedTo
-	if target != nil {
-		want = target.ID
+func rtkQueryNode(n *graph.Node) (endpoint string, generated bool) {
+	if n == nil {
+		return "", false
 	}
-	if e.To == want {
-		if target != nil {
-			*resolved++
-		}
-		return
+	endpoint, _ = n.Meta["rtk_endpoint"].(string)
+	generated, _ = n.Meta["rtk_generated_hook"].(bool)
+	return endpoint, generated
+}
+
+// rtkQueryCall distinguishes an endpoint carrier from a generic unresolved hook call.
+func rtkQueryCall(e *graph.Edge) (name string, tagged bool) {
+	if e == nil {
+		return "", false
 	}
+	if via, _ := e.Meta["via"].(string); via == rtkQueryVia {
+		name, _ = e.Meta["rtk_endpoint"].(string)
+		return name, true
+	}
+	if graph.IsUnresolvedTarget(e.To) {
+		return graph.UnresolvedName(e.To), false
+	}
+	return "", false
+}
+
+// rtkRebind records a target change and counts stationary matches too.
+func rtkRebind(e *graph.Edge, target *graph.Node, reindex *[]graph.EdgeReindex, resolved *int) {
 	oldTo := e.To
-	e.To = want
+	var id string
 	if target != nil {
-		e.Origin = graph.OriginASTInferred
+		id = target.ID
+		*resolved++
+	}
+	if rebindRTKQueryCall(e, id, target != nil) {
+		*reindex = append(*reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+	}
+}
+
+func rebindRTKQueryCall(e *graph.Edge, target string, matched bool) bool {
+	if !matched {
+		name, tagged := rtkQueryCall(e)
+		if !tagged {
+			return false
+		}
+		target = "unresolved::*." + name
+	}
+	if e.To == target {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	if matched {
 		e.Confidence = ConfidenceTyped
 		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceTyped)
 		StampSynthesizedTyped(e, SynthRTKQuery)
-		*resolved++
 	} else {
-		e.Origin = graph.OriginASTInferred
 		e.Confidence = 0
 		e.ConfidenceLabel = ""
 		UnstampSynthesized(e)
 	}
-	*reindex = append(*reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+	return true
 }
