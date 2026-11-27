@@ -156,7 +156,7 @@ func (p *rebuildSpringEventPass) captureListeners(ctx context.Context) error {
 }
 
 // h indexes tagged Calls, k their raw keys. a holds the global simple-name
-// arcs; e requests exact receipts and E maps raw keys to their live arcs.
+// arcs; e maps raw receipts to their uniquely claimed live edges.
 func (p *rebuildSpringEventPass) captureEdges(ctx context.Context) error {
 	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
 		kind, err := rebuildAttributionEdgeKind(r.key)
@@ -198,14 +198,14 @@ func (p *rebuildSpringEventPass) captureEdges(ctx context.Context) error {
 			return invalid("Spring event hierarchy key")
 		}
 		child, parent := p.rules.Simple(e.From), p.rules.Simple(e.To)
-		if child == "" || parent == "" || child == parent {
-			return nil
+		var arc []byte
+		if child != "" && parent != "" && child != parent {
+			arc = p.key('A', child, parent)
+			if err := p.put(p.key('a', child, parent), nil); err != nil {
+				return err
+			}
 		}
-		arc := p.key('a', child, parent)
-		if err := p.put(arc, nil); err != nil {
-			return err
-		}
-		return p.captureArcProof(snap, r.key, arc[len(p.prefix)+1:], kind)
+		return p.captureArcProof(snap, r.key, arc, kind)
 	})
 }
 
@@ -216,7 +216,10 @@ func (p *rebuildSpringEventPass) captureArcProof(snap *pebble.Snapshot, key, arc
 			return err
 		}
 		if proved {
-			return p.put(append(p.column('A'), arc...), nil)
+			if arc == nil {
+				return nil
+			}
+			return p.put(arc, nil)
 		}
 	}
 	custody, err := readRebuildEdgeCustody(snap, key)
@@ -227,8 +230,8 @@ func (p *rebuildSpringEventPass) captureArcProof(snap *pebble.Snapshot, key, arc
 		return err
 	}
 	if custody.proof != 0 {
-		if kind == graph.EdgeImplements && custody.proof == rebuildProofKMPExpectActual {
-			return p.put(append(p.column('A'), arc...), nil)
+		if arc != nil && kind == graph.EdgeImplements && custody.proof == rebuildProofKMPExpectActual {
+			return p.put(arc, nil)
 		}
 		return nil
 	}
@@ -240,10 +243,7 @@ func (p *rebuildSpringEventPass) captureArcProof(snap *pebble.Snapshot, key, arc
 	if err != nil || id.Kind != kind {
 		return err
 	}
-	if err := p.put(append(p.key('E', string(raw)), arc...), nil); err != nil {
-		return err
-	}
-	return p.put(append(p.column('e'), raw...), []byte{rebuildCapabilityWanted})
+	return p.claimKey(append(p.column('e'), raw...), key)
 }
 
 func (p *rebuildSpringEventPass) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
@@ -272,28 +272,31 @@ func (p *rebuildSpringEventPass) record(ctx context.Context, receipts iter.Seq2[
 				}
 			case graph.EdgeExtends, graph.EdgeImplements:
 				key := append(p.column('e'), pendingEdgeKey(raw)...)
-				state, err := p.state(key)
+				claim, err := p.marked(key)
 				if err != nil {
 					return err
 				}
-				if state != 0 {
-					if err := p.note(key, rebuildScratchProofBit(valid)); err != nil {
+				if len(claim) > 1 {
+					if err := noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(valid)); err != nil {
 						return err
 					}
 				}
 			}
 		}
 	}
-	return pendingVisit(ctx, p.b.pending, p.column('E'), func(r row) error {
-		raw, arc, err := readKeyString(r.key[len(p.prefix)+1:])
+	return pendingVisit(ctx, p.b.pending, p.column('e'), func(r row) error {
+		if len(r.value) <= 1 || r.value[0] != rebuildScratchExact {
+			return nil
+		}
+		id, err := decodeLinkRecorder(r.value[1:])
 		if err != nil {
 			return err
 		}
-		state, err := p.state(append(p.column('e'), raw...))
-		if err != nil || state != rebuildScratchExact {
-			return err
+		child, parent := p.rules.Simple(id.From), p.rules.Simple(id.To)
+		if child == "" || parent == "" || child == parent {
+			return nil
 		}
-		return p.put(append(p.column('A'), arc...), nil)
+		return p.put(p.key('A', child, parent), nil)
 	})
 }
 
