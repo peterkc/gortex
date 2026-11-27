@@ -41,6 +41,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"MyBatis", "moves", 1},
 		{"SQL callsite", "moves", 1},
 		{"Store Factory", "moves", 1},
+		{"Redux Thunk", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name  string
@@ -423,6 +424,8 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	const storeBinding, storeAction = "useCalendarStore", "reloadCalendar"
 	action := node("calendarStore.ts", ts, "calendarDispatch", graph.KindFunction, 1)
 	action.Meta = map[string]any{"store_factory": storeBinding, "store_member": storeAction}
+	thunk := node(app, ts, "calendarThunk", graph.KindVariable, 1)
+	thunk.Meta = map[string]any{"redux_thunk": thunk.Name}
 	setup := node(app, ts, "setup", graph.KindFunction, 2)
 	subscribe := node(app, ts, "subscribe", graph.KindMethod, 6)
 	notify := node(app, ts, "notify", graph.KindMethod, 9)
@@ -437,7 +440,7 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	spec.Meta = map[string]any{"fabric_component": "ClockView"}
 	// Observer must accept the registrar call proved by event channel;
 	// the original receipt has no call to subscribe.
-	appFacts := receipt([]*graph.Node{setup, subscribe, notify, callback, field, topic, show, spec},
+	appFacts := receipt([]*graph.Node{thunk, setup, subscribe, notify, callback, field, topic, show, spec},
 		edge(setup, topic.ID, graph.EdgeEmits, 3, event),
 		edge(subscribe, topic.ID, graph.EdgeListensOn, 7, event),
 		edge(subscribe, field.ID, graph.EdgeAccessesField, 8, nil),
@@ -449,6 +452,8 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 			map[string]any{"via": "sql.callsite", "sql_function": sqlFunction}),
 		edge(show, "unresolved::*."+storeAction, graph.EdgeCalls, 25,
 			map[string]any{"via": "store-factory", "store_binding": storeBinding, "store_action": storeAction}),
+		edge(thunk, "unresolved::*."+storeAction, graph.EdgeCalls, 26,
+			map[string]any{"via": "redux-thunk", "thunk_dispatch": storeAction}),
 	)
 
 	const rpc = "rpc.go"

@@ -570,6 +570,15 @@ func buildRebuildStages(
 				zap.Uint64("stubs", storeFactory.Stubs), zap.Uint64("resolved", storeFactory.Resolved),
 				zap.Uint64("moves", storeFactory.Moves))
 		}
+		reduxThunk, err := resolver.RunRebuildReduxThunk(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if reduxThunk.Stubs != 0 {
+			logger.Info("rebuild Redux Thunk applied to private build",
+				zap.Uint64("stubs", reduxThunk.Stubs), zap.Uint64("resolved", reduxThunk.Resolved),
+				zap.Uint64("moves", reduxThunk.Moves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

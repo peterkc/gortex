@@ -189,6 +189,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildSQLCallsite,
 	nil, // 59: retired StoreFactory order refusal
 	store_pebble.ErrRebuildStoreFactory,
+	store_pebble.ErrRebuildReduxThunk,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
