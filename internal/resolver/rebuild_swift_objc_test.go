@@ -525,3 +525,45 @@ func TestRebuildSwiftObjCProtocolOrder(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildSwiftObjCNodeRowCap(t *testing.T) {
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthSwiftObjC})
+	require.NoError(t, err)
+	facts, _ := rebuildSwiftObjCFixture(0)
+	padding := strings.Repeat("x", 16<<20)
+	for _, fixture := range []struct {
+		name    string
+		reached bool
+	}{
+		{"unmatched method", false},
+		{"matched method", true},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, facts...)
+			selection, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.True(t, selection.allows(SynthSwiftObjC))
+			before := rebuildSwiftObjCPrivateEdges(t, b)
+			large := *facts[0].Nodes[0]
+			large.Meta = map[string]any{"unrelated": padding}
+			if fixture.reached {
+				large.Meta["objc_selector"] = "deliverTo:"
+			} else {
+				large.ID, large.Name = "p/Bridge.swift::unused", "unused"
+			}
+			// Enlarge the live row after the census to test the stage's own cap.
+			b.AddNode(&large)
+			stats, err := RunRebuildSwiftObjC(t.Context(), b, rebuildGRPCReceipts(facts...), selection)
+			if fixture.reached {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildSwiftObjC)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "swift/objc node row")
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildSwiftObjCPrivateEdges(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 8, stats.Edges) // The ninth edge was already present.
+		})
+	}
+}

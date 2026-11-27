@@ -13,6 +13,8 @@ import (
 
 var ErrRebuildSwiftObjC = errors.New("pebble rebuild Swift/ObjC stage failed")
 
+const rebuildSwiftObjCRowBytes = 16 << 20
+
 var rebuildSwiftObjCPrefix = []byte{'g', 'J'}
 
 // RebuildSwiftObjCStats reports installed edges.
@@ -74,7 +76,24 @@ func rebuildSwiftObjCKey(col byte, fields ...string) []byte {
 }
 
 func (p *rebuildSwiftObjCPass) put(key, value []byte) error {
-	return p.b.putRebuildScratch(key, value, 16<<20, "Swift/ObjC")
+	return p.b.putRebuildScratch(key, value, rebuildSwiftObjCRowBytes, "Swift/ObjC")
+}
+
+func (p *rebuildSwiftObjCPass) node(ctx context.Context, id string, decode func([]byte) (*graph.Node, error)) (*graph.Node, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	key := pendingNodeKey(id)
+	return pendingGet(p.b.pending, key, func(raw []byte) (*graph.Node, error) {
+		if len(key)+len(raw) > rebuildSwiftObjCRowBytes {
+			return nil, fmt.Errorf("%w: swift/objc node row", ErrRebuildLinkInputSize)
+		}
+		n, err := decode(raw)
+		if err == nil && n.ID != id {
+			return nil, invalid("swift/objc node identity")
+		}
+		return n, err
+	})
 }
 
 func (p *rebuildSwiftObjCPass) propose(ctx context.Context, e *graph.Edge) error {
@@ -88,6 +107,13 @@ func (p *rebuildSwiftObjCPass) propose(ctx context.Context, e *graph.Edge) error
 	if err != nil || exists {
 		// Duplicate explicit and heuristic matches have identical payload.
 		return err
+	}
+	// Only endpoints of a new edge need a deciding row. Discovery can see
+	// a large declaration that has no match without refusing the turn.
+	for _, id := range [...]string{e.From, e.To} {
+		if _, err := p.node(ctx, id, decodeNodeLight); err != nil {
+			return err
+		}
 	}
 	raw, err := encodeEdge(e)
 	if err != nil {
@@ -115,7 +141,7 @@ func (p *rebuildSwiftObjCPass) wantProtocolElection(ctx context.Context, winnerI
 	if err != nil || state != 0 {
 		return err
 	}
-	winner, err := p.b.RebuildView().Node(ctx, winnerID)
+	winner, err := p.node(ctx, winnerID, decodeNodeLight)
 	if err != nil {
 		return err
 	}
@@ -185,7 +211,7 @@ func (p *rebuildSwiftObjCPass) noteReceipt(ctx context.Context, raw *graph.Node,
 	if err != nil || (fromState == 0 && toState == 0) {
 		return err
 	}
-	live, err := p.b.RebuildView().Node(ctx, raw.ID)
+	live, err := p.node(ctx, raw.ID, decodeNode)
 	if err != nil {
 		return err
 	}
