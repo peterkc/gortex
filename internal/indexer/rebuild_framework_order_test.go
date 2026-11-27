@@ -36,6 +36,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Flutter setState", "edges", 1},
 		{"KMP expect/actual", "edges", 2},
 		{"Expo module bridge", "edges", 1},
+		{"Fabric", "edges", 2},
 	}
 	for _, tc := range []struct {
 		name  string
@@ -173,6 +174,8 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	appendHandler.Meta = map[string]any{"cc_append_field": "queuedHandlers"}
 	java := node("Calendar.java", "java", method, graph.KindMethod, 5)
 	java.Meta = map[string]any{"rn_module": module, "rn_method": method}
+	manager := node(java.FilePath, java.Language, "RCTClockView", graph.KindType, 8)
+	manager.Meta = map[string]any{"fabric_component": "RCTClockView", "fabric_native": "java"}
 
 	const app, ts = "app.ts", "typescript"
 	setup := node(app, ts, "setup", graph.KindFunction, 2)
@@ -185,9 +188,11 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	topic.Meta = map[string]any{"transport": "eventemitter", "event_kind": "pubsub"}
 	event := map[string]any{"transport": "eventemitter"}
 	show := node(app, ts, "show", graph.KindFunction, 20)
+	spec := node(app, ts, "ClockView", graph.KindType, 23)
+	spec.Meta = map[string]any{"fabric_component": "ClockView"}
 	// Observer must accept the registrar call proved by event channel;
 	// the original receipt has no call to subscribe.
-	appFacts := receipt([]*graph.Node{setup, subscribe, notify, callback, field, topic, show},
+	appFacts := receipt([]*graph.Node{setup, subscribe, notify, callback, field, topic, show, spec},
 		edge(setup, topic.ID, graph.EdgeEmits, 3, event),
 		edge(subscribe, topic.ID, graph.EdgeListensOn, 7, event),
 		edge(subscribe, field.ID, graph.EdgeAccessesField, 8, nil),
@@ -255,7 +260,7 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
-		receipt([]*graph.Node{java}),
+		receipt([]*graph.Node{java, manager}),
 		appFacts, grpcFacts, widgetFacts, temporalFacts,
 		receipt([]*graph.Node{expect}),
 		receipt([]*graph.Node{actual}),

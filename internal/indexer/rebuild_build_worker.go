@@ -538,6 +538,15 @@ func buildRebuildStages(
 				zap.Uint64("edges", expoModules.Edges),
 				zap.Uint64("spill_bytes", expoModules.SpillBytes))
 		}
+		fabric, err := resolver.RunRebuildFabric(ctx, private, receipts, selection, 1<<20)
+		if err != nil {
+			return err
+		}
+		if fabric.Edges != 0 || fabric.SpillBytes != 0 {
+			logger.Info("rebuild Fabric applied to private build",
+				zap.Uint64("edges", fabric.Edges),
+				zap.Uint64("spill_bytes", fabric.SpillBytes))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

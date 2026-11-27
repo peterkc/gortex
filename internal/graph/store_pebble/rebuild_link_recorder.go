@@ -51,6 +51,8 @@ const (
 	rebuildProofKMPExpectActual
 	// First source recorder and Expo declaration ownership.
 	rebuildProofExpoModules
+	// Exact Fabric spec and manager declaration ownership.
+	rebuildProofFabric
 	rebuildProofLimit
 )
 
