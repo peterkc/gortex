@@ -427,3 +427,47 @@ func TestRebuildLaravelStationaryReceiptElection(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildLaravelReceiptOnlyCall(t *testing.T) {
+	const file, lang = "events.php", "php"
+	publisher := rebuildEventNode(file, "publish", lang, "")
+	listener := rebuildEventNode(file, "listen", lang, "")
+	listener.Meta = map[string]any{"laravel_listener_type": "Notice"}
+	nodes := []*graph.Node{publisher, listener}
+	for _, tc := range []struct {
+		name, route, to string
+		firstUntagged   bool
+		refuse          bool
+	}{
+		{"receipt-only route binds", "Notice", "unresolved::*.handle", false, true},
+		{"receipt-only route already targets listener", "Notice", listener.ID, false, false},
+		{"receipt-only route misses without a reset", "Other", "unresolved::*.handle", false, false},
+		{"later same-key tagged receipt cannot replace raw row", "Notice", "unresolved::*.handle", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live := &graph.Edge{From: publisher.ID, To: tc.to, Kind: graph.EdgeCalls, FilePath: file, Line: 3}
+			raw := *live
+			raw.Meta = map[string]any{"via": laravelEventVia, "laravel_event_type": tc.route}
+			build := openRebuildGRPCBuild(t, rebuildEventFacts(file, lang, nodes, live))
+			before := rebuildEventSavedRows(t, build)
+			edges := []*graph.Edge{&raw}
+			if tc.firstUntagged {
+				edges = []*graph.Edge{live, &raw}
+			}
+			receipt := rebuildEventFacts(file, lang, nodes, edges...)
+			stats, err := RunRebuildLaravelEvent(t.Context(), build, rebuildGRPCReceipts(receipt), rebuildLaravelTestSelection(t))
+			if tc.refuse {
+				_, native := openRebuildEventStores(t, receipt)
+				require.Equal(t, 1, ResolveLaravelEventCalls(native))
+				require.NotContains(t, rebuildEventSQLiteRows(native).edges, &raw)
+				var refusal *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(live)}, refusal)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, build))
+		})
+	}
+}

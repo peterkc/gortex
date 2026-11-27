@@ -37,8 +37,9 @@ type RebuildLaravelEventRules struct {
 
 type rebuildLaravelEventPass struct {
 	rebuildCallMoves
-	rules RebuildLaravelEventRules
-	stats RebuildLaravelEventStats
+	rules     RebuildLaravelEventRules
+	stats     RebuildLaravelEventStats
+	haveCalls bool
 }
 
 // RebuildLaravelEvent runs once on a fresh private graph, after Sidekiq.
@@ -70,7 +71,7 @@ func (b *BuildStore) RebuildLaravelEvent(ctx context.Context, receipts iter.Seq2
 	if err != nil || !active {
 		return stats, err
 	}
-	if err := p.collectCalls(ctx); err != nil || p.stats.Stubs == 0 {
+	if err := p.collectCalls(ctx); err != nil || !p.haveCalls {
 		return p.stats, err
 	}
 	if receipts != nil {
@@ -194,6 +195,7 @@ func (p *rebuildLaravelEventPass) collectCalls(ctx context.Context) error {
 		if err != nil || kind != graph.EdgeCalls {
 			return err
 		}
+		p.haveCalls = true
 		raw, err := rebuildReceiptKey(snap, r.key)
 		if err != nil && !errors.Is(err, ErrRebuildUnknownProvenance) {
 			return err
@@ -428,9 +430,17 @@ func (p *rebuildLaravelEventPass) recordEdge(e *graph.Edge, admitted bool, order
 		if err != nil || len(claim) <= 1 || claim[0] != rebuildCapabilityWanted {
 			return err
 		}
-		owned, err := p.get(append(p.column('c'), claim[1:]...))
-		if err != nil || !bytes.Equal(owned, raw) {
+		old := claim[1:]
+		key := append(p.column('c'), old...)
+		owned, err := p.get(key)
+		if err != nil {
 			return err
+		}
+		if owned == nil {
+			return p.recordReceiptOnlyCall(e, admitted, raw, old, claim)
+		}
+		if !bytes.Equal(owned, raw) {
+			return nil
 		}
 		if admitted {
 			typ := p.rules.Call(e)
@@ -462,6 +472,30 @@ func (p *rebuildLaravelEventPass) recordEdge(e *graph.Edge, admitted bool, order
 		}
 		return invalid("Laravel receipt live edge missing")
 	}, edge)
+}
+
+// A raw-only route may affect a stationary live Call, but only a unique
+// receipt with the same custody identity can be assigned to that Call.
+func (p *rebuildLaravelEventPass) recordReceiptOnlyCall(e *graph.Edge, admitted bool, raw, old, claim []byte) error {
+	claimKey := append(p.column('r'), raw...)
+	if err := noteRebuildScratchPayload(p.put, claimKey, claim, rebuildScratchProofBit(admitted)); err != nil {
+		return err
+	}
+	typ := p.rules.Call(e)
+	if !admitted || typ == "" {
+		return nil
+	}
+	live, err := p.edge(old)
+	if err != nil || live == nil {
+		return errors.Join(err, invalid("Laravel receipt-only Call missing"))
+	}
+	if p.rules.Call(live) != "" || live.Kind != e.Kind || live.From != e.From || live.FilePath != e.FilePath || live.Line != e.Line {
+		return nil
+	}
+	if err := p.put(p.key('e', p.rules.SimpleName(typ)), nil); err != nil {
+		return err
+	}
+	return p.put(append(p.column('C'), old...), appendKeyString(nil, typ))
 }
 
 // joinHandles elects the owner from MemberOf rows, not from a class node or
@@ -676,7 +710,22 @@ func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
 		return err
 	}
 	var refused rebuildScratchRefusals
-	prefix := p.column('c')
+	prefix := p.column('C')
+	if err := p.visit(ctx, prefix, func(r row) error {
+		old := r.key[len(prefix):]
+		e, err := p.edge(old)
+		if err != nil || e == nil {
+			return errors.Join(err, invalid("Laravel planned receipt-only Call missing"))
+		}
+		changed, err := p.receiptChangesStationaryCall(ctx, r.value, *e, anchor)
+		if changed {
+			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
+		}
+		return err
+	}); err != nil {
+		return err
+	}
+	prefix = p.column('c')
 	if err := p.visit(ctx, prefix, func(r row) error {
 		old := r.key[len(prefix):]
 		e, err := p.edge(old)
@@ -708,34 +757,11 @@ func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
 				refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 				return nil
 			}
-			typ, rest, err := readKeyString(raw)
-			if err != nil || len(rest) != 0 {
-				return invalid("Laravel receipt Call route")
-			}
-			if typ == "" || !anchor {
-				return nil
-			}
-			prefix := p.key('T', p.rules.SimpleName(typ))
-			var first string
-			var matched uint64
-			if err := p.visit(ctx, prefix, func(r row) error {
-				id, _, err := readKeyString(r.key[len(prefix):])
-				if matched == 0 {
-					first = id
-				}
-				matched++
-				return err
-			}); err != nil {
-				return err
-			}
-			certain, err := p.listenerSubset(ctx, p.rules.SimpleName(typ), 'x', 'T')
-			if err != nil {
-				return err
-			}
-			if !certain || p.rules.Rebind(&before, first, matched != 0) || matched > 1 {
+			changed, err := p.receiptChangesStationaryCall(ctx, raw, before, anchor)
+			if changed {
 				refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			}
-			return nil
+			return err
 		}
 		proved, err := p.listenersProved(ctx, event)
 		if err != nil {
@@ -767,6 +793,34 @@ func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
 		return err
 	}
 	return refused.err()
+}
+
+func (p *rebuildLaravelEventPass) receiptChangesStationaryCall(ctx context.Context, raw []byte, before graph.Edge, anchor bool) (bool, error) {
+	typ, rest, err := readKeyString(raw)
+	if err != nil || len(rest) != 0 {
+		return false, invalid("Laravel receipt Call route")
+	}
+	if typ == "" || !anchor {
+		return false, nil
+	}
+	prefix := p.key('T', p.rules.SimpleName(typ))
+	var first string
+	var matched uint64
+	if err := p.visit(ctx, prefix, func(r row) error {
+		id, _, err := readKeyString(r.key[len(prefix):])
+		if matched == 0 {
+			first = id
+		}
+		matched++
+		return err
+	}); err != nil {
+		return false, err
+	}
+	certain, err := p.listenerSubset(ctx, p.rules.SimpleName(typ), 'x', 'T')
+	if err != nil {
+		return false, err
+	}
+	return !certain || p.rules.Rebind(&before, first, matched != 0) || matched > 1, nil
 }
 
 func (p *rebuildLaravelEventPass) prepareOrdered(ctx context.Context, path string) (err error) {
