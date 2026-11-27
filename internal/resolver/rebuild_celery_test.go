@@ -144,6 +144,84 @@ func TestRebuildCeleryNeedsTaskNameAnchor(t *testing.T) {
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 }
 
+func TestRebuildCeleryProofGuards(t *testing.T) {
+	const file, registered = "tasks.py", "email.send"
+	caller := celeryTestNode(file, "dispatch", "", "")
+	caller.WorkspaceID = "local"
+	anchor := celeryTestNode(file, "anchor", "mail", "")
+	winner := celeryTestNode(file, "winner", "", registered)
+	winner.WorkspaceID = caller.WorkspaceID
+	entrant := celeryTestNode(file, "entrant", "", "")
+	entrant.WorkspaceID = "foreign"
+	nodes := []*graph.Node{caller, anchor, winner, entrant}
+	for i := range celeryFanoutCap - 1 {
+		n := celeryTestNode(file, fmt.Sprintf("peer%d", i), "", registered)
+		n.WorkspaceID = entrant.WorkspaceID
+		nodes = append(nodes, n)
+	}
+	call := celeryTestCall(caller.ID, "unresolved::*.mail", file, "mail", registered, 4)
+	facts := rebuildEventFacts(file, "python", nodes, call)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthCelery})
+	require.NoError(t, err)
+	for _, change := range []string{"task-name anchor", "extra registration", "Call registration", "Call owner", "Call language"} {
+		t.Run(change, func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			proof := rebuildEventFacts(file, "python", slices.Clone(nodes))
+			callProof := rebuildEventFacts(file, "python", nil, call)
+			switch change {
+			case "task-name anchor":
+				proof.Nodes[1] = celeryTestNode(file, "anchor", "", "different.registration")
+			case "extra registration":
+				raw := celeryTestNode(file, "entrant", "", registered)
+				raw.WorkspaceID = entrant.WorkspaceID
+				proof.Nodes[3] = raw
+			case "Call registration":
+				callProof.Edges[0] = celeryTestCall(caller.ID, call.To, file, "mail", "different.registration", call.Line)
+			case "Call owner":
+				callProof.File.FilePath = "different.py"
+			case "Call language":
+				callProof.EffectiveLanguage = ""
+			}
+			stats, err := RunRebuildCelery(t.Context(), b, rebuildGRPCReceipts(proof, callProof), selection)
+			require.ErrorIs(t, err, store_pebble.ErrRebuildCelery)
+			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildCeleryCandidateNodeCap(t *testing.T) {
+	const file = "tasks.py"
+	caller := celeryTestNode(file, "dispatch", "", "")
+	anchor := celeryTestNode(file, "anchor", "mail", "")
+	call := celeryTestCall(caller.ID, "unresolved::*.mail", file, "mail", "", 4)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthCelery})
+	require.NoError(t, err)
+	for _, task := range []string{"", "mail"} {
+		large := celeryTestNode(file, "large", task, "")
+		large.Meta["payload"] = strings.Repeat("x", 16<<20)
+		facts := rebuildEventFacts(file, "python", []*graph.Node{caller, anchor, large}, call)
+		proof := rebuildEventFacts(file, "python", []*graph.Node{caller, anchor}, call)
+		b := openRebuildGRPCBuild(t, facts)
+		before := rebuildEventSavedRows(t, b)
+		stats, err := RunRebuildCelery(t.Context(), b, rebuildGRPCReceipts(proof), selection)
+		if task != "" {
+			require.ErrorIs(t, err, store_pebble.ErrRebuildCelery)
+			require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+			require.ErrorContains(t, err, "Celery node row")
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		} else {
+			require.NoError(t, err)
+			native := openRebuildTemporalOracle(t, facts)
+			require.Equal(t, 1, ResolveCeleryCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		}
+	}
+}
+
 func TestRebuildCeleryFrozenSelection(t *testing.T) {
 	const file = "tasks.py"
 	caller := celeryTestNode(file, "dispatch", "", "")
@@ -156,6 +234,13 @@ func TestRebuildCeleryFrozenSelection(t *testing.T) {
 	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 	require.NoError(t, err)
 	require.False(t, frozen.allows(SynthCelery))
+	before := rebuildEventSavedRows(t, b)
+	stats, err := RunRebuildCelery(t.Context(), b, func(func(store_pebble.ParseFacts, error) bool) {
+		t.Fatal("an unrelated Call must not require receipts")
+	}, selection)
+	require.NoError(t, err)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
 	late := celeryTestCall(caller.ID, "unresolved::*.mail", file, "mail", "", 3)
 	b.AddEdge(late)
 	bounded, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
@@ -164,7 +249,7 @@ func TestRebuildCeleryFrozenSelection(t *testing.T) {
 
 	late.Meta["payload"] = large.Meta["payload"]
 	b.AddEdge(late)
-	stats, err := RunRebuildCelery(t.Context(), b, nil, frozen)
+	stats, err = RunRebuildCelery(t.Context(), b, nil, frozen)
 	require.NoError(t, err)
 	require.Zero(t, stats)
 	refrozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)

@@ -108,6 +108,12 @@ func (p *rebuildCeleryPass) collect(ctx context.Context) (bool, error) {
 			return err
 		}
 		task, registered := p.celery.Node(n)
+		if task == "" && registered == "" {
+			return nil
+		}
+		if err := p.nodeInput(r.key, r.value); err != nil {
+			return err
+		}
 		haveTasks = haveTasks || task != ""
 		for i, name := range [...]string{task, registered} {
 			if name == "" {
