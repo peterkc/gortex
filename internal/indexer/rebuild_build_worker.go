@@ -420,18 +420,6 @@ func buildRebuildStages(
 			zap.Uint64("claim_observed_pending_flush_bytes", stats.Signatures.Claims.SpillBytes),
 			zap.Uint64("claim_peak_row_bytes", stats.Signatures.Claims.PeakRowBytes))
 	}
-	grpc, err := resolver.RunRebuildGRPC(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
-	if err != nil {
-		return err
-	}
-	if grpc.Stubs != 0 {
-		logger.Info("rebuild gRPC applied to private build",
-			zap.Uint64("stubs", grpc.Stubs),
-			zap.Uint64("registrations", grpc.Registrations),
-			zap.Uint64("resolved", grpc.Resolved),
-			zap.Uint64("moves", grpc.Moves),
-			zap.Uint64("spill_bytes", grpc.SpillBytes))
-	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
 	return errRebuildBuildIncomplete
