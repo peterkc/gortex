@@ -209,8 +209,9 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 	return b.reindexChunkWithRecorders(batch, false)
 }
 
-// capture records the original key at the checked main writer. Other moves
-// may inherit an existing recorder but cannot invent one.
+// Capture records the original key on checked target or kind reindexes,
+// including main linking, Go receiver repair, and target attribution. Other
+// reindexes can inherit an existing recorder but do not seed one.
 func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, capture bool) error {
 	// First free every moving stored identity. A stationary destination
 	// preserves its row, and the first claimant wins any free destination.
@@ -248,6 +249,7 @@ func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, captur
 				continue
 			}
 			if index, ok := created[string(oldKey)]; ok {
+				recorder = candidates[index].recorder
 				candidates[index] = claim{}
 				delete(created, string(oldKey))
 			} else if r.RefreshIdentity {

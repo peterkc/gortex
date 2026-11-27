@@ -222,11 +222,12 @@ func (b *BuildStore) restoreGuardSources(ctx context.Context, sources []graph.Pl
 // particular, a second record for a shared target pointer can name an old
 // identity that did not exist, or a no-op identity already marked moving.
 // The main reindex adapter's stationary and missing-old rules differ here.
-func (b *BuildStore) rebuildGuardReindex(ctx context.Context, moves []graph.EdgeReindex) error {
+func (b *BuildStore) rebuildGuardReindex(ctx context.Context, moves []graph.EdgeReindex) (err error) {
 	type moveKeys struct{ old, next string }
 	keys := make([]moveKeys, 0, len(moves))
 	initial := make(map[string]*graph.Edge, 2*len(moves))
 	state := make(map[string]*graph.Edge, 2*len(moves))
+	origins := make(map[*graph.Edge]string, len(moves))
 	moving := make(map[string]bool, len(moves))
 	var size int
 	load := func(key string) error {
@@ -263,6 +264,11 @@ func (b *BuildStore) rebuildGuardReindex(ctx context.Context, moves []graph.Edge
 		}
 		k := moveKeys{string(pendingEdgeKey(&old)), string(pendingEdgeKey(m.Edge))}
 		keys = append(keys, k)
+		// A duplicate borrows the same payload after its target changed. Its
+		// later old key does not identify the row that supplied that payload.
+		if _, seen := origins[m.Edge]; !seen {
+			origins[m.Edge] = k.old
+		}
 		for _, key := range [...]string{k.old, k.next} {
 			if err := load(key); err != nil {
 				return err
@@ -291,6 +297,10 @@ func (b *BuildStore) rebuildGuardReindex(ctx context.Context, moves []graph.Edge
 	}
 	// All winner choices are fixed. Iterate in first-observed order; the
 	// pending writer never exposes the intermediate state as a serving head.
+	// Read lineage from before the writes: an earlier delete or replacement
+	// can remove a later winner's source. Only one recorder is held at a time.
+	recorders := b.pending.NewSnapshot()
+	defer func() { err = errors.Join(err, recorders.Close()) }()
 	for _, k := range keys {
 		for _, key := range [...]string{k.old, k.next} {
 			if err := ctx.Err(); err != nil {
@@ -309,7 +319,13 @@ func (b *BuildStore) rebuildGuardReindex(ctx context.Context, moves []graph.Edge
 				if err := b.deleteEdge([]byte(key), before); err != nil {
 					return err
 				}
-			} else if err := b.putEdge(after); err != nil {
+				continue
+			}
+			recorder, err := readLinkRecorder(recorders, []byte(origins[after]))
+			if err != nil {
+				return err
+			}
+			if err := b.writePendingEdge(after, recorder, before != nil); err != nil {
 				return err
 			}
 		}

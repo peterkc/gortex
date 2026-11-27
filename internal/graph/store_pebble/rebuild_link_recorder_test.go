@@ -1,10 +1,10 @@
 package store_pebble
 
 import (
-	"errors"
 	"slices"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -82,12 +82,6 @@ func TestRebuildLinkRecorderFollowsInstalledMoves(t *testing.T) {
 	lookup(view, winner.Edge, &raw)
 	lookup(view, &stationary, nil)
 	lookup(view, framework, nil)
-	stationaryID := graph.EdgeIdentityFor(&stationary)
-	_, err := view.RequireOriginalLinkRecorder(ctx, stationaryID)
-	var unknown *RebuildUnknownProvenanceError
-	if !errors.As(err, &unknown) || unknown.Count != 1 || unknown.First != stationaryID {
-		t.Fatalf("required original recorder for %+v = %v; want unknown provenance for that key (count 1)", stationaryID, err)
-	}
 
 	second := move(*winner.Edge, "second-live")
 	if err := tracked.ApplyLinkReindexes(ctx, []graph.EdgeReindex{second}); err != nil {
@@ -100,4 +94,107 @@ func TestRebuildLinkRecorderFollowsInstalledMoves(t *testing.T) {
 	tracked.ReindexEdges([]graph.EdgeReindex{last})
 	lookup(view, second.Edge, nil)
 	lookup(view, last.Edge, &raw)
+}
+
+func TestRebuildLinkRecorderFollowsSameChunkChain(t *testing.T) {
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	raw := graph.Edge{From: "caller", To: "unresolved::a", Kind: graph.EdgeCalls, FilePath: "routes.ts", Line: 5}
+	live, middle, final := raw, raw, raw
+	live.To, middle.To, final.To = "first", "unstored", "last"
+	b.AddEdge(&raw)
+	require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &live, OldTo: raw.To}}))
+	b.ReindexEdges([]graph.EdgeReindex{
+		{Edge: &middle, OldTo: live.To},
+		{Edge: &final, OldTo: middle.To},
+	})
+	view := b.RebuildView()
+	for _, e := range []*graph.Edge{&live, &middle} {
+		id := graph.EdgeIdentityFor(e)
+		stored, err := view.Edge(ctx, id)
+		require.NoError(t, err)
+		require.Nil(t, stored)
+		_, found, err := view.OriginalLinkRecorder(ctx, id)
+		require.NoError(t, err)
+		require.False(t, found)
+	}
+	id := graph.EdgeIdentityFor(&final)
+	stored, err := view.Edge(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	got, found, err := view.OriginalLinkRecorder(ctx, id)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, graph.EdgeIdentityFor(&raw), got)
+}
+
+func TestRebuildLinkRecorderFollowsGuardWinner(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		incumbent bool
+		alias     bool
+		tracked   bool
+	}{
+		{name: "free-revert", tracked: true},
+		{name: "stationary-incumbent", incumbent: true, tracked: true},
+		{name: "replacement-takes-source-recorder", incumbent: true, alias: true, tracked: true},
+		{name: "untracked-replacement-clears-old-recorder", incumbent: true, alias: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			b := newBuild(t, FullProfile)
+			raw := graph.Edge{From: "caller", To: "unresolved::original", Kind: graph.EdgeCalls, FilePath: "routes.ts", Line: 5, Via: "moved"}
+			live := raw
+			live.To, live.Origin = "resolved", graph.OriginASTInferred
+			if tc.tracked {
+				b.AddEdge(&raw)
+				require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &live, OldTo: raw.To}}))
+			} else {
+				b.AddEdge(&live)
+			}
+			wantRaw := &raw
+			incumbentRaw := raw
+			incumbentRaw.To, incumbentRaw.Via = "unresolved::other", "incumbent"
+			const destination = "unresolved::reverted"
+			if tc.incumbent {
+				incumbent := incumbentRaw
+				incumbent.To, incumbent.Origin = destination, graph.OriginASTInferred
+				b.AddEdge(&incumbentRaw)
+				require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &incumbent, OldTo: incumbentRaw.To}}))
+				if !tc.alias {
+					wantRaw = &incumbentRaw
+				}
+			}
+			// Guard duplicates borrow the same pointer. After the first revert
+			// mutates To, the duplicate names the destination as its old key.
+			reverted := live
+			reverted.To = destination
+			moves := []graph.EdgeReindex{{Edge: &reverted, OldTo: live.To}}
+			if tc.alias {
+				moves = append(moves, graph.EdgeReindex{Edge: &reverted, OldTo: destination})
+			}
+			_, err := b.ApplyRebuildGuardPage(ctx, moves, nil)
+			require.NoError(t, err)
+			view := b.RebuildView()
+			liveID := graph.EdgeIdentityFor(&live)
+			stored, err := view.Edge(ctx, liveID)
+			require.NoError(t, err)
+			require.Nil(t, stored)
+			_, found, err := view.OriginalLinkRecorder(ctx, liveID)
+			require.NoError(t, err)
+			require.False(t, found)
+			winnerID := graph.EdgeIdentityFor(&reverted)
+			winner, err := view.Edge(ctx, winnerID)
+			require.NoError(t, err)
+			require.NotNil(t, winner)
+			require.Equal(t, wantRaw.Via, winner.Via)
+			require.Empty(t, winner.Origin)
+			got, found, err := view.OriginalLinkRecorder(ctx, winnerID)
+			require.NoError(t, err)
+			require.Equal(t, tc.tracked, found)
+			if tc.tracked {
+				require.Equal(t, graph.EdgeIdentityFor(wantRaw), got)
+			}
+		})
+	}
 }

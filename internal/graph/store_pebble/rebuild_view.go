@@ -278,10 +278,11 @@ func linkPendingTarget(id string) bool {
 		!strings.Contains(text, "::"+graph.FnValuePlaceholderMarker)
 }
 
-// ApplyLinkReindexes replaces raw targets and kinds for one reduced main
-// resolver page. The reducer supplies unique, complete old keys in frontier
-// order; duplicate destination keys keep the first claimant. Unlike the
-// legacy mutation adapter this must not split the page at 256 rows.
+// ApplyLinkReindexes replaces targets or kinds for a checked resolver page
+// and records the original key of each installed move. The reducer supplies
+// unique, complete old keys in frontier order; duplicate destination keys
+// keep the first claimant. Unlike the legacy mutation adapter this must not
+// split the page at 256 rows.
 // On error the caller must abandon the private build.
 func (b *BuildStore) ApplyLinkReindexes(ctx context.Context, moves []graph.EdgeReindex) error {
 	return b.applyRebuildLinkReindexes(ctx, moves, "")

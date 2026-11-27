@@ -42,16 +42,6 @@ func (v RebuildView) OriginalLinkRecorder(ctx context.Context, live graph.EdgeId
 	return raw, found, err
 }
 
-// RequireOriginalLinkRecorder refuses when a consumer already knows that
-// the current identity is not raw and its move link is absent.
-func (v RebuildView) RequireOriginalLinkRecorder(ctx context.Context, live graph.EdgeIdentity) (graph.EdgeIdentity, error) {
-	raw, found, err := v.OriginalLinkRecorder(ctx, live)
-	if err == nil && !found {
-		err = &RebuildUnknownProvenanceError{Count: 1, First: live}
-	}
-	return raw, err
-}
-
 func decodeLinkRecorder(key []byte) (graph.EdgeIdentity, error) {
 	var out graph.EdgeIdentity
 	var kind string
