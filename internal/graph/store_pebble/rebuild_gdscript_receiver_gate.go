@@ -182,7 +182,7 @@ func (b *BuildStore) applyRebuildGDScriptGate(ctx context.Context) (count uint64
 				return invalid("GDScript receiver refresh identity")
 			}
 			if !apply {
-				if err := b.proveRebuildGDScriptGatePayload(key, before); err != nil {
+				if err := b.proveRebuildEdgePayload(key, before); err != nil {
 					return err
 				}
 				_, err := readRebuildEdgeCustody(b.pending, key)
@@ -191,7 +191,7 @@ func (b *BuildStore) applyRebuildGDScriptGate(ctx context.Context) (count uint64
 			if err := b.refreshPendingEdge(after); err != nil {
 				return err
 			}
-			if err := b.proveRebuildGDScriptGatePayload(key, payload.buf); err != nil {
+			if err := b.proveRebuildEdgePayload(key, payload.buf); err != nil {
 				return err
 			}
 			count++
@@ -203,18 +203,4 @@ func (b *BuildStore) applyRebuildGDScriptGate(ctx context.Context) (count uint64
 	}
 	err = visit(true)
 	return count, err
-}
-
-func (b *BuildStore) proveRebuildGDScriptGatePayload(key, want []byte) error {
-	match, err := pendingGet(b.pending, key, func(got []byte) (bool, error) {
-		return bytes.Equal(got, want), nil
-	})
-	if err != nil || match {
-		return err
-	}
-	id, err := decodeLinkRecorder(key)
-	if err != nil {
-		return err
-	}
-	return &RebuildUnknownProvenanceError{Count: 1, First: id}
 }

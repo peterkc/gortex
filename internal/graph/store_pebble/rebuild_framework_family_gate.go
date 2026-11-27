@@ -73,7 +73,7 @@ func (b *BuildStore) RebuildFrameworkFamilyGate(ctx context.Context, ordinarySyn
 		// Prove every old payload before deleting any row. One full identity
 		// is one proposal, and the write lock excludes changed incumbents.
 		if err := pendingVisit(ctx, b.pending, prefix, func(r row) error {
-			return b.checkRebuildFamilyDrop(r.key[len(prefix):], r.value)
+			return b.proveRebuildEdgePayload(r.key[len(prefix):], r.value)
 		}); err != nil {
 			return err
 		}
@@ -103,18 +103,4 @@ func rebuildFamilyNodeLanguage(snap *pebble.Snapshot, id string) (string, bool, 
 		return n.Language, nil
 	})
 	return language, oversized, err
-}
-
-func (b *BuildStore) checkRebuildFamilyDrop(key, want []byte) error {
-	match, err := pendingGet(b.pending, key, func(got []byte) (bool, error) {
-		return bytes.Equal(got, want), nil
-	})
-	if err != nil || match {
-		return err
-	}
-	id, err := decodeLinkRecorder(key)
-	if err != nil {
-		return err
-	}
-	return &RebuildUnknownProvenanceError{Count: 1, First: id}
 }

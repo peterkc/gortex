@@ -20,12 +20,12 @@ func TestRebuildFamilyDropRequiresSavedPayload(t *testing.T) {
 	want, err := pendingGet(b.pending, key, copyValue)
 	require.NoError(t, err)
 	require.NotEmpty(t, want)
-	require.NoError(t, b.checkRebuildFamilyDrop(key, want))
+	require.NoError(t, b.proveRebuildEdgePayload(key, want))
 	changed := *e
 	changed.Meta = map[string]any{"marker": "stale"}
 	stale, err := encodeEdge(&changed)
 	require.NoError(t, err)
-	require.ErrorIs(t, b.checkRebuildFamilyDrop(key, stale), ErrRebuildUnknownProvenance)
+	require.ErrorIs(t, b.proveRebuildEdgePayload(key, stale), ErrRebuildUnknownProvenance)
 	got, err := pendingGet(b.pending, key, copyValue)
 	require.NoError(t, err)
 	require.Equal(t, want, got)

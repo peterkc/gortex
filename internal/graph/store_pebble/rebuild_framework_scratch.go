@@ -183,3 +183,17 @@ func proveRebuildScratchEndpoints(ctx context.Context, visit rebuildScratchEdgeV
 	}
 	return refused.err()
 }
+
+func (b *BuildStore) proveRebuildEdgePayload(key, want []byte) error {
+	match, err := pendingGet(b.pending, key, func(got []byte) (bool, error) {
+		return bytes.Equal(got, want), nil
+	})
+	if err != nil || match {
+		return err
+	}
+	id, err := decodeLinkRecorder(key)
+	if err != nil {
+		return err
+	}
+	return &RebuildUnknownProvenanceError{Count: 1, First: id}
+}

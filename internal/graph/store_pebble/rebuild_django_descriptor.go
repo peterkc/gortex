@@ -124,7 +124,7 @@ func (b *BuildStore) RebuildDjangoDescriptor(ctx context.Context, receipts iter.
 	return count, b.withWrites(func() error {
 		before := p.column('b')
 		if err := pendingVisit(ctx, b.pending, before, func(r row) error {
-			return b.checkRebuildFamilyDrop(r.key[len(before):], r.value)
+			return b.proveRebuildEdgePayload(r.key[len(before):], r.value)
 		}); err != nil {
 			return err
 		}
