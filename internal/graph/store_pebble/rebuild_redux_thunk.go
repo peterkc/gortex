@@ -87,7 +87,8 @@ func (b *BuildStore) RebuildReduxThunk(ctx context.Context, receipts iter.Seq2[P
 // Pool keys start with t (thunks), a (actions), or g (getters), then
 // a column: c candidate by ID, u cohort proof, i/w global/workspace
 // singleton, f/s their file singletons. Other columns: b wanted getter
-// names, l deferred Calls, n caller proof. The move helper uses r/m/o.
+// names, l deferred Calls, n caller proof, p election witnesses.
+// The move helper uses r/m/o.
 func (p *rebuildReduxThunkPass) poolKey(pool, col byte, fields ...string) []byte {
 	return keyStrings(append(p.column(pool), col), fields...)
 }
@@ -146,16 +147,11 @@ func (p *rebuildReduxThunkPass) collect(ctx context.Context) (bool, error) {
 }
 
 func (p *rebuildReduxThunkPass) candidate(pool byte, name string, n *graph.Node) error {
-	if err := p.put(p.poolKey(pool, 'c', n.ID),
-		append([]byte{rebuildCapabilityWanted}, p.poolKey(pool, 'u', name)...)); err != nil {
+	cohort := p.poolKey(pool, 'u', name)
+	if err := p.put(p.poolKey(pool, 'c', n.ID), append([]byte{rebuildCapabilityWanted}, cohort...)); err != nil {
 		return err
 	}
-	for _, key := range [][]byte{
-		p.poolKey(pool, 'i', name),
-		p.poolKey(pool, 'w', name, n.WorkspaceID),
-		p.poolKey(pool, 'f', name, n.FilePath),
-		p.poolKey(pool, 's', name, n.WorkspaceID, n.FilePath),
-	} {
+	for _, key := range rebuildStoreScopeKeys(cohort, len(p.prefix)+1, 'i', n) {
 		if err := p.addUnique(key, n.ID); err != nil {
 			return err
 		}
@@ -215,8 +211,9 @@ func (p *rebuildReduxThunkPass) addUnique(key []byte, value string) error {
 }
 
 type rebuildReduxThunkPick struct {
-	target string
-	inputs [][]byte // only the live cohorts, caller and getter used by election
+	target  string
+	inputs  [][]byte                       // consulted pool markers, caller and getter
+	buckets []rebuildStoreCandidateWitness // deciding candidate buckets
 }
 
 func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string) (pick rebuildReduxThunkPick, err error) {
@@ -224,7 +221,8 @@ func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string) (pi
 	var haveCaller, triedGetter bool
 	var getterFile string
 	for _, pool := range [...]byte{'t', 'a'} {
-		id, seen, err := p.unique(p.poolKey(pool, 'i', callee))
+		scoped := p.poolKey(pool, 'i', callee)
+		id, seen, err := p.unique(scoped)
 		if err != nil {
 			return pick, err
 		}
@@ -242,51 +240,41 @@ func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string) (pi
 			}
 			haveCaller = true
 		}
+		var callerFile string
 		if caller != nil {
-			id, seen, err = p.unique(p.poolKey(pool, 'w', callee, caller.WorkspaceID))
+			scoped = p.poolKey(pool, 'w', callee, caller.WorkspaceID)
+			id, seen, err = p.unique(scoped)
 			if err != nil {
 				return pick, err
 			}
+			callerFile = caller.FilePath
 		}
-		if !seen {
-			continue
-		}
-		if id != "" {
-			pick.target = id
-			return pick, nil
-		}
-		if binding != "" && !triedGetter {
-			getterFile, _, err = p.unique(p.poolKey('g', 'i', binding))
-			if err != nil {
-				return pick, err
+		chosen, err := pickRebuildStoreCandidate(p.unique, scoped, id, seen, func() (string, error) {
+			if binding != "" && !triedGetter {
+				file, _, err := p.unique(p.poolKey('g', 'i', binding))
+				if err != nil {
+					return "", err
+				}
+				getterFile, triedGetter = file, true
+				pick.inputs = append(pick.inputs, p.poolKey('g', 'u', binding))
 			}
-			pick.inputs = append(pick.inputs, p.poolKey('g', 'u', binding))
-			triedGetter = true
-		}
-		pick.target, err = p.inFile(pool, callee, getterFile, caller)
-		if err != nil || pick.target != "" {
+			return getterFile, nil
+		}, callerFile, func(file string) []byte {
+			if caller != nil {
+				return p.poolKey(pool, 's', callee, caller.WorkspaceID, file)
+			}
+			return p.poolKey(pool, 'f', callee, file)
+		})
+		if err != nil {
 			return pick, err
 		}
-		if caller != nil {
-			pick.target, err = p.inFile(pool, callee, caller.FilePath, caller)
-			if err != nil || pick.target != "" {
-				return pick, err
-			}
+		pick.buckets = append(pick.buckets, chosen.buckets...)
+		if chosen.target != "" {
+			pick.target = chosen.target
+			return pick, nil
 		}
 	}
 	return pick, nil
-}
-
-func (p *rebuildReduxThunkPass) inFile(pool byte, callee, file string, caller *graph.Node) (string, error) {
-	if file == "" {
-		return "", nil
-	}
-	key := p.poolKey(pool, 'f', callee, file)
-	if caller != nil {
-		key = p.poolKey(pool, 's', callee, caller.WorkspaceID, file)
-	}
-	id, _, err := p.unique(key)
-	return id, err
 }
 
 func (p *rebuildReduxThunkPass) plan(ctx context.Context) error {
@@ -367,6 +355,9 @@ func (p *rebuildReduxThunkPass) planCall(old []byte, e *graph.Edge, callee, bind
 			return err
 		}
 	}
+	if err := p.wantCandidateBuckets(pick.buckets); err != nil {
+		return err
+	}
 	if err := p.stage(old, e); err != nil {
 		return err
 	}
@@ -413,12 +404,16 @@ func (p *rebuildReduxThunkPass) prove(ctx context.Context, receipts iter.Seq2[Pa
 	}
 	anchor := false
 	for _, pool := range [...]byte{'t', 'a', 'g'} {
-		if err := pendingVisit(ctx, p.b.pending, p.poolKey(pool, 'c'), func(r row) error {
-			if len(r.value) < 2 {
+		prefix := p.poolKey(pool, 'c')
+		if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+			if len(r.value) <= len(p.prefix)+2 {
 				return invalid("Redux Thunk candidate proof")
 			}
-			if r.value[0] == rebuildScratchExact {
+			exact := r.value[0] == rebuildScratchExact
+			if exact {
 				anchor = anchor || pool == 't'
+			}
+			if !exact && pool != 'g' || exact && pool == 'g' {
 				return nil
 			}
 			key := r.value[1:]
@@ -426,7 +421,10 @@ func (p *rebuildReduxThunkPass) prove(ctx context.Context, receipts iter.Seq2[Pa
 			if err != nil || state == 0 {
 				return err
 			}
-			return noteRebuildScratchState(p.put, key, state, rebuildCapabilityUnproved)
+			if pool == 'g' {
+				return noteRebuildScratchState(p.put, key, state, rebuildCapabilityUnproved)
+			}
+			return p.foldExactCandidate(r, prefix, len(p.prefix)+1, 'i', p.node)
 		}); err != nil {
 			return err
 		}
@@ -530,17 +528,25 @@ func (p *rebuildReduxThunkPass) recordCandidate(pool byte, raw *graph.Node, file
 		return err
 	}
 	ok := rebuildStoreFactorySameNode(raw, live, file, lang)
-	if ok {
-		switch pool {
-		case 't':
-			name := p.rules.Thunk(raw)
-			ok = name != "" && raw.WorkspaceID == live.WorkspaceID && bytes.Equal(claim[1:], p.poolKey(pool, 'u', name))
-		case 'a':
-			binding, member := p.rules.Action(raw)
-			ok = binding != "" && raw.WorkspaceID == live.WorkspaceID && bytes.Equal(claim[1:], p.poolKey(pool, 'u', member))
-		case 'g':
-			ok = p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], p.poolKey(pool, 'u', raw.Name))
+	if pool == 'g' {
+		ok = ok && p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], p.poolKey(pool, 'u', raw.Name))
+	} else {
+		var sameRole bool
+		if raw.Kind == graph.KindMethod || rebuildStoreFactoryGetterKind(raw.Kind) {
+			if pool == 't' {
+				name := p.rules.Thunk(raw)
+				sameRole = name != "" && bytes.Equal(claim[1:], p.poolKey(pool, 'u', name))
+			} else {
+				binding, member := p.rules.Action(raw)
+				sameRole = binding != "" && bytes.Equal(claim[1:], p.poolKey(pool, 'u', member))
+			}
 		}
+		if sameRole && live != nil && (raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
+			if err := p.noteCandidateScopeChange(claim[1:], len(p.prefix)+1, 'i', raw, live); err != nil {
+				return err
+			}
+		}
+		ok = ok && sameRole && raw.WorkspaceID == live.WorkspaceID
 	}
 	return noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(ok))
 }
@@ -572,5 +578,5 @@ func (p *rebuildReduxThunkPass) proved(old []byte, e *graph.Edge, anchor bool) (
 			return false, err
 		}
 	}
-	return true, nil
+	return p.candidateBucketsProved(pick.buckets)
 }

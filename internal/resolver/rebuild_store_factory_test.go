@@ -215,15 +215,15 @@ func TestRebuildStoreFactoryRefusesUnprovedMove(t *testing.T) {
 	call := rebuildStoreFactoryMarker(callerFile, caller.ID, "unresolved::reset", "reset")
 	callerFacts := rebuildEventFacts(callerFile, "typescript", []*graph.Node{caller, local}, call)
 	storeFacts := rebuildEventFacts(storeFile, "typescript", []*graph.Node{remote, getter})
-	b := openRebuildGRPCBuild(t, callerFacts, storeFacts)
-	before := rebuildEventSavedRows(t, b)
-	selection, err := NewFrameworkSynthesizerSelection([]string{SynthStoreFactory})
-	require.NoError(t, err)
-	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
-	require.NoError(t, err)
-	require.True(t, frozen.allows(SynthStoreFactory))
 	for _, input := range []string{"caller workspace", "loser workspace", "getter eligibility", "raw marker"} {
 		t.Run(input, func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, callerFacts, storeFacts)
+			before := rebuildEventSavedRows(t, b)
+			selection, err := NewFrameworkSynthesizerSelection([]string{SynthStoreFactory})
+			require.NoError(t, err)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthStoreFactory))
 			left, right := callerFacts, storeFacts
 			left.Nodes = slices.Clone(left.Nodes)
 			right.Nodes = slices.Clone(right.Nodes)
@@ -247,6 +247,12 @@ func TestRebuildStoreFactoryRefusesUnprovedMove(t *testing.T) {
 				left.Edges = []*graph.Edge{&e}
 			}
 			stats, err := RunRebuildStoreFactory(t.Context(), b, rebuildGRPCReceipts(left, right), frozen)
+			if input == "loser workspace" {
+				require.NoError(t, err)
+				require.Equal(t, store_pebble.RebuildStoreFactoryStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+				requireRebuildStoreCandidateMove(t, b, before, call, remote.ID, SynthStoreFactory, 0.75)
+				return
+			}
 			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 			var refusal *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
@@ -421,4 +427,104 @@ export const begin = createAsyncThunk('begin', async () => {});
 			require.Equal(t, before, rebuildEventSavedRows(t, b))
 		})
 	}
+}
+
+func TestRebuildStoreFactoryAndReduxThunkCandidateProof(t *testing.T) {
+	const callerFile, getterFile = "caller.ts", "getter.ts"
+	for _, synth := range []string{SynthStoreFactory, SynthReduxThunk} {
+		t.Run(synth, func(t *testing.T) {
+			for _, mode := range []string{"two exact peers", "duplicate receipt", "scope enters winning file"} {
+				t.Run(mode, func(t *testing.T) {
+					caller := rebuildEventNode(callerFile, "call", "typescript", "local")
+					winner := rebuildStoreFactoryAction(callerFile, caller.WorkspaceID)
+					getter := rebuildEventNode(getterFile, "useStore", caller.Language, "")
+					getter.Kind = graph.KindVariable
+					call := rebuildStoreFactoryMarker(callerFile, caller.ID, "unresolved::reset", "reset")
+					if synth == SynthReduxThunk {
+						call = rebuildReduxThunkMarker(caller, "reset", 9)
+						call.Meta["store_binding"] = "useStore"
+					}
+					var peers []*graph.Node
+					for _, suffix := range []string{"@1", "@2", "@3"} {
+						n := rebuildStoreFactoryAction(getterFile, caller.WorkspaceID)
+						if synth == SynthReduxThunk {
+							n = rebuildReduxThunkNode(getterFile, "reset")
+							n.WorkspaceID = caller.WorkspaceID
+						}
+						n.ID += suffix
+						peers = append(peers, n)
+					}
+					want := winner.ID
+					if mode == "scope enters winning file" {
+						peers[1].WorkspaceID, peers[2].WorkspaceID = "foreign", "foreign"
+						want = peers[0].ID
+					}
+					left := rebuildEventFacts(callerFile, caller.Language, []*graph.Node{caller, winner}, call)
+					right := rebuildEventFacts(getterFile, caller.Language, append([]*graph.Node{getter}, peers...))
+					b := openRebuildGRPCBuild(t, left, right)
+					before := rebuildEventSavedRows(t, b)
+					selection, err := NewFrameworkSynthesizerSelection([]string{synth})
+					require.NoError(t, err)
+					frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+					require.NoError(t, err)
+					// Native falls through two getter-file peers. A duplicate
+					// receipt cannot prove the second peer. A foreign peer
+					// moved into the winning scope instead breaks a singleton.
+					peer := peers[1]
+					switch mode {
+					case "duplicate receipt":
+						peer = peers[0]
+					case "scope enters winning file":
+						n := *peer
+						n.WorkspaceID = caller.WorkspaceID
+						peer = &n
+					}
+					right.Nodes = []*graph.Node{getter, peers[0], peer}
+					receipts := rebuildGRPCReceipts(left, right)
+					var moves uint64
+					confidence := 0.75
+					if synth == SynthStoreFactory {
+						stats, proofErr := RunRebuildStoreFactory(t.Context(), b, receipts, frozen)
+						moves, err = stats.Moves, proofErr
+					} else {
+						stats, proofErr := RunRebuildReduxThunk(t.Context(), b, receipts, frozen)
+						moves, err = stats.Moves, proofErr
+						confidence = ConfidenceHeuristic
+					}
+					if mode == "two exact peers" {
+						require.NoError(t, err)
+						require.Equal(t, uint64(1), moves)
+						requireRebuildStoreCandidateMove(t, b, before, call, want, synth, confidence)
+						return
+					}
+					first := graph.EdgeIdentityFor(call)
+					first.To = want
+					var refusal *store_pebble.RebuildUnknownProvenanceError
+					require.ErrorAs(t, err, &refusal)
+					require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: first}, refusal)
+					require.Zero(t, moves)
+					require.Equal(t, before, rebuildEventSavedRows(t, b))
+				})
+			}
+		})
+	}
+}
+
+func requireRebuildStoreCandidateMove(t *testing.T, b *store_pebble.BuildStore, before rebuildEventRows,
+	call *graph.Edge, target, synth string, confidence float64,
+) {
+	t.Helper()
+	want := before
+	want.edges = slices.Clone(before.edges)
+	old := graph.EdgeIdentityFor(call)
+	i := slices.IndexFunc(want.edges, func(e *graph.Edge) bool { return graph.EdgeIdentityFor(e) == old })
+	require.NotEqual(t, -1, i)
+	moved := *want.edges[i]
+	moved.To, moved.Origin, moved.Confidence = target, graph.OriginASTInferred, confidence
+	moved.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, confidence)
+	moved.Meta = maps.Clone(moved.Meta)
+	StampSynthesized(&moved, synth)
+	want.edges[i] = &moved
+	want.sort()
+	require.Equal(t, want, rebuildEventSavedRows(t, b))
 }

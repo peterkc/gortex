@@ -257,16 +257,14 @@ func TestRebuildReduxThunkRefusesUnprovedMove(t *testing.T) {
 	call.Meta["store_binding"] = "useStore"
 	left := rebuildEventFacts(callerFile, caller.Language, []*graph.Node{caller, local}, call)
 	right := rebuildEventFacts(getterFile, caller.Language, []*graph.Node{remote, getter})
-	b := openRebuildGRPCBuild(t, left, right)
-	before := rebuildEventSavedRows(t, b)
-	selection, err := NewFrameworkSynthesizerSelection([]string{SynthReduxThunk})
-	require.NoError(t, err)
-	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
-	require.NoError(t, err)
-	first := graph.EdgeIdentityFor(call)
-	first.To = remote.ID
 	for _, mismatch := range []string{"raw binding", "losing thunk scope", "getter eligibility"} {
 		t.Run(mismatch, func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, left, right)
+			before := rebuildEventSavedRows(t, b)
+			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReduxThunk})
+			require.NoError(t, err)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
 			l, r := left, right
 			switch mismatch {
 			case "raw binding":
@@ -284,6 +282,14 @@ func TestRebuildReduxThunkRefusesUnprovedMove(t *testing.T) {
 				r.Nodes = []*graph.Node{remote, &n}
 			}
 			stats, err := RunRebuildReduxThunk(t.Context(), b, rebuildGRPCReceipts(l, r), frozen)
+			if mismatch == "losing thunk scope" {
+				require.NoError(t, err)
+				require.Equal(t, store_pebble.RebuildReduxThunkStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+				requireRebuildStoreCandidateMove(t, b, before, call, remote.ID, SynthReduxThunk, ConfidenceHeuristic)
+				return
+			}
+			first := graph.EdgeIdentityFor(call)
+			first.To = remote.ID
 			var refusal *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
 			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: first}, refusal)

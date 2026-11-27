@@ -89,7 +89,7 @@ func (b *BuildStore) RebuildStoreFactory(ctx context.Context, receipts iter.Seq2
 // b: binding has an action; c/g: action/getter proof with affected key by ID.
 // a/w: global/workspace action singleton; f/s: their file singletons.
 // t: getter file singleton by binding. u/v: affected action/getter proof.
-// n: affected caller proof; r: raw-key claims;
+// n: affected caller proof; p: election witnesses; r: raw-key claims;
 // m: new payload by old key; o: raw receipt key in move order.
 func rebuildStoreFactoryKey(col byte, fields ...string) []byte {
 	return keyStrings(append(bytes.Clone(rebuildStoreFactoryPrefix), col), fields...)
@@ -159,16 +159,11 @@ func (p *rebuildStoreFactoryPass) collect(ctx context.Context) (bool, error) {
 		if err := p.put(rebuildStoreFactoryKey('b', binding), nil); err != nil {
 			return err
 		}
-		if err := p.put(rebuildStoreFactoryKey('c', n.ID),
-			append([]byte{rebuildCapabilityWanted}, rebuildStoreFactoryKey('u', binding, member)...)); err != nil {
+		cohort := rebuildStoreFactoryKey('u', binding, member)
+		if err := p.put(rebuildStoreFactoryKey('c', n.ID), append([]byte{rebuildCapabilityWanted}, cohort...)); err != nil {
 			return err
 		}
-		for _, key := range [][]byte{
-			rebuildStoreFactoryKey('a', binding, member),
-			rebuildStoreFactoryKey('w', binding, member, n.WorkspaceID),
-			rebuildStoreFactoryKey('f', binding, member, n.FilePath),
-			rebuildStoreFactoryKey('s', binding, member, n.WorkspaceID, n.FilePath),
-		} {
+		for _, key := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'a', n) {
 			if err := p.addUnique(key, n.ID); err != nil {
 				return err
 			}
@@ -225,52 +220,43 @@ func (p *rebuildStoreFactoryPass) node(id string) (*graph.Node, error) {
 }
 
 type rebuildStoreFactoryElection struct {
-	target string
+	rebuildStoreCandidatePick
 	caller *graph.Node
 	seen   bool // an action cohort exists before workspace filtering
 	getter bool // the filtered cohort needs the getter/fallback decision
 }
 
 func (p *rebuildStoreFactoryPass) elect(from, binding, member string) (pick rebuildStoreFactoryElection, err error) {
-	pick.target, pick.seen, err = p.unique(rebuildStoreFactoryKey('a', binding, member))
-	if err != nil || !pick.seen {
+	scoped := rebuildStoreFactoryKey('a', binding, member)
+	id, seen, err := p.unique(scoped)
+	pick.seen = seen
+	if err != nil || !seen {
 		return pick, err
 	}
 	pick.caller, err = p.node(from)
 	if err != nil {
 		return pick, err
 	}
-	seen := pick.seen
+	var callerFile string
 	if pick.caller != nil {
-		pick.target, seen, err = p.unique(rebuildStoreFactoryKey('w', binding, member, pick.caller.WorkspaceID))
-	}
-	if err != nil || !seen || pick.target != "" {
-		return pick, err
-	}
-	pick.getter = true
-	file, _, err := p.unique(rebuildStoreFactoryKey('t', binding))
-	if err != nil {
-		return pick, err
-	}
-	if file != "" {
-		pick.target, err = p.actionInFile(binding, member, file, pick.caller)
-		if err != nil || pick.target != "" {
+		scoped = rebuildStoreFactoryKey('w', binding, member, pick.caller.WorkspaceID)
+		id, seen, err = p.unique(scoped)
+		if err != nil {
 			return pick, err
 		}
+		callerFile = pick.caller.FilePath
 	}
-	if pick.caller != nil && pick.caller.FilePath != "" {
-		pick.target, err = p.actionInFile(binding, member, pick.caller.FilePath, pick.caller)
-	}
+	pick.rebuildStoreCandidatePick, err = pickRebuildStoreCandidate(p.unique, scoped, id, seen, func() (string, error) {
+		pick.getter = true
+		file, _, err := p.unique(rebuildStoreFactoryKey('t', binding))
+		return file, err
+	}, callerFile, func(file string) []byte {
+		if pick.caller != nil {
+			return rebuildStoreFactoryKey('s', binding, member, pick.caller.WorkspaceID, file)
+		}
+		return rebuildStoreFactoryKey('f', binding, member, file)
+	})
 	return pick, err
-}
-
-func (p *rebuildStoreFactoryPass) actionInFile(binding, member, file string, caller *graph.Node) (string, error) {
-	key := rebuildStoreFactoryKey('f', binding, member, file)
-	if caller != nil {
-		key = rebuildStoreFactoryKey('s', binding, member, caller.WorkspaceID, file)
-	}
-	id, _, err := p.unique(key)
-	return id, err
 }
 
 func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
@@ -317,7 +303,8 @@ func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
 			if err := p.want(rebuildStoreFactoryKey('u', binding, member)); err != nil {
 				return err
 			}
-		} else {
+		}
+		if !pick.nonempty {
 			p.needsAnchor = true
 		}
 		if pick.getter {
@@ -329,6 +316,9 @@ func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
 			if err := p.want(rebuildStoreFactoryKey('n', pick.caller.ID)); err != nil {
 				return err
 			}
+		}
+		if err := p.wantCandidateBuckets(pick.buckets); err != nil {
+			return err
 		}
 		if err := p.stage(r.key, e); err != nil {
 			return err
@@ -366,11 +356,11 @@ func (p *rebuildStoreFactoryPass) prove(ctx context.Context, receipts iter.Seq2[
 			return err
 		}
 	}
-	anchor, err := p.foldProof(ctx, 'c')
+	anchor, err := p.proveActions(ctx)
 	if err != nil {
 		return err
 	}
-	if _, err := p.foldProof(ctx, 'g'); err != nil {
+	if err := p.proveGetters(ctx); err != nil {
 		return err
 	}
 	var refused rebuildScratchRefusals
@@ -475,22 +465,46 @@ func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, fil
 		return err
 	}
 	ok := rebuildStoreFactorySameNode(raw, live, file, lang)
-	if ok && col == 'c' {
+	if col == 'c' {
 		binding, member := p.rules.Action(raw)
-		ok = raw.WorkspaceID == live.WorkspaceID && bytes.Equal(claim[1:], rebuildStoreFactoryKey('u', binding, member))
+		sameRole := raw.Kind == graph.KindFunction && bytes.Equal(claim[1:], rebuildStoreFactoryKey('u', binding, member))
+		if sameRole && live != nil && (raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
+			if err := p.noteCandidateScopeChange(claim[1:], len(p.prefix), 'a', raw, live); err != nil {
+				return err
+			}
+		}
+		ok = ok && sameRole && raw.WorkspaceID == live.WorkspaceID
 	} else if ok {
 		ok = p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], rebuildStoreFactoryKey('v', raw.Name))
 	}
 	return noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(ok))
 }
 
-func (p *rebuildStoreFactoryPass) foldProof(ctx context.Context, col byte) (exact bool, err error) {
-	err = pendingVisit(ctx, p.b.pending, rebuildStoreFactoryKey(col), func(r row) error {
+func (p *rebuildStoreFactoryPass) proveActions(ctx context.Context) (anchor bool, err error) {
+	prefix := rebuildStoreFactoryKey('c')
+	err = pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		if len(r.value) <= len(p.prefix)+1 {
+			return invalid("Store Factory candidate proof")
+		}
+		if r.value[0] != rebuildScratchExact {
+			return nil
+		}
+		anchor = true
+		state, err := p.state(r.value[1:])
+		if err != nil || state == 0 {
+			return err // an unrelated exact action is only an anchor
+		}
+		return p.foldExactCandidate(r, prefix, len(p.prefix), 'a', p.node)
+	})
+	return anchor, err
+}
+
+func (p *rebuildStoreFactoryPass) proveGetters(ctx context.Context) error {
+	return pendingVisit(ctx, p.b.pending, rebuildStoreFactoryKey('g'), func(r row) error {
 		if len(r.value) < 2 {
 			return invalid("Store Factory candidate proof")
 		}
 		if r.value[0] == rebuildScratchExact {
-			exact = true
 			return nil
 		}
 		key := r.value[1:]
@@ -500,7 +514,6 @@ func (p *rebuildStoreFactoryPass) foldProof(ctx context.Context, col byte) (exac
 		}
 		return noteRebuildScratchState(p.put, key, state, rebuildCapabilityUnproved)
 	})
-	return exact, err
 }
 
 func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool) (bool, error) {
@@ -516,17 +529,15 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 		return false, err
 	}
 	binding, member := p.rules.Stub(e)
-	cohort, err := p.state(rebuildStoreFactoryKey('u', binding, member))
-	if err != nil || cohort == 0 {
-		// An empty cohort can restub only if an exact action establishes
-		// that native would not skip the Call scan entirely.
-		return anchor && err == nil, err
-	}
-	if cohort != rebuildCapabilityWanted {
-		return false, nil
-	}
 	pick, err := p.elect(e.From, binding, member)
 	if err != nil {
+		return false, err
+	}
+	if !pick.nonempty && !anchor {
+		// An empty scoped cohort has no candidate witness of its own.
+		return false, nil
+	}
+	if ok, err := p.candidateBucketsProved(pick.buckets); err != nil || !ok {
 		return false, err
 	}
 	if pick.getter {
