@@ -528,3 +528,98 @@ func requireRebuildStoreCandidateMove(t *testing.T, b *store_pebble.BuildStore, 
 	want.sort()
 	require.Equal(t, want, rebuildEventSavedRows(t, b))
 }
+
+func TestRebuildStoreFactoryAndReduxThunkGetterFileProof(t *testing.T) {
+	const callerFile, getterFile = "caller.ts", "getter.ts"
+	for _, synth := range []string{SynthStoreFactory, SynthReduxThunk} {
+		t.Run(synth, func(t *testing.T) {
+			for _, tc := range []struct {
+				name                 string
+				ambiguous, extraFile bool
+				refuse               bool
+			}{
+				{name: "two exact files", ambiguous: true, extraFile: true},
+				{name: "two declarations in one file", ambiguous: true, refuse: true},
+				{name: "one exact declaration in the only file"},
+				{name: "duplicate moved to a second file", extraFile: true, refuse: true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					caller := rebuildEventNode(callerFile, "call", "typescript", "local")
+					candidate := func(file string) *graph.Node {
+						if synth == SynthReduxThunk {
+							n := rebuildReduxThunkNode(file, "reset")
+							n.WorkspaceID = caller.WorkspaceID
+							return n
+						}
+						return rebuildStoreFactoryAction(file, caller.WorkspaceID)
+					}
+					local, remote := candidate(callerFile), candidate(getterFile)
+					getter := func(file string) *graph.Node {
+						n := rebuildEventNode(file, "useStore", caller.Language, "")
+						n.Kind = graph.KindVariable
+						return n
+					}
+					one, duplicate := getter(getterFile), getter(getterFile)
+					duplicate.ID += "@2"
+					other, third := getter("other.ts"), getter("third.ts")
+					call := rebuildStoreFactoryMarker(callerFile, caller.ID, "unresolved::reset", "reset")
+					if synth == SynthReduxThunk {
+						call = rebuildReduxThunkMarker(caller, "reset", 9)
+						call.Meta["store_binding"] = "useStore"
+					}
+					left := rebuildEventFacts(callerFile, caller.Language, []*graph.Node{caller, local}, call)
+					right := rebuildEventFacts(getterFile, caller.Language, []*graph.Node{remote, one, duplicate})
+					otherFacts := rebuildEventFacts(other.FilePath, caller.Language, []*graph.Node{other})
+					live := []store_pebble.ParseFacts{left, right}
+					want := remote.ID
+					if tc.ambiguous {
+						want = local.ID
+						live = append(live, otherFacts, rebuildEventFacts(third.FilePath, caller.Language, []*graph.Node{third}))
+					}
+					b := openRebuildGRPCBuild(t, live...)
+					before := rebuildEventSavedRows(t, b)
+					selection, err := NewFrameworkSynthesizerSelection([]string{synth})
+					require.NoError(t, err)
+					frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+					require.NoError(t, err)
+					if !tc.ambiguous || tc.extraFile {
+						right.Nodes = []*graph.Node{remote, one}
+					}
+					recorded := []store_pebble.ParseFacts{left, right}
+					if tc.extraFile {
+						if !tc.ambiguous {
+							moved := *duplicate
+							moved.FilePath = other.FilePath
+							otherFacts.Nodes = []*graph.Node{&moved}
+						}
+						recorded = append(recorded, otherFacts)
+					}
+					var moves uint64
+					confidence := 0.75
+					receipts := rebuildGRPCReceipts(recorded...)
+					if synth == SynthStoreFactory {
+						stats, proofErr := RunRebuildStoreFactory(t.Context(), b, receipts, frozen)
+						moves, err = stats.Moves, proofErr
+					} else {
+						stats, proofErr := RunRebuildReduxThunk(t.Context(), b, receipts, frozen)
+						moves, err = stats.Moves, proofErr
+						confidence = ConfidenceHeuristic
+					}
+					if !tc.refuse {
+						require.NoError(t, err)
+						require.Equal(t, uint64(1), moves)
+						requireRebuildStoreCandidateMove(t, b, before, call, want, synth, confidence)
+						return
+					}
+					var refusal *store_pebble.RebuildUnknownProvenanceError
+					require.ErrorAs(t, err, &refusal)
+					first := graph.EdgeIdentityFor(call)
+					first.To = want
+					require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: first}, refusal)
+					require.Zero(t, moves)
+					require.Equal(t, before, rebuildEventSavedRows(t, b))
+				})
+			}
+		})
+	}
+}

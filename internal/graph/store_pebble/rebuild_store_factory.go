@@ -88,7 +88,7 @@ func (b *BuildStore) RebuildStoreFactory(ctx context.Context, receipts iter.Seq2
 
 // b: binding has an action; c/g: action/getter proof with affected key by ID.
 // a/w: global/workspace action singleton; f/s: their file singletons.
-// t: getter file singleton by binding. u/v: affected action/getter proof.
+// t: live getter files, x: exact getter files. u/v: affected action/getter proof.
 // n: affected caller proof; p: election witnesses; r: raw-key claims;
 // m: new payload by old key; o: raw receipt key in move order.
 func rebuildStoreFactoryKey(col byte, fields ...string) []byte {
@@ -360,7 +360,7 @@ func (p *rebuildStoreFactoryPass) prove(ctx context.Context, receipts iter.Seq2[
 	if err != nil {
 		return err
 	}
-	if err := p.proveGetters(ctx); err != nil {
+	if err := p.foldGetterFiles(ctx, rebuildStoreFactoryKey('g'), p.node, p.addUnique); err != nil {
 		return err
 	}
 	var refused rebuildScratchRefusals
@@ -454,8 +454,9 @@ func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, fil
 	if err != nil || len(claim) == 0 {
 		return err
 	}
+	var state byte
 	if col != 'c' || !p.needsAnchor {
-		state, err := p.state(claim[1:])
+		state, err = p.state(claim[1:])
 		if err != nil || state == 0 {
 			return err
 		}
@@ -474,8 +475,14 @@ func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, fil
 			}
 		}
 		ok = ok && sameRole && raw.WorkspaceID == live.WorkspaceID
-	} else if ok {
-		ok = p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], rebuildStoreFactoryKey('v', raw.Name))
+	} else {
+		sameGetter := p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], rebuildStoreFactoryKey('v', raw.Name))
+		if sameGetter {
+			if err := p.noteGetterFileChange(claim[1:], state, raw, live, file, lang); err != nil {
+				return err
+			}
+		}
+		ok = ok && sameGetter
 	}
 	return noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(ok))
 }
@@ -497,23 +504,6 @@ func (p *rebuildStoreFactoryPass) proveActions(ctx context.Context) (anchor bool
 		return p.foldExactCandidate(r, prefix, len(p.prefix), 'a', p.node)
 	})
 	return anchor, err
-}
-
-func (p *rebuildStoreFactoryPass) proveGetters(ctx context.Context) error {
-	return pendingVisit(ctx, p.b.pending, rebuildStoreFactoryKey('g'), func(r row) error {
-		if len(r.value) < 2 {
-			return invalid("Store Factory candidate proof")
-		}
-		if r.value[0] == rebuildScratchExact {
-			return nil
-		}
-		key := r.value[1:]
-		state, err := p.state(key)
-		if err != nil || state == 0 {
-			return err
-		}
-		return noteRebuildScratchState(p.put, key, state, rebuildCapabilityUnproved)
-	})
 }
 
 func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool) (bool, error) {
@@ -541,8 +531,8 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 		return false, err
 	}
 	if pick.getter {
-		state, err := p.state(rebuildStoreFactoryKey('v', binding))
-		if err != nil || state != rebuildCapabilityWanted {
+		ok, err := p.getterFilesProved(rebuildStoreFactoryKey('t', binding), rebuildStoreFactoryKey('v', binding), p.unique)
+		if err != nil || !ok {
 			return false, err
 		}
 	}

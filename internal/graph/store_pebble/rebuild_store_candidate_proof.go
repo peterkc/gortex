@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"bytes"
+	"context"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -135,18 +136,75 @@ func (p *rebuildCallMoves) noteCandidateScopeChange(cohort []byte, column int, g
 func (p *rebuildCallMoves) foldExactCandidate(r row, prefix []byte, column int, global byte,
 	node func(string) (*graph.Node, error),
 ) error {
-	id, rest, err := readKeyString(r.key[len(prefix):])
-	if err != nil || len(rest) != 0 || id == "" {
-		return invalid(p.label + " candidate proof key")
-	}
-	n, err := node(id)
+	n, err := p.candidateProofNode(r.key[len(prefix):], node)
 	if err != nil {
 		return err
 	}
-	if n == nil {
-		return invalid(p.label + " candidate proof has no live node")
-	}
 	return p.countCandidateBuckets(rebuildStoreScopeKeys(r.value[1:], column, global, n))
+}
+
+func (p *rebuildCallMoves) candidateProofNode(key []byte, node func(string) (*graph.Node, error)) (*graph.Node, error) {
+	id, rest, err := readKeyString(key)
+	if err != nil || len(rest) != 0 || id == "" {
+		return nil, invalid(p.label + " candidate proof key")
+	}
+	n, err := node(id)
+	if err != nil {
+		return nil, err
+	}
+	if n == nil {
+		return nil, invalid(p.label + " candidate proof has no live node")
+	}
+	return n, nil
+}
+
+func (p *rebuildCallMoves) getterProofKey(wanted []byte) []byte {
+	return append(p.column('x'), wanted[len(p.prefix):]...)
+}
+
+// Note a known eligible getter that moved to another file. Unlike an omitted
+// duplicate in the same file, it can defeat a unique getter file.
+func (p *rebuildCallMoves) noteGetterFileChange(wanted []byte, state byte, raw, live *graph.Node, file, lang string) error {
+	if live != nil && lang != "" && rebuildStoreFactoryGetterKind(raw.Kind) && raw.FilePath == file && file != live.FilePath {
+		return noteRebuildScratchState(p.put, wanted, state, rebuildCapabilityUnproved)
+	}
+	return nil
+}
+
+// Fold one exact claim per ID. addUnique counts a file once and stops at two
+// distinct files, even when more getter declarations are live.
+func (p *rebuildCallMoves) foldGetterFiles(ctx context.Context, prefix []byte,
+	node func(string) (*graph.Node, error), addUnique func([]byte, string) error,
+) error {
+	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		if len(r.value) <= len(p.prefix)+1 {
+			return invalid(p.label + " getter proof")
+		}
+		if r.value[0] != rebuildScratchExact {
+			return nil
+		}
+		n, err := p.candidateProofNode(r.key[len(prefix):], node)
+		if err != nil {
+			return err
+		}
+		return addUnique(p.getterProofKey(r.value[1:]), n.FilePath)
+	})
+}
+
+func (p *rebuildCallMoves) getterFilesProved(live, wanted []byte, unique func([]byte) (string, bool, error)) (bool, error) {
+	file, seen, err := unique(live)
+	if err != nil {
+		return false, err
+	}
+	exactFile, exactSeen, err := unique(p.getterProofKey(wanted))
+	if err != nil || seen != exactSeen || file != exactFile {
+		return false, err
+	}
+	if seen && file == "" {
+		return true, nil // two exact files already exclude a unique file
+	}
+	state, err := rebuildScratchState(p.b.pending, wanted, p.label+" getter proof")
+	return state == rebuildCapabilityWanted, err
 }
 
 // rebuildStoreScopeKeys changes the cohort column and extends its encoded member key.
