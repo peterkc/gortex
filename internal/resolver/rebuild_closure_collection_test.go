@@ -179,8 +179,8 @@ func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
 			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
 			want := rebuildEventSQLiteRows(native)
 			require.Len(t, want.edges, 2)
-			// Damage only the later pair's receipt. The live registrar and
-			// the earlier, fully proved pair must both survive a refusal unchanged.
+			// Change only the later pair's receipt. Equal native field
+			// names still link; a missing or different field refuses.
 			switch mode {
 			case "missing":
 				proof[1].Nodes = proof[1].Nodes[:1]
@@ -201,7 +201,7 @@ func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
 				proof[1].Nodes[1].Meta[rebuildCCDispatch] = []string{"other"}
 			}
 			stats, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
-			if mode == "complete" {
+			if mode != "missing" && mode != "changed field" {
 				require.NoError(t, err)
 				require.Equal(t, uint64(2), stats.Edges)
 				require.Equal(t, want, rebuildEventSavedRows(t, b))

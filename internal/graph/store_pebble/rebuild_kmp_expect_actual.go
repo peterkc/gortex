@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"reflect"
 	"slices"
 	"strings"
 
@@ -264,26 +263,26 @@ func (p *rebuildKMPPass) noteReceipt(raw *graph.Node, file, language string) err
 		return err
 	}
 	proved := language != "" && language == raw.Language && raw.FilePath == file && sameRebuildKMPInput(raw, live)
-	bit := rebuildScratchProofBit(proved)
 	if state != 0 {
-		if err := noteRebuildScratchState(p.put, key, state, bit); err != nil {
+		roleProved := false
+		if proved {
+			role, _ := raw.Meta["kmp_role"].(string)
+			currentRole, _ := live.Meta["kmp_role"].(string)
+			roleProved = role == currentRole
+		}
+		if err := noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(roleProved)); err != nil {
 			return err
 		}
 	}
 	if markerState != 0 {
-		return noteRebuildScratchState(p.put, marker, markerState, bit)
+		return noteRebuildScratchState(p.put, marker, markerState, rebuildScratchProofBit(proved))
 	}
 	return nil
 }
 
 func sameRebuildKMPInput(raw, live *graph.Node) bool {
-	if live == nil || live.ID != raw.ID || live.Kind != raw.Kind || live.Language != raw.Language || live.Name != raw.Name ||
-		live.FilePath != raw.FilePath || live.StartLine != raw.StartLine || live.RepoPrefix != raw.RepoPrefix {
-		return false
-	}
-	value, present := raw.Meta["kmp_role"]
-	current, found := live.Meta["kmp_role"]
-	return present == found && reflect.DeepEqual(value, current)
+	return live != nil && live.ID == raw.ID && live.Kind == raw.Kind && live.Language == raw.Language && live.Name == raw.Name &&
+		live.FilePath == raw.FilePath && live.StartLine == raw.StartLine && live.RepoPrefix == raw.RepoPrefix
 }
 
 func (p *rebuildKMPPass) visitProposals(ctx context.Context, yield func(*graph.Edge) error) error {

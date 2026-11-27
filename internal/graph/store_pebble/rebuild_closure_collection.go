@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"reflect"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
@@ -284,14 +283,9 @@ func sameRebuildClosureInput(raw, live *graph.Node) bool {
 		live.Name != raw.Name || live.FilePath != raw.FilePath || live.StartLine != raw.StartLine || live.RepoPrefix != raw.RepoPrefix {
 		return false
 	}
-	for _, role := range [...]string{"cc_dispatch_field", "cc_append_field"} {
-		value, present := raw.Meta[role]
-		current, found := live.Meta[role]
-		if present != found || !reflect.DeepEqual(value, current) {
-			return false
-		}
-	}
-	return true
+	rawDispatch, rawAppend := closureFields(raw.Meta)
+	liveDispatch, liveAppend := closureFields(live.Meta)
+	return rawDispatch == liveDispatch && rawAppend == liveAppend
 }
 
 func (p *rebuildClosurePass) visit(ctx context.Context, yield func(*graph.Edge) error) error {
