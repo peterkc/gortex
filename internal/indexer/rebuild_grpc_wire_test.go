@@ -61,6 +61,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"UIKit", store_pebble.ErrRebuildUIKit, 86},
 		{"Vapor", store_pebble.ErrRebuildVapor, 87},
 		{"GoFrame", store_pebble.ErrRebuildGoFrame, 88},
+		{"SvelteKit load", store_pebble.ErrRebuildSvelteKitLoad, 89},
 		{"factory chain", store_pebble.ErrRebuildFactoryChain, 91},
 		{"function-value callbacks", store_pebble.ErrRebuildFnValue, 92},
 		{"value refs", store_pebble.ErrRebuildValueRefs, 94},

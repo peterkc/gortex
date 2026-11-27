@@ -63,6 +63,8 @@ const (
 	rebuildProofMacroExpansion
 	// Exact EF Core entity, mapping and sibling receipts for ModelsTable.
 	rebuildProofEFCoreModel
+	// Exact SvelteKit route roles and workspace placement.
+	rebuildProofSvelteKitLoad
 	rebuildProofLimit
 )
 

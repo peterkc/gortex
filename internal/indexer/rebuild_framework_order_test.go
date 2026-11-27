@@ -69,6 +69,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"UIKit", "moves", 1},
 		{"Vapor", "moves", 1},
 		{"GoFrame", "moves", 1},
+		{"SvelteKit load", "adds", 1},
 		{"factory chain", "moves", 1},
 		{"function-value callbacks", "adds", 1},
 		{"value refs", "moves", 1},
@@ -810,6 +811,12 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		edge(goFrameRoute, "unresolved::*.HarnessRequest", graph.EdgeCalls, 2,
 			map[string]any{"via": "goframe-route", "goframe_request_type": "HarnessRequest", "goframe_request_pkg": "harness"}))
 
+	const pagePath, serverPath = "harness/+page.svelte", "harness/+page.server.ts"
+	page := node(pagePath, "svelte", "+page", graph.KindType, 2)
+	page.Meta = map[string]any{"component": true}
+	serverLoad := node(serverPath, "typescript", "load", graph.KindFunction, 3)
+	pageFacts, serverFacts := receipt([]*graph.Node{page}), receipt([]*graph.Node{serverLoad})
+
 	const factoryPath = "factory_harness.go"
 	factoryCaller := node(factoryPath, "go", "useFactoryHarness", graph.KindFunction, 1)
 	factorySeed := node(factoryPath, "go", "MakeFactoryHarness", graph.KindFunction, 3)
@@ -853,6 +860,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
 		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts, railsFacts,
-		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, uikitFacts, vaporFacts, goFrameFacts, factoryFacts, callbackFacts, valueFacts,
+		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, uikitFacts, vaporFacts, goFrameFacts, pageFacts, serverFacts, factoryFacts, callbackFacts, valueFacts,
 	}
 }
