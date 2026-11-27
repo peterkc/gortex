@@ -3,6 +3,7 @@ package resolver
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -238,4 +239,57 @@ func TestRebuildCSharpIfaceDispatchTwoFamiliesOneKey(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1, adds)
 	require.Contains(t, rebuildEventSavedRows(t, build).edges, csharpIfaceDispatchEdge(call, method.ID, a.ID, 1))
+}
+
+func TestRebuildCSharpIfaceDispatchParentNodeCap(t *testing.T) {
+	const file = "Types.cs"
+	iface := ifaceRebuildNode(file, "IFoo", "csharp", graph.KindInterface)
+	foreign := ifaceRebuildNode("foreign/Types.cs", iface.Name, iface.Language, iface.Kind)
+	foreign.RepoPrefix = "foreign"
+	anchor := ifaceRebuildNode(file, "Run", "csharp", graph.KindMethod)
+	anchor.Meta = map[string]any{"iface_member": true}
+	owner := ifaceRebuildNode(file, "Foo", "csharp", graph.KindType)
+	method := ifaceRebuildNode(file, "Foo.Run", "csharp", graph.KindMethod)
+	method.Name = anchor.Name
+	caller := ifaceRebuildNode(file, "call", "csharp", graph.KindFunction)
+	call := ifaceRebuildEdge(caller, anchor.ID, graph.EdgeCalls, 3)
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(file, "csharp", []*graph.Node{iface, anchor, owner, method, caller},
+			ifaceRebuildEdge(owner, "unresolved::IFoo", graph.EdgeImplements, 1),
+			ifaceRebuildEdge(anchor, iface.ID, graph.EdgeMemberOf, 1),
+			ifaceRebuildEdge(method, owner.ID, graph.EdgeMemberOf, 1), call),
+		rebuildEventFacts(foreign.FilePath, foreign.Language, []*graph.Node{foreign}),
+	}
+	padding := strings.Repeat("x", 16<<20)
+	for _, tc := range []struct {
+		name   string
+		large  *graph.Node
+		refuse bool
+	}{
+		{"same repository", iface, true},
+		{"other repository", foreign, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			build := openRebuildGRPCBuild(t, facts...)
+			frozen := ifaceRebuildSelection(t, build)
+			require.True(t, frozen.allows(SynthCSharpIfaceDispatch))
+			large := *tc.large
+			large.Meta = map[string]any{"padding": padding}
+			build.AddNode(&large)
+			before := rebuildEventSavedRows(t, build).edges
+			adds, err := RunRebuildCSharpIfaceDispatch(t.Context(), build, rebuildGRPCReceipts(facts...), frozen)
+			after := rebuildEventSavedRows(t, build).edges
+			if tc.refuse {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildCSharpIfaceDispatch)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "csharp interface dispatch parent node")
+				require.Zero(t, adds)
+				require.Equal(t, before, after)
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, adds)
+			require.Contains(t, after, csharpIfaceDispatchEdge(call, method.ID, iface.ID, 1))
+		})
+	}
 }

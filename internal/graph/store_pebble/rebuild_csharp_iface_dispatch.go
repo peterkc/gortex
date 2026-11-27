@@ -336,9 +336,18 @@ func (p *rebuildCSharpIface) resolveParents(ctx context.Context, child, name str
 	}
 	var chosen string
 	var count, optional int
-	add := func(n *graph.Node, exact bool) {
+	add := func(n *graph.Node, exact bool) error {
 		if !p.rules.Candidate(n, from.RepoPrefix) {
-			return
+			return nil
+		}
+		key := pendingNodeKey(n.ID)
+		if _, err := pendingGet(p.b.pending, key, func(value []byte) (bool, error) {
+			if len(key)+len(value) > p.rowBytes {
+				return false, fmt.Errorf("%w: csharp interface dispatch parent node", ErrRebuildLinkInputSize)
+			}
+			return true, nil
+		}); err != nil {
+			return err
 		}
 		if exact {
 			chosen = n.ID
@@ -346,14 +355,15 @@ func (p *rebuildCSharpIface) resolveParents(ctx context.Context, child, name str
 		} else {
 			optional++
 		}
+		return nil
 	}
 	if p.replay {
 		if err := p.visit(ctx, rebuildIfaceRawNameKey(name), func(r row) error {
 			n, err := decodeNode(r.value)
-			if err == nil {
-				add(n, true)
+			if err != nil {
+				return err
 			}
-			return err
+			return add(n, true)
 		}); err != nil {
 			return err
 		}
@@ -374,8 +384,7 @@ func (p *rebuildCSharpIface) resolveParents(ctx context.Context, child, name str
 		if !p.replay && !exact {
 			p.poolGap = true
 		}
-		add(n, !p.replay)
-		return nil
+		return add(n, !p.replay)
 	}); err != nil {
 		return err
 	}
