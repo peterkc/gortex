@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -149,6 +150,75 @@ func TestRebuildGRPCOrdersAndProvesRawCustody(t *testing.T) {
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 			}
+		})
+	}
+}
+
+func TestRebuildNgRxEffectStoreInputs(t *testing.T) {
+	const file, name = "effects.ts", "load"
+	rules := RebuildNgRxEffectRules{
+		Stub: func(e *graph.Edge) string {
+			name, _ := e.Meta["ngrx_action"].(string)
+			return name
+		},
+		Getter: storeFactoryTestRules().Getter,
+		Rebind: storeFactoryTestRules().Rebind,
+	}
+	for _, mode := range []string{"non-Call marker", "stationary raw claim", "action cap", "occupied scratch"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			b := newBuild(t, FullProfile)
+			action := &graph.Node{ID: file + "::" + name, Kind: graph.KindType, Name: name, FilePath: file, Language: "typescript"}
+			raw := &graph.Edge{From: "effect", To: "unresolved::*.load", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
+				Meta: map[string]any{"ngrx_action": name}}
+			switch mode {
+			case "non-Call marker":
+				raw.Kind = graph.EdgeMemberOf
+			case "stationary raw claim":
+				raw.To = action.ID
+			case "action cap":
+				action.Meta = map[string]any{"payload": strings.Repeat("x", rebuildNgRxEffectRowBytes)}
+			}
+			facts := ParseFacts{
+				EffectiveLanguage: "typescript", File: graph.FileMetaRow{FilePath: file, NodeCount: 1},
+				Nodes: []*graph.Node{action}, Edges: []*graph.Edge{raw},
+			}
+			require.NoError(t, b.AddParsedFile("", facts))
+			receipts := unreadStoreFactoryReceipts(t)
+			if mode == "stationary raw claim" {
+				live := *raw
+				live.To = "unresolved::*.load"
+				require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &live, OldTo: raw.To}}))
+				b.AddEdge(raw)
+				for _, e := range []*graph.Edge{raw, &live} {
+					claim, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(e))
+					require.NoError(t, err)
+					require.Equal(t, rebuildEdgeCustody{raw: pendingEdgeKey(raw)}, claim)
+				}
+				receipts = func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
+			}
+			if mode == "occupied scratch" {
+				require.NoError(t, b.pending.Set([]byte("gRz"), []byte("sentinel"), pebble.NoSync))
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildNgRxEffect(ctx, receipts, rules)
+			if mode == "non-Call marker" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, ErrRebuildNgRxEffect)
+				switch mode {
+				case "stationary raw claim":
+					require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+				case "action cap":
+					require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+					require.ErrorContains(t, err, "NgRx Effect node row")
+				case "occupied scratch":
+					require.ErrorIs(t, err, errInvalidRecord)
+					require.ErrorContains(t, err, "NgRx Effect scratch range occupied")
+				}
+			}
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})
 	}
 }

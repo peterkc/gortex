@@ -88,7 +88,7 @@ func (b *BuildStore) RebuildNgRxEffect(ctx context.Context, receipts iter.Seq2[P
 }
 
 func rebuildNgRxActionKind(kind graph.NodeKind) bool {
-	return kind == graph.KindType || rebuildStoreFactoryGetterKind(kind)
+	return kind == graph.KindVariable || kind == graph.KindConstant || kind == graph.KindFunction || kind == graph.KindType
 }
 
 // h records the owned Call keys; q records their requested action names.
