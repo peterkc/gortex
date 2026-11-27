@@ -268,7 +268,7 @@ func (p *rebuildRails) elect(ctx context.Context, q rebuildExpressQuery, fromDir
 	if proved {
 		nameCol, methodCol, modelCol = 'A', 'B', 'm'
 	}
-	id, _, err := p.convention(ctx, q, fromDir, nameCol)
+	id, _, _, err := p.convention(ctx, q, fromDir, nameCol)
 	if err != nil || id == "" {
 		return "", false, err
 	}
