@@ -45,6 +45,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Store Factory", "moves", 1},
 		{"Redux Thunk", "moves", 1},
 		{"Object Registry", "moves", 1},
+		{"Vuex Dispatch", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -472,9 +473,11 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	command := node(app, ts, "ClockCommand", graph.KindType, 28)
 	execute := node(app, ts, "execute", graph.KindMethod, 29)
 	execute.ID = command.ID + "." + execute.Name
+	vuexAction := node(app, ts, "signInAction", graph.KindFunction, 32)
+	vuexAction.Meta = map[string]any{"vuex_namespace": "account", "vuex_action": "signIn", "vuex_kind": "action"}
 	// Observer must accept the registrar call proved by event channel;
 	// the original receipt has no call to subscribe.
-	appFacts := receipt([]*graph.Node{thunk, setup, subscribe, notify, callback, field, topic, show, spec, command, execute},
+	appFacts := receipt([]*graph.Node{thunk, setup, subscribe, notify, callback, field, topic, show, spec, command, execute, vuexAction},
 		edge(setup, topic.ID, graph.EdgeEmits, 3, event),
 		edge(subscribe, topic.ID, graph.EdgeListensOn, 7, event),
 		edge(subscribe, field.ID, graph.EdgeAccessesField, 8, nil),
@@ -492,6 +495,8 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		// A stale real target cannot be rebound by the main unresolved-call pass.
 		edge(show, setup.ID, graph.EdgeCalls, 30,
 			map[string]any{"via": "object-registry", "registry_value": command.Name, "registry_method": execute.Name}),
+		edge(show, setup.ID, graph.EdgeCalls, 34,
+			map[string]any{"via": "vuex-dispatch", "vuex_key": "account/signIn", "vuex_kind": "action"}),
 	)
 
 	const rpc = "rpc.go"

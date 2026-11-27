@@ -190,6 +190,7 @@ var rebuildFailureKinds = [...]error{
 	nil, // 62: reserved for NgRx Effect
 	store_pebble.ErrRebuildObjectRegistry,
 	store_pebble.ErrRebuildRTKQuery,
+	store_pebble.ErrRebuildVuexDispatch,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

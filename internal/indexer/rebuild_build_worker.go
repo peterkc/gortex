@@ -593,6 +593,15 @@ func buildRebuildStages(
 			logger.Info("rebuild RTK Query applied to private build",
 				zap.Uint64("resolved", rtkQuery.Resolved), zap.Uint64("moves", rtkQuery.Moves))
 		}
+		vuexDispatch, err := resolver.RunRebuildVuexDispatch(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if vuexDispatch.Stubs != 0 {
+			logger.Info("rebuild Vuex Dispatch applied to private build",
+				zap.Uint64("stubs", vuexDispatch.Stubs), zap.Uint64("resolved", vuexDispatch.Resolved),
+				zap.Uint64("moves", vuexDispatch.Moves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

@@ -22,7 +22,7 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 		SynthGRPCStub, SynthTemporalStub, SynthEventChannel, SynthSwiftObjC,
 		SynthReactNative, SynthReactNativePair, SynthObserverChannel, SynthClosureCollection,
 		SynthReactSetState, SynthFlutterSetState, SynthKMPExpectActual, SynthExpoModules, SynthFabric, SynthMyBatis,
-		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthObjectRegistry, SynthRTKQuery,
+		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch,
 	} {
 		if selection.allows(name) {
 			frozen.names[name] = struct{}{}
@@ -64,13 +64,14 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 	_, redux := frozen.names[SynthReduxThunk]
 	_, registry := frozen.names[SynthObjectRegistry]
 	_, rtk := frozen.names[SynthRTKQuery]
-	if redux || rtk {
-		edges.via = make(map[string]bool, 2)
+	_, vuex := frozen.names[SynthVuexDispatch]
+	if redux || rtk || vuex {
+		edges.via = make(map[string]bool, 3)
 	}
-	if grpc || temporal || react || flutter || redux || registry || rtk {
+	if grpc || temporal || react || flutter || redux || registry || rtk || vuex {
 		if err := view.VisitFrameworkGateEdges(ctx, temporal, func(e graph.FrameworkCensusEdge) error {
 			if e.Kind == graph.EdgeCalls {
-				via := (redux && e.Via == reduxThunkVia) || (rtk && e.Via == rtkQueryVia)
+				via := (redux && e.Via == reduxThunkVia) || (rtk && e.Via == rtkQueryVia) || (vuex && e.Via == vuexDispatchVia)
 				setState := (react || flutter) && isSetStateTarget(e.To)
 				grpcStub := grpc && e.Via == "grpc.stub" && e.GRPCService != "" && e.GRPCMethod != ""
 				temporalVia := temporal && strings.HasPrefix(e.Via, "temporal.")
