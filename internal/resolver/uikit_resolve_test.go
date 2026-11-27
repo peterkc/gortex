@@ -175,3 +175,41 @@ func TestResolveUIKitRefs_SharedCandidatesDropRetargetedEdge(t *testing.T) {
 	assert.Nil(t, synthUIKitEdge(g, graph.EdgeCalls, source, "App/DataSources/DeltaDataSource.swift::DeltaDataSource"))
 	streams.releasePass(SynthUIKitResolve, bundle)
 }
+
+func TestResolveUIKitRefs_SeesSwiftUIResiduals(t *testing.T) {
+	g := graph.New()
+	const (
+		sourceFile = "App/Sources/Use.swift"
+		source     = sourceFile + "::Use"
+		modelFile  = "App/Models/ModelViewController.swift"
+		model      = modelFile + "::ModelViewController"
+		vcFile     = "App/ViewControllers/ScreenViewController.swift"
+		vc         = vcFile + "::ScreenViewController"
+	)
+	g.AddNode(&graph.Node{ID: source, Kind: graph.KindFunction, Name: "Use", FilePath: sourceFile, Language: "swift"})
+	convNode(g, model, modelFile, "ModelViewController")
+	convNode(g, vc, vcFile, "ScreenViewController")
+	g.AddBatch(nil, []*graph.Edge{
+		{From: source, To: "unresolved::ModelViewController", Kind: graph.EdgeReferences, FilePath: sourceFile, Line: 1},
+		{From: source, To: "unresolved::ScreenViewController", Kind: graph.EdgeCalls, FilePath: sourceFile, Line: 2},
+	})
+	streams := newFrameworkStreamCandidates(g, map[string]int{"apple": 1}, map[string]int{SynthUIKitResolve: 1})
+	collectFrameworkEdgeCensus(g, streams)
+	require.Equal(t, 1, ResolveSwiftUIRefs(g))
+	bundle := streams.passStreams(g, SynthUIKitResolve)
+	require.NotNil(t, bundle)
+	defer streams.releasePass(SynthUIKitResolve, bundle)
+	require.Empty(t, bundle.refs, "SwiftUI consumed the frozen Reference")
+	require.Len(t, bundle.calls, 1)
+	require.Equal(t, 1, resolveUIKitRefs(g, bundle))
+	assert.NotNil(t, synthUIKitEdge(g, graph.EdgeCalls, source, vc))
+	assert.Nil(t, synthUIKitEdge(g, graph.EdgeReferences, source, model))
+	refs := g.GetOutEdges(source)
+	require.Len(t, refs, 2)
+	for _, e := range refs {
+		if e.Kind == graph.EdgeReferences {
+			require.Equal(t, model, e.To)
+			require.Equal(t, SynthSwiftUIResolve, e.Meta[MetaSynthesizedBy])
+		}
+	}
+}

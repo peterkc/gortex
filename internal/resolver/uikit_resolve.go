@@ -120,19 +120,23 @@ func resolveUIKitRefs(g graph.Store, cands *frameworkPassCandidates) int {
 		if targetID == "" {
 			continue
 		}
-		oldTo := edge.To
-		edge.To = targetID
-		edge.Origin = graph.OriginASTInferred
-		edge.Confidence = conf
-		edge.ConfidenceLabel = graph.ConfidenceLabelFor(edge.Kind, conf)
-		StampSynthesized(edge, SynthUIKitResolve)
-		reindex = append(reindex, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
+		reindex = append(reindex, uikitRefRebind(edge, targetID, conf))
 		resolved++
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func uikitRefRebind(edge *graph.Edge, targetID string, conf float64) graph.EdgeReindex {
+	oldTo := edge.To
+	edge.To = targetID
+	edge.Origin = graph.OriginASTInferred
+	edge.Confidence = conf
+	edge.ConfidenceLabel = graph.ConfidenceLabelFor(edge.Kind, conf)
+	StampSynthesized(edge, SynthUIKitResolve)
+	return graph.EdgeReindex{Edge: edge, OldTo: oldTo}
 }
 
 func isUIKitCandidateEdge(edge *graph.Edge) bool {
