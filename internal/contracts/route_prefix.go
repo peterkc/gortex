@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -795,4 +796,42 @@ func joinPaths(parts ...string) string {
 		return ""
 	}
 	return b.String()
+}
+
+// RouterFileCensus reports whether the native scanner reads the file without a route.
+func RouterFileCensus(path, lang string) bool {
+	switch lang {
+	case "python", "typescript", "javascript":
+		return true
+	}
+	switch filepath.Ext(path) {
+	case ".py", ".ts", ".tsx", ".js", ".jsx":
+		return true
+	}
+	return false
+}
+
+// RouterFactsRequired is the native router census plus unresolved Go-route
+// candidates that a checked parse receipt must carry until link-time filtering.
+func RouterFactsRequired(path, lang string, records []Contract, questions []EndpointContractQuestion) bool {
+	if RouterFileCensus(path, lang) {
+		return true
+	}
+	// Outside the unconditional scanner census, the legacy pass only reads
+	// source belonging to an HTTP route. An unrelated Go/Java/etc. unit must
+	// retain its normal content-only proof across comment and body saves.
+	for _, record := range records {
+		if record.Type == ContractHTTP {
+			switch record.Meta["framework"] {
+			case "fastapi/flask", "flask", "express", "nestjs", "gin/echo/chi", "spring", "rails", "laravel", "axum", "fiber", "vapor", "actix":
+				return true
+			}
+		}
+	}
+	for _, q := range questions {
+		if q.Kind == EndpointGoRoute {
+			return true
+		}
+	}
+	return false
 }

@@ -8286,24 +8286,9 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 	classResolvers := make(map[string]func(string, int) string)
 	qualifiedClasses := false
 	for _, c := range reg.All() {
-		if c.Role != contracts.RoleProvider || c.Type != contracts.ContractHTTP {
-			continue
-		}
-		trail, _ := c.Meta["handler_trail"].(string)
-		fallback, _ := c.Meta["handler_ident"].(string)
-		handlerClass, _ := c.Meta["handler_class"].(string)
+		trail, fallback, handlerClass := contracts.ProviderHandlerHints(c)
 		if trail == "" && fallback == "" {
 			continue
-		}
-		// Skip contracts where schema is already populated — the
-		// initial file-scoped pass worked.
-		if src, _ := c.Meta["schema_source"].(string); src == "extracted" || src == "partial" {
-			continue
-		}
-		if !strings.HasSuffix(c.FilePath, ".php") {
-			// Class-scoped selection relies on PHP namespace identity; other
-			// frameworks keep the name-based lookup.
-			handlerClass = ""
 		}
 		if handlerClass != "" {
 			resolve, seen := classResolvers[c.FilePath]

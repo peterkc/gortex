@@ -118,6 +118,15 @@ func ParseCount() uint64 { return parseCount.Load() }
 // ParseFile parses source bytes with the given language and returns the tree.
 // The caller must call tree.Close() when done.
 func ParseFile(src []byte, lang *sitter.Language) (*sitter.Tree, error) {
+	return ParseFileContext(context.Background(), src, lang)
+}
+
+// ParseFileContext also stops on caller cancellation. The native parse
+// timeout still bounds work when the caller's deadline is later or unset.
+func ParseFileContext(ctx context.Context, src []byte, lang *sitter.Language) (*sitter.Tree, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Guard before the parser pool. The UTF-16 check must run BEFORE any
 	// binary/NUL sniff: a UTF-16 source's NUL-interleaved bytes would
 	// otherwise be labelled "binary" instead of "UTF-16", and nothing would
@@ -150,7 +159,7 @@ func ParseFile(src []byte, lang *sitter.Language) (*sitter.Tree, error) {
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), parseTimeout)
+	ctx, cancel := context.WithTimeout(ctx, parseTimeout)
 	defer cancel()
 
 	parseCount.Add(1)

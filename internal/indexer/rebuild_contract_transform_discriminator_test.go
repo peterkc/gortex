@@ -103,9 +103,10 @@ func other(w Writer) {
 func TestRebuildContractTransformedLaravelClassDiscriminator(t *testing.T) {
 	const path = "routes.php"
 	const useLine = `use Acme\OrderController as Orders;`
-	raw := "<?php\nnamespace Routes;\n" + useLine + "\n" +
-		"Route::get('/orders', [Orders::class, 'index']);\n" +
-		"Route::get('/orders/all', [Orders::class, 'index']);\n"
+	raw := "<?php\nnamespace Routes {\n" + useLine + "\n" +
+		"Route::get('/orders', [Orders::class, 'index']);\n}\n" +
+		"namespace Admin {\nRoute::get('/admin', [Dashboard::class, 'index']);\n}\n" +
+		"namespace PublicSite {\nRoute::get('/public', [Dashboard::class, 'index']);\n}\n"
 	root, src := rebuildInputFixture(t)
 	writeFile(t, filepath.Join(root, path), raw)
 	idx, bounds := rebuildContractTransformFixture(t, graph.New(), root)
@@ -118,10 +119,13 @@ func TestRebuildContractTransformedLaravelClassDiscriminator(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, reused)
 	require.Equal(t, before+2, parser.ParseCount(), "one raw parse for both registration lines")
-	require.Len(t, facts.LaravelHandlerClasses, 2)
-	require.Len(t, facts.Records, 2)
-	require.Contains(t, facts.LaravelHandlerClasses, "4:Orders")
-	require.Contains(t, facts.LaravelHandlerClasses, "5:Orders")
+	wantClasses := map[string]string{
+		"4:Orders":     `Acme\OrderController`,
+		"7:Dashboard":  `Admin\Dashboard`,
+		"10:Dashboard": `PublicSite\Dashboard`,
+	}
+	require.Equal(t, wantClasses, facts.LaravelHandlerClasses)
+	require.Len(t, facts.Records, len(wantClasses))
 
 	// The prepared detector still emits the unqualified hint. Only the raw
 	// registration's namespace/import resolver owns the answer.
@@ -133,8 +137,10 @@ func TestRebuildContractTransformedLaravelClassDiscriminator(t *testing.T) {
 	require.NotNil(t, prepared)
 	for _, route := range facts.Records {
 		_, class := contracts.LaravelHandlerClassKey(route)
-		require.Equal(t, "Orders", class)
-		require.Equal(t, `Routes\Orders`, prepared(class, route.Line))
+		if route.Line == 4 {
+			require.Equal(t, "Orders", class)
+			require.Equal(t, `Routes\Orders`, prepared(class, route.Line))
+		}
 	}
 
 	// Reopen the same store with a fresh indexer. No live bytes are available.
@@ -151,7 +157,7 @@ func TestRebuildContractTransformedLaravelClassDiscriminator(t *testing.T) {
 		key, class := contracts.LaravelHandlerClassKey(route)
 		answer, ok := saved.LaravelHandlerClasses[key]
 		require.True(t, ok)
-		require.Equal(t, `Acme\OrderController`, answer)
+		require.Equal(t, wantClasses[key], answer)
 		require.Equal(t, native(class, route.Line), answer)
 	}
 	require.Equal(t, before, parser.ParseCount(), "restart hit does not parse")
@@ -258,4 +264,157 @@ func TestRebuildContractTransformChild(t *testing.T) {
 		os.Exit(2)
 	}
 	os.Exit(0)
+}
+
+func TestRebuildContractRawUTF16NativeParity(t *testing.T) {
+	const handler = "handler.go::handler"
+	const goSource = "package p\nfunc handler() { WriteJSON (w, 200, \"ok\") }\n"
+	const phpSource = "<?php\nnamespace Routes;\nuse Acme\\OrderController as Orders;\nRoute::get('/orders', [Orders::class, 'index']);\n"
+	for _, tc := range []struct {
+		name, path, lang, source string
+		withBOM                  bool
+	}{
+		{"Go BOM", "handler.go", "go", goSource, true},
+		{"Go unmarked", "handler.go", "go", goSource, false},
+		{"PHP BOM", "routes.php", "php", phpSource, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, src := rebuildInputFixture(t)
+			raw := utf16LENoBOM(t, tc.source)
+			if tc.withBOM {
+				raw = utf16LEWithBOM(t, tc.source)
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(root, tc.path), raw, 0o600))
+			g := graph.New()
+			idx := newTestIndexer(g)
+			idx.registry.Register(languages.NewPHPExtractor())
+			idx.SetRootPath(root)
+			t.Cleanup(idx.Close)
+			input, _, err := readRebuildInput(t.Context(), src, tc.path, tc.lang, 1024)
+			require.NoError(t, err)
+			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			recipe := rebuildDigest{1}
+			before := parser.ParseCount()
+			base, _, reused, err := idx.loadRebuildFileWithContractFacts(t.Context(), src, store, input, recipe, rebuildTransformBounds{FileBytes: 1024})
+			require.NoError(t, err)
+			require.False(t, reused)
+			require.Equal(t, before+1, parser.ParseCount(), "the raw guard declines before tree-sitter")
+			_, saved, reused, err := idx.loadRebuildFileWithContractFacts(t.Context(), nil, store, input, recipe, rebuildTransformBounds{})
+			require.NoError(t, err)
+			require.True(t, reused)
+			nativeSrc := idx.contractFileSrc(tc.path)
+			require.Equal(t, raw, nativeSrc)
+			if tc.lang == "php" {
+				require.Nil(t, languages.PHPClassNameResolver(nativeSrc))
+				require.Len(t, saved.Records, 1)
+				key, nativeClass := contracts.LaravelHandlerClassKey(saved.Records[0])
+				require.Equal(t, "Orders", nativeClass)
+				require.Equal(t, nativeClass, saved.LaravelHandlerClasses[key])
+				return
+			}
+			f := saved.Handlers[handler]
+			require.Nil(t, f.AST)
+			require.Nil(t, f.Bindings)
+			g.AddBatch(base.Nodes, base.Edges)
+			const id = "http::GET::/"
+			registration := contracts.Contract{
+				ID:       id,
+				Role:     contracts.RoleProvider,
+				Type:     contracts.ContractHTTP,
+				FilePath: "router.go",
+				Line:     1,
+				Meta:     map[string]any{"handler_ident": "handler", "path": "/"},
+			}
+			native := contracts.NewRegistry()
+			native.Add(cloneContractRecords([]contracts.Contract{registration})[0])
+			idx.resolveProviderHandlers(native)
+			want := native.ByID(id)
+			require.Len(t, want, 1)
+			require.Equal(t, handler, want[0].SymbolID)
+			require.NotContains(t, want[0].Meta, "response_type")
+			idx.contractProviderValue = func(c contracts.Contract, _ []*graph.Node) (map[string]any, bool) {
+				f.EnrichProvider(&c)
+				return c.Meta, true
+			}
+			replay := contracts.NewRegistry()
+			replay.Add(cloneContractRecords([]contracts.Contract{registration})[0])
+			idx.resolveProviderHandlers(replay)
+			require.Equal(t, want, replay.ByID(id))
+		})
+	}
+}
+
+func TestRebuildContractRawParseNativeSkips(t *testing.T) {
+	for _, tc := range []struct {
+		path, raw string
+		noAST     bool
+	}{
+		{path: "main.GO", raw: "package p\nfunc H() { WriteJSON (w, 200, \"raw\") }\n"},
+		{path: "main.go", noAST: true},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			idx := newTestIndexer(graph.New())
+			t.Cleanup(idx.Close)
+			prepared := []byte("package p\nfunc H() { WriteJSON (w, 200, 42) }\n")
+			before := parser.ParseCount()
+			_, facts, err := idx.extractPreparedRebuildFileWithContractFacts(t.Context(), tc.path, languages.NewGoExtractor(), []byte(tc.raw), prepared)
+			require.NoError(t, err)
+			require.Equal(t, before+1, parser.ParseCount())
+			h, ok := facts.Handlers[tc.path+"::H"]
+			require.True(t, ok)
+			if tc.noAST {
+				require.Nil(t, h.AST)
+			}
+			require.Empty(t, h.AST)
+			require.Nil(t, h.Bindings)
+		})
+	}
+}
+
+func TestRebuildContractRawTreeRefusal(t *testing.T) {
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	ctx := t.Context()
+	raw := []byte("package p\nfunc H() {}\n")
+	prepared := []byte("package p\nfunc H() { println(0) }\n")
+	before := parser.ParseCount()
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	err := idx.captureRebuildContractBodies(canceled, "main.go", "go", raw, prepared, &parser.ExtractionResult{}, true, &contracts.FileFacts{})
+	require.ErrorIs(t, err, contracts.ErrContractFactTree)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, before, parser.ParseCount())
+
+	tree := contracts.ParseTreeForLang("go", prepared)
+	require.NotNil(t, tree)
+	defer tree.Release()
+	err = idx.captureRebuildContractBodies(ctx, "main.go", "go", raw, raw, &parser.ExtractionResult{Tree: tree}, true, &contracts.FileFacts{})
+	require.ErrorIs(t, err, contracts.ErrContractFactTree)
+	require.ErrorContains(t, err, "main.go: go handler facts")
+
+	const path = "routes.php"
+	raw = []byte("<?php\nRoute::get('/orders', [Orders::class, 'index']);\n")
+	route := contracts.Contract{
+		Role: contracts.RoleProvider, Type: contracts.ContractHTTP, FilePath: path, Line: 2,
+		Meta: map[string]any{"handler_ident": "index", "handler_class": "Orders"},
+	}
+	f := &contracts.FileFacts{Records: []contracts.Contract{route}}
+	err = idx.captureRebuildContractBodies(ctx, path, "php", raw, raw, &parser.ExtractionResult{}, false, f)
+	require.ErrorIs(t, err, contracts.ErrContractFactTree)
+	require.ErrorContains(t, err, "routes.php: php handler facts")
+	require.Nil(t, languages.PHPClassNameResolverWithTree(nil))
+	require.Nil(t, languages.PHPClassNameResolverWithTree(tree))
+
+	// An already-enriched provider does not enter the native class pass even
+	// if its prepared record still carries the class hint.
+	f.Records[0].Meta["schema_source"] = "extracted"
+	before = parser.ParseCount()
+	require.NoError(t, idx.captureRebuildContractBodies(ctx, path, "php", raw, bytes.TrimSpace(raw), &parser.ExtractionResult{}, false, f))
+	require.Nil(t, f.LaravelHandlerClasses)
+	require.Equal(t, before, parser.ParseCount())
+	f.Records[0].ID = "http::GET::/orders"
+	reg := contracts.NewRegistry()
+	reg.Add(f.Records[0])
+	idx.resolveProviderHandlers(reg)
+	require.Equal(t, before, parser.ParseCount(), "native also skips class qualification")
 }

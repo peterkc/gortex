@@ -5,12 +5,15 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"strings"
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
+// The inactive receipt embeds unmodified v2 bytes. Decoding the base has
+// v2 semantics (including present-empty slices decoding as nil).
 const contractParseFactsFormat byte = 4
 
 // EncodeContractParseFacts builds a candidate contract receipt. Active v2
@@ -24,6 +27,10 @@ func EncodeContractParseFacts(base ParseFacts, facts *contracts.FileFacts) ([]by
 	if err != nil {
 		return nil, err
 	}
+	return encodeContractFactSuffix(v2, facts)
+}
+
+func encodeContractFactSuffix(v2 []byte, facts *contracts.FileFacts) ([]byte, error) {
 	e := contractFactsEncoder{buf: appendBytes([]byte{contractParseFactsFormat}, v2)}
 	e.boolean(facts.ScanSkipped)
 	writeFactSlice(&e, facts.Records, writeFactRecord)
@@ -134,8 +141,14 @@ func checkContractParseFacts(base ParseFacts, f *contracts.FileFacts) error {
 			shapes[n.ID] = struct{}{}
 		case graph.KindFunction, graph.KindMethod:
 			h, ok := f.Handlers[n.ID]
-			if !ok || h.Regex == nil || h.AST == nil {
+			goPath := strings.HasSuffix(n.FilePath, ".go")
+			if !ok || h.Regex == nil || (!goPath && h.AST == nil) {
 				return invalid("missing contract handler answer")
+			}
+			// A nil Go AST is an explicit native no-tree answer. A present
+			// tree answer has a bindings map even when no bindings were found.
+			if goPath && base.EffectiveLanguage == "go" && (h.AST == nil) != (h.Bindings == nil) {
+				return invalid("incomplete Go contract handler tree answer")
 			}
 			if raw, ok := h.AST["status_codes"]; ok {
 				if _, typed := raw.([]int); !typed {
@@ -173,6 +186,9 @@ func checkContractParseFacts(base ParseFacts, f *contracts.FileFacts) error {
 			}
 		}
 	}
+	if f.Router == nil && contracts.RouterFactsRequired(path, base.EffectiveLanguage, f.Records, f.Questions) {
+		return invalid("missing contract router facts")
+	}
 	if f.Router != nil {
 		last := 0
 		if f.Router.LineCount < 0 {
@@ -189,8 +205,10 @@ func checkContractParseFacts(base ParseFacts, f *contracts.FileFacts) error {
 }
 
 func validFactRecord(c contracts.Contract, path string) bool {
-	return c.FilePath == path && c.Type != "" && (c.Role == contracts.RoleProvider || c.Role == contracts.RoleConsumer) &&
-		!math.IsNaN(c.Confidence) && !math.IsInf(c.Confidence, 0)
+	// Endpoints and enrichment update metadata. Owner scope belongs to replay,
+	// not this portable receipt. Non-finite confidence is not a valid record.
+	return c.FilePath == path && c.Type != "" && (c.Role == contracts.RoleProvider || c.Role == contracts.RoleConsumer) && c.Meta != nil &&
+		c.RepoPrefix == "" && c.WorkspaceID == "" && c.ProjectID == "" && !math.IsNaN(c.Confidence) && !math.IsInf(c.Confidence, 0)
 }
 
 // Collections encode nil as -1 and present empty as zero. A map's sorted keys
@@ -269,12 +287,19 @@ func readFactMap[T any](d *recordCursor, read func(*recordCursor) T) map[string]
 	var previous string
 	for i := 0; i < n && d.err == nil; i++ {
 		key := d.str()
+		if d.err != nil {
+			return nil
+		}
 		if i > 0 && key <= previous {
 			d.err = invalid("contract fact map order")
-			break
+			return nil
 		}
 		previous = key
-		out[key] = read(d)
+		value := read(d)
+		if d.err != nil {
+			return nil
+		}
+		out[key] = value
 	}
 	return out
 }

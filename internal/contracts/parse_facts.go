@@ -31,16 +31,33 @@ type FileFacts struct {
 	ScanSkipped           bool
 }
 
-// LaravelHandlerClassKey identifies the raw class question from a prepared
+// ProviderHandlerHints selects unresolved HTTP providers for the native
+// cross-file handler pass. Only PHP uses a class to narrow candidates.
+func ProviderHandlerHints(c Contract) (trail, fallback, class string) {
+	if c.Role != RoleProvider || c.Type != ContractHTTP {
+		return "", "", ""
+	}
+	trail, _ = c.Meta["handler_trail"].(string)
+	fallback, _ = c.Meta["handler_ident"].(string)
+	if trail == "" && fallback == "" {
+		return "", "", ""
+	}
+	// The initial file-scoped pass already populated the schema.
+	if src, _ := c.Meta["schema_source"].(string); src == "extracted" || src == "partial" {
+		return "", "", ""
+	}
+	if strings.HasSuffix(c.FilePath, ".php") {
+		class, _ = c.Meta["handler_class"].(string)
+	}
+	return trail, fallback, class
+}
+
+// LaravelHandlerClassKey identifies a PHP class question from a prepared
 // registration. Use the registration file's facts, not the winning handler's.
 // Several resource routes can share the same class and source line.
 func LaravelHandlerClassKey(c Contract) (key, class string) {
-	if c.Role != RoleProvider || c.Type != ContractHTTP || !strings.HasSuffix(c.FilePath, ".php") || c.Line <= 0 {
-		return "", ""
-	}
-	framework, _ := c.Meta["framework"].(string)
-	class, _ = c.Meta["handler_class"].(string)
-	if framework != "laravel" || class == "" {
+	_, _, class = ProviderHandlerHints(c)
+	if class == "" {
 		return "", ""
 	}
 	return strconv.Itoa(c.Line) + ":" + class, class
@@ -106,7 +123,8 @@ func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []s
 	}
 	byRow := make(map[int]*sitter.Node)
 	byName := make(map[string]*sitter.Node)
-	if tree != nil && tree.Tree() != nil && tree.Lang() == "go" {
+	goTree := lang == "go" && tree != nil && tree.Tree() != nil && tree.Lang() == "go"
+	if goTree {
 		var visit func(*sitter.Node) error
 		visit = func(n *sitter.Node) error {
 			if n == nil {
@@ -150,7 +168,7 @@ func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []s
 			continue
 		}
 		var bf *goBodyFacts
-		if tree != nil && tree.Tree() != nil && tree.Lang() == "go" {
+		if goTree {
 			body := byRow[n.StartLine-1]
 			if body == nil && n.Name != "" {
 				body = byName[n.Name]
@@ -160,7 +178,10 @@ func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []s
 		}
 		c := Contract{Role: RoleProvider, SymbolID: n.ID, FilePath: n.FilePath, Line: n.StartLine, Meta: map[string]any{}}
 		enrichHTTPContract(&c, lines, nodes, lang)
-		f := HandlerFacts{Regex: c.Meta, AST: map[string]any{}}
+		f := HandlerFacts{Regex: c.Meta}
+		if lang != "go" || bf != nil {
+			f.AST = make(map[string]any)
+		}
 		if bf != nil {
 			c.Meta = f.AST
 			applyProviderFacts(&c, nodes, bf)

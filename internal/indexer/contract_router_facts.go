@@ -1,10 +1,6 @@
 package indexer
 
-import (
-	"path/filepath"
-
-	"github.com/zzet/gortex/internal/contracts"
-)
+import "github.com/zzet/gortex/internal/contracts"
 
 // The proof records the actual join result, including a join that found no
 // mount. Unconsumed facts and source line counts cannot invalidate it.
@@ -15,33 +11,11 @@ type contractRouterProof struct {
 }
 
 func contractRouterCensus(file ContractFollowupFile) bool {
-	switch file.Language {
-	case "python", "typescript", "javascript":
-		return true
-	}
-	switch filepath.Ext(file.Path) {
-	case ".py", ".ts", ".tsx", ".js", ".jsx":
-		return true
-	}
-	return false
+	return contracts.RouterFileCensus(file.Path, file.Language)
 }
 
 func contractRouterSupported(file ContractFollowupFile, records []contracts.Contract) bool {
-	if contractRouterCensus(file) {
-		return true
-	}
-	// Outside the unconditional scanner census, the legacy pass only reads
-	// source belonging to an HTTP route. An unrelated Go/Java/etc. unit must
-	// retain its normal content-only proof across comment and body saves.
-	for _, record := range records {
-		if record.Type == contracts.ContractHTTP {
-			switch record.Meta["framework"] {
-			case "fastapi/flask", "flask", "express", "nestjs", "gin/echo/chi", "spring", "rails", "laravel", "axum", "fiber", "vapor", "actix":
-				return true
-			}
-		}
-	}
-	return false
+	return contracts.RouterFactsRequired(file.Path, file.Language, records, nil)
 }
 
 func contractRouterEligible(reg *contracts.Registry) bool {

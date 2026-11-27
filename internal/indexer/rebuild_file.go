@@ -292,14 +292,7 @@ func (idx *Indexer) captureRebuildContractFacts(ctx context.Context, graphPath, 
 	if err := idx.captureRebuildContractBodies(ctx, graphPath, lang, raw, prepared, result, callables, c); err != nil {
 		return nil, err
 	}
-	routerSupported := contractRouterSupported(ContractFollowupFile{Path: graphPath, Language: lang}, c.Records)
-	for _, q := range c.Questions {
-		if q.Kind == contracts.EndpointGoRoute {
-			routerSupported = true
-			break
-		}
-	}
-	if routerSupported {
+	if contracts.RouterFactsRequired(graphPath, lang, c.Records, c.Questions) {
 		facts := contracts.RouterFileFacts(graphPath, raw).Clone()
 		c.Router = &facts
 	}
@@ -310,11 +303,12 @@ func (idx *Indexer) captureRebuildContractFacts(ctx context.Context, graphPath, 
 // captureRebuildContractBodies does only the two named raw-tree operations.
 // Other lazy handler facts already use raw text and never need another tree.
 func (idx *Indexer) captureRebuildContractBodies(ctx context.Context, path, lang string, raw, prepared []byte, result *parser.ExtractionResult, callables bool, facts *contracts.FileFacts) error {
+	handlerLang := detectLangFromPath(path)
 	var grammar *sitter.Language
 	var tree *parser.ParseTree
 	switch lang {
 	case "go":
-		if callables {
+		if callables && handlerLang == "go" && len(raw) != 0 {
 			grammar, tree = golang.GetLanguage(), result.Tree
 		}
 	case "php":
@@ -325,51 +319,46 @@ func (idx *Indexer) captureRebuildContractBodies(ctx context.Context, path, lang
 			}
 		}
 	}
+	rawTreeDeclined := false
 	if grammar != nil && !bytes.Equal(raw, prepared) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		start := time.Now()
-		t, err := parser.ParseFile(raw, grammar)
+		t, err := parser.ParseFileContext(ctx, raw, grammar)
 		idx.logger.Debug("build contract raw parse", zap.String("language", lang), zap.Int("bytes", len(raw)), zap.Duration("elapsed", time.Since(start)), zap.Error(err))
-		if err != nil {
+		switch {
+		case err == nil:
+			tree = parser.NewParseTree(t, raw, lang)
+			defer tree.Release()
+		case errors.Is(err, parser.ErrUTF16Source), errors.Is(err, parser.ErrBinarySource):
+			// Native treats these deterministic input refusals as a nil tree.
+			rawTreeDeclined = true
+			tree = nil
+		default:
 			return fmt.Errorf("%w: %s: raw %s: %w", contracts.ErrContractFactTree, path, lang, err)
 		}
-		tree = parser.NewParseTree(t, raw, lang)
-		defer tree.Release()
 	}
-	if grammar != nil && (lang != "go" || len(raw) != 0) {
-		if tree == nil || tree.Tree() == nil || tree.Lang() != lang || !bytes.Equal(tree.Source(), raw) {
-			return fmt.Errorf("%w: %s: %s handler facts", contracts.ErrContractFactTree, path, lang)
-		}
-		if lang == "go" {
-			root := tree.Tree().Inner().RootNode()
-			if root == nil || root.Language().Inner != grammar.Inner {
-				return fmt.Errorf("%w: %s: Go handler grammar differs", contracts.ErrContractFactTree, path)
-			}
-		}
+	if grammar != nil && !rawTreeDeclined && (tree == nil || tree.Tree() == nil || tree.Lang() != lang || !bytes.Equal(tree.Source(), raw)) {
+		return fmt.Errorf("%w: %s: %s handler facts", contracts.ErrContractFactTree, path, lang)
 	}
 	if lang == "php" && grammar != nil {
 		resolve := languages.PHPClassNameResolverWithTree(tree)
-		if resolve == nil {
-			return fmt.Errorf("%w: %s: PHP handler class facts", contracts.ErrContractFactTree, path)
-		}
 		facts.LaravelHandlerClasses = make(map[string]string)
 		for _, c := range facts.Records {
 			if key, class := contracts.LaravelHandlerClassKey(c); key != "" {
-				facts.LaravelHandlerClasses[key] = resolve(class, c.Line)
+				if resolve != nil {
+					class = resolve(class, c.Line)
+				}
+				facts.LaravelHandlerClasses[key] = class
 			}
 		}
 	}
 	if !callables {
 		return nil
 	}
-	// The native Go helper supplies no tree for empty source. PHP and other
-	// languages use the regex provider facts, not their qualification tree.
-	if lang != "go" || len(raw) == 0 {
+	// PHP uses its tree only for class qualification, not provider facts.
+	if lang != "go" {
 		tree = nil
 	}
 	var err error
-	facts.Handlers, err = contracts.CaptureFileHandlerFacts(ctx, result.Nodes, splitLines(raw), detectLangFromPath(path), tree)
+	facts.Handlers, err = contracts.CaptureFileHandlerFacts(ctx, result.Nodes, splitLines(raw), handlerLang, tree)
 	return err
 }

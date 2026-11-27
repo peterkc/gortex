@@ -8,9 +8,9 @@ import (
 	"github.com/zzet/gortex/internal/contracts"
 )
 
-// Contract metadata uses the existing native value tags and binary string
-// codec, but has no JSON fallback. Its collection counts preserve typed nil;
-// the legacy graph metadata format does not distinguish it from empty.
+// Contract metadata reuses v2 tag values and the binary string codec, but
+// not all v2 payloads. Collections use signed counts (-1 for nil), and
+// metaTagShape stores a binary shape, not JSON. No tag falls back to JSON.
 const (
 	contractMetaStringMap      byte = 0x14
 	contractMetaStringMapSlice byte = 0x15
@@ -165,6 +165,9 @@ func writeFactFloat(e *contractFactsEncoder, v float64) {
 }
 
 func readFactInt64(d *recordCursor) int64 {
+	if d.err != nil {
+		return 0
+	}
 	v, n := binary.Varint(d.buf)
 	if n <= 0 {
 		d.err = invalid("contract metadata int64")
@@ -175,6 +178,9 @@ func readFactInt64(d *recordCursor) int64 {
 }
 
 func readFactUint64(d *recordCursor) uint64 {
+	if d.err != nil {
+		return 0
+	}
 	v, n := binary.Uvarint(d.buf)
 	if n <= 0 {
 		d.err = invalid("contract metadata uint64")
@@ -185,6 +191,9 @@ func readFactUint64(d *recordCursor) uint64 {
 }
 
 func readFactFloat(d *recordCursor) float64 {
+	if d.err != nil {
+		return 0
+	}
 	if len(d.buf) < 8 {
 		d.err = invalid("truncated contract metadata float")
 		return 0

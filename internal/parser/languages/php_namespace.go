@@ -68,10 +68,6 @@ func PHPClassNameResolverWithTree(tree *parser.ParseTree) func(string, int) stri
 	if tree == nil || tree.Tree() == nil || tree.Lang() != "php" {
 		return nil
 	}
-	root := tree.Tree().Inner().RootNode()
-	if root == nil || root.Language().Inner != php.GetLanguage().Inner {
-		return nil
-	}
 	return newPHPNameResolver(tree.Tree().RootNode(), tree.Source()).resolve
 }
 
