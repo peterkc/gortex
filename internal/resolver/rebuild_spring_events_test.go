@@ -314,3 +314,39 @@ func TestRebuildSpringEventsProofTerms(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildSpringEventsListenerReceiptFields(t *testing.T) {
+	pub := springRebuildNode("publish", "")
+	first := springRebuildNode("A", "Child")
+	call := springRebuildCall(pub.ID, "unresolved::old", "Child", 10)
+	input := rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, first}, call)
+	for _, tc := range []struct {
+		name   string
+		kind   graph.NodeKind
+		listen string
+		refuse bool
+	}{
+		{"language and receipt file differ", graph.KindMethod, "Child", false},
+		{"kind differs", graph.KindFunction, "Child", true},
+		{"qualified marker differs", graph.KindMethod, "pkg.Child", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, input)
+			before := rebuildEventSavedRows(t, b)
+			raw := *first
+			raw.Kind, raw.FilePath, raw.Language = tc.kind, "Other.kts", "kotlin"
+			raw.Meta = map[string]any{"spring_listener_type": tc.listen}
+			receipts := rebuildGRPCReceipts(rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub}, call),
+				rebuildEventFacts(raw.FilePath, "kotlin-script", []*graph.Node{&raw}))
+			stats, err := RunRebuildSpringEvents(t.Context(), b, receipts, springRebuildSelection(t, b))
+			if tc.refuse {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildSpringEventStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+		})
+	}
+}

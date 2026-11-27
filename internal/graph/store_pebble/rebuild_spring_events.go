@@ -109,10 +109,6 @@ func (b *BuildStore) RebuildSpringEvents(ctx context.Context, receipts iter.Seq2
 	return p.stats, err
 }
 
-func (p *rebuildSpringEventPass) key(col byte, fields ...string) []byte {
-	return keyStrings(p.column(col), fields...)
-}
-
 func (p *rebuildSpringEventPass) state(key []byte) (byte, error) {
 	return rebuildScratchState(p.b.pending, key, "Spring event proof state")
 }
@@ -324,12 +320,12 @@ func (p *rebuildSpringEventPass) recordListener(raw *graph.Node, file, lang stri
 	if state == 0 {
 		return nil
 	}
-	live, err := pendingGet(p.b.pending, pendingNodeKey(raw.ID), decodeNodeLight)
+	live, err := pendingGet(p.b.pending, pendingNodeKey(raw.ID), decodeNode)
 	if err != nil {
 		return err
 	}
-	valid := role && present && lang != "" &&
-		sameRebuildLanguageMarker(raw, live, file)
+	valid := role && present && lang != "" && raw.FilePath == file && live != nil &&
+		raw.ID == live.ID && raw.Kind == live.Kind && t == p.rules.Listener(live)
 	return p.note(key, rebuildScratchProofBit(valid))
 }
 
@@ -362,7 +358,7 @@ func (p *rebuildSpringEventPass) call(old []byte) (*graph.Edge, error) {
 }
 
 func (p *rebuildSpringEventPass) callProved(old []byte) (bool, error) {
-	raw, err := pendingGet(p.b.pending, append(p.column('k'), old...), copyValue)
+	raw, err := p.get(append(p.column('k'), old...))
 	if err != nil || raw == nil {
 		return false, err
 	}
@@ -383,7 +379,7 @@ func (p *rebuildSpringEventPass) listeners(ctx context.Context, root string, res
 	}
 	out := p.key(result, root)
 	done := p.key('c', string(result), root)
-	cached, err := pendingGet(p.b.pending, done, copyValue)
+	cached, err := p.get(done)
 	if err != nil {
 		return nil, "", err
 	}
@@ -415,7 +411,7 @@ func (p *rebuildSpringEventPass) listeners(ctx context.Context, root string, res
 		if err := ctx.Err(); err != nil {
 			return nil, "", err
 		}
-		t, err := pendingGet(p.b.pending, binary.BigEndian.AppendUint64(p.column('q'), i), copyValue)
+		t, err := p.get(binary.BigEndian.AppendUint64(p.column('q'), i))
 		if err != nil {
 			return nil, "", err
 		}
@@ -673,7 +669,7 @@ func (p *rebuildSpringEventPass) offerAdds(ctx context.Context, e *graph.Edge, p
 			return err
 		}
 		winnerKey := append(p.column('d'), key...)
-		winner, err := pendingGet(p.b.pending, winnerKey, copyValue)
+		winner, err := p.get(winnerKey)
 		if err != nil {
 			return err
 		}
