@@ -78,6 +78,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{name: "exact_checkout", exact: true},
 		{name: "legacy_without_namespace"},
 		{name: "redux_thunk_refusal", exact: true, cancelAfter: "Store Factory"},
+		{name: "laravel_refusal", exact: true, cancelAfter: "Sidekiq"},
 		{name: "gin_refusal", exact: true, cancelAfter: "macro expansion"},
 		{name: "gin_no_offers", exact: true, noGin: true},
 	} {
@@ -161,7 +162,10 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
 			if tc.cancelAfter != "" {
 				wantErr, wire := store_pebble.ErrRebuildReduxThunk, uint8(61)
-				if tc.cancelAfter == "macro expansion" {
+				switch tc.cancelAfter {
+				case "Sidekiq":
+					wantErr, wire = store_pebble.ErrRebuildLaravelEvent, 72
+				case "macro expansion":
 					wantErr, wire = store_pebble.ErrRebuildGinMiddleware, 77
 				}
 				require.ErrorIs(t, err, wantErr)
