@@ -158,6 +158,39 @@ func TestRebuildTemporalAddRunsAndTail(t *testing.T) {
 	}
 }
 
+func TestRebuildTemporalSpillsBeforeAppend(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	ctx := t.Context()
+	const threshold = 1 << 10
+	// Each encoded row fits alone, but the two together exceed the threshold.
+	first := graph.Edge{From: "caller", To: "a", Kind: graph.EdgeCalls, Via: strings.Repeat("x", 3*threshold/4)}
+	second := first
+	second.To = "b"
+	_, err := b.RebuildTemporal(ctx, func(func(ParseFacts, error) bool) {}, threshold,
+		func(p *RebuildTemporalPass) (RebuildTemporalStats, error) {
+			require.NoError(t, p.QueueAdd(ctx, &first))
+			require.NoError(t, p.QueueAdd(ctx, &second))
+
+			require.Equal(t, 1, p.addRuns)
+			require.Len(t, p.addRows, 1)
+			tail, err := decodeEdge(p.addRows[0].value)
+			require.NoError(t, err)
+			require.Equal(t, &second, tail)
+			var added []*graph.Edge
+			require.NoError(t, visitTemporalAddRun(ctx, p.addRunPath(0), func(r row) error {
+				e, err := decodeEdge(r.value)
+				if err != nil {
+					return err
+				}
+				added = append(added, e)
+				return nil
+			}))
+			require.Equal(t, []*graph.Edge{&first}, added)
+			return RebuildTemporalStats{}, nil
+		})
+	require.NoError(t, err)
+}
+
 func TestRebuildTemporalRefusesAffectedOutputRows(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

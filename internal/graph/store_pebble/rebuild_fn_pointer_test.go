@@ -123,6 +123,36 @@ func TestRebuildFnPointerMoveRunsAndTail(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestRebuildFnPointerSpillsBeforeAppend(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	ctx := t.Context()
+	const threshold = 1 << 10
+	p, err := b.CaptureFnPointerCensus(ctx, threshold, func(*graph.Edge) bool { return false })
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, p.Close()) })
+
+	// Each encoded row fits alone, but the two together exceed the threshold.
+	first := graph.Edge{From: "a", To: "old", Kind: graph.EdgeCalls, Via: strings.Repeat("x", 3*threshold/4)}
+	second := first
+	second.From = "b"
+	for _, old := range []graph.Edge{first, second} {
+		moved := old
+		moved.To = "new"
+		require.NoError(t, p.StageMove(ctx, graph.EdgeReindex{Edge: &moved, OldTo: old.To}))
+	}
+
+	stream := &p.moves[fnPointerCallMoves-fnPointerRegMoves]
+	require.Equal(t, 1, stream.runs)
+	require.Len(t, stream.rows, 1)
+	require.Equal(t, fnPointerEdgeKey(fnPointerCallMoves, &second), stream.rows[0].key)
+	var keys []string
+	require.NoError(t, visitFnPointerMoveRun(ctx, p.runPath(fnPointerCallMoves, 0), func(r row) error {
+		keys = append(keys, string(r.key))
+		return nil
+	}))
+	require.Equal(t, []string{string(fnPointerEdgeKey(fnPointerCallMoves, &first))}, keys)
+}
+
 func TestRebuildFnPointerRefusesUnorderedMoves(t *testing.T) {
 	for _, tc := range []struct {
 		name, from string
