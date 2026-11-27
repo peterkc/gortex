@@ -116,6 +116,117 @@ func (p *rebuildCallMoves) candidateBucketsProved(buckets []rebuildStoreCandidat
 	return true, nil
 }
 
+// A receipt for a live ID can enter a deciding cohort without a live claim
+// for that role. Only live claims can supply exact or activation witnesses.
+func (p *rebuildCallMoves) recordStoreCandidate(key, after []byte, column int, global byte, anchor bool, raw *graph.Node, file, lang string) error {
+	claim, err := p.marked(key)
+	if err != nil {
+		return err
+	}
+	var before []byte
+	if len(claim) > 1 {
+		before = claim[1:]
+	}
+	same := after != nil && bytes.Equal(before, after)
+	var wanted bool
+	if before != nil {
+		state, err := rebuildScratchState(p.b.pending, before, p.label+" receipt proof")
+		if err != nil {
+			return err
+		}
+		wanted = state != 0
+	}
+	var entered bool
+	if after != nil && !same {
+		state, err := rebuildScratchState(p.b.pending, after, p.label+" receipt proof")
+		if err != nil {
+			return err
+		}
+		entered = state != 0
+	}
+	if !wanted && !entered && (!anchor || before == nil) {
+		return nil
+	}
+	live, err := p.storeReceiptNode(raw.ID)
+	if err != nil {
+		return err
+	}
+	receipt := rebuildStoreNodeReceipt(raw, live, file, lang)
+	if receipt && (entered || same && wanted && (raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath)) {
+		if err := p.noteCandidateCohortChange(before, after, column, global, raw, live); err != nil {
+			return err
+		}
+	}
+	if before == nil {
+		return nil
+	}
+	proof := rebuildStoreCandidateProof(receipt && same, raw, live)
+	if anchor {
+		proof |= rebuildStoreAnchorProof(receipt && after != nil)
+	}
+	return p.noteStoreNodeProof(key, claim, proof)
+}
+
+// Getter claims prove live files. A new role or a move can add a file
+// without supplying an exact claim for it.
+func (p *rebuildCallMoves) recordStoreGetter(key, wanted, files []byte, raw *graph.Node, file, lang string) error {
+	claim, err := p.marked(key)
+	if err != nil || len(claim) <= 1 && wanted == nil {
+		return err
+	}
+	var before []byte
+	if len(claim) > 1 {
+		before = claim[1:]
+	}
+	var beforeState, afterState byte
+	if before != nil {
+		beforeState, err = rebuildScratchState(p.b.pending, before, p.label+" receipt proof")
+		if err != nil {
+			return err
+		}
+	}
+	same := wanted != nil && bytes.Equal(before, wanted)
+	if same {
+		afterState = beforeState
+	} else if wanted != nil {
+		afterState, err = rebuildScratchState(p.b.pending, wanted, p.label+" receipt proof")
+		if err != nil {
+			return err
+		}
+	}
+	if beforeState == 0 && afterState == 0 {
+		return nil
+	}
+	live, err := p.storeReceiptNode(raw.ID)
+	if err != nil {
+		return err
+	}
+	receipt := rebuildStoreNodeReceipt(raw, live, file, lang)
+	exact := receipt && same && file == live.FilePath
+	if receipt && !exact && afterState != 0 {
+		liveFile, _, err := p.unique(files)
+		if err != nil {
+			return err
+		}
+		if file != liveFile {
+			if err := noteRebuildScratchState(p.put, wanted, afterState, rebuildCapabilityUnproved); err != nil {
+				return err
+			}
+		}
+	}
+	if beforeState == 0 {
+		return nil
+	}
+	return p.noteStoreNodeProof(key, claim, rebuildScratchProofBit(exact))
+}
+
+func (p *rebuildCallMoves) storeReceiptNode(id string) (*graph.Node, error) {
+	key := pendingNodeKey(id)
+	return pendingGet(p.b.pending, key, func(val []byte) (*graph.Node, error) {
+		return checkedRebuildLightNode(row{key, val}, p.label)
+	})
+}
+
 // A changed receipt for a known candidate may enter deciding buckets.
 // Record only the buckets it enters, without disturbing other scopes.
 func (p *rebuildCallMoves) noteCandidateScopeChange(cohort []byte, column int, global byte, raw, live *graph.Node) error {
@@ -123,9 +234,12 @@ func (p *rebuildCallMoves) noteCandidateScopeChange(cohort []byte, column int, g
 }
 
 func (p *rebuildCallMoves) noteCandidateCohortChange(beforeCohort, afterCohort []byte, column int, global byte, raw, live *graph.Node) error {
-	before := rebuildStoreScopeKeys(beforeCohort, column, global, live)
+	var before [][]byte
+	if len(beforeCohort) != 0 {
+		before = rebuildStoreScopeKeys(beforeCohort, column, global, live)
+	}
 	for i, bucket := range rebuildStoreScopeKeys(afterCohort, column, global, raw) {
-		if bytes.Equal(bucket, before[i]) {
+		if before != nil && bytes.Equal(bucket, before[i]) {
 			continue
 		}
 		key := p.candidateProofKey(bucket)

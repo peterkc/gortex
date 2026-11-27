@@ -213,7 +213,6 @@ func (p *rebuildStoreFactoryPass) node(id string) (*graph.Node, error) {
 type rebuildStoreFactoryElection struct {
 	rebuildStoreCandidatePick
 	caller      *graph.Node
-	seen        bool // an action cohort exists before workspace filtering
 	getter      bool // the filtered cohort needs the getter/fallback decision
 	getterProof bool // the getter file can change the decision
 }
@@ -221,7 +220,6 @@ type rebuildStoreFactoryElection struct {
 func (p *rebuildStoreFactoryPass) elect(from string, call rebuildStoreDispatchCall, resolveGetter bool) (pick rebuildStoreFactoryElection, err error) {
 	scoped := p.key('a', call.group, call.member)
 	id, seen, err := p.unique(scoped)
-	pick.seen = seen
 	if err != nil {
 		return pick, err
 	}
@@ -341,10 +339,8 @@ func (p *rebuildStoreFactoryPass) planCall(old []byte, e *graph.Edge, call rebui
 	if !p.rules.rebind(e, call.reset, pick.target, pick.target != "") {
 		return nil
 	}
-	if pick.seen {
-		if err := p.want(p.key('u', call.group, call.member)); err != nil {
-			return err
-		}
+	if err := p.want(p.key('u', call.group, call.member)); err != nil {
+		return err
 	}
 	if !pick.nonempty {
 		p.needsAnchor = true
@@ -470,47 +466,24 @@ func (p *rebuildStoreFactoryPass) recordNode(raw *graph.Node, file, lang string)
 
 func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, file, lang string) error {
 	key := p.key(col, raw.ID)
-	claim, err := p.marked(key)
-	if err != nil || len(claim) == 0 {
-		return err
-	}
-	var state byte
-	if col != 'c' || !p.needsAnchor {
-		state, err = p.state(claim[1:])
-		if err != nil || state == 0 {
-			return err
-		}
-	}
-	live, err := p.node(raw.ID)
-	if err != nil {
-		return err
-	}
-	receipt := rebuildStoreNodeReceipt(raw, live, file, lang)
-	var proof byte
 	if col == 'c' {
-		binding, member := p.rules.action(raw)
-		eligible := p.rules.kind(raw.Kind) && binding != ""
-		cohort := p.key('u', binding, member)
-		sameRole := eligible && bytes.Equal(claim[1:], cohort)
-		if receipt && eligible && (!sameRole || raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
-			if err := p.noteCandidateCohortChange(claim[1:], cohort, len(p.prefix), 'a', raw, live); err != nil {
-				return err
+		// Celery records its task and registration cohorts separately.
+		if p.rules.action == nil {
+			return nil
+		}
+		var cohort []byte
+		if p.rules.kind(raw.Kind) {
+			if binding, member := p.rules.action(raw); binding != "" {
+				cohort = p.key('u', binding, member)
 			}
 		}
-		proof = rebuildStoreCandidateProof(receipt && sameRole, raw, live)
-		if p.needsAnchor {
-			proof |= rebuildStoreAnchorProof(receipt && eligible)
-		}
-	} else {
-		sameGetter := rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.getter(raw, raw.Name) && bytes.Equal(claim[1:], p.key('v', raw.Name))
-		if sameGetter {
-			if err := p.noteGetterFileChange(claim[1:], state, raw, live, file, lang); err != nil {
-				return err
-			}
-		}
-		proof = rebuildScratchProofBit(receipt && sameGetter && raw.FilePath == live.FilePath)
+		return p.recordStoreCandidate(key, cohort, len(p.prefix), 'a', p.needsAnchor, raw, file, lang)
 	}
-	return p.noteStoreNodeProof(key, claim, proof)
+	var wanted, files []byte
+	if rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.getter(raw, raw.Name) {
+		wanted, files = p.key('v', raw.Name), p.key('t', raw.Name)
+	}
+	return p.recordStoreGetter(key, wanted, files, raw, file, lang)
 }
 
 func (p *rebuildStoreFactoryPass) proveActions(ctx context.Context) (anchor bool, err error) {

@@ -1,7 +1,6 @@
 package store_pebble
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/pathkey"
 )
 
 var ErrRebuildNgRxEffect = errors.New("pebble rebuild NgRx Effect stage failed")
@@ -202,9 +200,6 @@ func (p *rebuildNgRxEffectPass) proveCalls(ctx context.Context, receipts iter.Se
 		if err != nil {
 			return err
 		}
-		if err := p.noteUnindexedActions(ctx, facts); err != nil {
-			return err
-		}
 		if err := p.record(ctx, facts); err != nil {
 			return err
 		}
@@ -226,48 +221,4 @@ func (p *rebuildNgRxEffectPass) proveCalls(ctx context.Context, receipts iter.Se
 		return err
 	}
 	return refused.err()
-}
-
-// The census only indexes requested actions. A receipt for a known node can
-// still enter a deciding bucket after a rename or a kind change.
-func (p *rebuildNgRxEffectPass) noteUnindexedActions(ctx context.Context, facts ParseFacts) error {
-	file := pathkey.Normalize(facts.File.FilePath)
-	for _, raw := range facts.Nodes {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if facts.EffectiveLanguage == "" || raw.FilePath != file || !rebuildNgRxActionKind(raw.Kind) || raw.Name == "" {
-			continue
-		}
-		wanted, err := p.present(p.key('q', raw.Name))
-		if err != nil {
-			return err
-		}
-		if !wanted {
-			continue
-		}
-		after := p.key('u', rebuildNgRxActionGroup, raw.Name)
-		claim, err := p.marked(p.key('c', raw.ID))
-		if err != nil {
-			return err
-		}
-		if len(claim) > 1 && bytes.Equal(claim[1:], after) {
-			continue // the shared recorder checks scope changes in this cohort.
-		}
-		live, err := p.node(raw.ID)
-		if err != nil {
-			return err
-		}
-		if live == nil {
-			continue
-		}
-		var beforeName string
-		if rebuildNgRxActionKind(live.Kind) {
-			beforeName = live.Name
-		}
-		if err := p.noteCandidateCohortChange(p.key('u', rebuildNgRxActionGroup, beforeName), after, len(p.prefix), 'a', raw, live); err != nil {
-			return err
-		}
-	}
-	return nil
 }

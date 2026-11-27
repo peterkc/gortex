@@ -205,11 +205,11 @@ func (p *rebuildReduxThunkPass) elect(e *graph.Edge, callee, binding string, res
 		if err != nil {
 			return pick, err
 		}
+		pick.inputs = append(pick.inputs, p.poolKey(pool, 'u', callee))
 		if !seen {
 			pick.buckets = append(pick.buckets, rebuildStoreCandidateWitness{scoped, 0})
 			continue
 		}
-		pick.inputs = append(pick.inputs, p.poolKey(pool, 'u', callee))
 		if !haveCaller {
 			caller, err = p.node(e.From)
 			if err != nil {
@@ -506,55 +506,28 @@ func (p *rebuildReduxThunkPass) recordNode(raw *graph.Node, file, lang string) e
 
 func (p *rebuildReduxThunkPass) recordCandidate(pool byte, raw *graph.Node, file, lang string) error {
 	key := p.poolKey(pool, 'c', raw.ID)
-	claim, err := p.marked(key)
-	if err != nil || len(claim) == 0 {
-		return err
-	}
-	// Even outside the affected cohorts, one eligible thunk must prove
-	// that native would not return before looking at Calls at all.
-	var state byte
-	if pool != 't' {
-		state, err = p.state(claim[1:])
-		if err != nil || state == 0 {
-			return err
-		}
-	}
-	live, err := p.node(raw.ID)
-	if err != nil {
-		return err
-	}
-	receipt := rebuildStoreNodeReceipt(raw, live, file, lang)
-	var proof byte
 	if pool == 'g' {
-		sameGetter := rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name) && bytes.Equal(claim[1:], p.poolKey(pool, 'u', raw.Name))
-		if sameGetter {
-			if err := p.noteGetterFileChange(claim[1:], state, raw, live, file, lang); err != nil {
-				return err
-			}
+		var wanted, files []byte
+		if rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.Getter(raw, raw.Name) {
+			wanted, files = p.poolKey(pool, 'u', raw.Name), p.poolKey(pool, 'i', raw.Name)
 		}
-		proof = rebuildScratchProofBit(receipt && sameGetter && raw.FilePath == live.FilePath)
-	} else {
-		var name string
-		if raw.Kind == graph.KindMethod || rebuildStoreFactoryGetterKind(raw.Kind) {
-			if pool == 't' {
-				name = p.rules.Thunk(raw)
-			} else if binding, member := p.rules.Action(raw); binding != "" {
-				name = member
-			}
-		}
-		cohort := p.poolKey(pool, 'u', name)
-		sameRole := name != "" && bytes.Equal(claim[1:], cohort)
-		if receipt && name != "" && (!sameRole || raw.WorkspaceID != live.WorkspaceID || raw.FilePath != live.FilePath) {
-			if err := p.noteCandidateCohortChange(claim[1:], cohort, len(p.prefix)+1, 'i', raw, live); err != nil {
-				return err
-			}
-		}
-		proof = rebuildStoreCandidateProof(receipt && sameRole, raw, live)
+		return p.recordStoreGetter(key, wanted, files, raw, file, lang)
+	}
+	var name string
+	if raw.Kind == graph.KindMethod || rebuildStoreFactoryGetterKind(raw.Kind) {
 		if pool == 't' {
-			proof |= rebuildStoreAnchorProof(receipt && name != "")
+			name = p.rules.Thunk(raw)
+		} else if binding, member := p.rules.Action(raw); binding != "" {
+			name = member
 		}
 	}
-	return p.noteStoreNodeProof(key, claim, proof)
+	var cohort []byte
+	if name != "" {
+		cohort = p.poolKey(pool, 'u', name)
+	}
+	// One live eligible thunk proves native reaches the Call scan, even
+	// if that thunk's cohort does not take part in the election.
+	return p.recordStoreCandidate(key, cohort, len(p.prefix)+1, 'i', pool == 't', raw, file, lang)
 }
 
 func (p *rebuildReduxThunkPass) proved(old []byte, e *graph.Edge, anchor bool) (bool, error) {
