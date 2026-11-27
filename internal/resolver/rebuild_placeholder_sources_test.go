@@ -62,7 +62,7 @@ func (f placeholderFixture) native(t *testing.T) ([]*graph.Edge, int) {
 	return rows, moved
 }
 
-func (f placeholderFixture) private(t *testing.T) ([]*graph.Edge, store_pebble.RebuildPlaceholderStats) {
+func (f placeholderFixture) private(t *testing.T, spillAt int) ([]*graph.Edge, store_pebble.RebuildPlaceholderStats) {
 	t.Helper()
 	ctx := t.Context()
 	b := rebuildFnPointerBuild(t)
@@ -72,7 +72,7 @@ func (f placeholderFixture) private(t *testing.T) ([]*graph.Edge, store_pebble.R
 		b.ReindexEdges(page)
 		if i == 0 {
 			var err error
-			p, err = b.CapturePlaceholderSources(ctx, 1<<20)
+			p, err = b.CapturePlaceholderSources(ctx, spillAt)
 			require.NoError(t, err)
 			defer func() { require.NoError(t, p.Close()) }()
 		}
@@ -119,7 +119,7 @@ func TestRebuildPlaceholderSourcesPages(t *testing.T) {
 		},
 	}
 	want, nativeMoved := f.native(t)
-	got, stats := f.private(t)
+	got, stats := f.private(t, 1<<20)
 	require.Len(t, got, 7)
 	require.Equal(t, want, got)
 	require.Equal(t, 2, nativeMoved)
@@ -177,9 +177,20 @@ func TestRebuildPlaceholderSourcesWindowCollision(t *testing.T) {
 	require.Contains(t, kept, &movedB)
 	require.Contains(t, lost, &movedB)
 	slices.Reverse(f.edges)
-	got, stats := f.private(t)
-	require.Equal(t, kept, got, "complete-key oracle, regardless of insertion order")
-	require.Equal(t, 257, stats.Claimed)
-	require.Equal(t, 2, stats.Windows)
-	require.Equal(t, moves, stats.Reindexes)
+	for _, spillAt := range []int{1, 1 << 20} {
+		t.Run(fmt.Sprint(spillAt), func(t *testing.T) {
+			got, stats := f.private(t, spillAt)
+			require.Equal(t, kept, got, "complete-key oracle, regardless of insertion order")
+			require.Equal(t, 257, stats.Claimed)
+			require.Equal(t, 2, stats.Windows)
+			require.Equal(t, moves, stats.Reindexes)
+			if spillAt == 1 {
+				require.Equal(t, stats.Claimed, stats.Flushes)
+				require.Positive(t, stats.SpillBytes)
+			} else {
+				require.Zero(t, stats.Flushes)
+				require.Zero(t, stats.SpillBytes)
+			}
+		})
+	}
 }

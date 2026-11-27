@@ -12,7 +12,8 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// The pre-lookup claim kernel from cab57980. Do not use the membership set.
+// The pre-lookup claim kernel from cab57980, with the current move stream.
+// Keep its range deletes and do not use the membership set.
 func legacyPlaceholderClaim(ctx context.Context, p *RebuildPlaceholderSources, rp graph.PlaceholderRepoint) error {
 	if rp.NewFrom == rp.OldFrom || rp.OldFrom == "" || rp.NewFrom == "" {
 		return nil
@@ -22,7 +23,7 @@ func legacyPlaceholderClaim(ctx context.Context, p *RebuildPlaceholderSources, r
 	if err := pendingVisit(ctx, p.build.pending, site, func(r row) error {
 		key := binary.BigEndian.AppendUint64(bytes.Clone(placeholderMoves), uint64(p.stats.Claimed))
 		p.stats.Claimed++
-		return p.put(append(key, r.key[len(site):]...), []byte(rp.NewFrom))
+		return p.stageMove(ctx, append(key, r.key[len(site):]...), []byte(rp.NewFrom))
 	}); err != nil {
 		return err
 	}
@@ -61,6 +62,16 @@ func placeholderLookupRows(t *testing.T, b *BuildStore, prefix []byte) []row {
 	return rows
 }
 
+func placeholderMoveRows(t *testing.T, p *RebuildPlaceholderSources) []row {
+	t.Helper()
+	var rows []row
+	require.NoError(t, p.visitMoves(t.Context(), func(r row) error {
+		rows = append(rows, row{bytes.Clone(r.key), bytes.Clone(r.value)})
+		return nil
+	}))
+	return rows
+}
+
 func TestRebuildPlaceholderLookupEquality(t *testing.T) {
 	const source = "unresolved::field"
 	const file = "repo/f.go"
@@ -81,6 +92,7 @@ func TestRebuildPlaceholderLookupEquality(t *testing.T) {
 	}
 	type result struct {
 		rows    [][]row
+		moves   [][]row
 		stats   []RebuildPlaceholderStats
 		applied []row
 		err     string
@@ -103,8 +115,13 @@ func TestRebuildPlaceholderLookupEquality(t *testing.T) {
 			return stats
 		}
 		var got result
-		got.rows = append(got.rows, placeholderLookupRows(t, b, placeholderPrefix))
-		got.stats = append(got.stats, logicalStats())
+		capture := func() {
+			require.Empty(t, placeholderLookupRows(t, b, placeholderMoves))
+			got.rows = append(got.rows, placeholderLookupRows(t, b, placeholderPrefix))
+			got.moves = append(got.moves, placeholderMoveRows(t, p))
+			got.stats = append(got.stats, logicalStats())
+		}
+		capture()
 		record := func(batch []graph.EdgeReindex) error {
 			if legacy {
 				return legacyPlaceholderRecord(t.Context(), p, batch)
@@ -114,8 +131,8 @@ func TestRebuildPlaceholderLookupEquality(t *testing.T) {
 		for i, batch := range batches {
 			if fail && i == 1 {
 				// After the first committed claim batch, make the pending store
-				// read-only. The duplicate claims are empty, the following
-				// claim put fails, and the later link must not run.
+				// read-only. The duplicate claims are empty. The next move
+				// is staged, but its site delete fails before the later link.
 				require.NoError(t, b.pending.Flush())
 				require.NoError(t, b.pending.Close())
 				opts := pendingOptions(nil)
@@ -123,17 +140,21 @@ func TestRebuildPlaceholderLookupEquality(t *testing.T) {
 				opts.ReadOnly = true
 				b.pending, err = pebble.Open(filepath.Join(b.scratchParent, "pending"), opts)
 				require.NoError(t, err)
+				site := placeholderSite(source, file, 2)
+				wantSite := placeholderLookupRows(t, b, site)
+				require.Len(t, wantSite, 1)
 				err = record(batch)
 				require.ErrorIs(t, err, ErrRebuildPlaceholderSources)
 				require.ErrorIs(t, err, pebble.ErrReadOnly)
 				got.err = err.Error()
-				require.Equal(t, 4, p.stats.Claimed) // failed put counted before returning
-				require.Zero(t, p.stats.Links)       // later link not reached
+				require.Equal(t, 4, p.stats.Claimed)
+				require.Zero(t, p.stats.Links)
+				require.Equal(t, wantSite, placeholderLookupRows(t, b, site))
 				if !legacy {
-					require.Contains(t, p.sites, string(placeholderSite(source, file, 2)))
+					require.Contains(t, p.sites, string(site))
 				}
-				got.rows = append(got.rows, placeholderLookupRows(t, b, placeholderPrefix))
-				got.stats = append(got.stats, logicalStats())
+				capture()
+				require.Len(t, got.moves[len(got.moves)-1], 4)
 				require.NoError(t, b.pending.Close())
 				opts.ReadOnly = false
 				b.pending, err = pebble.Open(filepath.Join(b.scratchParent, "pending"), opts)
@@ -144,8 +165,7 @@ func TestRebuildPlaceholderLookupEquality(t *testing.T) {
 				b.ReindexEdges(batch[2:]) // retarget the claimed live edge
 			}
 			require.NoError(t, record(batch))
-			got.rows = append(got.rows, placeholderLookupRows(t, b, placeholderPrefix))
-			got.stats = append(got.stats, logicalStats())
+			capture()
 			if !legacy && i == 0 {
 				require.Len(t, p.sites, 2)
 				require.NotContains(t, p.sites, string(placeholderSite(source, file, 1)))

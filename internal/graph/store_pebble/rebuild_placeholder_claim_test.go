@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -40,7 +40,8 @@ func TestRebuildPlaceholderClaimDeletesPoints(t *testing.T) {
 	require.NoError(t, p.claim(t.Context(), rp))
 	require.Empty(t, placeholderLookupRows(t, b, site))
 	require.Equal(t, []row{{otherKey, []byte("keep")}}, placeholderLookupRows(t, b, placeholderSites))
-	require.Equal(t, wantMoves, placeholderLookupRows(t, b, placeholderMoves))
+	require.Equal(t, wantMoves, placeholderMoveRows(t, p))
+	require.Empty(t, placeholderLookupRows(t, b, placeholderMoves))
 	require.Equal(t, 3, p.stats.Claimed)
 	require.Equal(t, map[string]struct{}{string(other): {}}, p.sites)
 
@@ -89,35 +90,26 @@ func TestRebuildPlaceholderClaimNoRowsOrRepeated(t *testing.T) {
 	ro.ReadOnly = true
 	b.pending, err = pebble.Open(dir, ro)
 	require.NoError(t, err)
-	wantMoves := placeholderLookupRows(t, b, placeholderMoves)
+	wantMoves := placeholderMoveRows(t, p)
 	require.Len(t, wantMoves, 1)
 	rp.NewFrom = "loser"
 	require.NoError(t, p.claim(t.Context(), rp))
 	rp.Line = 1
 	require.NoError(t, p.claim(t.Context(), rp))
-	require.Equal(t, wantMoves, placeholderLookupRows(t, b, placeholderMoves))
+	require.Equal(t, wantMoves, placeholderMoveRows(t, p))
+	require.Empty(t, placeholderLookupRows(t, b, placeholderMoves))
 	require.Empty(t, placeholderLookupRows(t, b, placeholderSites))
 	require.Equal(t, 1, p.stats.Claimed)
 	require.Equal(t, map[string]struct{}{string(empty): {}}, p.sites)
 }
 
-func TestRebuildPlaceholderClaimCanceledDuringVisit(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	// Cancel when the first move row's forced flush finishes, before the
-	// visit can advance to its second site row. The seed flush is not armed.
-	var armed atomic.Bool
-	opts := pendingOptions(nil)
-	opts.DisableAutomaticCompactions = true
-	opts.AddEventListener(pebble.EventListener{FlushEnd: func(pebble.FlushInfo) {
-		if armed.Load() {
-			cancel()
-		}
-	}})
-	db, err := pebble.Open(filepath.Join(t.TempDir(), "pending"), opts)
+func TestRebuildPlaceholderClaimSpillFailureLeavesSite(t *testing.T) {
+	dir := t.TempDir()
+	db, err := pebble.Open(filepath.Join(dir, "pending"), pendingOptions(nil))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	b := &BuildStore{pending: db}
+	// The first move reaches the threshold, but the scratch parent does not exist.
+	b := &BuildStore{pending: db, scratchParent: filepath.Join(dir, "missing")}
 	rp := graph.PlaceholderRepoint{OldFrom: "unresolved::x", NewFrom: "winner"}
 	site := placeholderSite(rp.OldFrom, rp.FilePath, rp.Line)
 	p := &RebuildPlaceholderSources{build: b, spillAt: 1, sites: map[string]struct{}{string(site): {}}}
@@ -125,12 +117,19 @@ func TestRebuildPlaceholderClaimCanceledDuringVisit(t *testing.T) {
 		edgeKey := pendingEdgeKey(&graph.Edge{From: rp.OldFrom, To: target, Kind: graph.EdgeArgOf})
 		require.NoError(t, db.Set(append(bytes.Clone(site), edgeKey...), nil, pebble.NoSync))
 	}
-	require.NoError(t, db.Flush())
 	wantSites := placeholderLookupRows(t, b, site)
 	require.Len(t, wantSites, 2)
-	armed.Store(true)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
 	require.ErrorIs(t, p.claim(ctx, rp), context.Canceled)
+	require.Zero(t, p.stats.Claimed)
+	require.Empty(t, placeholderMoveRows(t, p))
+	require.Equal(t, wantSites, placeholderLookupRows(t, b, site))
+
+	require.ErrorIs(t, p.claim(t.Context(), rp), os.ErrNotExist)
 	require.Equal(t, 1, p.stats.Claimed)
 	require.Equal(t, wantSites, placeholderLookupRows(t, b, site))
 	require.Contains(t, p.sites, string(site))
+	require.Empty(t, placeholderLookupRows(t, b, placeholderMoves))
 }

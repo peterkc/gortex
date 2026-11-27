@@ -6,9 +6,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -25,22 +28,27 @@ var (
 
 // RebuildPlaceholderStats counts saved census identities, claimed identities,
 // distinct retarget links, and exact-refetch windows and rows submitted for
-// reindex. SpillBytes counts L0 bytes during threshold flushes, not heap size.
+// reindex. Flushes counts closed threshold SST runs consumed by Apply, and
+// SpillBytes counts their physical bytes. Overlay rows and the in-memory tail
+// add none.
 type RebuildPlaceholderStats struct {
 	Census, Claimed, Links, Windows, Reindexes int
 	Flushes                                    int
 	SpillBytes                                 uint64
 }
 
-// RebuildPlaceholderSources owns one private pending range. The coordinator
-// holds at most one handle per build and serializes calls and graph writes.
+// RebuildPlaceholderSources owns one private pending range and its move runs.
+// The coordinator holds at most one handle per build and serializes calls
+// and graph writes.
 type RebuildPlaceholderSources struct {
-	build     *BuildStore
-	spillAt   int
-	unflushed int
-	stats     RebuildPlaceholderStats
-	sites     map[string]struct{} // unclaimed exact census site keys
-	applied   bool
+	build    *BuildStore
+	spillAt  int
+	buffered int
+	runDir   string
+	moves    []row
+	stats    RebuildPlaceholderStats
+	sites    map[string]struct{} // unclaimed exact census site keys
+	applied  bool
 }
 
 // CapturePlaceholderSources captures the light census AFTER the first
@@ -67,7 +75,7 @@ func (b *BuildStore) CapturePlaceholderSources(ctx context.Context, spillAt int)
 		p.stats.Census++
 		site := placeholderSite(e.From, e.FilePath, e.Line)
 		p.sites[string(site)] = struct{}{}
-		return p.put(append(site, r.key...), nil)
+		return b.pending.Set(append(site, r.key...), nil, pebble.NoSync)
 	})
 	if err != nil {
 		return nil, placeholderError(errors.Join(err, p.Close()))
@@ -121,7 +129,7 @@ func (p *RebuildPlaceholderSources) claim(ctx context.Context, rp graph.Placehol
 		claimedKeys = append(claimedKeys, bytes.Clone(r.key))
 		key := binary.BigEndian.AppendUint64(bytes.Clone(placeholderMoves), uint64(p.stats.Claimed))
 		p.stats.Claimed++
-		return p.put(append(key, r.key[len(site):]...), []byte(rp.NewFrom))
+		return p.stageMove(ctx, append(key, r.key[len(site):]...), []byte(rp.NewFrom))
 	}); err != nil {
 		return err
 	}
@@ -172,7 +180,7 @@ func (p *RebuildPlaceholderSources) link(ri graph.EdgeReindex) error {
 	if !known {
 		p.stats.Links++
 	}
-	return p.put(key, after)
+	return p.build.pending.Set(key, after, pebble.NoSync)
 }
 
 func (p *RebuildPlaceholderSources) currentKey(ctx context.Context, key []byte) ([]byte, error) {
@@ -217,9 +225,9 @@ func (p *RebuildPlaceholderSources) Apply(ctx context.Context) (RebuildPlacehold
 			positions = 0
 			return nil
 		}
-		if err := pendingVisit(ctx, p.build.pending, placeholderMoves, func(r row) error {
+		if err := p.visitMoves(ctx, func(r row) error {
 			const ordinalBytes = 8
-			if len(r.key) <= len(placeholderMoves)+ordinalBytes || len(r.value) == 0 {
+			if !bytes.HasPrefix(r.key, placeholderMoves) || len(r.key) <= len(placeholderMoves)+ordinalBytes || len(r.value) == 0 {
 				return invalid("placeholder move row")
 			}
 			key, err := p.currentKey(ctx, r.key[len(placeholderMoves)+ordinalBytes:])
@@ -260,23 +268,108 @@ func (p *RebuildPlaceholderSources) Apply(ctx context.Context) (RebuildPlacehold
 	return p.stats, nil
 }
 
-func (p *RebuildPlaceholderSources) put(key, value []byte) error {
-	db := p.build.pending
-	if err := db.Set(key, value, pebble.NoSync); err != nil {
-		return err
+func (p *RebuildPlaceholderSources) stageMove(ctx context.Context, key, value []byte) error {
+	size := len(key) + len(value)
+	if len(p.moves) != 0 && size > p.spillAt-p.buffered {
+		if err := p.spillMoves(ctx); err != nil {
+			return err
+		}
 	}
-	p.unflushed += len(key) + len(value)
-	if p.unflushed < p.spillAt {
-		return nil
+	p.moves = append(p.moves, row{key, value})
+	p.buffered += size
+	if p.buffered >= p.spillAt {
+		return p.spillMoves(ctx)
 	}
-	before := db.Metrics().Levels[0].TableBytesFlushed
-	if err := db.Flush(); err != nil {
-		return err
-	}
-	p.stats.SpillBytes += db.Metrics().Levels[0].TableBytesFlushed - before
-	p.stats.Flushes++
-	p.unflushed = 0
 	return nil
+}
+
+func (p *RebuildPlaceholderSources) spillMoves(ctx context.Context) error {
+	if p.runDir == "" {
+		dir, err := os.MkdirTemp(filepath.Join(p.build.scratchParent, "pending"), "placeholder-moves-")
+		if err != nil {
+			return err
+		}
+		p.runDir = dir
+	}
+	path := p.runPath(p.stats.Flushes)
+	if err := p.writeMoves(ctx, path); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	p.stats.Flushes++
+	p.stats.SpillBytes += uint64(info.Size())
+	clear(p.moves)
+	p.moves = p.moves[:0]
+	p.buffered = 0
+	return nil
+}
+
+func (p *RebuildPlaceholderSources) runPath(run int) string {
+	return filepath.Join(p.runDir, fmt.Sprintf("%d.sst", run))
+}
+
+func (p *RebuildPlaceholderSources) writeMoves(ctx context.Context, path string) (err error) {
+	w, err := newLinkTable(path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, w.Close()) }()
+	// Claim ordinals are unique and increasing, so this buffer is sorted.
+	for _, r := range p.moves {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := w.Set(r.key, r.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *RebuildPlaceholderSources) visitMoves(ctx context.Context, yield func(row) error) error {
+	for i := range p.stats.Flushes {
+		if err := visitPlaceholderMoveRun(ctx, p.runPath(i), yield); err != nil {
+			return err
+		}
+	}
+	for _, r := range p.moves {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := yield(r); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+func visitPlaceholderMoveRun(ctx context.Context, path string, yield func(row) error) (err error) {
+	table, err := openLinkTable(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, table.Close()) }()
+	it, err := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, it.Close()) }()
+	for kv := it.First(); kv != nil; kv = it.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		value, _, err := kv.Value(nil)
+		if err != nil {
+			return err
+		}
+		if err := yield(row{kv.K.UserKey, value}); err != nil {
+			return err
+		}
+	}
+	return errors.Join(ctx.Err(), it.Error())
 }
 
 // Close releases scratch even if a main mutation or Apply failed.
@@ -287,7 +380,12 @@ func (p *RebuildPlaceholderSources) Close() error {
 	db := p.build.pending
 	p.build = nil
 	p.sites = nil
-	return placeholderError(db.DeleteRange(placeholderPrefix, prefixEnd(placeholderPrefix), pebble.NoSync))
+	p.moves = nil
+	err := db.DeleteRange(placeholderPrefix, prefixEnd(placeholderPrefix), pebble.NoSync)
+	if p.runDir != "" {
+		err = errors.Join(err, os.RemoveAll(p.runDir))
+	}
+	return placeholderError(err)
 }
 
 func placeholderError(err error) error {
