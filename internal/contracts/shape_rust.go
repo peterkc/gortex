@@ -31,10 +31,10 @@ var rustSerdeRenameRe = regexp.MustCompile(`rename\s*=\s*"([^"]+)"`)
 // Enum variants are not currently handled — contracts rarely use
 // enum bodies directly, and when they do (tagged unions) they need
 // bespoke serde handling that's beyond scope here.
-func extractRustShape(src []byte, startLine, endLine int) *Shape {
-	body := sliceBody(src, startLine, endLine)
+func extractRustShape(sourceLines []string, startLine, endLine int) *Shape {
+	body := sliceBody(sourceLines, startLine, endLine)
 	if body == "" {
-		body = braceBody(src, startLine, 400)
+		body = braceBody(sourceLines, startLine, 400)
 	}
 	openIdx := strings.Index(body, "{")
 	if openIdx < 0 {

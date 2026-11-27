@@ -24,10 +24,10 @@ var protoJSONNameRe = regexp.MustCompile(`json_name\s*=\s*"([^"]+)"`)
 // extractProtoShape reads a proto `message` body and returns its
 // fields. Only the outermost depth is walked — nested messages
 // (embedded definitions) get their own contract rows elsewhere.
-func extractProtoShape(src []byte, startLine, endLine int) *Shape {
-	body := sliceBody(src, startLine, endLine)
+func extractProtoShape(sourceLines []string, startLine, endLine int) *Shape {
+	body := sliceBody(sourceLines, startLine, endLine)
 	if body == "" {
-		body = braceBody(src, startLine, 400)
+		body = braceBody(sourceLines, startLine, 400)
 	}
 	openIdx := strings.Index(body, "{")
 	if openIdx < 0 {

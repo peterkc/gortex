@@ -5,13 +5,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"maps"
 	"os"
-	"slices"
 
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/codeowners"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/pathkey"
@@ -55,6 +54,7 @@ func (idx *Indexer) installRebuildParsePolicy(policy rebuildParsePolicy) {
 	idx.extractionOptionsOnce.Do(func() {
 		opts := parser.NewExtractionOptions(policy.TemporalEnvHelpers)
 		idx.extractionOptions.Store(&opts)
+		idx.frozenRebuildContractPolicy.Store(idx.rebuildContractPolicy())
 		installedOptions = true
 	})
 	if installedOwners && installedOptions && !policy.OwnershipUnavailable {
@@ -67,6 +67,34 @@ func (idx *Indexer) installRebuildParsePolicy(policy rebuildParsePolicy) {
 // binary layout or the shared native contract extraction policy.
 const rebuildContractCaptureVersion = 1
 
+// The rebuild worker binds the effective event-bus override once. Both the
+// file-node stamp and capture use the same snapshot as every key lookup.
+type rebuildContractPolicy struct {
+	eventBus []contracts.EventBusBoundary
+	suffix   []byte
+}
+
+func (idx *Indexer) rebuildContractPolicy() *rebuildContractPolicy {
+	boundaries := idx.eventBusBoundaries()
+	// A rebuild job's config comes from the frozen JSON request. Bind all
+	// settings in the file-node stamp, not just the capture detectors' knobs.
+	settings, _ := json.Marshal(struct {
+		Settings config.IndexConfig
+		EventBus []contracts.EventBusBoundary
+	}{contractExtractionSettings(idx.config), boundaries})
+	return &rebuildContractPolicy{eventBus: boundaries, suffix: rebuildContractRecipeSuffix(settings)}
+}
+
+func rebuildContractRecipeSuffix(settings []byte) []byte {
+	var b []byte
+	for _, version := range []string{contractExtractionPolicyVersion, contractDependencyInputVersion, contracts.RecordFingerprintVersion} {
+		b = binary.AppendUvarint(b, uint64(len(version)))
+		b = append(b, version...)
+	}
+	digest := blake3.Sum256(settings)
+	return append(b, digest[:]...)
+}
+
 // rebuildExtractorRecipe binds ordinary extraction and contract fact policy.
 // Include admissible refinement versions before looking up a receipt, when
 // the current bytes may no longer be available for a content probe.
@@ -78,8 +106,8 @@ func (idx *Indexer) rebuildExtractorRecipe(base rebuildDigest, input rebuildInpu
 	b = binary.AppendUvarint(b, postExtractionPolicyVersion)
 	b = binary.AppendUvarint(b, uint64(extractorVersionForLang(input.Language)))
 	if parser.ExtensionNeedsContentProbe(input.Path) {
-		for _, lang := range slices.Sorted(maps.Keys(extractorVersions)) {
-			if lang != input.Language && possibleRebuildLanguageRefinement(input.Path, lang) {
+		for _, lang := range possibleRebuildLanguageRefinements(input.Path) {
+			if lang != input.Language {
 				b = binary.AppendUvarint(b, uint64(len(lang)))
 				b = append(b, lang...)
 				b = binary.AppendUvarint(b, uint64(extractorVersionForLang(lang)))
@@ -87,16 +115,11 @@ func (idx *Indexer) rebuildExtractorRecipe(base rebuildDigest, input rebuildInpu
 		}
 	}
 	b = binary.AppendUvarint(b, 0) // end refinement versions
-	b = binary.AppendUvarint(b, uint64(len(contractExtractionPolicyVersion)))
-	b = append(b, contractExtractionPolicyVersion...)
-	// Both inputs are plain typed data (strings, booleans and integers).
-	// The same effective event-bus override is used by contract capture.
-	aliases, _ := json.Marshal(idx.config.HTTPClientAliases)
-	boundaries, _ := json.Marshal(idx.eventBusBoundaries())
-	b = binary.AppendUvarint(b, uint64(len(aliases)))
-	b = append(b, aliases...)
-	b = append(b, boundaries...)
-	return blake3.Sum256(b)
+	policy := idx.frozenRebuildContractPolicy.Load()
+	if policy == nil {
+		policy = idx.rebuildContractPolicy()
+	}
+	return blake3.Sum256(append(b, policy.suffix...))
 }
 
 // The ordinary recipe is also the prefix of the contract recipe. Keep the

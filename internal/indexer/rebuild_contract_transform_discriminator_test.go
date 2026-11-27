@@ -419,7 +419,7 @@ func TestRebuildContractRawTreeRefusal(t *testing.T) {
 	before := parser.ParseCount()
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	err := idx.captureRebuildContractBodies(canceled, "main.go", "go", raw, prepared, &parser.ExtractionResult{}, true, &contracts.FileFacts{})
+	err := idx.captureRebuildContractBodies(canceled, "main.go", "go", raw, prepared, nil, &parser.ExtractionResult{}, true, &contracts.FileFacts{})
 	require.ErrorIs(t, err, contracts.ErrContractFactTree)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, before, parser.ParseCount())
@@ -427,7 +427,7 @@ func TestRebuildContractRawTreeRefusal(t *testing.T) {
 	tree := contracts.ParseTreeForLang("go", prepared)
 	require.NotNil(t, tree)
 	defer tree.Release()
-	err = idx.captureRebuildContractBodies(ctx, "main.go", "go", raw, raw, &parser.ExtractionResult{Tree: tree}, true, &contracts.FileFacts{})
+	err = idx.captureRebuildContractBodies(ctx, "main.go", "go", raw, raw, nil, &parser.ExtractionResult{Tree: tree}, true, &contracts.FileFacts{})
 	require.ErrorIs(t, err, contracts.ErrContractFactTree)
 	require.ErrorContains(t, err, "main.go: go handler facts")
 
@@ -438,7 +438,7 @@ func TestRebuildContractRawTreeRefusal(t *testing.T) {
 		Meta: map[string]any{"handler_ident": "index", "handler_class": "Orders"},
 	}
 	f := &contracts.FileFacts{Records: []contracts.Contract{route}}
-	err = idx.captureRebuildContractBodies(ctx, path, "php", raw, raw, &parser.ExtractionResult{}, false, f)
+	err = idx.captureRebuildContractBodies(ctx, path, "php", raw, raw, nil, &parser.ExtractionResult{}, false, f)
 	require.ErrorIs(t, err, contracts.ErrContractFactTree)
 	require.ErrorContains(t, err, "routes.php: php handler facts")
 	require.Nil(t, languages.PHPClassNameResolverWithTree(nil))
@@ -448,7 +448,7 @@ func TestRebuildContractRawTreeRefusal(t *testing.T) {
 	// if its prepared record still carries the class hint.
 	f.Records[0].Meta["schema_source"] = "extracted"
 	before = parser.ParseCount()
-	require.NoError(t, idx.captureRebuildContractBodies(ctx, path, "php", raw, bytes.TrimSpace(raw), &parser.ExtractionResult{}, false, f))
+	require.NoError(t, idx.captureRebuildContractBodies(ctx, path, "php", raw, bytes.TrimSpace(raw), nil, &parser.ExtractionResult{}, false, f))
 	require.Nil(t, f.LaravelHandlerClasses)
 	require.Equal(t, before, parser.ParseCount())
 	f.Records[0].ID = "http::GET::/orders"
@@ -470,7 +470,7 @@ func TestRebuildContractRawGrammarFollowsPath(t *testing.T) {
 		nodes := []*graph.Node{handler}
 		f := &contracts.FileFacts{Shapes: map[string]*contracts.Shape{}}
 		before := parser.ParseCount()
-		require.NoError(t, idx.captureRebuildContractBodies(ctx, path, "php", raw, raw,
+		require.NoError(t, idx.captureRebuildContractBodies(ctx, path, "php", raw, raw, nil,
 			&parser.ExtractionResult{Nodes: nodes}, true, f))
 		require.Equal(t, before+1, parser.ParseCount(), "the prepared extractor is not Go")
 		base := store_pebble.ParseFacts{
@@ -510,7 +510,7 @@ func TestRebuildContractRawGrammarFollowsPath(t *testing.T) {
 			Handlers: map[string]contracts.HandlerFacts{},
 		}
 		before := parser.ParseCount()
-		require.NoError(t, idx.captureRebuildContractBodies(ctx, path, "go", raw, raw, &parser.ExtractionResult{}, false, f))
+		require.NoError(t, idx.captureRebuildContractBodies(ctx, path, "go", raw, raw, nil, &parser.ExtractionResult{}, false, f))
 		require.Equal(t, before+1, parser.ParseCount(), "the prepared extractor is not PHP")
 		base := store_pebble.ParseFacts{File: graph.FileMetaRow{FilePath: path}, EffectiveLanguage: "go"}
 		wire, err := store_pebble.EncodeContractParseFacts(base, f)

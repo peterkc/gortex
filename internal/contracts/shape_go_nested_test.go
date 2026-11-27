@@ -33,7 +33,7 @@ func TestExtractGoShape_NestedAnonymousStruct(t *testing.T) {
 	Processes []processEntry ` + "`json:\"processes\"`" + `
 }
 `)
-	shape := extractGoShape(src, 1, 16)
+	shape := ExtractShape("dashboard.go", src, 1, 16)
 	if shape == nil {
 		t.Fatal("expected non-nil shape")
 	}

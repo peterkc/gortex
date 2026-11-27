@@ -183,6 +183,10 @@ func enrichHTTPContract(c *Contract, lines []string, fileNodes []*graph.Node, la
 	}
 
 	start, end := handlerBodyRange(c, fileNodes, lines)
+	enrichProviderBody(c, lines, fileNodes, lang, start, end)
+}
+
+func enrichProviderBody(c *Contract, lines []string, fileNodes []*graph.Node, lang string, start, end int) {
 	if start <= 0 || end < start {
 		c.Meta["schema_source"] = "none"
 		return
@@ -325,22 +329,20 @@ func applyHints(c *Contract, h schemaHints, matched bool) {
 // Python) we trust it; otherwise we brace-balance up to a 200-line
 // safety window starting from the symbol's start_line.
 func handlerBodyRange(c *Contract, fileNodes []*graph.Node, lines []string) (int, int) {
-	// Find the handler node.
-	var node *graph.Node
 	for _, n := range fileNodes {
 		if n.ID == c.SymbolID {
-			node = n
-			break
+			return handlerNodeBodyRange(n, c.Line, lines)
 		}
 	}
-	if node == nil {
-		// Fall back to a window around the declaration line.
-		return braceWindow(lines, c.Line)
-	}
+	// Fall back to a window around the declaration line.
+	return braceWindow(lines, c.Line)
+}
+
+func handlerNodeBodyRange(node *graph.Node, line int, lines []string) (int, int) {
 	start := node.StartLine
 	end := node.EndLine
 	if start <= 0 {
-		start = c.Line
+		start = line
 	}
 	if end > start {
 		return start, clampLine(end, len(lines))

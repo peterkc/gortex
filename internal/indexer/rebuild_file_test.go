@@ -108,7 +108,8 @@ func TestRebuildFileBindsCloneExtractionRecipe(t *testing.T) {
 	off := newIndexer(&no, 0)
 	base := rebuildDigest{1}
 	onRecipe := defaultOn.rebuildExtractorRecipe(base, input)
-	require.Equal(t, onRecipe, explicitOn.rebuildExtractorRecipe(base, input))
+	require.Equal(t, defaultOn.rebuildBaseExtractorRecipe(base, input), explicitOn.rebuildBaseExtractorRecipe(base, input))
+	require.NotEqual(t, onRecipe, explicitOn.rebuildExtractorRecipe(base, input), "the contract dependency stamp records explicit clone settings")
 	require.NotEqual(t, onRecipe, off.rebuildExtractorRecipe(base, input))
 	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 	facts, reused, err := defaultOn.loadRebuildFile(ctx, src, store, input, base, rebuildTransformBounds{})
@@ -128,7 +129,7 @@ func TestRebuildFileBindsCloneExtractionRecipe(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, os.WriteFile(file, []byte("package p\nfunc Replacement(){}\n"), 0o600))
-	cached, reused, err := explicitOn.loadRebuildFile(ctx, src, store, input, base, rebuildTransformBounds{})
+	cached, reused, err := newIndexer(nil, 0).loadRebuildFile(ctx, src, store, input, base, rebuildTransformBounds{})
 	require.NoError(t, err)
 	require.True(t, reused)
 	replayed, err := store_pebble.EncodeParseFacts(cached)
@@ -147,6 +148,32 @@ func TestRebuildFileBindsCloneExtractionRecipe(t *testing.T) {
 		require.NotContains(t, n.Meta, cloneBodyMetaKey)
 		require.NotContains(t, n.Meta, cloneTokensMetaKey)
 	}
+}
+
+func TestRebuildFileOversizeRefusalPrecedesCanceledWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	root, src := rebuildInputFixture(t)
+	const path = "routes.go"
+	writeFile(t, filepath.Join(root, path), "package p\n")
+	input, _, err := readRebuildInput(ctx, src, path, "go", 1024)
+	require.NoError(t, err)
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	payload := encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
+		File: graph.FileMetaRow{FilePath: path}, EffectiveLanguage: "go",
+	})
+	store := rebuildParseStore{dir: t.TempDir(), limit: len(payload) - 1}
+	recipe := rebuildDigest{1}
+	_, _, reused, err := idx.loadRebuildFileWith(ctx, src, store, input, recipe, rebuildTransformBounds{},
+		func(context.Context, rebuildDigest, string, parser.Extractor, []byte, []byte) ([]byte, error) {
+			cancel()
+			return payload, nil
+		})
+	require.ErrorIs(t, err, errParseEntryTooLarge)
+	require.False(t, reused)
+	_, err = store.read(input.parseKey(idx.rebuildExtractorRecipe(recipe, input)))
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestRebuildFileRefusesUnboundEffectiveLanguage(t *testing.T) {
@@ -244,23 +271,4 @@ func decodeRebuildTestParseFacts(t testing.TB, payload []byte) store_pebble.Pars
 	base, _, _, err := store_pebble.DecodeContractParseFacts(payload)
 	require.NoError(t, err)
 	return base
-}
-
-func TestRebuildContractRecipeBindsCapturePolicy(t *testing.T) {
-	idx := newTestIndexer(graph.New())
-	t.Cleanup(idx.Close)
-	t.Setenv("CODEGRAPH_EVENT_CONFIG", "")
-	t.Setenv("GORTEX_EVENT_BUS_DISABLE", "1")
-	input := rebuildInput{Path: "routes.go", Language: "go"}
-	base := rebuildDigest{1}
-	first := idx.rebuildExtractorRecipe(base, input)
-	require.NotEqual(t, idx.rebuildBaseExtractorRecipe(base, input), first)
-	require.NotEqual(t, idx.rebuildExtractorRecipe(rebuildDigest{2}, input), first)
-	idx.config.HTTPClientAliases = []string{"apiGet"}
-	withAliases := idx.rebuildExtractorRecipe(base, input)
-	require.NotEqual(t, first, withAliases)
-	idx.config.EventBus = []config.EventBusBoundarySpec{{Name: "bus", Callee: "publish"}}
-	require.Equal(t, withAliases, idx.rebuildExtractorRecipe(base, input), "a disabled provider does not affect capture")
-	t.Setenv("GORTEX_EVENT_BUS_DISABLE", "")
-	require.NotEqual(t, withAliases, idx.rebuildExtractorRecipe(base, input))
 }

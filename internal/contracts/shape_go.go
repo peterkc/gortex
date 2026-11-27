@@ -29,8 +29,8 @@ var goFieldRe = regexp.MustCompile(
 // exported field list. Non-exported fields (lower-case first letter)
 // are dropped because they never appear on the wire. Embedded fields
 // are skipped — they require cross-file resolution we don't do here.
-func extractGoShape(src []byte, startLine, endLine int) *Shape {
-	body := sliceBody(src, startLine, endLine)
+func extractGoShape(sourceLines []string, startLine, endLine int) *Shape {
+	body := sliceBody(sourceLines, startLine, endLine)
 	if body == "" {
 		return nil
 	}
@@ -40,7 +40,7 @@ func extractGoShape(src []byte, startLine, endLine int) *Shape {
 	if openIdx < 0 {
 		// No opening brace in the slice — fall back to brace walk so
 		// types whose end_line == start_line still produce a shape.
-		body = braceBody(src, startLine, 300)
+		body = braceBody(sourceLines, startLine, 300)
 		openIdx = strings.Index(body, "{")
 		if openIdx < 0 {
 			return nil

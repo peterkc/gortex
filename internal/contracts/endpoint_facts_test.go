@@ -106,6 +106,78 @@ func Other(w Writer) { value, err := svc.Get(); _ = err; WriteJSON(w, 200, value
 	require.Equal(t, MakeBodyFacts(tree, nodes[2]).VarBinding("value"), facts[nodes[2].ID].VarBinding("value"))
 }
 
+func TestFileHandlerFactsNativeRegexRanges(t *testing.T) {
+	const path = "handlers.js"
+	const lang = "javascript"
+	lines := []string{
+		"function outer() {",
+		"  res.sendStatus(201);",
+		"  function inner() {",
+		"    res.sendStatus(202);",
+		"  }",
+		"  res.sendStatus(203);",
+		"}",
+		"function fallback() {",
+		"  res.sendStatus(204);",
+		"}",
+		"res.sendStatus(205);",
+	}
+	handler := func(id string, start, end int) *graph.Node {
+		return &graph.Node{
+			ID:        id,
+			FilePath:  path,
+			Kind:      graph.KindFunction,
+			StartLine: start,
+			EndLine:   end,
+		}
+	}
+	first := handler("duplicate-id", 3, 5)
+	first.Kind = graph.KindType
+	nodes := []*graph.Node{
+		first,
+		handler("inner", 3, 5),
+		handler("outer", 1, 7),
+		handler("duplicate-start", 1, 3),
+		handler("duplicate-end", 6, 7),
+		handler("equal-span", 1, 7),
+		handler("duplicate-id", 8, 10),
+		handler("single-line-span", 8, 8),
+		handler("missing-end", 8, 0),
+		handler("reversed-span", 8, 7),
+		handler("out-of-bounds", 20, 21),
+		handler("no-span", 0, 0),
+	}
+	for _, tc := range []struct {
+		name  string
+		lines []string
+	}{
+		{name: "spans", lines: lines},
+		{name: "no lines"},
+		{name: "empty source", lines: []string{""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, err := CaptureFileHandlerFacts(t.Context(), nodes, tc.lines, lang, nil)
+			require.NoError(t, err)
+			require.Len(t, facts, len(nodes)-1)
+			for _, n := range nodes[1:] {
+				want := Contract{
+					Role:     RoleProvider,
+					SymbolID: n.ID,
+					FilePath: path,
+					Line:     n.StartLine,
+				}
+				EnrichHTTPContract(&want, tc.lines, nodes, lang)
+				require.Equal(t, want.Meta, facts[n.ID].Regex, n.ID)
+			}
+			if tc.name == "spans" {
+				require.Equal(t, []int{201, 202, 203}, facts["outer"].Regex["status_codes"])
+				require.Equal(t, []int{202}, facts["duplicate-id"].Regex["status_codes"])
+				require.Equal(t, []int{204}, facts["missing-end"].Regex["status_codes"])
+			}
+		})
+	}
+}
+
 func TestEndpointClientQuestionsNativeDedup(t *testing.T) {
 	src := []byte(`import requests
 

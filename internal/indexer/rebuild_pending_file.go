@@ -78,10 +78,10 @@ func (idx *Indexer) submitPendingRebuildFile(ctx context.Context, input rebuildI
 	if resp.Bad() {
 		return nil, fmt.Errorf("parser worker: %s", resp.Err)
 	}
-	return checkPendingRebuildReply(resp.RebuildHeader, resp.RebuildEntry, key, input.Path, ext.Language(), entryLimit)
+	return checkPendingRebuildReply(resp.RebuildHeader, resp.RebuildEntry, key, input.Path, ext.Language(), prepared, entryLimit)
 }
 
-func checkPendingRebuildReply(header, entry []byte, key rebuildDigest, path, language string, entryLimit int) ([]byte, error) {
+func checkPendingRebuildReply(header, entry []byte, key rebuildDigest, path, language string, prepared []byte, entryLimit int) ([]byte, error) {
 	if len(entry) == 0 {
 		return nil, fmt.Errorf("%w: parser worker returned no rebuild entry", errParseEntryCorrupt)
 	}
@@ -104,6 +104,9 @@ func checkPendingRebuildReply(header, entry []byte, key rebuildDigest, path, lan
 	if facts.EffectiveLanguage != language {
 		return nil, fmt.Errorf("%w: parser worker effective language differs: got %q, want %q", errParseEntryCorrupt, facts.EffectiveLanguage, language)
 	}
+	if facts.File.Size != len(prepared) || facts.File.ContentHash != contentHashForSource(prepared) {
+		return nil, fmt.Errorf("%w: parser worker entry does not match the prepared content", errParseEntryCorrupt)
+	}
 	return entry, nil
 }
 
@@ -123,6 +126,11 @@ func servePendingRebuildFile(reg *parser.Registry, path string, ext parser.Extra
 	}
 	if int64(len(frozen.Raw)) != input.Size || blake3.Sum256(frozen.Raw) != input.Content {
 		return nil, nil, fmt.Errorf("%w: %s", ErrBuildInputChanged, path)
+	}
+	// Gob omits an empty byte slice. Restore the present empty source so
+	// native raw-source readers distinguish it from unavailable source.
+	if frozen.Raw == nil {
+		frozen.Raw = []byte{}
 	}
 	var cfg config.IndexConfig
 	if err := json.Unmarshal(frozen.IndexConfigJSON, &cfg); err != nil {

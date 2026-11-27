@@ -27,10 +27,10 @@ var (
 // extractJavaShape reads a Java / Kotlin class body and returns its
 // fields. Field-level annotations (@JsonProperty, @Nullable) on the
 // preceding lines are attached to the field that follows.
-func extractJavaShape(src []byte, startLine, endLine int) *Shape {
-	body := sliceBody(src, startLine, endLine)
+func extractJavaShape(sourceLines []string, startLine, endLine int) *Shape {
+	body := sliceBody(sourceLines, startLine, endLine)
 	if body == "" {
-		body = braceBody(src, startLine, 400)
+		body = braceBody(sourceLines, startLine, 400)
 	}
 	openIdx := strings.Index(body, "{")
 	if openIdx < 0 {

@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,4 +94,112 @@ func TestRebuildParsePolicyKeysUseFrozenEffectiveInputs(t *testing.T) {
 	updated := start(freezeRebuildParsePolicy(root, cfg))
 	checkOwner(save(updated, owned, false), "team::second")
 	save(updated, unowned, false)
+}
+
+func TestRebuildContractRecipeVersions(t *testing.T) {
+	idx := &Indexer{}
+	off := false
+	idx.config.Coverage.Clones.Enabled = &off
+	idx.config.Coverage.Ownership.Enabled = &off
+	// Pin the recipe framing with fixed serialized settings, independent of
+	// the environment and config defaults. Update only on a recipe change.
+	idx.frozenRebuildContractPolicy.Store(&rebuildContractPolicy{suffix: rebuildContractRecipeSuffix([]byte("{}"))})
+	base := rebuildDigest{1}
+	header := rebuildInput{Path: "x.h", Language: "c"}
+	cFile := rebuildInput{Path: "x.c", Language: "c"}
+	goFile := rebuildInput{Path: "x.go", Language: "go"}
+	beforeHeader := idx.rebuildExtractorRecipe(base, header)
+	require.Equal(t, "04a917f856acbe5f91c014dc51a5436fef8bb34ab0d17afeda240261b28c8a03", hex.EncodeToString(beforeHeader[:]))
+	require.NotEqual(t, beforeHeader, idx.rebuildExtractorRecipe(rebuildDigest{2}, header))
+	beforeC := idx.rebuildExtractorRecipe(base, cFile)
+	beforeGo := idx.rebuildExtractorRecipe(base, goFile)
+	require.NotEqual(t, beforeC, beforeHeader)
+	bump := func(lang string) {
+		prior := extractorVersions[lang]
+		t.Cleanup(func() { extractorVersions[lang] = prior })
+		extractorVersions[lang]++
+	}
+	bump("cpp")
+	require.NotEqual(t, beforeHeader, idx.rebuildExtractorRecipe(base, header))
+	require.Equal(t, beforeC, idx.rebuildExtractorRecipe(base, cFile))
+	require.Equal(t, beforeGo, idx.rebuildExtractorRecipe(base, goFile))
+	bump("go")
+	require.NotEqual(t, beforeGo, idx.rebuildExtractorRecipe(base, goFile))
+}
+
+func TestRebuildContractRecipeBindsStampedConfig(t *testing.T) {
+	ctx := t.Context()
+	t.Setenv("CODEGRAPH_EVENT_CONFIG", "")
+	t.Setenv("GORTEX_EVENT_BUS_DISABLE", "1")
+	root, src := rebuildInputFixture(t)
+	const path = "routes.go"
+	writeFile(t, filepath.Join(root, path), "package p\nfunc Route() {}\n")
+	input, _, err := readRebuildInput(ctx, src, path, "go", 1024)
+	require.NoError(t, err)
+	base := rebuildDigest{1}
+	start := func(cfg config.IndexConfig) *Indexer {
+		t.Helper()
+		reg := parser.NewRegistry()
+		reg.Register(languages.NewGoExtractor())
+		idx := New(graph.New(), reg, cfg, zap.NewNop())
+		idx.installRebuildParsePolicy(rebuildParsePolicy{})
+		t.Cleanup(idx.Close)
+		return idx
+	}
+	readFresh := func(idx *Indexer) (rebuildDigest, []byte, contractDependencyInputs) {
+		t.Helper()
+		store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+		key := input.parseKey(idx.rebuildExtractorRecipe(base, input))
+		facts, reused, err := idx.loadRebuildFile(ctx, src, store, input, base, rebuildTransformBounds{})
+		require.NoError(t, err)
+		require.False(t, reused)
+		stamp, ok := storedContractDependencyInputs(facts.Nodes)
+		require.True(t, ok)
+		wire, err := store.read(key)
+		require.NoError(t, err)
+		return key, wire, stamp
+	}
+	cfg := config.Default().Index
+	cfg.EventBus = []config.EventBusBoundarySpec{{Name: "bus", Callee: "publish"}}
+	original := start(cfg)
+	key, wire, stamp := readFresh(original)
+
+	// These are the only construction settings excluded from the stamp.
+	construction := cfg
+	construction.Workers++
+	construction.DirtyChain = &config.DirtyChainConfig{}
+	otherKey, otherWire, otherStamp := readFresh(start(construction))
+	require.Equal(t, key, otherKey)
+	require.Equal(t, stamp, otherStamp)
+	require.Equal(t, wire, otherWire)
+
+	for _, change := range []struct {
+		name string
+		edit func(*config.IndexConfig)
+	}{
+		{"aliases", func(cfg *config.IndexConfig) { cfg.HTTPClientAliases = []string{"apiGet"} }},
+		{"disabled bus specs", func(cfg *config.IndexConfig) { cfg.EventBus = nil }},
+		{"generated parser setting", func(cfg *config.IndexConfig) { cfg.IndexGeneratedParsers = !cfg.IndexGeneratedParsers }},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			other := cfg
+			change.edit(&other)
+			otherKey, otherWire, otherStamp := readFresh(start(other))
+			require.NotEqual(t, stamp.Config, otherStamp.Config)
+			require.NotEqual(t, wire, otherWire)
+			require.NotEqual(t, key, otherKey)
+		})
+	}
+
+	// A running job uses the same effective boundaries for admission,
+	// capture and replay even if the environment changes mid-job.
+	t.Setenv("GORTEX_EVENT_BUS_DISABLE", "")
+	otherKey, otherWire, otherStamp = readFresh(original)
+	require.Equal(t, key, otherKey)
+	require.Equal(t, stamp, otherStamp)
+	require.Equal(t, wire, otherWire)
+	otherKey, otherWire, otherStamp = readFresh(start(cfg))
+	require.NotEqual(t, stamp.Config, otherStamp.Config)
+	require.NotEqual(t, wire, otherWire)
+	require.NotEqual(t, key, otherKey)
 }

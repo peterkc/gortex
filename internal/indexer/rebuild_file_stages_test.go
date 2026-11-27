@@ -537,7 +537,7 @@ func TestRebuildFileStagesContractReceiptLifecycle(t *testing.T) {
 	badKey := badInput.parseKey(restarted.rebuildExtractorRecipe(recipe, badInput))
 	valid, err := store.read(badKey)
 	require.NoError(t, err)
-	for _, tc := range []string{"legacy payload", "truncated payload", "wrong key", "wrong digest"} {
+	for _, tc := range []string{"legacy payload", "truncated payload", "wrong key", "wrong digest", "wrong embedded path"} {
 		t.Run(tc, func(t *testing.T) {
 			store = rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 			var wire []byte
@@ -556,8 +556,21 @@ func TestRebuildFileStagesContractReceiptLifecycle(t *testing.T) {
 				header := makeRebuildParseEntryHeader(badKey, valid)
 				wire = append(header[:], valid...)
 				wire[len(wire)-1] ^= 1
+			case "wrong embedded path":
+				other := encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
+					File: graph.FileMetaRow{FilePath: "other.go"}, EffectiveLanguage: "go",
+				})
+				header := makeRebuildParseEntryHeader(badKey, other)
+				wire = append(header[:], other...)
 			}
 			require.NoError(t, os.WriteFile(store.entry(badKey), wire, 0o600))
+			if tc == "wrong embedded path" {
+				got, reused, err := restarted.loadRebuildFile(ctx, src, store, badInput, recipe, rebuildTransformBounds{})
+				require.ErrorIs(t, err, errParseEntryCorrupt)
+				require.ErrorContains(t, err, "file identity differs")
+				require.Empty(t, got)
+				require.False(t, reused)
+			}
 			_, offers, err := build(restarted, []rebuildInput{badInput})
 			require.ErrorIs(t, err, errParseEntryCorrupt)
 			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest}, offers)

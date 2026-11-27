@@ -20,8 +20,8 @@ func runRebuildReturnsTo(ctx context.Context, build *store_pebble.BuildStore, re
 	}, resolvedCallTargetName)
 }
 
-// Read the same admitted entries that assembled the private graph. Nothing
-// here opens checkout files or extracts a missing receipt again.
+// Read only the base of the same entries already checked during admission.
+// The store still checks the envelope. No checkout read or extraction occurs.
 func (idx *Indexer) rebuildDataflowReceipts(ctx context.Context, job rebuildFileStages, store rebuildParseStore,
 	census *rebuildExtractorCensus,
 ) iter.Seq2[store_pebble.ParseFacts, error] {
@@ -37,7 +37,7 @@ func (idx *Indexer) rebuildDataflowReceipts(ctx context.Context, job rebuildFile
 				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: reload %q for dataflow lift: %w", errParseEntryCorrupt, input.Path, err))
 				return
 			}
-			facts, _, _, err := store_pebble.DecodeContractParseFacts(raw)
+			facts, err := store_pebble.DecodeContractParseFactsBase(raw)
 			if err != nil {
 				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: decode %q for dataflow lift: %w", errParseEntryCorrupt, input.Path, err))
 				return

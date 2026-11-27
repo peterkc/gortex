@@ -1,6 +1,7 @@
 package crashpool
 
 import (
+	"bufio"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -54,12 +55,13 @@ type Pool struct {
 	crashes atomic.Int64 // worker deaths detected by Submit
 }
 
-// procWorker wraps one worker subprocess and its gob pipes.
+// procWorker wraps one worker subprocess and its request and reply pipes.
 type procWorker struct {
-	cmd   *exec.Cmd
-	enc   *gob.Encoder
-	dec   *gob.Decoder
-	stdin io.Closer
+	cmd    *exec.Cmd
+	enc    *gob.Encoder
+	dec    *gob.Decoder
+	stdin  io.Closer
+	stdout io.Reader
 }
 
 // NewPool spawns cfg.Workers worker subprocesses and returns a ready
@@ -131,11 +133,15 @@ func (p *Pool) spawn() (*procWorker, error) {
 		return nil, err
 	}
 	procio.StderrWatcher{Logger: p.cfg.Logger, Tag: "crashpool worker"}.Watch(stderr)
+	// Both reply readers share the same buffer. Gob must not hide
+	// read-ahead from the strict rebuild reply reader.
+	out := bufio.NewReader(stdout)
 	return &procWorker{
-		cmd:   cmd,
-		enc:   gob.NewEncoder(stdin),
-		dec:   gob.NewDecoder(stdout),
-		stdin: stdin,
+		cmd:    cmd,
+		enc:    gob.NewEncoder(stdin),
+		dec:    gob.NewDecoder(out),
+		stdin:  stdin,
+		stdout: out,
 	}, nil
 }
 
@@ -156,6 +162,9 @@ func (w *procWorker) kill() {
 func (w *procWorker) roundTrip(req *extractRequest, resp *extractResponse) error {
 	if err := w.enc.Encode(req); err != nil {
 		return err
+	}
+	if req.RebuildFile != nil {
+		return readRebuildReply(w.stdout, req.Seq, req.RebuildFile.EntryLimit, resp)
 	}
 	if err := w.dec.Decode(resp); err != nil {
 		return err

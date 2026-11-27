@@ -315,7 +315,8 @@ func TestPendingRebuildFileEffectiveLanguage(t *testing.T) {
 	}{
 		{path: "main.tsx", raw: "export function Entry(): number { return 1; }\n", walk: "typescript", effective: "typescript"},
 		{path: "main.jsx", raw: "export function Entry() { return 1; }\n", walk: "javascript", effective: "javascript"},
-		{path: "empty.js", raw: "// No declarations\n", walk: "javascript", effective: "javascript", noDefinitions: true},
+		{path: "empty.js", walk: "javascript", effective: "javascript", noDefinitions: true},
+		{path: "comment.js", raw: "// No declarations\n", walk: "javascript", effective: "javascript", noDefinitions: true},
 		{path: "header.h", raw: "namespace demo {}\n", prepared: "int Entry(void) { return 1; }\n", walk: "c", effective: "cpp"},
 		{path: "binary.h", raw: "namespace demo {}\x00", walk: "c", effective: "cpp", noDefinitions: true, skipped: true},
 	} {
@@ -341,8 +342,12 @@ func TestPendingRebuildFileEffectiveLanguage(t *testing.T) {
 			pendingEntry, err := pending.read(key)
 			require.NoError(t, err)
 			require.Equal(t, normalEntry, pendingEntry)
-			facts, _, _, err := store_pebble.DecodeContractParseFacts(pendingEntry)
+			facts, captured, _, err := store_pebble.DecodeContractParseFacts(pendingEntry)
 			require.NoError(t, err)
+			if tc.path == "empty.js" {
+				require.NotNil(t, captured.Router)
+				require.Equal(t, 1, captured.Router.LineCount, "empty source is present")
+			}
 			require.Equal(t, tc.path, facts.File.FilePath)
 			require.Equal(t, tc.effective, facts.EffectiveLanguage)
 			expectedContent := tc.raw
@@ -381,8 +386,13 @@ func TestPendingRebuildFileChecksReply(t *testing.T) {
 	const path = "unit.go"
 	const language = "go"
 	key := rebuildDigest{1}
+	prepared := []byte("package unit\n")
 	base := store_pebble.ParseFacts{
-		File:              graph.FileMetaRow{FilePath: path},
+		File: graph.FileMetaRow{
+			FilePath:    path,
+			Size:        len(prepared),
+			ContentHash: contentHashForSource(prepared),
+		},
 		EffectiveLanguage: language,
 	}
 	facts := &contracts.FileFacts{
@@ -393,11 +403,11 @@ func TestPendingRebuildFileChecksReply(t *testing.T) {
 	require.NoError(t, err)
 	header := makeRebuildParseEntryHeader(key, entry)
 	limit := len(entry)
-	got, err := checkPendingRebuildReply(header[:], entry, key, path, language, limit)
+	got, err := checkPendingRebuildReply(header[:], entry, key, path, language, prepared, limit)
 	require.NoError(t, err, "header does not count against the payload limit")
 	require.Equal(t, entry, got)
 
-	got, err = checkPendingRebuildReply(header[:], entry, key, path, language, limit-1)
+	got, err = checkPendingRebuildReply(header[:], entry, key, path, language, prepared, limit-1)
 	require.ErrorIs(t, err, errParseEntryTooLarge)
 	require.Nil(t, got)
 	legacy, err := store_pebble.EncodeParseFacts(base)
@@ -414,21 +424,42 @@ func TestPendingRebuildFileChecksReply(t *testing.T) {
 		{"wrong key", header[:], entry, rebuildDigest{2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := checkPendingRebuildReply(tc.header, tc.entry, tc.key, path, language, limit)
+			got, err := checkPendingRebuildReply(tc.header, tc.entry, tc.key, path, language, prepared, limit)
 			require.ErrorIs(t, err, errParseEntryCorrupt)
 			require.Nil(t, got)
 		})
 	}
-	got, err = checkPendingRebuildReply(legacyHeader[:], legacy, key, path, language, limit)
+	got, err = checkPendingRebuildReply(legacyHeader[:], legacy, key, path, language, prepared, limit)
 	require.ErrorIs(t, err, errParseEntryCorrupt)
 	require.ErrorContains(t, err, "decode parser worker entry")
 	require.Nil(t, got)
-	got, err = checkPendingRebuildReply(header[:], entry, key, "other.go", language, limit)
+	got, err = checkPendingRebuildReply(header[:], entry, key, "other.go", language, prepared, limit)
 	require.ErrorContains(t, err, "parser worker entry has a different file identity")
 	require.Nil(t, got)
-	got, err = checkPendingRebuildReply(header[:], entry, key, path, "cpp", limit)
+	got, err = checkPendingRebuildReply(header[:], entry, key, path, "cpp", prepared, limit)
 	require.ErrorContains(t, err, `parser worker effective language differs: got "go", want "cpp"`)
 	require.Nil(t, got)
+
+	for _, tc := range []struct {
+		name string
+		size int
+		hash string
+	}{
+		{"prepared size", len(prepared) + 1, base.File.ContentHash},
+		{"prepared hash", len(prepared), contentHashForSource([]byte("package evil\n"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			other := base
+			other.File.Size, other.File.ContentHash = tc.size, tc.hash
+			forged, err := store_pebble.EncodeContractParseFacts(other, facts)
+			require.NoError(t, err)
+			stamp := makeRebuildParseEntryHeader(key, forged)
+			got, err := checkPendingRebuildReply(stamp[:], forged, key, path, language, prepared, 1<<20)
+			require.ErrorIs(t, err, errParseEntryCorrupt)
+			require.ErrorContains(t, err, "parser worker entry does not match the prepared content")
+			require.Nil(t, got, "the caller must not receive bytes to publish")
+		})
+	}
 }
 
 func TestPendingRebuildFileChecksRawInput(t *testing.T) {

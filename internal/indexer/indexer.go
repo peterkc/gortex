@@ -670,7 +670,8 @@ type Indexer struct {
 	codeownersOnce  sync.Once
 	codeownersRules []codeowners.Rule
 	// Set only after a fresh rebuild indexer installs both frozen parse inputs.
-	frozenRebuildParsePolicy atomic.Pointer[rebuildParsePolicy]
+	frozenRebuildParsePolicy    atomic.Pointer[rebuildParsePolicy]
+	frozenRebuildContractPolicy atomic.Pointer[rebuildContractPolicy]
 
 	// cloneIndex maintains the clone-detection CMS + length-stratified
 	// LSH live across single-file edits, so a steady-state reindex

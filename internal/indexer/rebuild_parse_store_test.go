@@ -78,7 +78,7 @@ func TestRebuildParseStoreRefusesBadEntry(t *testing.T) {
 	require.Len(t, dir, 2)
 }
 
-func TestRebuildParseStoreInactiveContractReceiptBinding(t *testing.T) {
+func TestRebuildParseStoreContractReceiptBinding(t *testing.T) {
 	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 	const file = "src\xff.go"
 	input := rebuildInput{Path: file, Language: "go", Content: rebuildDigest{1}}

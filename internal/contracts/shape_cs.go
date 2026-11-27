@@ -31,10 +31,10 @@ var csJsonIgnoreRe = regexp.MustCompile(`\[JsonIgnore`)
 // System.Text.Json by default; properties are). Records with
 // positional parameters are captured through their synthesised
 // properties — most modern DTOs use this form.
-func extractCSharpShape(src []byte, startLine, endLine int) *Shape {
-	body := sliceBody(src, startLine, endLine)
+func extractCSharpShape(sourceLines []string, startLine, endLine int) *Shape {
+	body := sliceBody(sourceLines, startLine, endLine)
 	if body == "" {
-		body = braceBody(src, startLine, 400)
+		body = braceBody(sourceLines, startLine, 400)
 	}
 	// Positional records: `public record UserResp(string Id, string Email);`
 	// Detected separately — no `{` body, all props in the paren group.

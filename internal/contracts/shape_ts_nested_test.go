@@ -33,7 +33,7 @@ func TestExtractTSShape_NestedAnonymousObject(t *testing.T) {
   processes: Process[]
 }
 `)
-	shape := extractTSShape(src, 1, 15)
+	shape := ExtractShape("dashboard.ts", src, 1, 15)
 	if shape == nil {
 		t.Fatal("expected non-nil shape")
 	}
@@ -79,7 +79,7 @@ func TestExtractTSShape_FlatInterfaceUnchanged(t *testing.T) {
   email?: string
 }
 `)
-	shape := extractTSShape(src, 1, 5)
+	shape := ExtractShape("dashboard.ts", src, 1, 5)
 	if shape == nil {
 		t.Fatal("expected non-nil shape")
 	}

@@ -47,22 +47,38 @@ func encodeContractFactSuffix(v2 []byte, facts *contracts.FileFacts) ([]byte, er
 	return e.buf, nil
 }
 
-// DecodeContractParseFacts requires a complete contract receipt; v2 is not a
-// built-empty contract result. factBytes is the exact encoded contract suffix.
-func DecodeContractParseFacts(raw []byte) (base ParseFacts, facts *contracts.FileFacts, factBytes int, err error) {
+// DecodeContractParseFactsBase reads the embedded v2 facts after admission
+// has checked the full receipt. It does not validate the contract suffix.
+func DecodeContractParseFactsBase(raw []byte) (ParseFacts, error) {
+	base, _, err := decodeContractParseFactsBase(raw)
+	return base, err
+}
+
+func decodeContractParseFactsBase(raw []byte) (ParseFacts, []byte, error) {
 	if len(raw) == 0 || raw[0] != ContractParseFactsFormat {
-		return ParseFacts{}, nil, 0, invalid("contract parse facts format")
+		return ParseFacts{}, nil, invalid("contract parse facts format")
 	}
 	d := recordCursor{buf: raw[1:]}
 	v2 := d.bytes()
 	if len(v2) == 0 || v2[0] != parseFactsWithLanguageFormat {
-		return ParseFacts{}, nil, 0, invalid("contract receipt requires v2 base facts")
+		return ParseFacts{}, nil, invalid("contract receipt requires v2 base facts")
 	}
-	base, err = DecodeParseFacts(v2)
+	base, err := DecodeParseFacts(v2)
+	if err != nil {
+		return ParseFacts{}, nil, err
+	}
+	return base, d.buf, nil
+}
+
+// DecodeContractParseFacts requires a complete contract receipt; v2 is not a
+// built-empty contract result. factBytes is the exact encoded contract suffix.
+func DecodeContractParseFacts(raw []byte) (base ParseFacts, facts *contracts.FileFacts, factBytes int, err error) {
+	base, suffix, err := decodeContractParseFactsBase(raw)
 	if err != nil {
 		return ParseFacts{}, nil, 0, err
 	}
-	factBytes = len(d.buf)
+	d := recordCursor{buf: suffix}
+	factBytes = len(suffix)
 	facts = &contracts.FileFacts{
 		ScanSkipped:           d.boolean(),
 		Records:               readFactSlice(&d, readFactRecord),

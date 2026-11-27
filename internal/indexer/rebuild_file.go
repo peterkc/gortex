@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -104,9 +105,6 @@ func (idx *Indexer) loadRebuildFileWith(ctx context.Context, src source.ContentS
 	if err != nil {
 		return base, nil, false, err
 	}
-	if base.EffectiveLanguage != ext.Language() {
-		return store_pebble.ParseFacts{}, nil, false, fmt.Errorf("%w: %s: effective parse language differs", errParseEntryCorrupt, input.Path)
-	}
 	if err := ctx.Err(); err != nil {
 		return store_pebble.ParseFacts{}, nil, false, err
 	}
@@ -125,7 +123,7 @@ func (idx *Indexer) decodeRebuildFileReceipt(input rebuildInput, payload []byte)
 		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: %s: file identity differs", errParseEntryCorrupt, input.Path)
 	}
 	effective, _ := idx.registry.GetByLanguage(base.EffectiveLanguage)
-	if base.EffectiveLanguage == "" || effective == nil ||
+	if effective == nil ||
 		(base.EffectiveLanguage != input.Language && !possibleRebuildLanguageRefinement(input.Path, base.EffectiveLanguage)) {
 		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: %s: invalid effective parse language %q for admitted language %q",
 			errParseEntryCorrupt, input.Path, base.EffectiveLanguage, input.Language)
@@ -137,19 +135,25 @@ func (idx *Indexer) decodeRebuildFileReceipt(input rebuildInput, payload []byte)
 // content probe. It does not pick a language; the digest-bound receipt records
 // which result the probe selected. A registered but impossible ID is corrupt.
 func possibleRebuildLanguageRefinement(path, lang string) bool {
+	return slices.Contains(possibleRebuildLanguageRefinements(path), lang)
+}
+
+// Return all possible refinements in recipe order, even if a language still
+// uses the default extractor version.
+func possibleRebuildLanguageRefinements(path string) []string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".h":
-		return lang == "cpp" || lang == "objc"
+		return []string{"cpp", "objc"}
 	case ".inc":
-		return lang == "c"
+		return []string{"c"}
 	case ".m":
-		return lang == "objc" || lang == "matlab" || lang == "mathematica"
+		return []string{"mathematica", "matlab", "objc"}
 	case ".json":
-		return lang == "liquid_json"
+		return []string{"liquid_json"}
 	case ".xml":
-		return lang == "mybatis" || lang == "spring"
+		return []string{"mybatis", "spring"}
 	default:
-		return false
+		return nil
 	}
 }
 
@@ -265,18 +269,26 @@ func (idx *Indexer) captureRebuildContractFacts(ctx context.Context, graphPath, 
 		c.Questions = capture.Questions
 	}
 	var callables bool
+	var rawLines []string
 	for _, node := range result.Nodes {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		switch node.Kind {
 		case graph.KindType, graph.KindInterface:
-			c.Shapes[node.ID] = contracts.ExtractShape(node.FilePath, raw, node.StartLine, node.EndLine)
+			var shape *contracts.Shape
+			if extract := contracts.ShapeExtractorForPath(node.FilePath); extract != nil {
+				if rawLines == nil {
+					rawLines = splitLines(raw)
+				}
+				shape = extract(rawLines, node.StartLine, node.EndLine)
+			}
+			c.Shapes[node.ID] = shape
 		case graph.KindFunction, graph.KindMethod:
 			callables = true
 		}
 	}
-	if err := idx.captureRebuildContractBodies(ctx, graphPath, lang, raw, prepared, result, callables, c); err != nil {
+	if err := idx.captureRebuildContractBodies(ctx, graphPath, lang, raw, prepared, rawLines, result, callables, c); err != nil {
 		return nil, err
 	}
 	if contracts.RouterFactsRequired(graphPath, lang, c.Records, c.Questions) {
@@ -289,7 +301,7 @@ func (idx *Indexer) captureRebuildContractFacts(ctx context.Context, graphPath, 
 
 // captureRebuildContractBodies does only the two named raw-tree operations.
 // Other lazy handler facts already use raw text and never need another tree.
-func (idx *Indexer) captureRebuildContractBodies(ctx context.Context, path, lang string, raw, prepared []byte, result *parser.ExtractionResult, callables bool, facts *contracts.FileFacts) error {
+func (idx *Indexer) captureRebuildContractBodies(ctx context.Context, path, lang string, raw, prepared []byte, rawLines []string, result *parser.ExtractionResult, callables bool, facts *contracts.FileFacts) error {
 	handlerLang := detectLangFromPath(path)
 	var grammar *sitter.Language
 	var tree *parser.ParseTree
@@ -340,7 +352,10 @@ func (idx *Indexer) captureRebuildContractBodies(ctx context.Context, path, lang
 	if !callables {
 		return nil
 	}
+	if rawLines == nil {
+		rawLines = splitLines(raw)
+	}
 	var err error
-	facts.Handlers, err = contracts.CaptureFileHandlerFacts(ctx, result.Nodes, splitLines(raw), handlerLang, tree)
+	facts.Handlers, err = contracts.CaptureFileHandlerFacts(ctx, result.Nodes, rawLines, handlerLang, tree)
 	return err
 }

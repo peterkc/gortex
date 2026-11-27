@@ -33,10 +33,10 @@ var tsFieldRe = regexp.MustCompile(`^\s*(?:readonly\s+)?(['"]?[\w$-]+['"]?)\s*(\
 //
 // Methods on classes are filtered out by the line pattern: lines
 // containing `(` before the first `:` don't match tsFieldRe.
-func extractTSShape(src []byte, startLine, endLine int) *Shape {
-	body := sliceBody(src, startLine, endLine)
+func extractTSShape(sourceLines []string, startLine, endLine int) *Shape {
+	body := sliceBody(sourceLines, startLine, endLine)
 	if body == "" {
-		body = braceBody(src, startLine, 300)
+		body = braceBody(sourceLines, startLine, 300)
 	}
 	openIdx := strings.Index(body, "{")
 	if openIdx < 0 {

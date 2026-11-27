@@ -51,7 +51,7 @@ type RebuildFileOptions struct {
 	IndexConfigJSON  []byte
 	Codeowners       []byte
 	Extractor        string
-	EntryLimit       int // Compact payload only, excluding the header.
+	EntryLimit       int // Limits the compact payload at both ends of the pipe, excluding the header.
 	AdmittedLanguage string
 	Kind             byte
 	Size             int64

@@ -332,3 +332,47 @@ func TestPoolFullFactsMatchesNativeFileReceipt(t *testing.T) {
 	require.Empty(t, unknown.ConstValues)
 	require.Empty(t, unknown.ParseErrorLocations)
 }
+
+func TestRebuildReplySizeBoundary(t *testing.T) {
+	header, entry := []byte("stamp"), []byte("entry")
+	for _, tc := range []struct {
+		name  string
+		limit int
+	}{
+		{"below", len(entry) + 1},
+		{"exact", len(entry)},
+		{"oversized", len(entry) - 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var wire bytes.Buffer
+			const seq = 7
+			require.NoError(t, writeRebuildReply(&wire, seq, header, entry, nil))
+			var resp extractResponse
+			err := readRebuildReply(&wire, seq, tc.limit, &resp)
+			if tc.limit < len(entry) {
+				require.ErrorContains(t, err, "crashpool: rebuild entry has 5 bytes, limit 4")
+				require.Empty(t, resp)
+				require.Equal(t, "stampentry", wire.String(), "oversized frame must be rejected without reading its body")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, header, resp.RebuildHeader)
+			require.Equal(t, entry, resp.RebuildEntry)
+			require.Zero(t, wire.Len())
+		})
+	}
+}
+
+func TestPoolRebuildRefusalKeepsOrdinaryGob(t *testing.T) {
+	p := newTestPool(t, "real", Config{Workers: 1})
+	const path = "main.go"
+	src := []byte("package main\nfunc Hello() {}\n")
+	before := p.Submit(path, "go", src)
+	require.False(t, before.Bad(), "unexpected failure: %s", before.Err)
+	refusal := p.SubmitFullFacts(path, "go", src, nil, RebuildFileOptions{EntryLimit: 1})
+	require.Equal(t, Result{Err: "crashpool: strict rebuild file handler unavailable"}, refusal)
+	require.Equal(t, before, p.Submit(path, "go", src))
+	spawns, crashes := p.Stats()
+	require.Equal(t, int64(1), spawns)
+	require.Zero(t, crashes)
+}

@@ -73,25 +73,38 @@ type ShapeField struct {
 // a supported language or the extractor couldn't find any fields.
 // Callers attach the returned Shape to the type node's meta.
 func ExtractShape(filePath string, src []byte, startLine, endLine int) *Shape {
-	lang := detectLanguage(filePath)
-	switch lang {
+	if startLine <= 0 {
+		return nil
+	}
+	extract := ShapeExtractorForPath(filePath)
+	if extract == nil {
+		return nil
+	}
+	return extract(strings.Split(string(src), "\n"), startLine, endLine)
+}
+
+// ShapeExtractorForPath selects the native shape extractor for a path.
+// The returned function takes source split on newlines so a file census can
+// reuse the same lines for all declarations. Unsupported paths return nil.
+func ShapeExtractorForPath(filePath string) func(lines []string, startLine, endLine int) *Shape {
+	switch detectLanguage(filePath) {
 	case "go":
-		return extractGoShape(src, startLine, endLine)
+		return extractGoShape
 	case "typescript", "javascript":
-		return extractTSShape(src, startLine, endLine)
+		return extractTSShape
 	case "python":
-		return extractPythonShape(src, startLine, endLine)
+		return extractPythonShape
 	case "java", "kotlin":
-		return extractJavaShape(src, startLine, endLine)
+		return extractJavaShape
 	case "dart":
-		return extractDartShape(src, startLine, endLine)
+		return extractDartShape
 	case "rust":
-		return extractRustShape(src, startLine, endLine)
+		return extractRustShape
 	case "csharp":
-		return extractCSharpShape(src, startLine, endLine)
+		return extractCSharpShape
 	}
 	if strings.HasSuffix(filePath, ".proto") {
-		return extractProtoShape(src, startLine, endLine)
+		return extractProtoShape
 	}
 	return nil
 }
@@ -100,12 +113,8 @@ func ExtractShape(filePath string, src []byte, startLine, endLine int) *Shape {
 // (1-based, inclusive). When end_line is zero or less than start the
 // parser didn't record a span — caller should use a brace-walked
 // fallback or skip.
-func sliceBody(src []byte, startLine, endLine int) string {
-	if startLine <= 0 {
-		return ""
-	}
-	lines := strings.Split(string(src), "\n")
-	if startLine > len(lines) {
+func sliceBody(lines []string, startLine, endLine int) string {
+	if startLine <= 0 || startLine > len(lines) {
 		return ""
 	}
 	end := endLine
@@ -121,8 +130,7 @@ func sliceBody(src []byte, startLine, endLine int) string {
 // braceBody is the fallback when a type node's end_line isn't
 // recorded. Walk from start_line forward, count braces, and stop when
 // the first one closes.
-func braceBody(src []byte, startLine int, maxLines int) string {
-	lines := strings.Split(string(src), "\n")
+func braceBody(lines []string, startLine, maxLines int) string {
 	if startLine <= 0 || startLine > len(lines) {
 		return ""
 	}

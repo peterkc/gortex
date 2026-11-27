@@ -82,6 +82,19 @@ func TestContractParseFactsPreserveBytesAndTypes(t *testing.T) {
 	prefix := recordCursor{buf: payload[1:]}
 	require.Equal(t, v2, prefix.bytes(), "strip the contract suffix without re-encoding to get the exact v2 bytes")
 	require.Equal(t, len(prefix.buf), factBytes)
+	baseOnly, err := DecodeContractParseFactsBase(payload)
+	require.NoError(t, err)
+	require.Equal(t, decodedBase, baseOnly)
+	noSuffix := payload[:len(payload)-factBytes]
+	baseOnly, err = DecodeContractParseFactsBase(noSuffix)
+	require.NoError(t, err, "replay does not decode the contract suffix")
+	require.Equal(t, decodedBase, baseOnly)
+	_, _, _, err = DecodeContractParseFacts(noSuffix)
+	require.ErrorIs(t, err, errInvalidRecord, "admission requires the suffix")
+	_, err = DecodeContractParseFactsBase(v2)
+	require.ErrorIs(t, err, errInvalidRecord, "replay requires the outer receipt format")
+	_, err = DecodeContractParseFactsBase(noSuffix[:len(noSuffix)-1])
+	require.ErrorIs(t, err, errInvalidRecord, "replay requires a complete base")
 	reencoded, err := EncodeContractParseFacts(decodedBase, decodedFacts)
 	require.NoError(t, err)
 	require.Equal(t, payload, reencoded)
@@ -89,7 +102,7 @@ func TestContractParseFactsPreserveBytesAndTypes(t *testing.T) {
 	_, err = EncodeContractParseFacts(decodedBase, decodedFacts)
 	require.ErrorIs(t, err, errInvalidRecord, "missing shape is not the same as its explicit nil answer")
 	_, err = DecodeParseFacts(payload)
-	require.ErrorIs(t, err, errInvalidRecord, "the active reader must not accept a candidate receipt")
+	require.ErrorIs(t, err, errInvalidRecord, "the bare parse-facts reader must not accept a contract receipt")
 	_, _, _, err = DecodeContractParseFacts(v2)
 	require.ErrorIs(t, err, errInvalidRecord, "a prior recipe is not a built-empty result")
 	for i := 0; i < len(payload); i++ {

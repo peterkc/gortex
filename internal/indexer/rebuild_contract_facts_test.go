@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"bytes"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -93,6 +94,15 @@ type Duplicate struct {
 	One bool
 }
 `)
+	var generated strings.Builder
+	generated.WriteString("package app\n")
+	const generatedTypes = 128
+	for i := range generatedTypes {
+		fmt.Fprintf(&generated, "type Generated%d struct {\nField%d string\n}\n", i, i)
+	}
+	generatedFile := capture("app/generated.go", "go", generated.String())
+	require.Len(t, generatedFile.facts.Shapes, generatedTypes)
+	require.NotNil(t, generatedFile.facts.Shapes[fmt.Sprintf("app/generated.go::Generated%d", generatedTypes-1)])
 	capture("other/types.go", "go", `package other
 type Duplicate struct {
 	Two int

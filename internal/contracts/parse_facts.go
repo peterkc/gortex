@@ -160,9 +160,16 @@ func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []s
 		}
 	}
 	out := make(map[string]HandlerFacts)
+	firstByID := make(map[string]*graph.Node)
 	for _, n := range nodes {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		// Native takes the first ID match, even if it isn't callable.
+		first := firstByID[n.ID]
+		if first == nil {
+			firstByID[n.ID] = n
+			first = n
 		}
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
 			continue
@@ -176,8 +183,15 @@ func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []s
 			bf = &goBodyFacts{tree: tree, src: tree.Source(), handler: n, body: body, bindings: map[string]Binding{}}
 			bf.walk(body)
 		}
-		c := Contract{Role: RoleProvider, SymbolID: n.ID, FilePath: n.FilePath, Line: n.StartLine, Meta: map[string]any{}}
-		enrichHTTPContract(&c, lines, nodes, lang)
+		c := Contract{
+			Role:     RoleProvider,
+			SymbolID: n.ID,
+			FilePath: n.FilePath,
+			Line:     n.StartLine,
+			Meta:     map[string]any{},
+		}
+		start, end := handlerNodeBodyRange(first, c.Line, lines)
+		enrichProviderBody(&c, lines, nodes, lang, start, end)
 		f := HandlerFacts{Regex: c.Meta}
 		if lang != "go" || bf != nil {
 			f.AST = make(map[string]any)

@@ -16,6 +16,9 @@ import (
 // compatible with pygraph/tsgraph) overrides .gortex.yaml's index.event_bus
 // when set and valid; GORTEX_EVENT_BUS_DISABLE=1 forces the bus off.
 func (idx *Indexer) eventBusBoundaries() []contracts.EventBusBoundary {
+	if policy := idx.frozenRebuildContractPolicy.Load(); policy != nil {
+		return policy.eventBus
+	}
 	if os.Getenv("GORTEX_EVENT_BUS_DISABLE") == "1" {
 		return nil
 	}

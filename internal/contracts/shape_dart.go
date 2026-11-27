@@ -28,10 +28,10 @@ var (
 // instance fields. Constructor parameters and method declarations are
 // skipped — we look only for top-level `<Type> <name>;` entries in
 // the class body.
-func extractDartShape(src []byte, startLine, endLine int) *Shape {
-	body := sliceBody(src, startLine, endLine)
+func extractDartShape(sourceLines []string, startLine, endLine int) *Shape {
+	body := sliceBody(sourceLines, startLine, endLine)
 	if body == "" {
-		body = braceBody(src, startLine, 400)
+		body = braceBody(sourceLines, startLine, 400)
 	}
 	openIdx := strings.Index(body, "{")
 	if openIdx < 0 {

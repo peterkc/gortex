@@ -119,9 +119,6 @@ func makeRebuildParseEntryHeader(key rebuildDigest, payload []byte) [parseEntryH
 }
 
 func checkRebuildParseEntryHeader(key rebuildDigest, header, payload []byte) error {
-	if len(header) != parseEntryHeader {
-		return fmt.Errorf("%w: %x", errParseEntryCorrupt, key)
-	}
 	want := makeRebuildParseEntryHeader(key, payload)
 	if !bytes.Equal(header, want[:]) {
 		return fmt.Errorf("%w: %x", errParseEntryCorrupt, key)

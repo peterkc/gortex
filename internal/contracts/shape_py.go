@@ -23,8 +23,8 @@ var pyFieldAliasRe = regexp.MustCompile(`alias\s*=\s*['"]([^'"]+)['"]`)
 // its typed attributes. Attributes without a type annotation are
 // skipped because we can't record a useful type for them. Methods
 // are skipped by requiring `:` before any `(`.
-func extractPythonShape(src []byte, startLine, endLine int) *Shape {
-	body := sliceBody(src, startLine, endLine)
+func extractPythonShape(sourceLines []string, startLine, endLine int) *Shape {
+	body := sliceBody(sourceLines, startLine, endLine)
 	if body == "" {
 		return nil
 	}

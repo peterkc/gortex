@@ -3,6 +3,7 @@ package crashpool
 import (
 	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,9 +14,8 @@ import (
 	"github.com/zzet/gortex/internal/parser/languages"
 )
 
-// RunWorker is the subprocess entry point. It serves extract requests
-// decoded from r and writes gob-encoded responses to w until r reaches
-// EOF, then returns nil.
+// RunWorker is the subprocess entry point. It serves extract requests from r
+// until EOF, then returns nil. Ordinary replies are gob-encoded.
 //
 // It is invoked by the hidden `gortex __parse-worker` subcommand. The
 // parent (Pool) owns the lifecycle: a worker is expected to run until
@@ -27,8 +27,8 @@ func RunWorker(r io.Reader, w io.Writer) error {
 // RebuildFileHandler produces a complete portable entry inside the worker.
 type RebuildFileHandler func(reg *parser.Registry, path string, ext parser.Extractor, prepared []byte, options parser.ExtractionOptions, frozen RebuildFileOptions) (header, entry []byte, err error)
 
-// RunWorkerWithRebuild serves the same protocol with an optional strict
-// rebuild handler. Ordinary requests never use it.
+// RunWorkerWithRebuild adds an optional strict rebuild handler. Its replies
+// use a bounded frame; ordinary requests and replies still use gob.
 func RunWorkerWithRebuild(r io.Reader, w io.Writer, rebuild RebuildFileHandler) error {
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
@@ -103,22 +103,20 @@ func serveWorker(reg *parser.Registry, r io.Reader, w io.Writer, rebuild ...Rebu
 			}
 			return err
 		}
-		var resp extractResponse
 		if req.RebuildFile != nil {
-			resp.Seq = req.Seq
+			var header, entry []byte
+			var err error
 			if len(rebuild) == 0 || rebuild[0] == nil || !req.FullFacts {
-				resp.Err = "crashpool: strict rebuild file handler unavailable"
+				err = errors.New("crashpool: strict rebuild file handler unavailable")
 			} else {
-				header, entry, err := serveRebuildFile(reg, req, rebuild[0])
-				if err != nil {
-					resp.Err = err.Error()
-				} else {
-					resp.RebuildHeader, resp.RebuildEntry = header, entry
-				}
+				header, entry, err = serveRebuildFile(reg, req, rebuild[0])
 			}
-		} else {
-			resp = serveOne(reg, req)
+			if err := writeRebuildReply(w, req.Seq, header, entry, err); err != nil {
+				return err
+			}
+			continue
 		}
+		resp := serveOne(reg, req)
 		if err := enc.Encode(&resp); err != nil {
 			return err
 		}
