@@ -100,11 +100,23 @@ func TestRebuildExpoModuleBridgePreservesReactNativeCustody(t *testing.T) {
 			return 0
 		}
 	}
-	expo, err := b.RebuildExpoModuleBridge(ctx, receipts, 3, family, isCall, makeCall)
+	before := rebuildFrameworkCustodyRows(t, b)
+	bad := *target
+	bad.Name = "changed"
+	// Expo needs the peer receipt, not the receipt for the RN incumbent.
+	expoReceipts := sharedClaimsTestReceipts(callerFacts, producerProofFacts(&bad), producerProofFacts(peer))
+	expo, err := b.RebuildExpoModuleBridge(ctx, expoReceipts, 3, family, isCall, makeCall)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, expo.Edges)
-	want[graph.EdgeIdentityFor(makeCall(first, peer))] = rebuildProofExpoModules
+	newEdge := makeCall(first, peer)
+	want[graph.EdgeIdentityFor(newEdge)] = rebuildProofExpoModules
 	requireSyntheticCustody(t, b, want)
+	key := pendingEdgeKey(newEdge)
+	after := rebuildFrameworkCustodyRows(t, b)
+	delete(after, string(key))
+	delete(after, string(pendingReverseKey(newEdge, key)))
+	delete(after, string(rebuildLinkRecorderKey(key)))
+	require.Equal(t, before, after, "the RN incumbent and both raw sites must stay byte-identical")
 }
 
 func TestRebuildExpoModuleBridgeRejectsLostMarker(t *testing.T) {

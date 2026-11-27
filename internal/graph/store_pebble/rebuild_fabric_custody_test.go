@@ -49,6 +49,45 @@ func TestRebuildFabricStoreCustody(t *testing.T) {
 	require.Equal(t, before, after)
 }
 
+func TestRebuildFabricStorePreservesOccupiedPairWithoutProof(t *testing.T) {
+	b, facts := seedRebuildFabricStore(t)
+	spec, first, second := facts[0].Nodes[0], facts[1].Nodes[0], facts[2].Nodes[0]
+	// The seed already has a raw-owned forward incumbent. Add its reverse
+	// with a different payload so neither direction may be replaced.
+	reverse := rebuildFabricStoreEdge(first, spec, "prior resolver")
+	b.AddEdge(reverse)
+	before := rebuildFrameworkCustodyRows(t, b)
+	require.Contains(t, before, string(pendingEdgeKey(reverse)))
+
+	// The live manager is unchanged. Its claim has the same join key, but
+	// would not prove an endpoint of a new edge.
+	bad := *first
+	bad.StartLine++
+	facts[1].Nodes = []*graph.Node{&bad}
+	stats, err := b.RebuildFabric(t.Context(), sharedClaimsTestReceipts(facts...), rebuildFabricStoreCandidate, rebuildFabricStoreEdge)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, stats.Edges)
+	after := rebuildFrameworkCustodyRows(t, b)
+	for _, want := range []*graph.Edge{
+		rebuildFabricStoreEdge(spec, second, "ColorView"),
+		rebuildFabricStoreEdge(second, spec, "ColorView"),
+	} {
+		key := pendingEdgeKey(want)
+		live, err := b.pendingEdge(key)
+		require.NoError(t, err)
+		require.Equal(t, want, live)
+		proof, err := readRebuildEdgeCustody(b.pending, key)
+		require.NoError(t, err)
+		require.Equal(t, rebuildEdgeCustody{proof: rebuildProofFabric}, proof)
+		reverse := string(pendingReverseKey(want, key))
+		require.Equal(t, key, after[reverse])
+		delete(after, string(key))
+		delete(after, reverse)
+		delete(after, string(rebuildLinkRecorderKey(key)))
+	}
+	require.Equal(t, before, after, "both incumbents must stay byte-identical")
+}
+
 func TestRebuildFabricStoreRefusesPortableDamage(t *testing.T) {
 	spelling := func(f *ParseFacts, n *graph.Node) { n.Meta["fabric_component"] = "COLORVIEW" }
 	for _, tc := range []struct {
