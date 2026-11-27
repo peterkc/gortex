@@ -806,21 +806,24 @@ func TestRebuildReduxThunkInputGuards(t *testing.T) {
 		name, message string
 		cause         error
 	}{
-		{"candidate node cap", "Redux Thunk node row", ErrRebuildLinkInputSize},
+		{"thunk node cap", "Redux Thunk node row", ErrRebuildLinkInputSize},
+		{"action node cap", "Redux Thunk node row", ErrRebuildLinkInputSize},
 		{"owned Call cap", "Redux Thunk edge row", ErrRebuildLinkInputSize},
 		{"candidate without ID", "Redux Thunk candidate has no ID", errInvalidRecord},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			thunk := storeFactoryTestAction("store.ts::reset", "store.ts", "")
-			thunk.Meta = map[string]any{"redux_thunk": storeFactoryTestMember}
-			b, _ := seedSyntheticCustody(t, producerProofFacts(thunk))
+			candidate := storeFactoryTestAction("store.ts::reset", "store.ts", "")
+			if tc.name != "action node cap" {
+				candidate.Meta = map[string]any{"redux_thunk": storeFactoryTestMember}
+			}
+			b, _ := seedSyntheticCustody(t, producerProofFacts(candidate))
 			var key, val []byte
 			var err error
 			switch tc.name {
-			case "candidate node cap":
-				thunk.Meta["large"] = large
-				key = pendingNodeKey(thunk.ID)
-				val, err = encodeNode(thunk)
+			case "thunk node cap", "action node cap":
+				candidate.Meta["large"] = large
+				key = pendingNodeKey(candidate.ID)
+				val, err = encodeNode(candidate)
 			case "owned Call cap":
 				call := storeFactoryTestCall("retired", 2)
 				call.Meta = map[string]any{"via": "redux-thunk", "thunk_dispatch": storeFactoryTestMember}
@@ -828,15 +831,34 @@ func TestRebuildReduxThunkInputGuards(t *testing.T) {
 				key = pendingEdgeKey(call)
 				val, err = encodeEdge(call)
 			case "candidate without ID":
-				thunk.ID = ""
-				key = pendingNodeKey(thunk.ID)
-				val, err = encodeNode(thunk)
+				candidate.ID = ""
+				key = pendingNodeKey(candidate.ID)
+				val, err = encodeNode(candidate)
 			}
 			require.NoError(t, err)
 			require.NoError(t, b.pending.Set(key, val, pebble.NoSync))
+			receipts := unreadStoreFactoryReceipts(t)
+			rules := reduxThunkStoreTestRules()
+			if tc.name == "thunk node cap" || tc.name == "action node cap" {
+				require.Greater(t, len(key)+len(val), rebuildReduxThunkRowBytes)
+				if tc.name == "action node cap" {
+					// Activate the action index without winning the reset election.
+					thunk := storeFactoryTestAction("store.ts::other", "store.ts", "")
+					thunk.Meta = map[string]any{"redux_thunk": "other"}
+					b.AddNode(thunk)
+				}
+				before := rebuildFrameworkCustodyRows(t, b)
+				stats, err := b.RebuildReduxThunk(t.Context(), receipts, rules)
+				require.NoError(t, err)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+
+				call := storeFactoryTestCall("retired", 2)
+				call.Meta = map[string]any{"via": "redux-thunk", "thunk_dispatch": storeFactoryTestMember}
+				b.AddEdge(call)
+			}
 			before := rebuildFrameworkCustodyRows(t, b)
-			receipts := func(func(ParseFacts, error) bool) { t.Fatal("unexpected receipt scan") }
-			stats, err := b.RebuildReduxThunk(t.Context(), receipts, reduxThunkStoreTestRules())
+			stats, err := b.RebuildReduxThunk(t.Context(), receipts, rules)
 			require.ErrorIs(t, err, ErrRebuildReduxThunk)
 			require.ErrorIs(t, err, tc.cause)
 			require.ErrorContains(t, err, tc.message)
