@@ -75,14 +75,8 @@ func (b *BuildStore) RebuildMediatR(ctx context.Context, receipts iter.Seq2[Pars
 			rebuildCallMoves: rebuildCallMoves{b: b, prefix: prefix, rowBytes: 16 << 20, label: "MediatR", inputRow: "edge row"},
 			needsAnchor:      true,
 			rules: rebuildStoreDispatchRules{
-				kind: rebuildMediatRHandlerKind,
-				action: func(n *graph.Node) (string, string) {
-					kind, reqType := rules.Handler(n)
-					if reqType == "" {
-						return "", ""
-					}
-					return kind, reqType
-				},
+				kind:   rebuildMediatRHandlerKind,
+				action: rules.Handler,
 				call:   read,
 				getter: rules.Getter,
 				rebind: func(e *graph.Edge, _, id string, matched bool) bool { return rules.Rebind(e, id, matched) },
@@ -123,7 +117,8 @@ func rebuildMediatRHandlerKind(kind graph.NodeKind) bool {
 }
 
 // y and j retain notification members in handler ID order, globally and by
-// workspace. c is the shared per-handler receipt claim.
+// workspace. W records whether all handlers of a type share one workspace.
+// c is the shared per-handler receipt claim.
 func (p *rebuildMediatRPass) collectHandlers(ctx context.Context) (bool, error) {
 	active := false
 	err := p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
@@ -152,6 +147,9 @@ func (p *rebuildMediatRPass) collectHandlers(ctx context.Context) (bool, error) 
 		}
 		if kind == rebuildMediatRNotification {
 			if err := p.put(p.key('y', reqType, n.ID), nil); err != nil {
+				return err
+			}
+			if err := p.addUnique(p.key('W', reqType), "="+n.WorkspaceID); err != nil {
 				return err
 			}
 			return p.put(p.key('j', reqType, n.WorkspaceID, n.ID), nil)
@@ -292,9 +290,13 @@ func (p *rebuildMediatRPass) planNotification(ctx context.Context, r row, e *gra
 		return err
 	}
 	if caller != nil {
-		if err := p.want(p.key('N', caller.ID)); err != nil {
+		// Native may see no caller in the receipts and use the global cohort.
+		if err := p.wantCandidateBuckets([]rebuildStoreCandidateWitness{{bucket: p.key('a', call.group, call.member)}}); err != nil {
 			return err
 		}
+	}
+	if err := p.want(p.key('N', e.From, call.member)); err != nil {
+		return err
 	}
 	return p.put(append(p.key('h'), r.key...), r.value)
 }
@@ -312,7 +314,7 @@ func (p *rebuildMediatRPass) proveCalls(ctx context.Context, receipts iter.Seq2[
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if err := p.recordNotificationCaller(raw, file, facts.EffectiveLanguage); err != nil {
+			if err := p.recordNotificationCaller(ctx, raw, file, facts.EffectiveLanguage); err != nil {
 				return err
 			}
 		}
@@ -363,18 +365,29 @@ func (p *rebuildMediatRPass) proveCalls(ctx context.Context, receipts iter.Seq2[
 	return refused.err()
 }
 
-func (p *rebuildMediatRPass) recordNotificationCaller(raw *graph.Node, file, lang string) error {
-	key := p.key('N', raw.ID)
-	state, err := p.state(key)
-	if err != nil || state == 0 {
-		return err
-	}
-	live, err := p.node(raw.ID)
-	if err != nil {
-		return err
-	}
-	exact := lang != "" && raw.FilePath == file && live != nil && live.ID == raw.ID && live.WorkspaceID == raw.WorkspaceID
-	return noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(exact))
+func (p *rebuildMediatRPass) recordNotificationCaller(ctx context.Context, raw *graph.Node, file, lang string) error {
+	prefix := p.key('N', raw.ID)
+	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		reqType, _, err := readKeyString(r.key[len(prefix):])
+		if err != nil {
+			return err
+		}
+		live, err := p.node(raw.ID)
+		if err != nil {
+			return err
+		}
+		exact := lang != "" && raw.FilePath == file
+		if live != nil {
+			exact = exact && live.ID == raw.ID && live.WorkspaceID == raw.WorkspaceID
+		} else if exact {
+			workspace, _, err := p.unique(p.key('W', reqType))
+			if err != nil {
+				return err
+			}
+			exact = workspace == "="+raw.WorkspaceID
+		}
+		return noteRebuildScratchState(p.put, r.key, r.value[0], rebuildScratchProofBit(exact))
+	})
 }
 
 // A producer proof certifies the installed payload, not an original source.
@@ -400,12 +413,27 @@ func (p *rebuildMediatRPass) notificationProved(ctx context.Context, old []byte,
 	if err != nil || state == 0 || state&rebuildStoreCandidateExtra != 0 {
 		return false, err
 	}
-	if caller != nil {
-		state, err := p.state(p.key('N', caller.ID))
-		if err != nil || state != rebuildScratchExact {
-			return false, err
-		}
+	callerState, err := p.state(p.key('N', e.From, call.member))
+	if err != nil {
+		return false, err
 	}
+	switch callerState {
+	case rebuildCapabilityWanted:
+		if caller != nil {
+			workspace, _, err := p.unique(p.key('W', call.member))
+			if err != nil || workspace != "="+caller.WorkspaceID {
+				return false, err
+			}
+			global, err := p.state(p.candidateProofKey(p.key('a', call.group, call.member)))
+			if err != nil || global == 0 || global&rebuildStoreCandidateExtra != 0 {
+				return false, err
+			}
+		}
+	case rebuildScratchExact:
+	default:
+		return false, nil
+	}
+	scoped := caller != nil || callerState == rebuildScratchExact
 	ok := true
 	err = p.handlers(ctx, prefix, func(id string) error {
 		claim, err := p.marked(p.key('c', id))
@@ -413,7 +441,7 @@ func (p *rebuildMediatRPass) notificationProved(ctx context.Context, old []byte,
 			return err
 		}
 		ok = ok && len(claim) > 1 && rebuildStoreCandidateExact(claim[0]) &&
-			(caller == nil || claim[0]&rebuildStoreOtherWorkspace == 0)
+			(!scoped || claim[0]&rebuildStoreOtherWorkspace == 0)
 		return nil
 	})
 	return ok, err

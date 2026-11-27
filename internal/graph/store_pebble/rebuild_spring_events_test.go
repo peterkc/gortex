@@ -1,8 +1,10 @@
 package store_pebble
 
 import (
+	"crypto/sha256"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -64,5 +66,40 @@ func TestRebuildSpringEventsRejectsSharedArcReceipt(t *testing.T) {
 		}
 		require.NoError(t, err)
 		require.Equal(t, RebuildSpringEventStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+	}
+}
+
+func TestRebuildSpringEventsArclessImplements(t *testing.T) {
+	const file = "Events.java"
+	arc := &graph.Edge{From: "pkg.Event", To: "other.Event", Kind: graph.EdgeImplements, FilePath: file, Line: 1}
+	call := &graph.Edge{From: "publish", To: "unresolved::old", Kind: graph.EdgeCalls, FilePath: file, Line: 2}
+	for _, stamped := range []bool{false, true} {
+		b, receipts := seedSyntheticCustody(t, ParseFacts{
+			EffectiveLanguage: "java",
+			File:              graph.FileMetaRow{FilePath: file},
+			Edges:             []*graph.Edge{arc, call},
+		})
+		key := pendingEdgeKey(arc)
+		if stamped {
+			encoded, err := pendingGet(b.pending, key, copyValue)
+			require.NoError(t, err)
+			require.NotEmpty(t, encoded)
+			digest := sha256.Sum256(encoded)
+			require.NoError(t, b.pending.Set(rebuildImplementsStampKey(key), digest[:], pebble.NoSync))
+		}
+		before := rebuildFrameworkCustodyRows(t, b)
+		stats, err := b.RebuildSpringEvents(t.Context(), receipts, RebuildSpringEventRules{
+			Listener: func(*graph.Node) string { return "" },
+			Event:    func(*graph.Edge) string { return "Event" },
+			Simple:   func(string) string { return "Event" },
+			Rebind:   func(*graph.Edge, string, string, bool) bool { return false },
+			Fanout:   func(*graph.Edge, string, string) *graph.Edge { return nil },
+		})
+		require.NoError(t, err)
+		require.Zero(t, stats)
+		require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		found, err := pendingGet(b.pending, nil, func([]byte) (bool, error) { return true, nil })
+		require.NoError(t, err)
+		require.False(t, found, "a degenerate arc must not write an empty key")
 	}
 }

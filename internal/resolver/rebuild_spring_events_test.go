@@ -327,8 +327,9 @@ func TestRebuildSpringEventsListenerReceiptFields(t *testing.T) {
 		refuse bool
 	}{
 		{"language and receipt file differ", graph.KindMethod, "Child", false},
-		{"kind differs", graph.KindFunction, "Child", true},
-		{"qualified marker differs", graph.KindMethod, "pkg.Child", true},
+		{"eligible kind differs", graph.KindFunction, "Child", false},
+		{"qualified marker differs", graph.KindMethod, "pkg.Child", false},
+		{"ineligible kind", graph.KindType, "Child", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := openRebuildGRPCBuild(t, input)
@@ -380,5 +381,106 @@ func TestRebuildSpringEventsStationarySoleListener(t *testing.T) {
 			require.Zero(t, stats)
 		}
 		require.Equal(t, before, rebuildEventSavedRows(t, b))
+	}
+}
+
+func TestRebuildSpringEventsStationaryPrimaryWithOccupiedFanout(t *testing.T) {
+	pub := springRebuildNode("publish", "")
+	first, second := springRebuildNode("A", "Event"), springRebuildNode("B", "Event")
+	call := springRebuildCall(pub.ID, first.ID, "Event", 10)
+	incumbent := *call
+	incumbent.To, incumbent.Meta = second.ID, nil
+	b := openRebuildGRPCBuild(t, rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, first, second}, call, &incumbent))
+	before := rebuildEventSavedRows(t, b)
+	receipt := rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, second}, call, &incumbent)
+	_, native := openRebuildEventStores(t, receipt)
+	require.Equal(t, 1, ResolveSpringEventCalls(native))
+	require.NotContains(t, rebuildEventSQLiteRows(native).edges, call)
+
+	stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(receipt), springRebuildSelection(t, b))
+	var refusal *store_pebble.RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(&incumbent)}, refusal)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
+}
+
+func TestRebuildSpringEventsReceiptArcEntrants(t *testing.T) {
+	pub := springRebuildNode("publish", "")
+	first := springRebuildNode("B", "Child")
+	call := springRebuildCall(pub.ID, first.ID, "Child", 10)
+	for _, tc := range []struct {
+		name     string
+		listener string
+		from     string
+		kind     graph.EdgeKind
+		refuse   bool
+	}{
+		{"earlier via Extends", "A", "Child", graph.EdgeExtends, true},
+		{"fanout via Implements", "C", "Child", graph.EdgeImplements, true},
+		{"unreachable arc", "A", "Other", graph.EdgeExtends, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entrant := springRebuildNode(tc.listener, "Base")
+			nodes := []*graph.Node{pub, first, entrant}
+			b := openRebuildGRPCBuild(t, rebuildEventFacts(springRebuildFile, "java", nodes, call))
+			before := rebuildEventSavedRows(t, b)
+			// Reach the live listener only by crossing both receipt-only arcs.
+			link := springRebuildArc(tc.from, "Middle", tc.kind, 2)
+			parent := springRebuildArc("Middle", "Base", graph.EdgeExtends, 3)
+			receipt := rebuildEventFacts(springRebuildFile, "java", nodes, call, link, parent)
+			stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(receipt), springRebuildSelection(t, b))
+			if tc.refuse {
+				var refusal *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				want := graph.EdgeIdentityFor(call)
+				want.To = entrant.ID
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refusal)
+				require.Zero(t, stats)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, store_pebble.RebuildSpringEventStats{Stubs: 1, Resolved: 1}, stats)
+			}
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildSpringEventsReceiptOnlyActivation(t *testing.T) {
+	pub := springRebuildNode("publish", "")
+	for _, tc := range []struct {
+		name, liveType, rawType, oldTo, refusalTo string
+	}{
+		{"no listeners on either side", "", "", pub.ID, ""},
+		{"unrelated entrant activates reset", "", "Other", pub.ID, "unresolved::*.Event"},
+		{"unrelated entrant cannot reset unresolved Call", "", "Other", "unresolved::old", ""},
+		{"entrant binds even with no live listeners", "", "Event", "unresolved::old", springRebuildFile + "::A"},
+		{"unproved sole listener cannot reset stationary Call", "Event", "", springRebuildFile + "::A", ""},
+		{"unrelated entrant makes sole-listener loss matter", "Event", "Other", springRebuildFile + "::A", "unresolved::*.Event"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live, raw := springRebuildNode("A", tc.liveType), springRebuildNode("A", tc.rawType)
+			call := springRebuildCall(pub.ID, tc.oldTo, "Event", 10)
+			b := openRebuildGRPCBuild(t, rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, live}, call))
+			before := rebuildEventSavedRows(t, b)
+			receipt := rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, raw}, call)
+			stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(receipt), springRebuildSelection(t, b))
+			switch {
+			case tc.refusalTo != "":
+				var refusal *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				want := graph.EdgeIdentityFor(call)
+				want.To = tc.refusalTo
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refusal)
+				require.Zero(t, stats)
+			case tc.liveType == "":
+				require.NoError(t, err)
+				require.Zero(t, stats)
+			default:
+				require.NoError(t, err)
+				require.Equal(t, store_pebble.RebuildSpringEventStats{Stubs: 1, Resolved: 1}, stats)
+			}
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
 	}
 }

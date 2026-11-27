@@ -31,14 +31,15 @@ type RebuildSpringEventStats struct{ Stubs, Resolved, Moves, Adds uint64 }
 
 type rebuildSpringEventPass struct {
 	rebuildCallMoves
-	rules      RebuildSpringEventRules
-	stats      RebuildSpringEventStats
-	refused    rebuildScratchRefusals
-	guard      bool
-	guardProof bool
-	entrants   bool
-	hasAdds    bool
-	calls      uint64
+	rules           RebuildSpringEventRules
+	stats           RebuildSpringEventStats
+	refused         rebuildScratchRefusals
+	liveListeners   uint64
+	guardProof      bool
+	entrants        bool
+	entrantListener bool
+	hasAdds         bool
+	calls           uint64
 }
 
 // RebuildSpringEvents runs once on the settled private graph. It proves move
@@ -82,7 +83,7 @@ func (b *BuildStore) RebuildSpringEvents(ctx context.Context, receipts iter.Seq2
 	if err := p.record(ctx, receipts); err != nil {
 		return stats, err
 	}
-	if !p.guard {
+	if p.liveListeners == 0 {
 		if p.entrants {
 			return stats, p.proveListenerEntrants(ctx)
 		}
@@ -147,7 +148,7 @@ func (p *rebuildSpringEventPass) captureListeners(ctx context.Context) error {
 		if err := p.input(r.key, r.value); err != nil {
 			return err
 		}
-		p.guard = true
+		p.liveListeners++
 		if err := p.put(p.key('n', n.ID), []byte{rebuildCapabilityWanted}); err != nil {
 			return err
 		}
@@ -276,8 +277,13 @@ func (p *rebuildSpringEventPass) record(ctx context.Context, receipts iter.Seq2[
 				if err != nil {
 					return err
 				}
-				if len(claim) > 1 {
+				switch {
+				case len(claim) > 1:
 					if err := noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(valid)); err != nil {
+						return err
+					}
+				case claim == nil && valid:
+					if err := p.recordArcEntrant(raw); err != nil {
 						return err
 					}
 				}
@@ -300,6 +306,20 @@ func (p *rebuildSpringEventPass) record(ctx context.Context, receipts iter.Seq2[
 	})
 }
 
+// b contains receipt arcs that can reach listeners absent from the live walk.
+func (p *rebuildSpringEventPass) recordArcEntrant(raw *graph.Edge) error {
+	child, parent := p.rules.Simple(raw.From), p.rules.Simple(raw.To)
+	if child == "" || parent == "" || child == parent {
+		return nil
+	}
+	live, err := p.present(p.key('a', child, parent))
+	if err != nil || live {
+		return err
+	}
+	p.entrants = true
+	return p.put(p.key('b', child, parent), nil)
+}
+
 func (p *rebuildSpringEventPass) recordListener(raw *graph.Node, file, lang string) error {
 	t := p.rules.Listener(raw)
 	role := raw.ID != "" && t != "" && springEventListenerKind(raw.Kind)
@@ -315,7 +335,7 @@ func (p *rebuildSpringEventPass) recordListener(raw *graph.Node, file, lang stri
 	}
 	if role && !present {
 		// An entrant is not an exact proof, even if this is an admitted receipt.
-		p.entrants = true
+		p.entrants, p.entrantListener = true, true
 		if err := p.put(p.key('j', cohort, raw.ID), nil); err != nil {
 			return err
 		}
@@ -323,12 +343,8 @@ func (p *rebuildSpringEventPass) recordListener(raw *graph.Node, file, lang stri
 	if state == 0 {
 		return nil
 	}
-	live, err := pendingGet(p.b.pending, pendingNodeKey(raw.ID), decodeNode)
-	if err != nil {
-		return err
-	}
-	valid := role && present && lang != "" && raw.FilePath == file && live != nil &&
-		raw.ID == live.ID && raw.Kind == live.Kind && t == p.rules.Listener(live)
+	// The live posting already establishes kind eligibility and simple type.
+	valid := role && present && lang != "" && raw.FilePath == file
 	return p.note(key, rebuildScratchProofBit(valid))
 }
 
@@ -373,12 +389,12 @@ func (p *rebuildSpringEventPass) callProved(old []byte) (bool, error) {
 // visited set stay in Pebble, as do the final listener postings sorted by ID.
 // A proved path need not use the same arc as another path to that listener.
 func (p *rebuildSpringEventPass) listeners(ctx context.Context, root string, result byte) ([]byte, string, error) {
-	arcs, listeners := byte('a'), byte('l')
+	arcs, listeners := "a", "l"
 	switch result {
 	case 'T':
-		arcs = 'A'
+		arcs = "A"
 	case 'J':
-		listeners = 'j'
+		arcs, listeners = "ab", "lj"
 	}
 	out := p.key(result, root)
 	done := p.key('c', string(result), root)
@@ -418,34 +434,38 @@ func (p *rebuildSpringEventPass) listeners(ctx context.Context, root string, res
 		if err != nil {
 			return nil, "", err
 		}
-		parents := p.key(arcs, string(t))
-		if err := pendingVisit(ctx, p.b.pending, parents, func(r row) error {
-			parent, _, err := readKeyString(r.key[len(parents):])
-			if err != nil {
-				return err
-			}
-			return enqueue(parent)
-		}); err != nil {
-			return nil, "", err
-		}
-		posting := p.key(listeners, string(t))
-		if err := pendingVisit(ctx, p.b.pending, posting, func(r row) error {
-			id, _, err := readKeyString(r.key[len(posting):])
-			if err != nil {
-				return err
-			}
-			if result == 'T' {
-				state, err := p.state(p.key('n', id))
-				if err != nil || state != rebuildScratchExact {
+		for col := range len(arcs) {
+			parents := p.key(arcs[col], string(t))
+			if err := pendingVisit(ctx, p.b.pending, parents, func(r row) error {
+				parent, _, err := readKeyString(r.key[len(parents):])
+				if err != nil {
 					return err
 				}
+				return enqueue(parent)
+			}); err != nil {
+				return nil, "", err
 			}
-			if first == "" || id < first {
-				first = id
+		}
+		for col := range len(listeners) {
+			posting := p.key(listeners[col], string(t))
+			if err := pendingVisit(ctx, p.b.pending, posting, func(r row) error {
+				id, _, err := readKeyString(r.key[len(posting):])
+				if err != nil {
+					return err
+				}
+				if result == 'T' {
+					state, err := p.state(p.key('n', id))
+					if err != nil || state != rebuildScratchExact {
+						return err
+					}
+				}
+				if first == "" || id < first {
+					first = id
+				}
+				return p.put(append(bytes.Clone(out), r.key[len(posting):]...), nil)
+			}); err != nil {
+				return nil, "", err
 			}
-			return p.put(append(bytes.Clone(out), r.key[len(posting):]...), nil)
-		}); err != nil {
-			return nil, "", err
 		}
 	}
 	for _, prefix := range [...][]byte{queue, visited} {
@@ -484,11 +504,11 @@ func (p *rebuildSpringEventPass) planMoves(ctx context.Context) error {
 		}
 		p.stats.Resolved += count
 		p.hasAdds = p.hasAdds || count > 1
-		if !p.guard {
+		if p.liveListeners == 0 {
 			return nil
 		}
 		if !p.rules.Rebind(e, t, first, count > 0) {
-			if count == 1 {
+			if count != 0 {
 				return p.put(append(p.column('i'), old...), nil)
 			}
 			return nil
@@ -534,13 +554,16 @@ func (p *rebuildSpringEventPass) proveMoves(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if p.liveListeners == 1 && !p.entrantListener {
+			return nil // Dropping the sole listener also disables native resets.
+		}
 		t := p.rules.Event(e)
 		_, first, err := p.listeners(ctx, p.rules.Simple(t), 'T')
 		if err != nil || first == e.To {
 			return err
 		}
-		// If this listener was absent, a native reset may move this Call.
-		if p.rules.Rebind(e, t, "", false) {
+		// Losing the first listener can promote a later one or reset this Call.
+		if p.rules.Rebind(e, t, first, first != "") {
 			p.refused.add(graph.EdgeIdentityFor(e), pendingEdgeKey(e))
 		}
 		return nil
@@ -631,7 +654,7 @@ func (p *rebuildSpringEventPass) checkListenerEntrants(ctx context.Context, e *g
 	if err != nil {
 		return err
 	}
-	if !p.guard && earlier == "" {
+	if p.liveListeners == 0 && earlier == "" && p.entrantListener {
 		// A receipt-only listener can activate resets even for unrelated events.
 		reset := *e
 		if p.rules.Rebind(&reset, t, "", false) {
@@ -651,7 +674,7 @@ func (p *rebuildSpringEventPass) checkListenerEntrants(ctx context.Context, e *g
 		}
 		if first == "" || id < first {
 			changed := *e
-			if p.rules.Rebind(&changed, t, id, true) || p.guard {
+			if p.rules.Rebind(&changed, t, id, true) || p.liveListeners != 0 {
 				p.refused.add(graph.EdgeIdentityFor(&changed), pendingEdgeKey(&changed))
 			}
 			return nil

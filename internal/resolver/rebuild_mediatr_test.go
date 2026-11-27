@@ -183,16 +183,24 @@ func TestRebuildMediatRNotificationProofTerms(t *testing.T) {
 		rawCall    *graph.Edge
 		noCaller   bool
 		wantRefuse bool
+		remoteLive bool
 	}{
-		{"raw Call claim", caller, second, other, &wrongCall, false, true},
-		{"extra handler", caller, second, &entrant, call, false, true},
-		{"caller receipt", nil, second, other, call, false, true},
-		{"handler receipt", caller, nil, other, call, false, true},
-		{"handler workspace", caller, &changeWorkspace, other, call, false, true},
-		{"global scope without caller", nil, &changeWorkspace, other, call, true, false},
+		{"raw Call claim", caller, second, other, &wrongCall, false, true, false},
+		{"extra handler", caller, second, &entrant, call, false, true, false},
+		{"no caller receipt and one workspace", nil, second, other, call, false, false, false},
+		{"handler receipt", caller, nil, other, call, false, true, false},
+		{"handler workspace", caller, &changeWorkspace, other, call, false, true, false},
+		{"global scope without caller", nil, &changeWorkspace, other, call, true, false, false},
+		{"receipt-only caller in the shared workspace", caller, second, other, call, true, false, false},
+		{"receipt-only caller filters a handler", caller, &changeWorkspace, other, call, true, true, false},
+		{"no caller receipt and two workspaces", nil, &changeWorkspace, other, call, false, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			live := []*graph.Node{first, second, other}
+			liveSecond := second
+			if tc.remoteLive {
+				liveSecond = &changeWorkspace
+			}
+			live := []*graph.Node{first, liveSecond, other}
 			if !tc.noCaller {
 				live = append(live, caller)
 			}
