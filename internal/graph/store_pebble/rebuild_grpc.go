@@ -30,10 +30,10 @@ type RebuildGRPCStats struct {
 }
 
 type rebuildGRPC struct {
-	b          *BuildStore
-	threshold  int
-	unflushed  int
-	stats      RebuildGRPCStats
+	b         *BuildStore
+	threshold int
+	unflushed int
+	stats     RebuildGRPCStats
 }
 
 // RebuildGRPC runs on a quiet private graph at the first framework turn.
@@ -58,7 +58,9 @@ func (b *BuildStore) RebuildGRPC(ctx context.Context, receipts iter.Seq2[ParseFa
 	if occupied {
 		return stats, invalid("gRPC scratch range occupied")
 	}
-	defer func() { err = errors.Join(err, b.pending.DeleteRange(rebuildGRPCPrefix, prefixEnd(rebuildGRPCPrefix), pebble.NoSync)) }()
+	defer func() {
+		err = errors.Join(err, b.pending.DeleteRange(rebuildGRPCPrefix, prefixEnd(rebuildGRPCPrefix), pebble.NoSync))
+	}()
 	p := rebuildGRPC{b: b, threshold: spillAt}
 	if err := p.capture(ctx); err != nil {
 		return stats, err
