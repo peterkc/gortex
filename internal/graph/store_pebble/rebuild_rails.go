@@ -123,6 +123,9 @@ func (b *BuildStore) RebuildRails(ctx context.Context, receipts iter.Seq2[ParseF
 	if err := p.capture(ctx); err != nil || p.stats.Stubs == 0 {
 		return p.stats, err
 	}
+	if err := p.captureCallClaims(ctx); err != nil {
+		return stats, err
+	}
 	if err := p.captureNodes(ctx); err != nil {
 		return stats, err
 	}
@@ -165,7 +168,7 @@ func (p *rebuildRails) capture(ctx context.Context) error {
 			return err
 		}
 		if raw != nil {
-			if err := p.claim(raw, old); err != nil {
+			if err := p.put(append(p.column('L'), raw...), nil); err != nil {
 				return err
 			}
 		}
@@ -180,6 +183,28 @@ func (p *rebuildRails) capture(ctx context.Context) error {
 		}
 		p.stats.Stubs++
 		return p.put(append(p.column('h'), old...), raw)
+	})
+}
+
+// A settled or non-frozen Call can own a frozen Call's raw receipt.
+func (p *rebuildRails) captureCallClaims(ctx context.Context) error {
+	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
+		kind, err := rebuildAttributionEdgeKind(r.key)
+		if err != nil || kind != graph.EdgeCalls {
+			return err
+		}
+		raw, err := rebuildReceiptKey(snap, r.key)
+		if errors.Is(err, ErrRebuildUnknownProvenance) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		wanted, err := p.present(append(p.column('L'), raw...))
+		if err != nil || !wanted {
+			return err
+		}
+		return p.claim(raw, r.key)
 	})
 }
 
