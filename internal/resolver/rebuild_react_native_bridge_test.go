@@ -420,6 +420,7 @@ func TestRebuildReactNativeBridgeEligibility(t *testing.T) {
 		{"RN unselected", "typescript", "Calendar", graph.EdgeCalls, true, 0},
 		{"no admitted family", "go", "Calendar", graph.EdgeCalls, false, 0},
 		{"web only", "typescript", "Calendar", graph.EdgeCalls, false, 1},
+		{"Vue only", "vue", "Calendar", graph.EdgeCalls, false, 1},
 		{"Apple only", "objc", "Calendar", graph.EdgeCalls, false, 1},
 		{"JVM only", "java", "Calendar", graph.EdgeCalls, false, 1},
 		{"non-Calls", "typescript", "Calendar", graph.EdgeReferences, false, 0},

@@ -88,13 +88,6 @@ func (p *rebuildKMPPass) put(key, value []byte) error {
 	return p.b.putRebuildScratch(key, value, rebuildKMPRowLimit, "KMP expect/actual")
 }
 
-func rebuildKMPCheckNodeSize(r row) error {
-	if len(r.key)+len(r.value) > rebuildKMPRowLimit {
-		return fmt.Errorf("%w: KMP expect/actual node row", ErrRebuildLinkInputSize)
-	}
-	return nil
-}
-
 func rebuildKMPHasKotlin(ctx context.Context, view RebuildView) (bool, error) {
 	// A normalized Kotlin marker supplies both native registry gates:
 	// the JVM family and the Kotlin marker. Neither restricts endpoints.
@@ -127,8 +120,9 @@ func (p *rebuildKMPPass) collect(ctx context.Context, view RebuildView) error {
 		default:
 			return nil
 		}
-		if err := rebuildKMPCheckNodeSize(r); err != nil {
-			return err
+		// FR-57 deliberately refuses oversized eligible input rows by type.
+		if len(r.key)+len(r.value) > rebuildKMPRowLimit {
+			return fmt.Errorf("%w: KMP expect/actual node row", ErrRebuildLinkInputSize)
 		}
 		// Only the fields read by kmpEdge or the join need to enter scratch.
 		projection, err := encodeNode(&graph.Node{
@@ -204,9 +198,6 @@ func (p *rebuildKMPPass) prove(ctx context.Context, receipts iter.Seq2[ParseFact
 	if err := p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
 		n, err := checkedRebuildLightNode(r, "KMP expect/actual")
 		if err != nil || !isRebuildKotlin(n.Language) {
-			return err
-		}
-		if err := rebuildKMPCheckNodeSize(r); err != nil {
 			return err
 		}
 		return p.put(rebuildKMPKey('k', n.ID), []byte{rebuildCapabilityWanted})

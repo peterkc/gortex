@@ -56,6 +56,10 @@ func TestRebuildKMPExpectActualMuxAndCustody(t *testing.T) {
 			Edges: []*graph.Edge{stationary}},
 		ParseFacts{EffectiveLanguage: "java", File: graph.FileMetaRow{FilePath: actual.FilePath}, Nodes: []*graph.Node{actual}},
 		ParseFacts{EffectiveLanguage: "kotlin", File: graph.FileMetaRow{FilePath: marker.FilePath}, Nodes: []*graph.Node{marker}})
+	// The oversized Kotlin row cannot pair, and the small marker already
+	// proves admission. Its metadata must not limit marker discovery.
+	b.AddNode(&graph.Node{ID: "decoy.kt", Kind: graph.KindFile, FilePath: "decoy.kt", Language: "kotlin",
+		Meta: map[string]any{"padding": strings.Repeat("x", rebuildKMPRowLimit)}})
 	stats, err = b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, stats.Edges)

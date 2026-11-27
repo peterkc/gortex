@@ -91,6 +91,7 @@ func TestRebuildExpoModuleBridgeFamilyGroups(t *testing.T) {
 		wantEdges int
 	}{
 		{"web and Apple", []string{"TypeScript", " Swift "}, 1},
+		{"Vue and Apple", []string{"vue", "swift"}, 1},
 		{"web and JVM", []string{"tsx", "Java"}, 1},
 		{"web only", []string{"javascript"}, 0},
 		{"Apple and JVM without web", []string{"swift", "kotlin"}, 0},
