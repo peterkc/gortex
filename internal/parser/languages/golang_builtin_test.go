@@ -87,3 +87,43 @@ func TestGoBuiltinPackageScopeFacts(t *testing.T) {
 		})
 	}
 }
+
+func TestGoExtractorBuiltinReceiverAdditionalScopes(t *testing.T) {
+	for _, tc := range []struct{ name, declaration, want string }{
+		{"function literal", "func use() { _ = func() { _ = len(nil) } }", ""},
+		{"receiver", "type Fn func([]int) int\nfunc (len Fn) use() { _ = len(nil) }", "shadowed"},
+		{"named result", "func use() (len func([]int) int) { _ = len(nil); return }", "shadowed"},
+		{"type parameter", "func use[len ~int]() { _ = len(1) }", "shadowed"},
+		{"range", "func use(fs []func([]int) int) { for _, len := range fs { _ = len(nil) } }", ""},
+		{"receive", "func use(ch chan func([]int) int) { select { case len := <-ch: _ = len(nil) } }", ""},
+		{"type switch", "func use(v any) { switch len := v.(type) { case func([]int) int: _ = len(nil) } }", ""},
+		{"literal does not bind the outer call", "func use() { _ = func() { var len int; _ = len }; _ = len(nil) }", "unbound"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const path = "example.go"
+			src := []byte("package sample\n" + tc.declaration + "\n")
+			ext := NewGoExtractor()
+			native, err := ext.Extract(path, src)
+			require.NoError(t, err)
+			defer native.ReleaseTree()
+			captured, err := ext.ExtractWithOptions(path, src, parser.ExtractionOptions{CaptureBuiltinReceiverFacts: true})
+			require.NoError(t, err)
+			defer captured.ReleaseTree()
+			base := edgesOfKind(native.Edges, graph.EdgeCalls)
+			calls := edgesOfKind(captured.Edges, graph.EdgeCalls)
+			require.Len(t, base, 1)
+			require.Len(t, calls, 1)
+			require.Equal(t, "unresolved::len", calls[0].To)
+			got, ok := calls[0].BuiltinReceiverHint()
+			require.Equal(t, tc.want != "", ok)
+			want := *base[0]
+			if tc.want != "" {
+				hint := graph.BuiltinReceiverHint{Language: "go", Form: tc.want, Name: "len"}
+				require.Equal(t, hint, got)
+				want.Meta = maps.Clone(want.Meta)
+				want.SetBuiltinReceiverHint(hint)
+			}
+			require.Equal(t, &want, calls[0])
+		})
+	}
+}

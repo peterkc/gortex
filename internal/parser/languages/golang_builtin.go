@@ -44,8 +44,9 @@ func goBuiltinPackageScope(root *sitter.Node, src []byte) string {
 	return strings.Join(append([]string{pkg}, slices.Sorted(maps.Keys(names))...), " ")
 }
 
-// Use AST ancestry, not the line-based graph caller, to identify the scope.
-// Function literals and calls outside a declaration body are not proved here.
+// Check the Call's AST ancestry, not its line-based graph owner. This is
+// evidence about the declaration body only; local block lifetimes and nested
+// function literals do not prove absence. Package scope is checked separately.
 func goBuiltinCallForm(call *sitter.Node, name string, src []byte, scopes map[uintptr]map[string]string) string {
 	for child, parent := call, call.Parent(); parent != nil; child, parent = parent, parent.Parent() {
 		switch parent.Type() {

@@ -8,6 +8,8 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 )
 
+// Each script block is parsed by its own delegate. A captured host hint is
+// raw evidence only: it cannot prove absence of a binding in another block.
 func TestBuiltinReceiverFactsInInlineScriptHosts(t *testing.T) {
 	for _, tc := range []struct {
 		ext                 parser.Extractor
