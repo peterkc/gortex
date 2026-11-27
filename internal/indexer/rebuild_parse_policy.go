@@ -67,6 +67,17 @@ func (idx *Indexer) installRebuildParsePolicy(policy rebuildParsePolicy) {
 // binary layout or the shared native contract extraction policy.
 const rebuildContractCaptureVersion = 1
 
+const rebuildBuiltinReceiverCaptureVersion = 1
+
+// The same language selection controls parser opt-in and receipt invalidation.
+func capturesRebuildBuiltinReceiverFacts(lang string) bool {
+	switch lang {
+	case "go", "javascript", "typescript", "vue", "svelte", "astro", "html":
+		return true
+	}
+	return false
+}
+
 // The rebuild worker binds the effective event-bus override once. Both the
 // file-node stamp and capture use the same snapshot as every key lookup.
 type rebuildContractPolicy struct {
@@ -100,8 +111,16 @@ func rebuildContractRecipeSuffix(settings []byte) []byte {
 // the current bytes may no longer be available for a content probe.
 func (idx *Indexer) rebuildExtractorRecipe(base rebuildDigest, input rebuildInput) rebuildDigest {
 	ordinary := idx.rebuildBaseExtractorRecipe(base, input)
-	b := append([]byte("gortex/rebuild/contract-parse\x00"), ordinary[:]...)
+	domain := "gortex/rebuild/contract-parse\x00"
+	captureReceiver := capturesRebuildBuiltinReceiverFacts(input.Language)
+	if captureReceiver {
+		domain = "gortex/rebuild/contract-parse-receiver\x00"
+	}
+	b := append([]byte(domain), ordinary[:]...)
 	b = append(b, store_pebble.ContractParseFactsFormat)
+	if captureReceiver {
+		b = binary.AppendUvarint(b, rebuildBuiltinReceiverCaptureVersion)
+	}
 	b = binary.AppendUvarint(b, rebuildContractCaptureVersion)
 	b = binary.AppendUvarint(b, postExtractionPolicyVersion)
 	b = binary.AppendUvarint(b, uint64(extractorVersionForLang(input.Language)))

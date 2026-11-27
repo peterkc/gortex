@@ -173,6 +173,9 @@ func (idx *Indexer) extractPreparedRebuildFileInto(ctx context.Context, rel stri
 	}
 	graphPath := pathkey.Normalize(rel)
 	lang := ext.Language()
+	if capture, ok := ext.(parser.OptionsExtractor); ok && capturesRebuildBuiltinReceiverFacts(lang) {
+		ext = rebuildBuiltinReceiverExtractor{Extractor: ext, capture: capture}
+	}
 	admission := newNativeParseExtractionAdmission(0, nil, idx.nativeParseAdmission.Load())
 	result, skipped, err := idx.extractFileCtxWithRawLease(ctx, admission, nil, nil, nil,
 		filepath.Join(idx.rootPath, filepath.FromSlash(rel)), graphPath, lang, ext, prepared)
@@ -358,4 +361,20 @@ func (idx *Indexer) captureRebuildContractBodies(ctx context.Context, path, lang
 	var err error
 	facts.Handlers, err = contracts.CaptureFileHandlerFacts(ctx, result.Nodes, rawLines, handlerLang, tree)
 	return err
+}
+
+// The adapter is local to rebuild extraction, after optional tree retention is
+// selected. It preserves admission's asset class and the normal timeout path.
+type rebuildBuiltinReceiverExtractor struct {
+	parser.Extractor
+	capture parser.OptionsExtractor
+}
+
+func (e rebuildBuiltinReceiverExtractor) AssetClass() parser.AssetClass {
+	return parser.AssetClassOf(e.Extractor)
+}
+
+func (e rebuildBuiltinReceiverExtractor) ExtractWithOptions(path string, src []byte, opts parser.ExtractionOptions) (*parser.ExtractionResult, error) {
+	opts.CaptureBuiltinReceiverFacts = true
+	return e.capture.ExtractWithOptions(path, src, opts)
 }

@@ -16,11 +16,13 @@ type Extractor interface {
 }
 
 // ExtractionOptions is immutable request-scoped parser configuration. Its
-// fields remain private so an extractor cannot mutate repository-owned state.
-// Use NewExtractionOptions to construct a normalized value and accessors to
-// obtain defensive copies for serialization.
+// reference data remains private so an extractor cannot mutate repository-owned state.
+// Use NewExtractionOptions to normalize the Temporal helper names.
 type ExtractionOptions struct {
 	temporalEnvHelpers []string
+
+	// CaptureBuiltinReceiverFacts records syntax evidence for the Pebble rebuild.
+	CaptureBuiltinReceiverFacts bool
 }
 
 // NewExtractionOptions normalizes Temporal helper names by trimming whitespace,
