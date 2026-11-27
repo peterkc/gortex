@@ -156,3 +156,70 @@ func TestRebuildMediatRRequiresRequestTypeForAnchor(t *testing.T) {
 	require.Zero(t, stats)
 	require.Equal(t, before, rebuildEventSavedRows(t, b))
 }
+
+func TestRebuildMediatRNotificationProofTerms(t *testing.T) {
+	const file = "Notifications.cs"
+	node := func(name string, handler bool) *graph.Node {
+		n := &graph.Node{ID: file + "::" + name, Kind: graph.KindMethod, FilePath: file, Language: "csharp"}
+		if handler {
+			n.Meta = map[string]any{"mediatr_kind": "notification", "mediatr_request_type": "Message"}
+		}
+		return n
+	}
+	caller, first, second, other := node("caller", false), node("A", true), node("B", true), node("C", false)
+	call := &graph.Edge{From: caller.ID, To: "unresolved::old", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
+		Meta: map[string]any{"via": mediatrVia, "mediatr_kind": "notification", "mediatr_request_type": "Message"}}
+	changeWorkspace := *second
+	changeWorkspace.WorkspaceID = "other"
+	entrant := *other
+	entrant.Meta = second.Meta
+	wrongCall := *call
+	wrongCall.Meta = map[string]any{"via": mediatrVia, "mediatr_kind": "notification", "mediatr_request_type": "Other"}
+	for _, tc := range []struct {
+		name       string
+		rawCaller  *graph.Node
+		rawSecond  *graph.Node
+		rawOther   *graph.Node
+		rawCall    *graph.Edge
+		noCaller   bool
+		wantRefuse bool
+	}{
+		{"raw Call claim", caller, second, other, &wrongCall, false, true},
+		{"extra handler", caller, second, &entrant, call, false, true},
+		{"caller receipt", nil, second, other, call, false, true},
+		{"handler receipt", caller, nil, other, call, false, true},
+		{"handler workspace", caller, &changeWorkspace, other, call, false, true},
+		{"global scope without caller", nil, &changeWorkspace, other, call, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live := []*graph.Node{first, second, other}
+			if !tc.noCaller {
+				live = append(live, caller)
+			}
+			raw := []*graph.Node{first}
+			for _, n := range []*graph.Node{tc.rawCaller, tc.rawSecond, tc.rawOther} {
+				if n != nil {
+					raw = append(raw, n)
+				}
+			}
+			b := openRebuildGRPCBuild(t, rebuildEventFacts(file, "csharp", live, call))
+			before := rebuildEventSavedRows(t, b)
+			receipt := rebuildEventFacts(file, "csharp", raw, tc.rawCall)
+			selection, err := NewFrameworkSynthesizerSelection([]string{SynthMediatR})
+			require.NoError(t, err)
+			stats, err := RunRebuildMediatR(t.Context(), b, rebuildGRPCReceipts(receipt), selection)
+			if !tc.wantRefuse {
+				require.NoError(t, err)
+				require.Equal(t, store_pebble.RebuildMediatRStats{Stubs: 1, Resolved: 2, Moves: 1, Adds: 1}, stats)
+				return
+			}
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			want := graph.EdgeIdentityFor(call)
+			want.To = first.ID
+			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
