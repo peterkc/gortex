@@ -842,6 +842,13 @@ func buildRebuildStages(
 		if familyDrops != 0 {
 			logger.Info("rebuild framework family gate applied to private build", zap.Uint64("drops", familyDrops))
 		}
+		djangoClaims, err := resolver.RunRebuildDjangoDescriptor(ctx, private, receipts, requestedSelection)
+		if err != nil {
+			return err
+		}
+		if djangoClaims != 0 {
+			logger.Info("rebuild Django descriptor applied to private build", zap.Uint64("claims", djangoClaims))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

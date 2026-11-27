@@ -66,6 +66,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"function-value callbacks", store_pebble.ErrRebuildFnValue, 92},
 		{"value refs", store_pebble.ErrRebuildValueRefs, 94},
 		{"framework family gate", store_pebble.ErrRebuildFrameworkFamilyGate, 95},
+		{"Django descriptor", store_pebble.ErrRebuildDjangoDescriptor, 96},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {

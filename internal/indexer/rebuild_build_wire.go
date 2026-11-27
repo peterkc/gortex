@@ -221,6 +221,7 @@ var rebuildFailureKinds = [...]error{
 	nil, // 93: deferred Pascal form
 	store_pebble.ErrRebuildValueRefs,
 	store_pebble.ErrRebuildFrameworkFamilyGate,
+	store_pebble.ErrRebuildDjangoDescriptor,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
