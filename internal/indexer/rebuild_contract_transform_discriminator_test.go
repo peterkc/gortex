@@ -11,6 +11,7 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 // D82 discriminator, not a production regression test yet: the primary
@@ -85,6 +86,55 @@ func TestRebuildContractTransformedHandlerPrecomputation(t *testing.T) {
 	contracts.EnrichHTTPContractWithTree(&got, splitLines(raw), result.Nodes, "go", result.Tree)
 	require.Equal(t, "int", got.Meta["response_type"], "prepared AST overlay")
 	require.Equal(t, native[0].Meta["response_type"], got.Meta["response_type"], "D82 primary one-parse parity")
+}
+
+// This diagnostic isolates the native class-name fact from linked winner
+// selection. Its second resolver call is a test oracle for the prepared AST,
+// not a permitted parse on the build path.
+func TestRebuildContractTransformedLaravelClassDiscriminator(t *testing.T) {
+	const path = "routes.php"
+	const useLine = `use Acme\OrderController as Orders;`
+	raw := []byte("<?php\nnamespace Routes;\n" + useLine + "\nRoute::get('/orders', [Orders::class, 'index']);\n")
+	// An admitted command transform can erase a use statement without
+	// changing either file length or the registration's line/byte offsets.
+	prepared := bytes.Replace(raw, []byte(useLine), bytes.Repeat([]byte(" "), len(useLine)), 1)
+	require.NotEqual(t, raw, prepared)
+	require.Len(t, prepared, len(raw))
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, path), string(raw))
+	idx := newTestIndexer(graph.New())
+	idx.SetRootPath(root)
+	t.Cleanup(idx.Close)
+	_, facts, err := idx.extractPreparedRebuildFileWithContractFacts(t.Context(), path, languages.NewPHPExtractor(), raw, prepared)
+	require.NoError(t, err)
+	require.NotNil(t, facts)
+	var routes []contracts.Contract
+	for _, record := range facts.Records {
+		if record.ID == "http::GET::/orders" && record.Role == contracts.RoleProvider {
+			routes = append(routes, record)
+		}
+	}
+	require.Len(t, routes, 1)
+	route := routes[0]
+	require.Equal(t, 4, route.Line)
+	require.Equal(t, "index", route.Meta["handler_ident"])
+	require.NotEqual(t, "partial", route.Meta["schema_source"])
+	require.NotEqual(t, "extracted", route.Meta["schema_source"])
+	class, ok := route.Meta["handler_class"].(string)
+	require.True(t, ok)
+	require.Equal(t, "Orders", class)
+
+	// Native resolveProviderHandlers resolves this class and line against
+	// contractFileSrc (raw), not the per-file detector's prepared source.
+	nativeSrc := idx.contractFileSrc(path)
+	require.Equal(t, raw, nativeSrc)
+	nativeResolve := languages.PHPClassNameResolver(nativeSrc)
+	preparedResolve := languages.PHPClassNameResolver(prepared)
+	require.NotNil(t, nativeResolve)
+	require.NotNil(t, preparedResolve)
+	require.Equal(t, `Acme\OrderController`, nativeResolve(class, route.Line))
+	require.Equal(t, `Routes\Orders`, preparedResolve(class, route.Line))
 }
 
 func TestRebuildContractTransformChild(t *testing.T) {
