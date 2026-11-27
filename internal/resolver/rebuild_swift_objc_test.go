@@ -439,7 +439,7 @@ func TestRebuildSwiftObjCProtocolReceiptElection(t *testing.T) {
 func TestRebuildSwiftObjCProtocolOrder(t *testing.T) {
 	facts, _ := rebuildSwiftObjCFixture(0)
 	winner := facts[2].Nodes[0]
-	// Both decoys sort after the winner, but neither is an @objc protocol.
+	// The Swift decoys sort after the winner, but neither is an @objc protocol.
 	wrongKind := *winner
 	wrongKind.ID += ".type"
 	wrongKind.Kind = graph.KindType
@@ -457,6 +457,14 @@ func TestRebuildSwiftObjCProtocolOrder(t *testing.T) {
 		EffectiveLanguage: "swift",
 		File:              graph.FileMetaRow{FilePath: loser.FilePath, NodeCount: 1},
 		Nodes:             []*graph.Node{&loser},
+	})
+	foreign := *winner
+	foreign.ID = "z/Protocol.java::BridgeDelegate"
+	foreign.FilePath, foreign.Language = "z/Protocol.java", "java"
+	facts = append(facts, store_pebble.ParseFacts{
+		EffectiveLanguage: foreign.Language,
+		File:              graph.FileMetaRow{FilePath: foreign.FilePath, NodeCount: 1},
+		Nodes:             []*graph.Node{&foreign},
 	})
 	var all store_pebble.ParseFacts
 	for _, f := range facts {
