@@ -40,14 +40,15 @@ type RebuildPlaceholderStats struct {
 // The coordinator holds at most one handle per build and serializes calls
 // and graph writes.
 type RebuildPlaceholderSources struct {
-	build    *BuildStore
-	spillAt  int
-	buffered int
-	runDir   string
-	moves    []row
-	stats    RebuildPlaceholderStats
-	sites    map[string]struct{} // unclaimed exact census site keys
-	applied  bool
+	build            *BuildStore
+	spillAt          int
+	buffered         int
+	runDir           string
+	moves            []row
+	stats            RebuildPlaceholderStats
+	sites            map[string]struct{} // unclaimed exact census site keys
+	applied          bool
+	goBuiltinRepoint bool
 }
 
 // CapturePlaceholderSources captures the light census AFTER the first
@@ -219,7 +220,7 @@ func (p *RebuildPlaceholderSources) Apply(ctx context.Context) (RebuildPlacehold
 			}
 			p.stats.Windows++
 			p.stats.Reindexes += len(batch)
-			if err := p.build.reindexChunk(batch); err != nil {
+			if err := p.build.reindexChunkWithProof(batch, false, p.goBuiltinRepoint); err != nil {
 				return err
 			}
 			clear(current)

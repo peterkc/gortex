@@ -195,10 +195,43 @@ func (b *BuildStore) keptOwner(id string) (sourceOwner, error) {
 	return sourceOwner{repo: n.RepoPrefix, present: kept, off: !kept}, nil
 }
 
+// The node-free source takes its scope from the recorded Go file, not the
+// builtin ID. Producer custody ties that scope to a same-site move.
+func (b *BuildStore) provedBuiltinSourceOwner(e *graph.Edge) (sourceOwner, error) {
+	entry, ok := graph.LookupPlatformBuiltin(graph.PlatformCatalogRevision, e.From)
+	if !ok || entry.Language != "go" || entry.Category != "" ||
+		!graph.PlaceholderSourceKind(e.Kind) || e.FilePath == "" || e.Line <= 0 {
+		return sourceOwner{}, invalid("invalid builtin source role")
+	}
+	c, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(e))
+	if err != nil {
+		return sourceOwner{}, err
+	}
+	if c.proof != rebuildProofGoBuiltinSource {
+		return sourceOwner{}, invalid("unproved builtin source repoint")
+	}
+	file, err := pendingGet(b.pending, pendingNodeKey(e.FilePath), decodeNodeLight)
+	if err != nil {
+		return sourceOwner{}, err
+	}
+	if file == nil || file.ID != e.FilePath || file.FilePath != e.FilePath || file.Kind != graph.KindFile ||
+		file.Language != "go" || entry.ID(file.RepoPrefix) != e.From {
+		return sourceOwner{}, invalid("builtin source recording scope differs")
+	}
+	return sourceOwner{repo: file.RepoPrefix, present: true}, nil
+}
+
+func (b *BuildStore) rebuildEdgeSourceOwner(e *graph.Edge) (sourceOwner, error) {
+	if graph.IsBuiltinStub(e.From) {
+		return b.provedBuiltinSourceOwner(e)
+	}
+	return b.keptOwner(e.From)
+}
+
 // projectedEdgeOwner distinguishes an omitted declaration from an absent
 // endpoint. Only the former removes the edge and its adjacency counts.
 func (b *BuildStore) projectedEdgeOwner(e *graph.Edge) (sourceOwner, bool, error) {
-	owner, err := b.keptOwner(e.From)
+	owner, err := b.rebuildEdgeSourceOwner(e)
 	if err != nil || owner.off {
 		return owner, false, err
 	}
@@ -280,7 +313,7 @@ func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns, stage Stag
 			return nil
 		}
 		if b.profile == FullProfile {
-			owner, err = b.keptOwner(e.From)
+			owner, err = b.rebuildEdgeSourceOwner(e)
 			if err != nil {
 				return err
 			}

@@ -70,6 +70,8 @@ const (
 	rebuildProofSvelteKitLoad
 	// Native external-call group and package election over proved live bytes.
 	rebuildProofExternalCallSynthesis
+	// A Go builtin claimed this exact placeholder-source site.
+	rebuildProofGoBuiltinSource
 	rebuildProofLimit
 )
 

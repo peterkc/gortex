@@ -221,6 +221,10 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 // a receipt-input move as untracked. A producer proof cannot move to a new
 // identity, and a missing old row cannot establish raw lineage.
 func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, capture bool) error {
+	return b.reindexChunkWithProof(batch, capture, false)
+}
+
+func (b *BuildStore) reindexChunkWithProof(batch []graph.EdgeReindex, capture, goBuiltinRepoint bool) error {
 	// First free every moving stored identity. A stationary destination
 	// preserves its row, and the first claimant wins any free destination.
 	type claim struct {
@@ -276,6 +280,11 @@ func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, captur
 				return err
 			}
 			custody = custody.moved(oldKey, e.Kind, capture)
+			if goBuiltinRepoint && e.From != old.From && graph.PlaceholderSourceKind(e.Kind) {
+				if entry, ok := graph.LookupPlatformBuiltin(graph.PlatformCatalogRevision, e.From); ok && entry.Language == "go" && entry.Category == "" {
+					custody = rebuildEdgeCustody{proof: rebuildProofGoBuiltinSource}
+				}
+			}
 			if err := b.deleteEdge(oldKey, old); err != nil {
 				return err
 			}

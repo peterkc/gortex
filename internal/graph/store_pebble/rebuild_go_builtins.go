@@ -91,6 +91,7 @@ func (b *BuildStore) reconcileBuiltinSources(ctx context.Context, spillBytes int
 	if err != nil {
 		return err
 	}
+	p.goBuiltinRepoint = true
 	defer func() { err = errors.Join(err, p.Close()) }()
 	err = b.withWrites(func() error {
 		return pendingVisit(ctx, b.pending, plan, func(r row) error {
