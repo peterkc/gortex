@@ -14,5 +14,6 @@ func RunRebuildClosureCollection(ctx context.Context, b *store_pebble.BuildStore
 	if !selection.allows(SynthClosureCollection) {
 		return store_pebble.RebuildClosureCollectionStats{}, nil
 	}
-	return b.RebuildClosureCollection(ctx, receipts, spillAt, ccFanoutCap, sameDispatchBoundary, closureCollectionEdge)
+	return b.RebuildClosureCollection(ctx, receipts, spillAt, ccFanoutCap, sameDispatchBoundary, closureCollectionEdge,
+		func(language string) bool { return frameworkLanguageFamily(language) == "apple" })
 }

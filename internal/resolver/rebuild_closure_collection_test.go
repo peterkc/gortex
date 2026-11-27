@@ -229,3 +229,77 @@ func rebuildClosureCollectionSelection(t *testing.T) FrameworkSynthesizerSelecti
 	require.NoError(t, err)
 	return selection
 }
+
+func TestRebuildClosureCollectionProvesFrozenAppleAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		claims   []string
+		wantEdge bool
+	}{
+		{name: "exact", claims: []string{"exact"}, wantEdge: true},
+		{name: "missing"},
+		{name: "wrong-id", claims: []string{"wrong-id"}},
+		{name: "exact-then-wrong-language", claims: []string{"exact", "wrong-language"}},
+		{name: "wrong-language-then-exact", claims: []string{"wrong-language", "exact"}},
+		{name: "exact-then-wrong-file", claims: []string{"exact", "wrong-file"}},
+		{name: "wrong-file-then-exact", claims: []string{"wrong-file", "exact"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const file, language, field = "plugin.go", "go", "handlers"
+			dispatch := rebuildClosureCollectionNode(file, "dispatch", language, rebuildCCDispatch, field)
+			register := rebuildClosureCollectionNode(file, "register", language, rebuildCCAppend, field)
+			apple := rebuildEventNode("remote/support.swift", "support", "swift", "")
+			// Only the out-of-workspace declaration admits the stage. It has
+			// no closure role and is not an endpoint of the Go call.
+			proof, b, native := openRebuildObserverStores(t, map[string]string{apple.ID: "remote"},
+				rebuildEventFacts(file, language, []*graph.Node{dispatch, register}),
+				rebuildEventFacts(apple.FilePath, apple.Language, []*graph.Node{apple}),
+			)
+			ctx := t.Context()
+			selection := rebuildClosureCollectionSelection(t)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthClosureCollection))
+			before := rebuildEventSavedRows(t, b)
+			receipts := proof[:1:1]
+			for _, claim := range tc.claims {
+				f := proof[1]
+				n := *f.Nodes[0]
+				switch claim {
+				case "exact":
+				case "wrong-id":
+					n.ID = n.FilePath + "::different"
+				case "wrong-language":
+					// The claim is still Apple-family, but not the same language.
+					n.Language = "objc"
+					f.EffectiveLanguage = n.Language
+				case "wrong-file":
+					n.FilePath = "remote/other.swift"
+					f.File.FilePath = n.FilePath
+				}
+				f.Nodes = []*graph.Node{&n}
+				receipts = append(receipts, f)
+			}
+			stats, err := RunRebuildClosureCollection(ctx, b, rebuildGRPCReceipts(receipts...), frozen, 1)
+			if !tc.wantEdge {
+				var refusal *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorIs(t, err, store_pebble.ErrRebuildClosureCollection)
+				require.ErrorAs(t, err, &refusal)
+				require.EqualValues(t, 1, refusal.Count)
+				require.Equal(t, graph.EdgeIdentityFor(closureCollectionEdge(dispatch, register, field)), refusal.First)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), stats.Edges)
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
+			want := rebuildEventSQLiteRows(native)
+			require.Len(t, want.edges, 1)
+			require.Equal(t, dispatch.ID, want.edges[0].From)
+			require.Equal(t, register.ID, want.edges[0].To)
+			require.Equal(t, want, rebuildEventSavedRows(t, b))
+		})
+	}
+}

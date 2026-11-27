@@ -32,7 +32,9 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 				d1, r1 := closureProofPair("z", "alpha")
 				d2, r2 := closureProofPair("a", "omega")
 				facts := setStateProofFacts([]*graph.Node{d1, r1, d2, r2})
-				b, exact := seedSyntheticCustody(t, facts)
+				apple := ParseFacts{EffectiveLanguage: "swift", File: graph.FileMetaRow{FilePath: "gate.swift"},
+					Nodes: []*graph.Node{{ID: "apple-marker", Language: "swift", FilePath: "gate.swift", Kind: graph.KindFile}}}
+				b, exact := seedSyntheticCustody(t, facts, apple)
 				bad := setStateProofFacts(nil)
 				for _, n := range []*graph.Node{d1, r1, r2} {
 					changed := *n
@@ -44,13 +46,13 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 					if conflictFirst {
 						first, last = bad, facts
 					}
-					if yield(first, nil) {
+					if yield(apple, nil) && yield(first, nil) {
 						yield(last, nil)
 					}
 				}
 				before := rebuildFrameworkCustodyRows(t, b)
 				boundary := func(_, _ *graph.Node) bool { return true }
-				stats, err := b.RebuildClosureCollection(t.Context(), receipts, 1, 8, boundary, setStateProofOutput)
+				stats, err := b.RebuildClosureCollection(t.Context(), receipts, 1, 8, boundary, setStateProofOutput, closureTestApple)
 				var refusal *RebuildUnknownProvenanceError
 				require.ErrorIs(t, err, ErrRebuildClosureCollection)
 				require.ErrorAs(t, err, &refusal)
@@ -60,7 +62,7 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 				}, refusal)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
-				stats, err = b.RebuildClosureCollection(t.Context(), exact, 1, 8, boundary, setStateProofOutput)
+				stats, err = b.RebuildClosureCollection(t.Context(), exact, 1, 8, boundary, setStateProofOutput, closureTestApple)
 				require.NoError(t, err)
 				require.EqualValues(t, 2, stats.Edges)
 			})
@@ -77,7 +79,7 @@ func TestRebuildClosureCollectionCountsUnprovedRoleWithoutOutput(t *testing.T) {
 	before := rebuildFrameworkCustodyRows(t, b)
 	stats, err := b.RebuildClosureCollection(t.Context(), func(yield func(ParseFacts, error) bool) {
 		yield(facts, nil)
-	}, 1, 1, func(_, _ *graph.Node) bool { return true }, setStateProofOutput)
+	}, 1, 1, func(_, _ *graph.Node) bool { return true }, setStateProofOutput, closureTestApple)
 	var refusal *RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refusal)
 	require.Equal(t, &RebuildUnknownProvenanceError{
@@ -89,7 +91,7 @@ func TestRebuildClosureCollectionCountsUnprovedRoleWithoutOutput(t *testing.T) {
 }
 
 func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
-	for _, mode := range []string{"fanout", "nil boundary", "nil builder", "scratch occupied", "input row", "proposal row"} {
+	for _, mode := range []string{"fanout", "nil boundary", "nil builder", "nil Apple predicate", "scratch occupied", "input row", "proposal row"} {
 		t.Run(mode, func(t *testing.T) {
 			dispatch, register := closureProofPair("one", "listeners")
 			facts := setStateProofFacts([]*graph.Node{dispatch, register})
@@ -97,6 +99,7 @@ func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
 			cap := 8
 			boundary := func(_, _ *graph.Node) bool { return true }
 			makeCall := setStateProofOutput
+			isApple := closureTestApple
 			want := "invalid closure collection stage inputs"
 			switch mode {
 			case "fanout":
@@ -105,6 +108,8 @@ func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
 				boundary = nil
 			case "nil builder":
 				makeCall = nil
+			case "nil Apple predicate":
+				isApple = nil
 			case "scratch occupied":
 				want = "closure collection scratch range occupied"
 				require.NoError(t, b.pending.Set(rebuildClosureKey('z'), []byte("sentinel"), pebble.NoSync))
@@ -126,7 +131,7 @@ func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
 			before := rebuildFrameworkCustodyRows(t, b)
 			stats, err := b.RebuildClosureCollection(t.Context(), func(func(ParseFacts, error) bool) {
 				t.Fatal("replayed receipts before validating closure input and proposals")
-			}, 1, cap, boundary, makeCall)
+			}, 1, cap, boundary, makeCall, isApple)
 			require.ErrorIs(t, err, ErrRebuildClosureCollection)
 			require.ErrorContains(t, err, want)
 			if mode != "scratch occupied" {
@@ -162,7 +167,7 @@ func TestRebuildClosureCollectionInstalledCustody(t *testing.T) {
 		Nodes:             []*graph.Node{dispatch, registrar},
 	})
 	stats, err := b.RebuildClosureCollection(t.Context(), receipts, 1, 8,
-		func(d, r *graph.Node) bool { return d.WorkspaceID == r.WorkspaceID }, makeCall)
+		func(d, r *graph.Node) bool { return d.WorkspaceID == r.WorkspaceID }, makeCall, closureTestApple)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, stats.Edges)
 	want := makeCall(dispatch, registrar, "listeners")
@@ -171,3 +176,5 @@ func TestRebuildClosureCollectionInstalledCustody(t *testing.T) {
 	require.Equal(t, want, live)
 	requireSyntheticCustody(t, b, map[graph.EdgeIdentity]rebuildEdgeProof{graph.EdgeIdentityFor(want): rebuildProofClosureCollection})
 }
+
+func closureTestApple(language string) bool { return language == "swift" }
