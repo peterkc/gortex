@@ -242,15 +242,14 @@ func prepareRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 			}
 		}
 		if !picked {
-			// Pinned applyBuiltinIfKnown changes only To. Its repo spelling is
-			// different from name lookup only when the source node is missing.
-			if language := langFromFilePath(e.FilePath); language != "" {
-				if category, ok := classifyBuiltin(name, language); ok {
-					if callerMissing {
-						repo = sourceSpellingRepoPrefix(e.From)
-					}
-					e.To = graph.StubID(repo, graph.StubKindBuiltin, language, category, name)
-				}
+			language := langFromFilePath(e.FilePath)
+			if callerMissing {
+				repo = sourceSpellingRepoPrefix(e.From)
+			}
+			if e.Kind == graph.EdgeCalls && (language == "js" || language == "ts") {
+				settleRebuildWebMember(&e, repo, language, name)
+			} else if category, ok := classifyBuiltin(name, language); ok {
+				e.To = graph.StubID(repo, graph.StubKindBuiltin, language, category, name)
 			}
 		}
 		if e.Kind == graph.EdgeReads && e.To != edge.To {
@@ -260,6 +259,33 @@ func prepareRebuildMember(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 		return nil
 	}
 	return query, nil
+}
+
+// Main has already selected the recording file and exhausted ordinary bindings.
+// Only a name that native would mark builtin can get a different target here.
+func settleRebuildWebMember(e *graph.Edge, repo, language, name string) {
+	const revision = graph.PlatformCatalogRevision
+	entry, ok := graph.LookupPlatformCandidate(revision, language, name)
+	if !ok {
+		return
+	}
+	status := graph.LinkStatusProbablePlatform
+	hint, ok := e.BuiltinReceiverHint()
+	if ok && (language == "js" && hint.Language == "javascript" || language == "ts" && hint.Language == "typescript") {
+		switch hint.Form {
+		case "import", "shadowed", "user":
+			return
+		}
+		if exact, ok := graph.LookupPlatformMember(revision, hint, name); ok {
+			entry, status = exact, graph.LinkStatusPlatform
+		}
+	}
+	e.To = entry.ID(repo)
+	e.Meta = maps.Clone(e.Meta)
+	if e.Meta == nil {
+		e.Meta = make(map[string]any, 1)
+	}
+	e.Meta[graph.MetaLinkStatus] = string(status)
 }
 
 // The native receiver interface predicate is a compatible same-repo name

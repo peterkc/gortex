@@ -124,6 +124,79 @@ func TestRebuildMemberNativeRows(t *testing.T) {
 	}
 }
 
+func TestRebuildWebMemberCallSettlement(t *testing.T) {
+	for _, site := range []struct{ file, lang, prefix string }{
+		{"src/caller.js", "javascript", "repo::builtin::js::"},
+		{"src/caller.tsx", "typescript", "repo::builtin::ts::"},
+	} {
+		t.Run(site.lang, func(t *testing.T) {
+			const legacy = "array/string::slice"
+			const unresolved = "unresolved::*.slice"
+			caller := &graph.Node{ID: "caller", Name: "caller", Kind: graph.KindFunction, FilePath: site.file, Language: site.lang, RepoPrefix: "repo"}
+			method := &graph.Node{ID: "custom::push", Name: "push", Kind: graph.KindMethod, FilePath: site.file, Language: site.lang, RepoPrefix: "repo",
+				Meta: map[string]any{"receiver": "Custom"}}
+			nodes := []*graph.Node{caller, method}
+			cases := []struct {
+				name, form, family string
+				native, rebuild    string
+				status             graph.LinkStatus
+			}{
+				{"slice", "instance", "array", site.prefix + legacy, site.prefix + "array::slice", graph.LinkStatusPlatform},
+				{"slice", "instance", "string", site.prefix + legacy, site.prefix + "string::slice", graph.LinkStatusPlatform},
+				{"slice", "unknown", "", site.prefix + legacy, site.prefix + legacy, graph.LinkStatusProbablePlatform},
+				{"slice", "", "", site.prefix + legacy, site.prefix + legacy, graph.LinkStatusProbablePlatform},
+				{"slice", "import", "", site.prefix + legacy, unresolved, graph.LinkStatusUnresolved},
+				{"slice", "shadowed", "", site.prefix + legacy, unresolved, graph.LinkStatusUnresolved},
+				{"slice", "user", "", site.prefix + legacy, unresolved, graph.LinkStatusUnresolved},
+				{"push", "user", "", method.ID, method.ID, graph.LinkStatusResolved},
+				{"custom", "instance", "array", "unresolved::*.custom", "unresolved::*.custom", graph.LinkStatusUnresolved},
+			}
+			var raw, hinted []*graph.Edge
+			for i, tc := range cases {
+				e := &graph.Edge{From: caller.ID, To: "unresolved::*." + tc.name, Kind: graph.EdgeCalls, FilePath: site.file, Line: i + 1,
+					Confidence: 0.42, Origin: graph.OriginASTInferred, Meta: map[string]any{"payload": "kept", "member_call": true}}
+				if tc.name == "push" {
+					e.Meta["receiver_type"] = "Custom"
+				}
+				raw = append(raw, e)
+				h := cloneFrameworkEdge(e)
+				if tc.form != "" {
+					hint := graph.BuiltinReceiverHint{Language: site.lang, Form: tc.form, Family: tc.family}
+					switch tc.form {
+					case "import":
+						hint.Name, hint.Module = "Custom", "other"
+					case "user":
+						hint.Name = "Custom"
+					}
+					h.SetBuiltinReceiverHint(hint)
+				}
+				hinted = append(hinted, h)
+			}
+			native := rebuildMemberNativeSaved(t, nodes, raw, len(raw)-1) // custom has no legacy entry.
+			ctx, build, opts := frontierFixture(t, 0)
+			build.AddBatch(nodes, hinted)
+			require.NoError(t, runRebuildMain(ctx, build, opts, false, RebuildMainInputs{}))
+			rows := rebuildFnPointerSaved(t, build)
+			require.Len(t, rows, len(cases))
+			for i, tc := range cases {
+				control := rebuildFnPointerSavedAt(t, native, graph.EdgeCalls, caller.ID, i+1)
+				require.Equal(t, tc.native, control.To)
+				want := cloneFrameworkEdge(control)
+				want.To = tc.rebuild
+				maps.Copy(want.Meta, hinted[i].Meta)
+				if graph.IsBuiltinStub(want.To) {
+					want.Meta[graph.MetaLinkStatus] = string(tc.status)
+				}
+				got := rebuildFnPointerSavedAt(t, rows, graph.EdgeCalls, caller.ID, i+1)
+				require.Equal(t, want, got, "line %d", i+1)
+				status, ok := got.LinkStatus()
+				require.True(t, ok)
+				require.Equal(t, tc.status, status)
+			}
+		})
+	}
+}
+
 func rebuildMemberNativeSaved(t *testing.T, nodes []*graph.Node, edges []*graph.Edge, moveCount int) []*graph.Edge {
 	t.Helper()
 	sql, err := store_sqlite.Open(filepath.Join(t.TempDir(), "native.sqlite"))
