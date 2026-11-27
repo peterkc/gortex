@@ -214,22 +214,44 @@ func TestRebuildEFCoreModelsOwnedReceiptPayload(t *testing.T) {
 
 func TestRebuildEFCoreModelsBudgetOnlyNamedTypes(t *testing.T) {
 	const cs = "Models.cs"
-	entity := &graph.Node{ID: "widget", Name: "Widget", FilePath: cs, Kind: graph.KindType, Language: "csharp"}
-	file := &graph.Node{ID: cs, Name: cs, FilePath: cs, Kind: graph.KindFile, Language: "csharp",
-		Meta: map[string]any{"ef_fluent": []map[string]any{efMappingAction("Ctx", "Widget", "widgets", "", "table", 0, 10)}}}
-	large := &graph.Node{ID: "unused", Name: "Unused", FilePath: cs, Kind: graph.KindType, Language: "csharp",
-		Meta: map[string]any{"unrelated": strings.Repeat("x", 16<<20)}}
-	facts := rebuildEventFacts(cs, "csharp", []*graph.Node{entity, file, large})
-	build := openRebuildGRPCBuild(t, facts)
-	changed, err := RunRebuildEFCoreModels(t.Context(), build, rebuildGRPCReceipts(facts), efRebuildSelection(t, build))
-	require.NoError(t, err)
-	require.EqualValues(t, 1, changed)
-	for _, e := range rebuildEventSavedRows(t, build).edges {
-		if e.Kind == graph.EdgeModelsTable {
-			require.Equal(t, entity.ID, e.From)
-			require.Equal(t, "db::orm::widgets", e.To)
-			return
-		}
+	// Each type fits the census row cap. Together they exceed the EF budget.
+	large := map[string]any{"unrelated": strings.Repeat("x", 9<<20)}
+	widget := &graph.Node{ID: "widget", Name: "Widget", FilePath: cs, Kind: graph.KindType, Language: "csharp", Meta: large}
+	gadget := &graph.Node{ID: "gadget", Name: "Gadget", FilePath: cs, Kind: graph.KindType, Language: "csharp", Meta: large}
+	for _, fixture := range []struct {
+		name       string
+		nameGadget bool
+	}{
+		{"skip unnamed type", false},
+		{"refuse named types over budget", true},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			actions := []map[string]any{efMappingAction("Ctx", widget.Name, "widgets", "", "table", 0, 10)}
+			if fixture.nameGadget {
+				actions = append(actions, efMappingAction("Ctx", gadget.Name, "gadgets", "", "table", 1, 11))
+			}
+			file := &graph.Node{ID: cs, Name: cs, FilePath: cs, Kind: graph.KindFile, Language: "csharp",
+				Meta: map[string]any{"ef_fluent": actions}}
+			facts := rebuildEventFacts(cs, "csharp", []*graph.Node{widget, gadget, file})
+			build := openRebuildGRPCBuild(t, facts)
+			selection := efRebuildSelection(t, build)
+			require.True(t, selection.allows(SynthCSharpEFCoreModels))
+			changed, err := RunRebuildEFCoreModels(t.Context(), build, rebuildGRPCReceipts(facts), selection)
+			if fixture.nameGadget {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildEFCoreModels)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "EF Core reduction input")
+				require.Zero(t, changed)
+				require.Empty(t, rebuildEventSavedRows(t, build).edges)
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, changed)
+			edges := rebuildEventSavedRows(t, build).edges
+			require.Len(t, edges, 1)
+			require.Equal(t, graph.EdgeModelsTable, edges[0].Kind)
+			require.Equal(t, widget.ID, edges[0].From)
+			require.Equal(t, "db::orm::widgets", edges[0].To)
+		})
 	}
-	t.Fatal("missing EF model projection")
 }
