@@ -46,7 +46,7 @@ func (r *Resolver) mergeCSharpPartialTypes() {
 	}
 	groups := make(map[csharpTypeKey][]*graph.Node)
 	for n := range r.nodesByKindLang(graph.KindType, "csharp") {
-		if n.Name == "" || n.FilePath == "" {
+		if !csharpPartialType(n) {
 			continue
 		}
 		k := csharpTypeKeyOf(n)
@@ -77,7 +77,7 @@ func (r *Resolver) mergeCSharpPartialTypesForFile(filePath string) {
 	}
 	groups := make(map[csharpTypeKey][]*graph.Node)
 	for n := range r.nodesByKindLang(graph.KindType, "csharp") {
-		if n.Name == "" || n.FilePath == "" {
+		if !csharpPartialType(n) {
 			continue
 		}
 		k := csharpTypeKeyOf(n)
