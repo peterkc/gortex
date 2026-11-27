@@ -176,33 +176,103 @@ func TestRebuildStoreFactorySQLiteNoMatch(t *testing.T) {
 }
 
 func TestRebuildStoreFactoryOrder(t *testing.T) {
-	// Surgical facts: two distinct old keys for one caller and source site
-	// converge on the same action. The first receipt supplies the winner.
 	const file = "order.ts"
-	caller := rebuildEventNode(file, "call", "typescript", "")
-	action := rebuildStoreFactoryAction(file, "")
-	bare := rebuildStoreFactoryMarker(file, caller.ID, "unresolved::reset", "reset")
-	wildcard := rebuildStoreFactoryMarker(file, caller.ID, "unresolved::*.reset", "reset")
-	bare.Meta["fixture"] = "first payload"
-	wildcard.Meta["fixture"] = "second payload"
-	facts := roundTripRebuildRNBridgeFacts(t, rebuildEventFacts(file, "typescript", []*graph.Node{caller, action}, bare, wildcard))
-	b, native := openRebuildEventStores(t, facts)
-	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
-	selection, err := NewFrameworkSynthesizerSelection([]string{SynthStoreFactory})
-	require.NoError(t, err)
-	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
-	require.NoError(t, err)
-	require.True(t, frozen.allows(SynthStoreFactory))
+	const reset, start, middle, end = file + "::reset", file + "::start", file + "::middle", file + "::end"
+	type call struct{ old, member, payload string }
+	for _, tc := range []struct {
+		name  string
+		calls []call
+		moves uint64
+		want  map[string]any
+	}{
+		{
+			name: "single convergence",
+			calls: []call{
+				{"unresolved::reset", "reset", "first payload"},
+				{"unresolved::*.reset", "reset", "second payload"},
+			},
+			moves: 2,
+			want:  map[string]any{reset: "first payload"},
+		},
+		{
+			// The first receipt targets middle, a moving old key that sorts before start.
+			name: "chain",
+			calls: []call{
+				{start, "middle", "from start"},
+				{middle, "end", "from middle"},
+			},
+			moves: 2,
+			want:  map[string]any{middle: "from start", end: "from middle"},
+		},
+		{
+			name: "cycle",
+			calls: []call{
+				{start, "middle", "from start"},
+				{middle, "start", "from middle"},
+			},
+			moves: 2,
+			want:  map[string]any{middle: "from start", start: "from middle"},
+		},
+		{
+			// Both winners arrive before their lexically earlier competitors.
+			name: "independent convergences",
+			calls: []call{
+				{"unresolved::z", "middle", "middle first"},
+				{"unresolved::y", "end", "end first"},
+				{"unresolved::a", "middle", "middle second"},
+				{"unresolved::b", "end", "end second"},
+			},
+			moves: 4,
+			want:  map[string]any{middle: "middle first", end: "end first"},
+		},
+		{
+			name: "stationary incumbent",
+			calls: []call{
+				{start, "reset", "incoming"},
+				{reset, "reset", "incumbent"},
+			},
+			moves: 1,
+			want:  map[string]any{reset: "incumbent"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := rebuildEventNode(file, "call", "typescript", "")
+			nodes := []*graph.Node{caller}
+			for _, member := range []string{"reset", "start", "middle", "end"} {
+				action := rebuildEventNode(file, member, "typescript", "")
+				action.Meta = map[string]any{"store_factory": "useStore"}
+				nodes = append(nodes, action)
+			}
+			edges := make([]*graph.Edge, 0, len(tc.calls))
+			for _, call := range tc.calls {
+				e := rebuildStoreFactoryMarker(file, caller.ID, call.old, call.member)
+				e.Meta["fixture"] = call.payload
+				edges = append(edges, e)
+			}
+			// Seed SQLite and replay receipts with the same order, not old-key order.
+			facts := roundTripRebuildRNBridgeFacts(t, rebuildEventFacts(file, "typescript", nodes, edges...))
+			b, native := openRebuildEventStores(t, facts)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+			selection, err := NewFrameworkSynthesizerSelection([]string{SynthStoreFactory})
+			require.NoError(t, err)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthStoreFactory))
 
-	stats, err := RunRebuildStoreFactory(t.Context(), b, rebuildGRPCReceipts(facts), frozen)
-	require.NoError(t, err)
-	require.EqualValues(t, 2, stats.Moves)
-	require.Equal(t, 2, ResolveStoreFactoryCalls(native))
-	want := rebuildEventSQLiteRows(native)
-	require.Len(t, want.edges, 1)
-	require.Equal(t, action.ID, want.edges[0].To)
-	require.Equal(t, "first payload", want.edges[0].Meta["fixture"])
-	require.Equal(t, want, rebuildEventSavedRows(t, b))
+			stats, err := RunRebuildStoreFactory(t.Context(), b, rebuildGRPCReceipts(facts), frozen)
+			require.NoError(t, err)
+			require.Equal(t, tc.moves, stats.Moves)
+			require.Equal(t, len(tc.calls), ResolveStoreFactoryCalls(native))
+			want := rebuildEventSQLiteRows(native)
+			require.Len(t, want.edges, len(tc.want))
+			payloads := make(map[string]any, len(want.edges))
+			for _, e := range want.edges {
+				payloads[e.To] = e.Meta["fixture"]
+			}
+			require.Equal(t, tc.want, payloads)
+			require.Equal(t, want, rebuildEventSavedRows(t, b))
+		})
+	}
 }
 
 func TestRebuildStoreFactoryRefusesUnprovedMove(t *testing.T) {
@@ -215,7 +285,7 @@ func TestRebuildStoreFactoryRefusesUnprovedMove(t *testing.T) {
 	call := rebuildStoreFactoryMarker(callerFile, caller.ID, "unresolved::reset", "reset")
 	callerFacts := rebuildEventFacts(callerFile, "typescript", []*graph.Node{caller, local}, call)
 	storeFacts := rebuildEventFacts(storeFile, "typescript", []*graph.Node{remote, getter})
-	for _, input := range []string{"caller workspace", "loser workspace", "getter eligibility", "raw marker"} {
+	for _, input := range []string{"caller workspace", "loser workspace", "getter eligibility", "raw marker", "raw binding"} {
 		t.Run(input, func(t *testing.T) {
 			b := openRebuildGRPCBuild(t, callerFacts, storeFacts)
 			before := rebuildEventSavedRows(t, b)
@@ -240,10 +310,14 @@ func TestRebuildStoreFactoryRefusesUnprovedMove(t *testing.T) {
 				n := *getter
 				n.Meta = map[string]any{"store_factory": false}
 				right.Nodes[1] = &n
-			case "raw marker":
+			case "raw marker", "raw binding":
 				e := *call
 				e.Meta = maps.Clone(e.Meta)
-				e.Meta["store_action"] = "other"
+				field := "store_action"
+				if input == "raw binding" {
+					field = "store_binding"
+				}
+				e.Meta[field] = "other"
 				left.Edges = []*graph.Edge{&e}
 			}
 			stats, err := RunRebuildStoreFactory(t.Context(), b, rebuildGRPCReceipts(left, right), frozen)

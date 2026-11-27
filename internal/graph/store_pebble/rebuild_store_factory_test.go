@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"iter"
+	"slices"
 	"strings"
 	"testing"
 
@@ -222,6 +223,8 @@ func TestRebuildStoreFactoryElection(t *testing.T) {
 	remote := storeFactoryTestAction("store.ts::reset", "store.ts", "workspace")
 	foreign := storeFactoryTestAction("peer.ts::reset", "peer.ts", "other")
 	getter := storeFactoryTestGetter("store.ts::getter", remote.FilePath)
+	decoy := storeFactoryTestGetter("peer.ts::getter", foreign.FilePath)
+	decoy.Meta["store_factory"] = false
 	for _, tc := range []struct {
 		name   string
 		caller bool
@@ -237,12 +240,21 @@ func TestRebuildStoreFactoryElection(t *testing.T) {
 			storeFactoryTestGetter("peer.ts::getter", foreign.FilePath)}, local},
 		{"two actions in getter file fall back to caller", true, []*graph.Node{local, remote, getter,
 			storeFactoryTestAction("store.ts::secondReset", remote.FilePath, remote.WorkspaceID)}, local},
+		{"ineligible getter cannot mask the getter file", true, []*graph.Node{local, remote, getter, decoy}, remote},
+		{"two actions in caller file", true, []*graph.Node{local, storeFactoryTestAction("app.ts::otherReset", local.FilePath, local.WorkspaceID)}, nil},
+		{"caller has no file", true, []*graph.Node{local, storeFactoryTestAction("emptyPathReset", "", local.WorkspaceID)}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			call := storeFactoryTestCall("retired", 2)
 			facts := []ParseFacts{storeFactoryTestSource(call)}
 			if tc.caller {
-				facts[0].Nodes = []*graph.Node{storeFactoryTestCaller()}
+				caller := storeFactoryTestCaller()
+				if tc.name == "caller has no file" {
+					caller.FilePath = ""
+					facts = append(facts, producerProofFacts(caller))
+				} else {
+					facts[0].Nodes = []*graph.Node{caller}
+				}
 			}
 			for _, n := range tc.inputs {
 				facts = append(facts, producerProofFacts(n))
@@ -376,5 +388,216 @@ func storeFactoryTestRules() RebuildStoreFactoryRules {
 			e.To = target
 			return true
 		},
+	}
+}
+
+func TestRebuildStoreFactoryAndReduxThunkProofGuards(t *testing.T) {
+	for _, redux := range []bool{false, true} {
+		stage := "Store Factory"
+		stageErr := ErrRebuildStoreFactory
+		if redux {
+			stage, stageErr = "Redux Thunk", ErrRebuildReduxThunk
+		}
+		t.Run(stage, func(t *testing.T) {
+			for _, guard := range []string{"receipt owner path", "no receipt for anchor", "mismatched node key"} {
+				t.Run(guard, func(t *testing.T) {
+					action := storeFactoryTestAction("store.ts::reset", "store.ts", "")
+					call := storeFactoryTestCall("retired", 2)
+					if guard == "no receipt for anchor" {
+						call.Meta["store_action"] = "removed"
+					}
+					if redux {
+						call.Meta["via"] = "redux-thunk"
+						call.Meta["thunk_dispatch"] = call.Meta["store_action"]
+						action.Meta["redux_thunk"] = storeFactoryTestMember
+					}
+					source, decls := storeFactoryTestSource(call), producerProofFacts(action)
+					b, _ := seedSyntheticCustody(t, source, decls)
+					switch guard {
+					case "receipt owner path":
+						// Keep the raw edge and key unchanged. Only the enclosing receipt lies.
+						source.File.FilePath = "wrong.ts"
+					case "no receipt for anchor":
+						decls.Nodes = nil
+					case "mismatched node key":
+						val, err := encodeNode(action)
+						require.NoError(t, err)
+						require.NoError(t, b.pending.Set(pendingNodeKey("different ID"), val, pebble.NoSync))
+					}
+					before := rebuildFrameworkCustodyRows(t, b)
+					receipts := sqlCallsiteTestReceipts(source, decls)
+					var err error
+					if redux {
+						var stats RebuildReduxThunkStats
+						stats, err = b.RebuildReduxThunk(t.Context(), receipts, reduxThunkStoreTestRules())
+						require.Zero(t, stats)
+					} else {
+						var stats RebuildStoreFactoryStats
+						stats, err = b.RebuildStoreFactory(t.Context(), receipts, storeFactoryTestRules())
+						require.Zero(t, stats)
+					}
+					require.ErrorIs(t, err, stageErr)
+					if guard == "mismatched node key" {
+						require.ErrorIs(t, err, errInvalidRecord)
+						require.ErrorContains(t, err, stage+" node identity")
+					} else {
+						want := *call
+						want.To = action.ID
+						if guard == "no receipt for anchor" {
+							want.To = "unresolved::*.removed"
+						}
+						var refusal *RebuildUnknownProvenanceError
+						require.ErrorAs(t, err, &refusal)
+						require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(&want)}, refusal)
+					}
+					require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				})
+			}
+		})
+	}
+}
+
+func TestRebuildReduxThunkCustodyGuards(t *testing.T) {
+	action := storeFactoryTestAction("middle", "store.ts", "")
+	action.Meta["redux_thunk"] = storeFactoryTestMember
+	raw := storeFactoryTestCall(action.ID, 2)
+	raw.Meta = map[string]any{"via": "redux-thunk", "thunk_dispatch": storeFactoryTestMember}
+	unread := func(func(ParseFacts, error) bool) { t.Fatal("Redux Thunk unexpectedly read receipts") }
+	for _, tc := range []struct{ name, alias string }{
+		{"occupied scratch", ""},
+		{"stationary ignores receipts", ""},
+		{"stale stationary cannot claim raw key", "a-mover"},
+		{"mover claims first", "a-mover"},
+		{"stationary claims first", "z-mover"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, receipts := seedSyntheticCustody(t, storeFactoryTestSource(raw), producerProofFacts(action))
+			if tc.name == "occupied scratch" {
+				key := append(slices.Clone(rebuildReduxThunkPrefix), 'z')
+				require.NoError(t, b.pending.Set(key, []byte("sentinel"), pebble.NoSync))
+			}
+			mover := *raw
+			if tc.alias == "" {
+				receipts = unread
+			} else {
+				mover.To = tc.alias
+				require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: &mover, OldTo: raw.To}}))
+				b.AddEdge(raw)
+			}
+			if tc.name == "stale stationary cannot claim raw key" {
+				require.NoError(t, b.withWrites(func() error {
+					return b.addEdgeWithCustody(raw, rebuildEdgeCustody{proof: rebuildProofReceiver})
+				}))
+				stale := *raw
+				stale.Context = "new payload without new custody digest"
+				val, err := encodeEdge(&stale)
+				require.NoError(t, err)
+				key := pendingEdgeKey(raw)
+				require.NoError(t, b.pending.Set(key, val, pebble.NoSync))
+				_, err = readRebuildEdgeCustody(b.pending, key)
+				require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildReduxThunk(t.Context(), receipts, reduxThunkStoreTestRules())
+			switch tc.name {
+			case "occupied scratch":
+				require.ErrorIs(t, err, ErrRebuildReduxThunk)
+				require.ErrorIs(t, err, errInvalidRecord)
+				require.ErrorContains(t, err, "Redux Thunk scratch range occupied")
+				require.Zero(t, stats)
+			case "stationary ignores receipts":
+				require.NoError(t, err)
+				require.Equal(t, RebuildReduxThunkStats{Stubs: 1, Resolved: 1}, stats)
+			case "stale stationary cannot claim raw key":
+				require.NoError(t, err)
+				require.Equal(t, RebuildReduxThunkStats{Stubs: 2, Resolved: 2, Moves: 1}, stats)
+				old := pendingEdgeKey(&mover)
+				delete(before, string(old))
+				delete(before, string(pendingReverseKey(&mover, old)))
+				delete(before, string(rebuildLinkRecorderKey(old)))
+			default:
+				require.ErrorIs(t, err, ErrRebuildReduxThunk)
+				var refusal *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(raw)}, refusal)
+				require.Zero(t, stats)
+			}
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func reduxThunkStoreTestRules() RebuildReduxThunkRules {
+	rules := storeFactoryTestRules()
+	return RebuildReduxThunkRules{
+		Thunk: func(n *graph.Node) string {
+			name, _ := n.Meta["redux_thunk"].(string)
+			return name
+		},
+		Action: rules.Action,
+		Stub: func(e *graph.Edge) string {
+			if e.Meta["via"] != "redux-thunk" {
+				return ""
+			}
+			name, _ := e.Meta["thunk_dispatch"].(string)
+			return name
+		},
+		Getter: rules.Getter,
+		Rebind: rules.Rebind,
+	}
+}
+
+func TestRebuildReduxThunkFileElection(t *testing.T) {
+	local := storeFactoryTestAction("app.ts::reset", "app.ts", "workspace")
+	remote := storeFactoryTestAction("store.ts::reset", "store.ts", "workspace")
+	getter := storeFactoryTestGetter("store.ts::getter", remote.FilePath)
+	decoy := storeFactoryTestGetter("peer.ts::getter", "peer.ts")
+	decoy.Meta["store_factory"] = false
+	for _, tc := range []struct {
+		name   string
+		nodes  []*graph.Node
+		target string
+	}{
+		{"ineligible getter cannot mask the getter file", []*graph.Node{local, remote, getter, decoy}, remote.ID},
+		{"two actions in getter file fall back to caller", []*graph.Node{local, remote, getter,
+			storeFactoryTestAction("store.ts::otherReset", remote.FilePath, remote.WorkspaceID)}, local.ID},
+		{"two actions in caller file", []*graph.Node{local, storeFactoryTestAction("app.ts::otherReset", local.FilePath, local.WorkspaceID)}, storeFactoryTestStub},
+		{"caller has no file", []*graph.Node{local, storeFactoryTestAction("emptyPathReset", "", local.WorkspaceID)}, storeFactoryTestStub},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := storeFactoryTestCaller()
+			if tc.name == "caller has no file" {
+				caller.FilePath = ""
+			}
+			call := storeFactoryTestCall("retired", 2)
+			call.Meta["via"] = "redux-thunk"
+			call.Meta["thunk_dispatch"] = storeFactoryTestMember
+			anchor := storeFactoryTestAction("anchor.ts::other", "anchor.ts", "")
+			anchor.Meta = map[string]any{"redux_thunk": "unrelated"}
+			facts := []ParseFacts{storeFactoryTestSource(call), producerProofFacts(caller), producerProofFacts(anchor)}
+			for _, n := range tc.nodes {
+				facts = append(facts, producerProofFacts(n))
+			}
+			b, receipts := seedSyntheticCustody(t, facts...)
+			stats, err := b.RebuildReduxThunk(t.Context(), receipts, reduxThunkStoreTestRules())
+			require.NoError(t, err)
+			wantStats := RebuildReduxThunkStats{Stubs: 1, Moves: 1}
+			if tc.target != storeFactoryTestStub {
+				wantStats.Resolved = 1
+			}
+			require.Equal(t, wantStats, stats)
+			want := *call
+			want.To = tc.target
+			old, next := pendingEdgeKey(call), pendingEdgeKey(&want)
+			gone, err := b.pendingEdge(old)
+			require.NoError(t, err)
+			require.Nil(t, gone)
+			saved, err := b.pendingEdge(next)
+			require.NoError(t, err)
+			require.Equal(t, &want, saved)
+			custody, err := readRebuildEdgeCustody(b.pending, next)
+			require.NoError(t, err)
+			require.Equal(t, rebuildEdgeCustody{raw: old}, custody)
+		})
 	}
 }
