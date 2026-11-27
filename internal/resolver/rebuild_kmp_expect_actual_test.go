@@ -281,12 +281,14 @@ func TestRebuildKMPExpectActualNeedsProvedKotlinMarker(t *testing.T) {
 	report := RunFrameworkSynthesizersWithSelection(native, selection)
 	require.NoError(t, report.Err)
 	require.Equal(t, 1, report.Total)
-	// The marker only admits KMP; its Kind, Name and StartLine do not
-	// identify a declaration used by the join.
+	// The marker only admits KMP. The gate reads the node's Language, not
+	// its Kind, Name, StartLine, or the receipt's extractor ID.
 	markerClaim := *marker
 	markerClaim.Kind, markerClaim.Name, markerClaim.StartLine = graph.KindFile, "other", 2
-	proof := rebuildEventFacts(markerClaim.FilePath, markerClaim.Language, []*graph.Node{&markerClaim})
+	proof := rebuildEventFacts(markerClaim.FilePath, "java", []*graph.Node{&markerClaim})
 	proof = roundTripRebuildRNBridgeFacts(t, proof)
+	require.Equal(t, "java", proof.EffectiveLanguage)
+	require.Equal(t, "kotlin", proof.Nodes[0].Language)
 	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts[0], facts[1], proof), frozen)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, stats.Edges)

@@ -264,20 +264,16 @@ func (p *rebuildKMPPass) noteReceipt(raw *graph.Node, file, language string) err
 	if err != nil {
 		return err
 	}
-	attributed := language != "" && language == raw.Language && raw.FilePath == file
 	if state != 0 {
-		roleProved := false
-		if attributed && sameRebuildKMPInput(raw, live) {
-			role, _ := raw.Meta["kmp_role"].(string)
-			currentRole, _ := live.Meta["kmp_role"].(string)
-			roleProved = role == currentRole
-		}
-		if err := noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(roleProved)); err != nil {
+		proved := language != "" && language == raw.Language && raw.FilePath == file &&
+			sameRebuildKMPInput(raw, live) && graph.KMPExpectActualRole(raw) == graph.KMPExpectActualRole(live)
+		if err := noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(proved)); err != nil {
 			return err
 		}
 	}
 	if markerState != 0 {
-		proved := attributed && live != nil && live.ID == raw.ID && live.Language == raw.Language && live.FilePath == file
+		// The native gate reads the node language, not the receipt's extractor ID.
+		proved := live != nil && live.ID == raw.ID && live.Language == raw.Language && raw.FilePath == file && live.FilePath == file
 		return noteRebuildScratchState(p.put, marker, markerState, rebuildScratchProofBit(proved))
 	}
 	return nil
