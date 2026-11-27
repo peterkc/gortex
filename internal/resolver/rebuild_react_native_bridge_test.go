@@ -154,6 +154,54 @@ func TestRebuildReactNativeBridgeDuplicateRecorder(t *testing.T) {
 	}
 }
 
+func TestRebuildReactNativeBridgeRejectsOverwrittenMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name, field, value string
+	}{
+		{"not a bridge call", "via", "other"},
+		{"missing module", "rn_module", ""},
+		{"missing method", "rn_method", ""},
+		{"no module bucket", "rn_module", "Contacts"},
+		{"no method bucket", "rn_method", "delete"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := rebuildRNBridgeFacts(t, "Calendar")
+			marker := facts[0].Edges[0]
+			last := *marker
+			last.Meta = maps.Clone(marker.Meta)
+			if tc.value == "" {
+				delete(last.Meta, tc.field)
+			} else {
+				last.Meta[tc.field] = tc.value
+			}
+			// No second valid site can hide the absent live marker. Both
+			// stores consume the same receipt in the same insertion order.
+			facts[0].Edges = []*graph.Edge{marker, &last}
+			facts[0] = roundTripRebuildRNBridgeFacts(t, facts[0])
+			private, native := openRebuildEventStores(t, facts...)
+			before := rebuildEventSavedRows(t, private)
+			require.Equal(t, []*graph.Edge{&last}, before.edges)
+			require.Equal(t, []*graph.Edge{marker}, rebuildEventSQLiteRows(native).edges)
+
+			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
+			require.NoError(t, err)
+			report := RunFrameworkSynthesizersWithSelection(native, selection)
+			require.NoError(t, report.Err)
+			require.Equal(t, 3, report.Total)
+			stats, err := RunRebuildReactNativeBridge(t.Context(), private, rebuildGRPCReceipts(facts...), selection, 1)
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.ErrorIs(t, err, store_pebble.ErrRebuildReactNativeBridge)
+			require.Equal(t, uint64(3), refused.Count)
+			first := graph.EdgeIdentityFor(marker)
+			first.To = facts[1].Nodes[0].ID
+			require.Equal(t, first, refused.First)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, private))
+		})
+	}
+}
+
 func TestRebuildReactNativeBridgeRejectsUnprovedEndpoints(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

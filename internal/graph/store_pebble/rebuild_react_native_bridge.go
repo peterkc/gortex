@@ -100,8 +100,8 @@ func (b *BuildStore) rebuildNativeModuleBridge(ctx context.Context, receipts ite
 		err = errors.Join(err, b.pending.DeleteRange(rebuildReactNativePrefix, prefixEnd(rebuildReactNativePrefix), pebble.NoSync))
 	}()
 	p := rebuildReactNativeBridge{b: b, threshold: spillAt, policy: policy}
-	active, err := p.capture(ctx, isCall)
-	if err != nil || !active {
+	ready, err := p.capture(ctx, isCall)
+	if err != nil || !ready {
 		return p.stats, err
 	}
 	if err := p.order(ctx, receipts, isCall); err != nil {
@@ -162,7 +162,7 @@ func (p *rebuildReactNativeBridge) get(key []byte) ([]byte, error) {
 func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*graph.Edge) bool) (bool, error) {
 	view := p.b.RebuildView()
 	var families uint8
-	var methods, active bool
+	var methods bool
 	if err := view.VisitNodes(ctx, func(n *graph.Node) error {
 		if families&p.policy.required != p.policy.required {
 			families |= p.policy.family(n.Language)
@@ -247,10 +247,11 @@ func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*gra
 			}
 			return p.refusedOutputs(ctx)
 		}
-		active = true
 		return p.put(key, append([]byte{rebuildCapabilityWanted}, live...))
 	})
-	return active, err
+	// Replay receipts even without a live marker: a duplicate payload may
+	// have hidden the only eligible call.
+	return true, err
 }
 
 func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2[ParseFacts, error], isCall func(*graph.Edge) bool) error {
@@ -270,6 +271,13 @@ func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2
 				return err
 			}
 			if len(state) == 0 {
+				if isCall(e) {
+					// No live claim remains for this receipt marker. Only
+					// distinct candidates for its module and method are affected.
+					if err := p.affected(ctx, e); err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			live, err := p.b.pendingEdge(state[1:])
