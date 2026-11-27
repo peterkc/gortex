@@ -187,7 +187,7 @@ var rebuildFailureKinds = [...]error{
 	nil, // 59: retired StoreFactory order refusal
 	store_pebble.ErrRebuildStoreFactory,
 	store_pebble.ErrRebuildReduxThunk,
-	nil, // 62: reserved for NgRx Effect
+	store_pebble.ErrRebuildNgRxEffect,
 	store_pebble.ErrRebuildObjectRegistry,
 	store_pebble.ErrRebuildRTKQuery,
 	store_pebble.ErrRebuildVuexDispatch,

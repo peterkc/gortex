@@ -22,7 +22,8 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 		SynthGRPCStub, SynthTemporalStub, SynthEventChannel, SynthSwiftObjC,
 		SynthReactNative, SynthReactNativePair, SynthObserverChannel, SynthClosureCollection,
 		SynthReactSetState, SynthFlutterSetState, SynthKMPExpectActual, SynthExpoModules, SynthFabric, SynthMyBatis,
-		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery,
+		SynthSQLCallsite, SynthStoreFactory, SynthReduxThunk, SynthNgRxEffect,
+		SynthObjectRegistry, SynthRTKQuery, SynthVuexDispatch, SynthCelery,
 	} {
 		if selection.allows(name) {
 			frozen.names[name] = struct{}{}
@@ -62,17 +63,19 @@ func FreezeRebuildFrameworkSelection(ctx context.Context, view store_pebble.Rebu
 	_, react := frozen.names[SynthReactSetState]
 	_, flutter := frozen.names[SynthFlutterSetState]
 	_, redux := frozen.names[SynthReduxThunk]
+	_, ngrx := frozen.names[SynthNgRxEffect]
 	_, registry := frozen.names[SynthObjectRegistry]
 	_, rtk := frozen.names[SynthRTKQuery]
 	_, vuex := frozen.names[SynthVuexDispatch]
 	_, celery := frozen.names[SynthCelery]
-	if redux || rtk || vuex || celery {
-		edges.via = make(map[string]bool, 4)
+	if redux || ngrx || rtk || vuex || celery {
+		edges.via = make(map[string]bool, 5)
 	}
-	if grpc || temporal || react || flutter || redux || registry || rtk || vuex || celery {
+	if grpc || temporal || react || flutter || redux || ngrx || registry || rtk || vuex || celery {
 		if err := view.VisitFrameworkGateEdges(ctx, temporal, func(e graph.FrameworkCensusEdge) error {
 			if e.Kind == graph.EdgeCalls {
-				via := (redux && e.Via == reduxThunkVia) || (rtk && e.Via == rtkQueryVia) || (vuex && e.Via == vuexDispatchVia) || (celery && e.Via == celeryVia)
+				via := (redux && e.Via == reduxThunkVia) || (ngrx && e.Via == ngrxEffectVia) ||
+					(rtk && e.Via == rtkQueryVia) || (vuex && e.Via == vuexDispatchVia) || (celery && e.Via == celeryVia)
 				setState := (react || flutter) && isSetStateTarget(e.To)
 				grpcStub := grpc && e.Via == "grpc.stub" && e.GRPCService != "" && e.GRPCMethod != ""
 				temporalVia := temporal && strings.HasPrefix(e.Via, "temporal.")

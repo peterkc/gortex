@@ -44,6 +44,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"SQL callsite", "moves", 1},
 		{"Store Factory", "moves", 1},
 		{"Redux Thunk", "moves", 1},
+		{"NgRx Effect", "moves", 1},
 		{"Object Registry", "moves", 1},
 		{"Vuex Dispatch", "moves", 1},
 		{"Celery", "moves", 1},
@@ -404,6 +405,32 @@ func TestRebuildSQLCallsiteFrozenGate(t *testing.T) {
 	}
 }
 
+func TestRebuildNgRxEffectFrozenViaOversized(t *testing.T) {
+	const file, lang = "effect.ts", "typescript"
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	caller := &graph.Node{ID: file + "::effect", Name: "effect", Kind: graph.KindVariable, FilePath: file, Language: lang}
+	require.NoError(t, b.AddParsedFile("repo", store_pebble.ParseFacts{
+		EffectiveLanguage: lang, File: graph.FileMetaRow{FilePath: file, NodeCount: 1}, Nodes: []*graph.Node{caller},
+	}))
+	selection, err := resolver.NewFrameworkSynthesizerSelection([]string{resolver.SynthNgRxEffect})
+	require.NoError(t, err)
+	// Native needs only the exact via on a Call, even without ngrx_action.
+	call := &graph.Edge{From: caller.ID, To: "unresolved::action", Kind: graph.EdgeCalls, FilePath: file, Line: 2,
+		Meta: map[string]any{"via": "ngrx-effect"}}
+	b.AddEdge(call)
+	frozen, err := resolver.FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.Equal(t, selection, frozen, "bounded via-only Call is relevant")
+
+	call.Context = strings.Repeat("x", 16<<20)
+	b.AddEdge(call)
+	_, err = resolver.FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+	require.ErrorContains(t, err, "framework census edge")
+}
+
 func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	node := func(file, lang, name string, kind graph.NodeKind, line int) *graph.Node {
 		return &graph.Node{
@@ -476,9 +503,13 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	execute.ID = command.ID + "." + execute.Name
 	vuexAction := node(app, ts, "signInAction", graph.KindFunction, 32)
 	vuexAction.Meta = map[string]any{"vuex_namespace": "account", "vuex_action": "signIn", "vuex_kind": "action"}
+	ngrxEffect := node(app, ts, "refreshClock$", graph.KindVariable, 36)
+	ngrxEffect.Meta = map[string]any{"ngrx_effect": ngrxEffect.Name}
+	ngrxAction := node(app, ts, "RefreshClock", graph.KindConstant, 39)
 	// Observer must accept the registrar call proved by event channel;
 	// the original receipt has no call to subscribe.
-	appFacts := receipt([]*graph.Node{thunk, setup, subscribe, notify, callback, field, topic, show, spec, command, execute, vuexAction},
+	appFacts := receipt(
+		[]*graph.Node{thunk, setup, subscribe, notify, callback, field, topic, show, spec, command, execute, vuexAction, ngrxEffect, ngrxAction},
 		edge(setup, topic.ID, graph.EdgeEmits, 3, event),
 		edge(subscribe, topic.ID, graph.EdgeListensOn, 7, event),
 		edge(subscribe, field.ID, graph.EdgeAccessesField, 8, nil),
@@ -498,6 +529,8 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 			map[string]any{"via": "object-registry", "registry_value": command.Name, "registry_method": execute.Name}),
 		edge(show, setup.ID, graph.EdgeCalls, 34,
 			map[string]any{"via": "vuex-dispatch", "vuex_key": "account/signIn", "vuex_kind": "action"}),
+		edge(ngrxEffect, setup.ID, graph.EdgeCalls, 37,
+			map[string]any{"via": "ngrx-effect", "ngrx_action": ngrxAction.Name}),
 	)
 
 	const rpc = "rpc.go"

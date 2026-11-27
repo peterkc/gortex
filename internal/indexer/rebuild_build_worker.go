@@ -576,6 +576,15 @@ func buildRebuildStages(
 				zap.Uint64("stubs", reduxThunk.Stubs), zap.Uint64("resolved", reduxThunk.Resolved),
 				zap.Uint64("moves", reduxThunk.Moves))
 		}
+		ngrxEffect, err := resolver.RunRebuildNgRxEffect(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if ngrxEffect.Stubs != 0 {
+			logger.Info("rebuild NgRx Effect applied to private build",
+				zap.Uint64("stubs", ngrxEffect.Stubs), zap.Uint64("resolved", ngrxEffect.Resolved),
+				zap.Uint64("moves", ngrxEffect.Moves))
+		}
 		objectRegistry, err := resolver.RunRebuildObjectRegistry(ctx, private, receipts, selection)
 		if err != nil {
 			return err
