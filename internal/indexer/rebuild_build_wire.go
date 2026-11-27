@@ -218,6 +218,8 @@ var rebuildFailureKinds = [...]error{
 	nil, // 90: deferred Rust scope
 	store_pebble.ErrRebuildFactoryChain,
 	store_pebble.ErrRebuildFnValue,
+	nil, // 93: deferred Pascal form
+	store_pebble.ErrRebuildValueRefs,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

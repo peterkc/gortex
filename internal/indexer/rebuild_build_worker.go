@@ -809,6 +809,13 @@ func buildRebuildStages(
 		if fnValueAdds != 0 {
 			logger.Info("rebuild function-value callbacks applied to private build", zap.Uint64("adds", fnValueAdds))
 		}
+		valueRefMoves, err := resolver.RunRebuildValueRefs(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if valueRefMoves != 0 {
+			logger.Info("rebuild value refs applied to private build", zap.Uint64("moves", valueRefMoves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
