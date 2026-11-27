@@ -49,7 +49,8 @@ func TestRebuildTemporalSQLiteOracleWrapperRounds(t *testing.T) {
 			for hop := 1; hop <= tc.hops; hop++ {
 				require.Equal(t, hop <= added, native.EdgeExists(id(hop), seed.To, graph.EdgeCalls, file, 20+hop), "hop %d", hop)
 			}
-			stats := assertRebuildTemporalOracle(t, native, selection, 4<<10, facts)
+			stats := assertRebuildTemporalOracle(t, native, selection, 1, facts)
+			require.Positive(t, stats.SpillBytes, "final wrapper slots spill at a 1-byte threshold")
 			require.Equal(t, uint64(added), stats.Wrappers)
 			require.Equal(t, 16, stats.WrapperRounds)
 			require.Equal(t, tc.capped, stats.WrapperCapped)
@@ -107,7 +108,8 @@ func TestRebuildTemporalSQLiteOracleWrapperLookup(t *testing.T) {
 	require.True(t, native.EdgeExists(fallbackCaller, activity, graph.EdgeCalls, file, 20))
 	require.Equal(t, beforeExact, native.GetOutEdges(exactCaller))
 	require.ElementsMatch(t, beforeSelf, native.GetOutEdges(byName))
-	assertRebuildTemporalOracle(t, native, selection, 1, facts)
+	stats := assertRebuildTemporalOracle(t, native, selection, 4<<10, facts)
+	require.Zero(t, stats.SpillBytes, "the final add tail does not count as spill")
 }
 
 func rebuildTemporalOracleWrapperParam(file, caller string, position int) *graph.Node {

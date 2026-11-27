@@ -78,7 +78,8 @@ func TestRebuildTemporalSQLiteOracleExecutorField(t *testing.T) {
 				require.Equal(t, before[0], call)
 				require.NotContains(t, call.Meta, "temporal_via_executor")
 			}
-			assertRebuildTemporalOracle(t, native, selection, tc.spillAt, facts)
+			stats := assertRebuildTemporalOracle(t, native, selection, tc.spillAt, facts)
+			require.Zero(t, stats.SpillBytes, "executor dispatches do not queue additions")
 		})
 	}
 }
@@ -126,7 +127,8 @@ func TestRebuildTemporalSQLiteOracleJavaBeatsGoExactSignature(t *testing.T) {
 	require.NotNil(t, provider)
 	require.Equal(t, "activity", provider.Meta["temporal_role"])
 	require.Equal(t, "Charge", provider.Meta["temporal_name"])
-	assertRebuildTemporalOracle(t, native, selection, 1, goFacts, javaFacts)
+	stats := assertRebuildTemporalOracle(t, native, selection, 1, goFacts, javaFacts)
+	require.Zero(t, stats.SpillBytes, "cross-language rebind is a move, not an addition")
 
 	// Suppress the Java candidate at this turn's exact refetch, not in parse
 	// facts. The full census and every durable input row are still present.
@@ -193,7 +195,6 @@ func assertRebuildTemporalOracle(t *testing.T, native *store_sqlite.Store, selec
 	}
 	stats, err := RunRebuildTemporal(t.Context(), private, receipts, selection, spillAt)
 	require.NoError(t, err)
-	require.Positive(t, stats.SpillBytes)
 
 	view := private.RebuildView()
 	var gotEdges []*graph.Edge

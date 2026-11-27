@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"os"
+	"path/filepath"
 	"slices"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/pathkey"
 )
@@ -24,7 +27,9 @@ const (
 	rebuildTemporalProofStateBytes = 1 + 8 // flags and a big-endian ordinal
 )
 
-// RebuildTemporalStats describes the complete private turn, including spill.
+// RebuildTemporalStats describes the private turn. SpillBytes counts physical
+// bytes of closed threshold SST runs consumed by the insertion stream. The
+// pending overlay and final in-memory tail add none.
 type RebuildTemporalStats struct {
 	WrapperRounds                         int
 	WrapperCapped                         bool
@@ -37,11 +42,14 @@ type RebuildTemporalStats struct {
 type RebuildTemporalPass struct {
 	build     *BuildStore
 	threshold int
-	buffered  int
-	spill     uint64
 	moves     uint64
 	adds      uint64
 	wants     uint64
+	addRows   []row
+	addBytes  int
+	addRuns   int
+	addDir    string
+	spill     uint64
 }
 
 // RebuildTemporal runs a reducer over a quiet private graph, proves the
@@ -69,7 +77,11 @@ func (b *BuildStore) RebuildTemporal(ctx context.Context, receipts iter.Seq2[Par
 	p := &RebuildTemporalPass{build: b, threshold: spillAt}
 	defer func() {
 		p.build = nil
+		p.addRows = nil
 		err = errors.Join(err, b.pending.DeleteRange(rebuildTemporalPrefix, prefixEnd(rebuildTemporalPrefix), pebble.NoSync))
+		if p.addDir != "" {
+			err = errors.Join(err, os.RemoveAll(p.addDir))
+		}
 	}()
 	stats, err = reduce(p)
 	if err != nil {
@@ -103,19 +115,7 @@ func (p *RebuildTemporalPass) put(ctx context.Context, key, value []byte) error 
 	if err := rebuildTemporalInput(key, value); err != nil {
 		return err
 	}
-	if err := p.build.pending.Set(key, value, pebble.NoSync); err != nil {
-		return err
-	}
-	p.buffered += len(key) + len(value)
-	if p.buffered >= p.threshold {
-		before := p.build.pending.Metrics().Levels[0].TableBytesFlushed
-		if err := p.build.pending.Flush(); err != nil {
-			return err
-		}
-		p.spill += p.build.pending.Metrics().Levels[0].TableBytesFlushed - before
-		p.buffered = 0
-	}
-	return nil
+	return p.build.pending.Set(key, value, pebble.NoSync)
 }
 
 // Put saves one resolver-owned row in an uppercase scratch column.
@@ -342,6 +342,8 @@ func (p *RebuildTemporalPass) QueueMove(ctx context.Context, oldTo string, e *gr
 	return p.put(ctx, key, append(appendKeyString(nil, string(oldKey)), raw...))
 }
 
+// QueueAdd appends a final slot or cross-language insertion. Only Apply
+// reads these rows, in ordinal order after the reindex windows.
 func (p *RebuildTemporalPass) QueueAdd(ctx context.Context, e *graph.Edge) error {
 	raw, err := encodeEdge(e)
 	if err != nil {
@@ -349,7 +351,114 @@ func (p *RebuildTemporalPass) QueueAdd(ctx context.Context, e *graph.Edge) error
 	}
 	key := binary.BigEndian.AppendUint64(rebuildTemporalKey('a'), p.adds)
 	p.adds++
-	return p.put(ctx, key, raw)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := rebuildTemporalInput(key, raw); err != nil {
+		return err
+	}
+	size := len(key) + len(raw)
+	if len(p.addRows) != 0 && size > p.threshold-p.addBytes {
+		if err := p.spillAdds(ctx); err != nil {
+			return err
+		}
+	}
+	p.addRows = append(p.addRows, row{key, raw})
+	p.addBytes += size
+	if p.addBytes >= p.threshold {
+		return p.spillAdds(ctx)
+	}
+	return nil
+}
+
+func (p *RebuildTemporalPass) spillAdds(ctx context.Context) error {
+	if p.addDir == "" {
+		dir, err := os.MkdirTemp(filepath.Join(p.build.scratchParent, "pending"), "temporal-adds-")
+		if err != nil {
+			return err
+		}
+		p.addDir = dir
+	}
+	path := p.addRunPath(p.addRuns)
+	if err := writeTemporalAddRun(ctx, path, p.addRows); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	p.addRuns++
+	p.spill += uint64(info.Size())
+	clear(p.addRows)
+	p.addRows = p.addRows[:0]
+	p.addBytes = 0
+	return nil
+}
+
+func (p *RebuildTemporalPass) addRunPath(run int) string {
+	return filepath.Join(p.addDir, fmt.Sprintf("%d.sst", run))
+}
+
+func writeTemporalAddRun(ctx context.Context, path string, rows []row) (err error) {
+	w, err := newLinkTable(path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, w.Close()) }()
+	for _, r := range rows {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := w.Set(r.key, r.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *RebuildTemporalPass) visitAdds(ctx context.Context, yield func(row) error) error {
+	// Ordinals increase as additions enter the buffer. Each run precedes
+	// both the next run and the tail, even for repeated edge identities.
+	for i := range p.addRuns {
+		if err := visitTemporalAddRun(ctx, p.addRunPath(i), yield); err != nil {
+			return err
+		}
+	}
+	for _, r := range p.addRows {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := yield(r); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+func visitTemporalAddRun(ctx context.Context, path string, yield func(row) error) (err error) {
+	table, err := openLinkTable(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, table.Close()) }()
+	it, err := table.NewIter(sstable.NoTransforms, nil, nil, sstable.TableBlobContext{})
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, it.Close()) }()
+	for kv := it.First(); kv != nil; kv = it.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		value, _, err := kv.Value(nil)
+		if err != nil {
+			return err
+		}
+		if err := yield(row{kv.K.UserKey, value}); err != nil {
+			return err
+		}
+	}
+	return errors.Join(ctx.Err(), it.Error())
 }
 
 func (p *RebuildTemporalPass) apply(ctx context.Context) error {
@@ -424,7 +533,7 @@ func (p *RebuildTemporalPass) apply(ctx context.Context) error {
 	}
 	// SQLite flushes staged slots after the durable reindex. The actual
 	// final identity at each slot is inserted only if still unoccupied.
-	return pendingVisit(ctx, p.build.pending, rebuildTemporalKey('a'), func(r row) error {
+	return p.visitAdds(ctx, func(r row) error {
 		e, err := decodeEdge(r.value)
 		if err != nil {
 			return err

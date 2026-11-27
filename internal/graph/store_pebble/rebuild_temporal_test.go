@@ -1,7 +1,11 @@
 package store_pebble
 
 import (
+	"encoding/binary"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -80,6 +84,80 @@ func TestRebuildTemporalWinnerCustody(t *testing.T) {
 	requireRebuildCustodyCount(t, b, 4)
 }
 
+func TestRebuildTemporalAddRunsAndTail(t *testing.T) {
+	for _, refuse := range []bool{false, true} {
+		name := "apply in ordinal order"
+		if refuse {
+			name = "remove runs on proof refusal"
+		}
+		t.Run(name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			ctx := t.Context()
+			const threshold = 1 << 10
+			first := &graph.Edge{From: "caller", To: "a", Kind: graph.EdgeCalls, FilePath: "workflow.go", Line: 1, Via: strings.Repeat("a", threshold)}
+			second, duplicate, last := *first, *first, *first
+			second.To = "b"
+			duplicate.Via = "later payload for the same key"
+			last.To, last.Via = "c", "tail"
+			before := rebuildFrameworkCustodyRows(t, b)
+			var physical uint64
+			var runDir string
+			stats, err := b.RebuildTemporal(ctx, func(func(ParseFacts, error) bool) {}, threshold,
+				func(p *RebuildTemporalPass) (RebuildTemporalStats, error) {
+					for _, e := range []*graph.Edge{first, &second, &duplicate, &last} {
+						require.NoError(t, p.QueueAdd(ctx, e))
+					}
+					runDir = p.addDir
+					require.Equal(t, 2, p.addRuns)
+					require.Len(t, p.addRows, 2)
+					require.NoError(t, pendingVisit(ctx, b.pending, rebuildTemporalKey('a'), func(row) error {
+						return fmt.Errorf("queued Temporal insert entered the pending overlay")
+					}))
+					for i := range p.addRuns {
+						info, err := os.Stat(p.addRunPath(i))
+						require.NoError(t, err)
+						physical += uint64(info.Size())
+					}
+					prefix := rebuildTemporalKey('a')
+					var next uint64
+					require.NoError(t, p.visitAdds(ctx, func(r row) error {
+						require.Len(t, r.key, len(prefix)+8)
+						require.Equal(t, next, binary.BigEndian.Uint64(r.key[len(prefix):]))
+						next++
+						return nil
+					}))
+					require.EqualValues(t, 4, next)
+					if refuse {
+						return RebuildTemporalStats{}, p.EdgeProof(first).WantNode(ctx, "missing")
+					}
+					return RebuildTemporalStats{}, nil
+				})
+			if refuse {
+				var refusal *RebuildUnknownProvenanceError
+				require.ErrorIs(t, err, ErrRebuildTemporal)
+				require.ErrorAs(t, err, &refusal)
+				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(first)}, refusal)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			} else {
+				require.NoError(t, err)
+				require.Positive(t, physical)
+				require.Equal(t, physical, stats.SpillBytes)
+				want := make(map[graph.EdgeIdentity]rebuildEdgeProof)
+				for _, e := range []*graph.Edge{first, &second, &last} {
+					saved, err := b.pendingEdge(pendingEdgeKey(e))
+					require.NoError(t, err)
+					require.Equal(t, e, saved)
+					want[graph.EdgeIdentityFor(e)] = rebuildProofTemporalSynthetic
+				}
+				requireSyntheticCustody(t, b, want)
+			}
+			_, err = os.Stat(runDir)
+			require.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
 func TestRebuildTemporalRefusesAffectedOutputRows(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -123,9 +201,10 @@ func TestRebuildTemporalRefusesAffectedOutputRows(t *testing.T) {
 			}
 			first := *raw
 			first.To = target.ID
+			flushed := b.pending.Metrics().Levels[0].TableBytesFlushed
 			stats, err := b.RebuildTemporal(ctx, func(yield func(ParseFacts, error) bool) {
 				yield(proofFacts, nil)
-			}, 1<<20, func(p *RebuildTemporalPass) (RebuildTemporalStats, error) {
+			}, 1, func(p *RebuildTemporalPass) (RebuildTemporalStats, error) {
 				stamped := *target
 				stamped.Meta = map[string]any{"temporal_role": "activity"}
 				role := p.NodeProof(&stamped)
@@ -145,8 +224,10 @@ func TestRebuildTemporalRefusesAffectedOutputRows(t *testing.T) {
 				}
 				return RebuildTemporalStats{}, nil
 			})
+			require.Equal(t, flushed, b.pending.Metrics().Levels[0].TableBytesFlushed)
 			if tc.wantCount == 0 {
 				require.NoError(t, err)
+				require.Zero(t, stats.SpillBytes)
 				for _, e := range facts.Edges {
 					out := *e
 					out.To = target.ID
