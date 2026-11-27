@@ -229,7 +229,7 @@ func (p *rebuildKMPPass) prove(ctx context.Context, receipts iter.Seq2[ParseFact
 			}
 		}
 	}
-	kotlinProved, err := p.b.proveRebuildLanguageMarker(ctx, rebuildKMPKey('k'), rebuildKMPRowLimit, "kmp Kotlin")
+	kotlinProved, err := p.b.proveRebuildLanguageMarker(ctx, rebuildKMPKey('k'), rebuildKMPRowLimit, "KMP Kotlin")
 	if err != nil {
 		return err
 	}
