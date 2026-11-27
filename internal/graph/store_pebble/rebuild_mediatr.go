@@ -483,10 +483,6 @@ func (p *rebuildMediatRPass) prepareFanout(ctx context.Context) error {
 
 func (p *rebuildMediatRPass) applyFanout(ctx context.Context) error {
 	return visitRebuildScratchKeyedEdges(ctx, p.b.pending, p.key('z'), 0, "MediatR fanout key", func(e *graph.Edge) error {
-		occupied, err := p.present(pendingEdgeKey(e))
-		if err != nil || occupied {
-			return err
-		}
-		return p.b.addEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofMediatRFanout})
+		return p.addFanoutIfAbsent(e, rebuildProofMediatRFanout)
 	})
 }

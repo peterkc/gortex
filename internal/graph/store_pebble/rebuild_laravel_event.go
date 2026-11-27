@@ -112,11 +112,7 @@ func (b *BuildStore) RebuildLaravelEvent(ctx context.Context, receipts iter.Seq2
 			if err != nil {
 				return err
 			}
-			occupied, err := p.present(pendingEdgeKey(e))
-			if err != nil || occupied {
-				return err
-			}
-			return b.addEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofLaravelEventFanout})
+			return p.addFanoutIfAbsent(e, rebuildProofLaravelEventFanout)
 		})
 	})
 }

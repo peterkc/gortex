@@ -221,3 +221,12 @@ func (p *rebuildCallMoves) apply(ctx context.Context, planned uint64) error {
 	}
 	return nil
 }
+
+// addFanoutIfAbsent preserves the first payload at a key after moves.
+func (p *rebuildCallMoves) addFanoutIfAbsent(e *graph.Edge, proof rebuildEdgeProof) error {
+	occupied, err := p.present(pendingEdgeKey(e))
+	if err != nil || occupied {
+		return err
+	}
+	return p.b.addEdgeWithCustody(e, rebuildEdgeCustody{proof: proof})
+}
