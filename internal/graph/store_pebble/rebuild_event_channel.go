@@ -325,7 +325,10 @@ func (p *rebuildEventChannel) prove(ctx context.Context, receipts iter.Seq2[Pars
 	}); err != nil || !wanted {
 		return err
 	}
-	if err := recordRebuildScratchReceipts(receipts, func(f ParseFacts) error {
+	for f, err := range receipts {
+		if err != nil {
+			return err
+		}
 		file, lang := pathkey.Normalize(f.File.FilePath), f.EffectiveLanguage
 		for _, n := range f.Nodes {
 			if err := ctx.Err(); err != nil {
@@ -365,9 +368,6 @@ func (p *rebuildEventChannel) prove(ctx context.Context, receipts iter.Seq2[Pars
 				return err
 			}
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 	var refused rebuildScratchRefusals
 	if err := pendingVisit(ctx, p.b.pending, eventScratch('w'), func(r row) error {
@@ -384,7 +384,7 @@ func (p *rebuildEventChannel) prove(ctx context.Context, receipts iter.Seq2[Pars
 			if err != nil {
 				return err
 			}
-			if state != rebuildCapabilityWanted|rebuildCapabilityProved {
+			if state != rebuildScratchExact {
 				refused.add(graph.EdgeIdentityFor(e), nil)
 				break
 			}

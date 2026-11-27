@@ -333,7 +333,10 @@ func (p *rebuildSetStatePass) wantCall(e *graph.Edge, live []byte) error {
 }
 
 func (p *rebuildSetStatePass) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
-	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
+	for facts, err := range receipts {
+		if err != nil {
+			return err
+		}
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, e := range facts.Edges {
 			if err := ctx.Err(); err != nil {
@@ -370,15 +373,12 @@ func (p *rebuildSetStatePass) record(ctx context.Context, receipts iter.Seq2[Par
 				return err
 			}
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 	return pendingVisit(ctx, p.b.pending, setStateScratch('r'), func(r row) error {
 		if len(r.value) < 2 {
 			return invalid("setState membership proof state")
 		}
-		if r.value[0] == rebuildCapabilityWanted|rebuildCapabilityProved {
+		if r.value[0] == rebuildScratchExact {
 			return nil
 		}
 		id, err := decodeLinkRecorder(r.value[1:])

@@ -215,7 +215,10 @@ func (p *rebuildKMPPass) prove(ctx context.Context, receipts iter.Seq2[ParseFact
 	}); err != nil {
 		return err
 	}
-	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
+	for facts, err := range receipts {
+		if err != nil {
+			return err
+		}
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, raw := range facts.Nodes {
 			if err := ctx.Err(); err != nil {
@@ -225,9 +228,6 @@ func (p *rebuildKMPPass) prove(ctx context.Context, receipts iter.Seq2[ParseFact
 				return err
 			}
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 	var kotlinProved bool
 	if err := pendingVisit(ctx, p.b.pending, rebuildKMPKey('k'), func(r row) error {

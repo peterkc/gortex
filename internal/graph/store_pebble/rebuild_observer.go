@@ -409,35 +409,38 @@ func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[Pars
 	if err != nil || !found {
 		return nil, err
 	}
-	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
+	for facts, err := range receipts {
+		if err != nil {
+			return nil, err
+		}
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, e := range facts.Edges {
 			if err := ctx.Err(); err != nil {
-				return err
+				return nil, err
 			}
 			bit := byte(rebuildCapabilityUnproved)
 			if facts.EffectiveLanguage != "" && e.FilePath == file {
 				bit = rebuildCapabilityProved
 			}
 			if err := p.note(append(observerScratch('e'), pendingEdgeKey(e)...), bit); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		for _, n := range facts.Nodes {
 			if err := ctx.Err(); err != nil {
-				return err
+				return nil, err
 			}
 			key := observerScratch('n', n.ID)
 			state, err := p.get(key)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if len(state) == 0 {
 				continue
 			}
 			live, err := p.node(ctx, n.ID)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			bit := byte(rebuildCapabilityUnproved)
 			if live != nil && facts.EffectiveLanguage != "" && n.FilePath == file &&
@@ -446,12 +449,9 @@ func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[Pars
 				bit = rebuildCapabilityProved
 			}
 			if err := p.note(key, bit); err != nil {
-				return err
+				return nil, err
 			}
 		}
-		return nil
-	}); err != nil {
-		return nil, err
 	}
 	var refused rebuildScratchRefusals
 	refuse := func(key []byte) error {

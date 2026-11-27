@@ -107,7 +107,10 @@ func (p *rebuildSwiftObjCPass) state(key []byte) (byte, error) {
 }
 
 func (p *rebuildSwiftObjCPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
-	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
+	for facts, err := range receipts {
+		if err != nil {
+			return err
+		}
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, n := range facts.Nodes {
 			if err := ctx.Err(); err != nil {
@@ -130,9 +133,6 @@ func (p *rebuildSwiftObjCPass) prove(ctx context.Context, receipts iter.Seq2[Par
 				return err
 			}
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 	return proveRebuildScratchEndpoints(ctx, p.visit, func(id string) (bool, error) {
 		state, err := p.state(rebuildSwiftObjCKey('n', id))

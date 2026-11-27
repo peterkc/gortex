@@ -697,10 +697,13 @@ func (p *rebuildGRPC) record(ctx context.Context, facts ParseFacts) error {
 }
 
 func (p *rebuildGRPC) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
-	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
-		return p.record(ctx, facts)
-	}); err != nil {
-		return err
+	for facts, err := range receipts {
+		if err != nil {
+			return err
+		}
+		if err := p.record(ctx, facts); err != nil {
+			return err
+		}
 	}
 	var refused rebuildScratchRefusals
 	if err := pendingVisit(ctx, p.b.pending, rebuildGRPCKey('m'), func(r row) error {
@@ -721,7 +724,7 @@ func (p *rebuildGRPC) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, 
 			if err != nil {
 				return err
 			}
-			if state != rebuildCapabilityWanted|rebuildCapabilityProved {
+			if state != rebuildScratchExact {
 				refused.add(graph.EdgeIdentityFor(e), nil)
 				break
 			}

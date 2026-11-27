@@ -201,12 +201,7 @@ func (p *rebuildClosurePass) propose(e *graph.Edge) error {
 	if err != nil {
 		return err
 	}
-	if err := p.wantNode(e.From); err != nil {
-		return err
-	}
-	if err := p.wantNode(e.To); err != nil {
-		return err
-	}
+	// Both proposal endpoints were wanted by the role counts.
 	p.changed = true
 	return p.put(proposal, raw)
 }
@@ -221,7 +216,10 @@ func (p *rebuildClosurePass) state(key []byte) (byte, error) {
 }
 
 func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
-	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
+	for facts, err := range receipts {
+		if err != nil {
+			return err
+		}
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, n := range facts.Nodes {
 			if err := ctx.Err(); err != nil {
@@ -244,9 +242,6 @@ func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[Parse
 				return err
 			}
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 	if err := proveRebuildScratchEndpoints(ctx, p.visit, func(id string) (bool, error) {
 		state, err := p.state(rebuildClosureKey('n', id))

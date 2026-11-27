@@ -387,7 +387,7 @@ func (p *rebuildReactNativeBridge) order(ctx context.Context, receipts iter.Seq2
 		if len(r.value) < 2 {
 			return invalid(p.policy.label + " recorder key")
 		}
-		if r.value[0] == rebuildCapabilityWanted|rebuildCapabilityProved {
+		if r.value[0] == rebuildScratchExact {
 			return nil
 		}
 		e, err := p.b.pendingEdge(r.value[1:])
@@ -510,7 +510,10 @@ func (p *rebuildReactNativeBridge) prove(ctx context.Context, receipts iter.Seq2
 		return nil
 	}
 	view := p.b.RebuildView()
-	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
+	for facts, err := range receipts {
+		if err != nil {
+			return err
+		}
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, n := range facts.Nodes {
 			if err := ctx.Err(); err != nil {
@@ -544,9 +547,6 @@ func (p *rebuildReactNativeBridge) prove(ctx context.Context, receipts iter.Seq2
 				return err
 			}
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 	return proveRebuildScratchEndpoints(ctx, p.visit, func(id string) (bool, error) {
 		state, err := p.get(rebuildRNKey('d', id))

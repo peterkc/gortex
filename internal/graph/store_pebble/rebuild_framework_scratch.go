@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"iter"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
@@ -66,18 +65,6 @@ func noteRebuildScratchPayload(put func([]byte, []byte) error, key, state []byte
 	}
 	state[0] |= bit
 	return put(key, state)
-}
-
-func recordRebuildScratchReceipts(receipts iter.Seq2[ParseFacts, error], record func(ParseFacts) error) error {
-	for facts, err := range receipts {
-		if err != nil {
-			return err
-		}
-		if err := record(facts); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 type rebuildScratchEdgeVisit func(context.Context, func(*graph.Edge) error) error
