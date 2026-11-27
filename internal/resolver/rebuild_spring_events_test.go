@@ -233,3 +233,42 @@ func TestRebuildSpringEventsUsesSettledProducerProof(t *testing.T) {
 		require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 	}
 }
+
+func TestRebuildSpringEventsReceiptListenerEntrants(t *testing.T) {
+	pub := springRebuildNode("publish", "")
+	first := springRebuildNode("B", "Event")
+	call := springRebuildCall(pub.ID, "unresolved::old", "Event", 10)
+	for _, tc := range []struct {
+		name, entrant, liveType, rawType string
+		occupy                           bool
+		refuse                           bool
+	}{
+		{name: "new first", entrant: "A", rawType: "Event", refuse: true},
+		{name: "new secondary", entrant: "C", liveType: "Other", rawType: "Event", refuse: true},
+		{name: "unreachable", entrant: "A", rawType: "Other"},
+		{name: "occupied secondary", entrant: "C", rawType: "Event", occupy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live := springRebuildNode(tc.entrant, tc.liveType)
+			raw := springRebuildNode(tc.entrant, tc.rawType)
+			edges := []*graph.Edge{call}
+			if tc.occupy {
+				edges = append(edges, &graph.Edge{From: pub.ID, To: live.ID, Kind: graph.EdgeCalls, FilePath: springRebuildFile, Line: call.Line})
+			}
+			b := openRebuildGRPCBuild(t, rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, first, live}, edges...))
+			before := rebuildEventSavedRows(t, b)
+			receipt := rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, first, raw}, edges...)
+			stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(receipt), springRebuildSelection(t, b))
+			if tc.refuse {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, raw.ID, refused.First.To)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildSpringEventStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+		})
+	}
+}

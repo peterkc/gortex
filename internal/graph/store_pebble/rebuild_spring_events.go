@@ -36,6 +36,7 @@ type rebuildSpringEventPass struct {
 	refused    rebuildScratchRefusals
 	guard      bool
 	guardProof bool
+	entrants   bool
 	hasAdds    bool
 	calls      uint64
 }
@@ -69,7 +70,7 @@ func (b *BuildStore) RebuildSpringEvents(ctx context.Context, receipts iter.Seq2
 		},
 		rules: rules,
 	}
-	if err := p.captureListeners(ctx); err != nil || !p.guard {
+	if err := p.captureListeners(ctx); err != nil {
 		return p.stats, err
 	}
 	if err := p.captureEdges(ctx); err != nil || p.stats.Stubs == 0 {
@@ -78,11 +79,17 @@ func (b *BuildStore) RebuildSpringEvents(ctx context.Context, receipts iter.Seq2
 	if err := p.planMoves(ctx); err != nil {
 		return stats, err
 	}
-	if p.stats.Moves == 0 && !p.hasAdds {
-		return p.stats, nil
-	}
 	if err := p.record(ctx, receipts); err != nil {
 		return stats, err
+	}
+	if !p.guard {
+		if p.entrants {
+			return stats, p.proveListenerEntrants(ctx)
+		}
+		return stats, nil
+	}
+	if p.stats.Moves == 0 && !p.hasAdds && !p.entrants {
+		return p.stats, nil
 	}
 	if err := p.proveMoves(ctx); err != nil {
 		return stats, err
@@ -123,6 +130,7 @@ func springEventListenerKind(kind graph.NodeKind) bool {
 }
 
 // l indexes live listener types by ID. n records their receipt evidence.
+// j indexes receipt-only types that could add listeners to a live cohort.
 func (p *rebuildSpringEventPass) captureListeners(ctx context.Context) error {
 	return p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
 		n, err := checkedRebuildLightNode(r, p.label)
@@ -294,21 +302,33 @@ func (p *rebuildSpringEventPass) record(ctx context.Context, receipts iter.Seq2[
 }
 
 func (p *rebuildSpringEventPass) recordListener(raw *graph.Node, file, lang string) error {
+	t := p.rules.Listener(raw)
+	role := raw.ID != "" && t != "" && springEventListenerKind(raw.Kind)
+	cohort := p.rules.Simple(t)
 	key := p.key('n', raw.ID)
 	state, err := p.state(key)
-	if err != nil || state == 0 {
+	if err != nil || state == 0 && !role {
 		return err
 	}
-	t := p.rules.Listener(raw)
-	present, err := p.present(p.key('l', p.rules.Simple(t), raw.ID))
+	present, err := p.present(p.key('l', cohort, raw.ID))
 	if err != nil {
 		return err
+	}
+	if role && !present {
+		// An entrant is not an exact proof, even if this is an admitted receipt.
+		p.entrants = true
+		if err := p.put(p.key('j', cohort, raw.ID), nil); err != nil {
+			return err
+		}
+	}
+	if state == 0 {
+		return nil
 	}
 	live, err := pendingGet(p.b.pending, pendingNodeKey(raw.ID), decodeNodeLight)
 	if err != nil {
 		return err
 	}
-	valid := t != "" && present && lang != "" && springEventListenerKind(raw.Kind) &&
+	valid := role && present && lang != "" &&
 		sameRebuildLanguageMarker(raw, live, file)
 	return p.note(key, rebuildScratchProofBit(valid))
 }
@@ -353,10 +373,13 @@ func (p *rebuildSpringEventPass) callProved(old []byte) (bool, error) {
 // Each requested event type is walked once per evidence set. The queue and
 // visited set stay in Pebble, as do the final listener postings sorted by ID.
 // A proved path need not use the same arc as another path to that listener.
-func (p *rebuildSpringEventPass) listeners(ctx context.Context, root string, proved bool) ([]byte, string, error) {
-	arcs, result := byte('a'), byte('t')
-	if proved {
-		arcs, result = 'A', 'T'
+func (p *rebuildSpringEventPass) listeners(ctx context.Context, root string, result byte) ([]byte, string, error) {
+	arcs, listeners := byte('a'), byte('l')
+	switch result {
+	case 'T':
+		arcs = 'A'
+	case 'J':
+		listeners = 'j'
 	}
 	out := p.key(result, root)
 	done := p.key('c', string(result), root)
@@ -406,13 +429,13 @@ func (p *rebuildSpringEventPass) listeners(ctx context.Context, root string, pro
 		}); err != nil {
 			return nil, "", err
 		}
-		posting := p.key('l', string(t))
+		posting := p.key(listeners, string(t))
 		if err := pendingVisit(ctx, p.b.pending, posting, func(r row) error {
 			id, _, err := readKeyString(r.key[len(posting):])
 			if err != nil {
 				return err
 			}
-			if proved {
+			if result == 'T' {
 				state, err := p.state(p.key('n', id))
 				if err != nil || state != rebuildScratchExact {
 					return err
@@ -449,7 +472,7 @@ func (p *rebuildSpringEventPass) visitCalls(ctx context.Context, visit func([]by
 func (p *rebuildSpringEventPass) planMoves(ctx context.Context) error {
 	return p.visitCalls(ctx, func(old []byte, e *graph.Edge) error {
 		t := p.rules.Event(e)
-		posting, first, err := p.listeners(ctx, p.rules.Simple(t), false)
+		posting, first, err := p.listeners(ctx, p.rules.Simple(t), 't')
 		if err != nil {
 			return err
 		}
@@ -462,7 +485,7 @@ func (p *rebuildSpringEventPass) planMoves(ctx context.Context) error {
 		}
 		p.stats.Resolved += count
 		p.hasAdds = p.hasAdds || count > 1
-		if !p.rules.Rebind(e, t, first, count > 0) {
+		if !p.guard || !p.rules.Rebind(e, t, first, count > 0) {
 			return nil
 		}
 		p.stats.Moves++
@@ -487,7 +510,7 @@ func (p *rebuildSpringEventPass) proveMoves(ctx context.Context) error {
 			// needs a witness; a chain that leads nowhere changes no output.
 			ok = p.guardProof
 		} else if ok {
-			_, first, err := p.listeners(ctx, p.rules.Simple(p.rules.Event(e)), true)
+			_, first, err := p.listeners(ctx, p.rules.Simple(p.rules.Event(e)), 'T')
 			if err != nil {
 				return err
 			}
@@ -506,7 +529,7 @@ func (p *rebuildSpringEventPass) proveMoves(ctx context.Context) error {
 // Simulate only the post-move occupancy, using the same windows as apply.
 // An occupied key suppresses every add at that key, even unproved offers.
 func (p *rebuildSpringEventPass) planAdds(ctx context.Context) error {
-	if !p.hasAdds {
+	if !p.hasAdds && !p.entrants {
 		return nil
 	}
 	for i := uint64(0); i < p.ordered; i += graph.SQLiteReindexChunkSize {
@@ -530,6 +553,14 @@ func (p *rebuildSpringEventPass) planAdds(ctx context.Context) error {
 		}); err != nil {
 			return err
 		}
+	}
+	if p.entrants {
+		if err := p.proveListenerEntrants(ctx); err != nil {
+			return err
+		}
+	}
+	if !p.hasAdds {
+		return p.refused.err()
 	}
 	if err := pendingVisit(ctx, p.b.pending, p.column('f'), func(r row) error {
 		proved, err := p.callProved(r.value)
@@ -556,10 +587,74 @@ func (p *rebuildSpringEventPass) planAdds(ctx context.Context) error {
 	return p.refused.err()
 }
 
+func (p *rebuildSpringEventPass) proveListenerEntrants(ctx context.Context) error {
+	if err := p.visitCalls(ctx, func(_ []byte, e *graph.Edge) error {
+		return p.checkListenerEntrants(ctx, e)
+	}); err != nil {
+		return err
+	}
+	return p.refused.err()
+}
+
+func (p *rebuildSpringEventPass) checkListenerEntrants(ctx context.Context, e *graph.Edge) error {
+	t := p.rules.Event(e)
+	root := p.rules.Simple(t)
+	live, first, err := p.listeners(ctx, root, 't')
+	if err != nil {
+		return err
+	}
+	entrants, earlier, err := p.listeners(ctx, root, 'J')
+	if err != nil {
+		return err
+	}
+	if !p.guard && earlier == "" {
+		// A receipt-only listener can activate resets even for unrelated events.
+		reset := *e
+		if p.rules.Rebind(&reset, t, "", false) {
+			p.refused.add(graph.EdgeIdentityFor(&reset), pendingEdgeKey(&reset))
+		}
+		return nil
+	}
+	return pendingVisit(ctx, p.b.pending, entrants, func(r row) error {
+		suffix := r.key[len(entrants):]
+		id, _, err := readKeyString(suffix)
+		if err != nil {
+			return err
+		}
+		known, err := p.present(append(bytes.Clone(live), suffix...))
+		if err != nil || known {
+			return err
+		}
+		if first == "" || id < first {
+			changed := *e
+			if p.rules.Rebind(&changed, t, id, true) || p.guard {
+				p.refused.add(graph.EdgeIdentityFor(&changed), pendingEdgeKey(&changed))
+			}
+			return nil
+		}
+		add := p.rules.Fanout(e, t, id)
+		key := pendingEdgeKey(add)
+		occupied, err := p.addKeyOccupied(key)
+		if err != nil || occupied {
+			return err
+		}
+		p.refused.add(graph.EdgeIdentityFor(add), key)
+		return nil
+	})
+}
+
+func (p *rebuildSpringEventPass) addKeyOccupied(key []byte) (bool, error) {
+	state, err := p.state(append(p.column('z'), key...))
+	if err != nil || state != 0 {
+		return state == 2, err
+	}
+	return p.present(key)
+}
+
 func (p *rebuildSpringEventPass) offerAdds(ctx context.Context, e *graph.Edge, proved bool) error {
 	t := p.rules.Event(e)
 	root := p.rules.Simple(t)
-	posting, first, err := p.listeners(ctx, root, false)
+	posting, first, err := p.listeners(ctx, root, 't')
 	if err != nil {
 		return err
 	}
@@ -573,15 +668,9 @@ func (p *rebuildSpringEventPass) offerAdds(ctx context.Context, e *graph.Edge, p
 		}
 		add := p.rules.Fanout(e, t, id)
 		key := pendingEdgeKey(add)
-		state, err := p.state(append(p.column('z'), key...))
-		if err != nil || state == 2 {
+		occupied, err := p.addKeyOccupied(key)
+		if err != nil || occupied {
 			return err
-		}
-		if state == 0 {
-			occupied, err := p.present(key)
-			if err != nil || occupied {
-				return err
-			}
 		}
 		winnerKey := append(p.column('d'), key...)
 		winner, err := pendingGet(p.b.pending, winnerKey, copyValue)
@@ -593,7 +682,7 @@ func (p *rebuildSpringEventPass) offerAdds(ctx context.Context, e *graph.Edge, p
 		}
 		valid := proved
 		if valid {
-			proof, earlier, err := p.listeners(ctx, root, true)
+			proof, earlier, err := p.listeners(ctx, root, 'T')
 			if err != nil {
 				return err
 			}
