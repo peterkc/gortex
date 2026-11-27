@@ -55,15 +55,17 @@ func (b *BuildStore) RebuildObserver(ctx context.Context, receipts iter.Seq2[Par
 	if err := p.elect(ctx, sameBoundary, maxCallbacks, makeCall, false); err != nil {
 		return stats, err
 	}
-	fallback, err := p.prove(ctx, receipts)
+	incomplete, err := p.prove(ctx, receipts)
 	if err != nil {
 		return stats, err
 	}
-	if fallback != nil {
+	if incomplete {
 		if err := p.elect(ctx, sameBoundary, maxCallbacks, makeCall, true); err != nil {
 			return stats, err
 		}
-		return stats, p.refusal(ctx, fallback)
+		if err := p.refusal(ctx); err != nil {
+			return stats, err
+		}
 	}
 	err = b.withWrites(func() error { return p.apply(ctx) })
 	return p.stats, err
@@ -76,7 +78,8 @@ type rebuildObserverPass struct {
 }
 
 // f: field IDs; r/d: access rows by field/role; c: distinct callbacks by
-// field; v: live inputs requiring exact raw keys; e: receipt proof states;
+// field (empty until needed); v: live inputs requiring exact raw keys;
+// e: receipt proof states;
 // n: declaration proof states with a live witness; w: staged output rows;
 // x: output proof flags used only when a witness fails.
 func observerScratch(col byte, fields ...string) []byte {
@@ -189,24 +192,38 @@ func (p *rebuildObserverPass) fields(ctx context.Context, yield func(string) err
 	})
 }
 
-func (p *rebuildObserverPass) recordCallbacks(ctx context.Context, field string, collect bool) error {
+const (
+	observerCallbackNeeded byte = 1
+	observerCallbackProved byte = 2
+)
+
+func (p *rebuildObserverPass) callbackRoutes(ctx context.Context, field string, yield func(access, in, ref *graph.Edge) error) error {
 	return p.access(ctx, 'r', field, func(access *graph.Edge) error {
-		wanted := false
 		return p.callbackWitnesses(ctx, access.From, func(in, ref *graph.Edge) error {
-			if collect {
-				return p.put(observerScratch('c', field, ref.To), nil)
-			}
-			if !wanted {
-				if err := p.wantWitness(access, access.From); err != nil {
-					return err
-				}
-				wanted = true
-			}
-			if err := p.wantEdge(in); err != nil {
-				return err
-			}
-			return p.wantWitness(ref, ref.To)
+			return yield(access, in, ref)
 		})
+	})
+}
+
+func (p *rebuildObserverPass) collectCallbacks(ctx context.Context, field string) error {
+	return p.callbackRoutes(ctx, field, func(_, _, ref *graph.Edge) error {
+		return p.put(observerScratch('c', field, ref.To), nil)
+	})
+}
+
+func (p *rebuildObserverPass) demandCallbacks(ctx context.Context, field string) error {
+	return p.callbackRoutes(ctx, field, func(access, in, ref *graph.Edge) error {
+		state, err := p.get(observerScratch('c', field, ref.To))
+		if err != nil || len(state) == 0 {
+			return err
+		}
+		if err := p.wantWitness(access, access.From); err != nil {
+			return err
+		}
+		if err := p.wantEdge(in); err != nil {
+			return err
+		}
+		return p.wantWitness(ref, ref.To)
 	})
 }
 
@@ -215,7 +232,7 @@ func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*grap
 ) error {
 	return p.fields(ctx, func(field string) error {
 		if !reporting {
-			if err := p.recordCallbacks(ctx, field, true); err != nil {
+			if err := p.collectCallbacks(ctx, field); err != nil {
 				return err
 			}
 		}
@@ -231,39 +248,62 @@ func (p *rebuildObserverPass) elect(ctx context.Context, sameBoundary func(*grap
 			if err := p.attributeCallbacks(ctx, field); err != nil {
 				return err
 			}
-		} else if err := p.recordCallbacks(ctx, field, false); err != nil {
+		}
+		if err := p.access(ctx, 'd', field, func(access *graph.Edge) error {
+			return p.pairDispatcher(ctx, access, field, sameBoundary, makeCall, reporting)
+		}); err != nil || reporting {
 			return err
 		}
-		return p.access(ctx, 'd', field, func(access *graph.Edge) error {
-			if !reporting {
-				if err := p.wantWitness(access, access.From); err != nil {
-					return err
-				}
-			}
-			disp, err := p.node(ctx, access.From)
-			if err != nil {
+		return p.demandCallbacks(ctx, field)
+	})
+}
+
+func (p *rebuildObserverPass) pairDispatcher(ctx context.Context, access *graph.Edge, field string,
+	sameBoundary func(*graph.Node, *graph.Node) bool, makeCall func(*graph.Node, string, string) *graph.Edge, reporting bool,
+) error {
+	disp, err := p.node(ctx, access.From)
+	if err != nil {
+		return err
+	}
+	badDispatch := false
+	if reporting {
+		badDispatch, err = p.witnessUnproved(access, access.From)
+		if err != nil {
+			return err
+		}
+	}
+	needed := false
+	prefix := observerScratch('c', field)
+	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		id, _, err := readKeyString(r.key[len(prefix):])
+		if err != nil || id == access.From {
+			return err
+		}
+		cb, err := p.node(ctx, id)
+		if err != nil || !sameBoundary(disp, cb) {
+			return err
+		}
+		e := makeCall(disp, id, field)
+		key := pendingEdgeKey(e)
+		prior, err := p.b.pendingEdge(key)
+		if err != nil || prior != nil {
+			return err
+		}
+		if reporting {
+			badCallback := len(r.value) == 0 || r.value[0] != observerCallbackProved
+			return p.reportProposal(key, field, badDispatch || badCallback)
+		}
+		needed = true
+		if len(r.value) == 0 {
+			if err := p.put(r.key, []byte{observerCallbackNeeded}); err != nil {
 				return err
 			}
-			badDispatch := false
-			if reporting {
-				badDispatch, err = p.witnessUnproved(access, access.From)
-				if err != nil {
-					return err
-				}
-			}
-			return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-				id, _, err := readKeyString(r.key[len(prefix):])
-				if err != nil || id == access.From {
-					return err
-				}
-				cb, err := p.node(ctx, id)
-				if err != nil || !sameBoundary(disp, cb) {
-					return err
-				}
-				return p.propose(makeCall(disp, id, field), field, reporting, badDispatch || len(r.value) != 0)
-			})
-		})
-	})
+		}
+		return p.propose(key, e)
+	}); err != nil || !needed {
+		return err
+	}
+	return p.wantWitness(access, access.From)
 }
 
 func (p *rebuildObserverPass) callbackWitnesses(ctx context.Context, registrar string, yield func(*graph.Edge, *graph.Edge) error) error {
@@ -299,33 +339,30 @@ func (p *rebuildObserverPass) callbackWitnesses(ctx context.Context, registrar s
 	})
 }
 
-func (p *rebuildObserverPass) propose(e *graph.Edge, field string, reporting, unproved bool) error {
-	key := pendingEdgeKey(e)
-	prior, err := p.b.pendingEdge(key)
-	if err != nil || prior != nil {
-		return err
-	}
-	// Fields arrive in native sorted ID order. A later field replaces the
-	// earlier staged payload; an occupied durable identity remains untouched.
-	if reporting {
-		// Use the winning field's proof. Within a field, fold any
-		// repeated routes to the same output key into one refusal.
-		proofKey := append(observerScratch('x'), key...)
-		previous, err := p.get(proofKey)
-		if err != nil {
-			return err
-		}
-		bad := byte(0)
-		if unproved || len(previous) > 0 && previous[0] != 0 && string(previous[1:]) == field {
-			bad = 1
-		}
-		return p.put(proofKey, append([]byte{bad}, field...))
-	}
+func (p *rebuildObserverPass) propose(key []byte, e *graph.Edge) error {
 	value, err := encodeEdge(e)
 	if err != nil {
 		return err
 	}
 	return p.put(append(observerScratch('w'), key...), value)
+}
+
+func (p *rebuildObserverPass) reportProposal(key []byte, field string, unproved bool) error {
+	// The later field replaces the earlier payload. Within one field,
+	// one proved route suffices, regardless of route order.
+	proofKey := append(observerScratch('x'), key...)
+	previous, err := p.get(proofKey)
+	if err != nil {
+		return err
+	}
+	if len(previous) != 0 && string(previous[1:]) == field && previous[0] == 0 {
+		return nil
+	}
+	bad := byte(0)
+	if unproved {
+		bad = 1
+	}
+	return p.put(proofKey, append([]byte{bad}, field...))
 }
 
 func observerProofMatches(proof rebuildEdgeProof, kind graph.EdgeKind) bool {
@@ -395,43 +432,43 @@ func (p *rebuildObserverPass) note(key []byte, bit byte) error {
 	return noteRebuildScratchPayload(p.put, key, state, bit)
 }
 
-func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) (*RebuildUnknownProvenanceError, error) {
+func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) (bool, error) {
 	found, err := rebuildGuardHasPrefix(ctx, p.b.pending, observerScratch('n'))
 	if err != nil || !found {
-		return nil, err
+		return false, err
 	}
 	for facts, err := range receipts {
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, e := range facts.Edges {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return false, err
 			}
 			bit := byte(rebuildCapabilityUnproved)
 			if facts.EffectiveLanguage != "" && e.FilePath == file {
 				bit = rebuildCapabilityProved
 			}
 			if err := p.note(append(observerScratch('e'), pendingEdgeKey(e)...), bit); err != nil {
-				return nil, err
+				return false, err
 			}
 		}
 		for _, n := range facts.Nodes {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return false, err
 			}
 			key := observerScratch('n', n.ID)
 			state, err := p.get(key)
 			if err != nil {
-				return nil, err
+				return false, err
 			}
 			if len(state) == 0 {
 				continue
 			}
 			live, err := p.node(ctx, n.ID)
 			if err != nil {
-				return nil, err
+				return false, err
 			}
 			bit := byte(rebuildCapabilityUnproved)
 			if live != nil && facts.EffectiveLanguage != "" && n.FilePath == file &&
@@ -440,43 +477,28 @@ func (p *rebuildObserverPass) prove(ctx context.Context, receipts iter.Seq2[Pars
 				bit = rebuildCapabilityProved
 			}
 			if err := p.note(key, bit); err != nil {
-				return nil, err
+				return false, err
 			}
 		}
 	}
-	var refused rebuildScratchRefusals
-	refuse := func(key []byte) error {
-		id, err := decodeLinkRecorder(key)
-		if err != nil {
-			return err
-		}
-		refused.add(id, nil)
-		return nil
-	}
+	incomplete := false
 	if err := pendingVisit(ctx, p.b.pending, observerScratch('v'), func(r row) error {
 		bad, err := p.rawUnproved(r.value)
-		if err != nil || !bad {
-			return err
-		}
-		return refuse(r.key[3:])
+		incomplete = incomplete || bad
+		return err
 	}); err != nil {
-		return nil, err
+		return false, err
 	}
 	if err := pendingVisit(ctx, p.b.pending, observerScratch('n'), func(r row) error {
 		if len(r.value) < 2 {
 			return invalid("Observer declaration proof row")
 		}
-		if r.value[0] != rebuildScratchExact {
-			return refuse(r.value[1:])
-		}
+		incomplete = incomplete || r.value[0] != rebuildScratchExact
 		return nil
 	}); err != nil {
-		return nil, err
+		return false, err
 	}
-	if refused.result.Count != 0 {
-		return &refused.result, nil
-	}
-	return nil, nil
+	return incomplete, nil
 }
 
 // rawUnproved reads the state for a wanted raw key. A one-byte marker
@@ -506,45 +528,32 @@ func (p *rebuildObserverPass) witnessUnproved(e *graph.Edge, id string) (bool, e
 	return len(state) < 2 || state[0] != rebuildScratchExact, err
 }
 
-// Report registrar admission against the field and each callback witness
-// against its own callback. Repeat the read-only join only on refusal.
+// Any proved route suffices for a needed callback. Repeat the join only
+// when receipt replay leaves a witness unproved.
 func (p *rebuildObserverPass) attributeCallbacks(ctx context.Context, field string) error {
-	return p.access(ctx, 'r', field, func(access *graph.Edge) error {
-		checked := false
-		badRegistrar := false
-		return p.callbackWitnesses(ctx, access.From, func(in, ref *graph.Edge) error {
-			if !checked {
-				var err error
-				badRegistrar, err = p.witnessUnproved(access, access.From)
-				if err != nil {
-					return err
-				}
-				checked = true
-			}
-			bad := badRegistrar
-			if !bad {
-				var err error
-				bad, err = p.edgeUnproved(in)
-				if err != nil {
-					return err
-				}
-			}
-			if !bad {
-				var err error
-				bad, err = p.witnessUnproved(ref, ref.To)
-				if err != nil {
-					return err
-				}
-			}
-			if !bad {
-				return nil
-			}
-			return p.put(observerScratch('c', field, ref.To), []byte{1})
-		})
+	return p.callbackRoutes(ctx, field, func(access, in, ref *graph.Edge) error {
+		key := observerScratch('c', field, ref.To)
+		state, err := p.get(key)
+		if err != nil || len(state) == 0 || state[0] == observerCallbackProved {
+			return err
+		}
+		bad, err := p.witnessUnproved(access, access.From)
+		if err != nil || bad {
+			return err
+		}
+		bad, err = p.edgeUnproved(in)
+		if err != nil || bad {
+			return err
+		}
+		bad, err = p.witnessUnproved(ref, ref.To)
+		if err != nil || bad {
+			return err
+		}
+		return p.put(key, []byte{observerCallbackProved})
 	})
 }
 
-func (p *rebuildObserverPass) refusal(ctx context.Context, fallback error) error {
+func (p *rebuildObserverPass) refusal(ctx context.Context) error {
 	prefix := observerScratch('x')
 	var refused rebuildScratchRefusals
 	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
@@ -563,10 +572,7 @@ func (p *rebuildObserverPass) refusal(ctx context.Context, fallback error) error
 	}); err != nil {
 		return err
 	}
-	if err := refused.err(); err != nil {
-		return err
-	}
-	return fallback
+	return refused.err()
 }
 
 func (p *rebuildObserverPass) apply(ctx context.Context) error {

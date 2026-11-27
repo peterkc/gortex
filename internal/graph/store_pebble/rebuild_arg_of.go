@@ -19,6 +19,7 @@ var ErrRebuildUnknownProvenance = errors.New("rebuild: unknown provenance")
 // possible producers or contenders. First names the lowest affected key.
 // If a pass must prove inputs but cannot elect an output without guessing,
 // Count and First describe the unproved inputs instead.
+// A fail-fast custody check reports the first conflict it encounters.
 type RebuildUnknownProvenanceError struct {
 	Count uint64
 	First graph.EdgeIdentity

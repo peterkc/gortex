@@ -82,23 +82,98 @@ func TestRebuildObserverOriginalKeyAndScratchOwnership(t *testing.T) {
 
 func TestRebuildObserverReportsProposalProofFolds(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		lastField string
-		bad       byte
+		name                string
+		lastField           string
+		firstBad, secondBad bool
+		bad                 byte
 	}{
-		{"same field keeps bad proof", "a", 1},
-		{"later field resets proof", "z", 0},
+		{"same field bad then proved", "a", true, false, 0},
+		{"same field proved then bad", "a", false, true, 0},
+		{"same field both bad", "a", true, true, 1},
+		{"later field can clear bad proof", "z", true, false, 0},
+		{"later field cannot borrow earlier proof", "z", false, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newBuild(t, FullProfile)
 			p := rebuildObserverPass{b: b}
 			e := &graph.Edge{From: "dispatcher", To: "callback", Kind: graph.EdgeCalls, FilePath: "bus.go", Line: 5}
-			require.NoError(t, p.propose(e, tc.lastField, false, false))
-			require.NoError(t, p.propose(e, "a", true, true))
-			require.NoError(t, p.propose(e, tc.lastField, true, false))
-			value, err := p.get(append(observerScratch('x'), pendingEdgeKey(e)...))
+			key := pendingEdgeKey(e)
+			require.NoError(t, p.reportProposal(key, "a", tc.firstBad))
+			require.NoError(t, p.reportProposal(key, tc.lastField, tc.secondBad))
+			value, err := p.get(append(observerScratch('x'), key...))
 			require.NoError(t, err)
 			require.Equal(t, append([]byte{tc.bad}, tc.lastField...), value)
+		})
+	}
+}
+
+func TestRebuildObserverSkipsIneligibleCallbackProof(t *testing.T) {
+	for _, livePair := range []bool{false, true} {
+		name := "no eligible pair"
+		if livePair {
+			name = "eligible pair alongside filtered callbacks"
+		}
+		t.Run(name, func(t *testing.T) {
+			registrar := setStateProofMethod("registrar", "subscribe", 1)
+			inactive := setStateProofMethod("inactive", "subscribe", 5)
+			dispatch := setStateProofMethod("dispatch", "notify", 2)
+			foreign := setStateProofMethod("foreign", "foreign", 3)
+			foreign.WorkspaceID = "other"
+			const field = "field"
+			access := func(n *graph.Node) *graph.Edge {
+				return &graph.Edge{From: n.ID, To: field, Kind: graph.EdgeAccessesField, FilePath: n.FilePath, Line: n.StartLine}
+			}
+			ref := func(n *graph.Node) *graph.Edge {
+				return &graph.Edge{From: "setup", To: n.ID, Kind: graph.EdgeReferences, FilePath: n.FilePath, Line: 9}
+			}
+			in := &graph.Edge{From: "setup", To: registrar.ID, Kind: graph.EdgeCalls, FilePath: registrar.FilePath, Line: 9}
+			regAccess, dispAccess, unusedAccess := access(registrar), access(dispatch), access(inactive)
+			selfRef, foreignRef := ref(dispatch), ref(foreign)
+			otherSite := &graph.Edge{From: "setup", To: inactive.ID, Kind: graph.EdgeCalls, FilePath: inactive.FilePath, Line: 10}
+			proof := setStateProofFacts([]*graph.Node{registrar, dispatch}, regAccess, dispAccess, in)
+			facts := setStateProofFacts([]*graph.Node{registrar, dispatch, foreign, inactive},
+				regAccess, dispAccess, in, selfRef, foreignRef, unusedAccess, otherSite)
+			allowed := setStateProofMethod("allowed", "allowed", 4)
+			if livePair {
+				edge := ref(allowed)
+				facts.Nodes = append(facts.Nodes, allowed)
+				facts.Edges = append(facts.Edges, edge)
+				proof.Nodes = append(proof.Nodes, allowed)
+				proof.Edges = append(proof.Edges, edge)
+			}
+			b, _ := seedSyntheticCustody(t, facts)
+			receipts := func(yield func(ParseFacts, error) bool) {
+				require.True(t, livePair, "filtered pairs do not demand any receipts")
+				// Check demand directly. Ignoring an unproved route later
+				// would otherwise hide an eager receipt request.
+				for _, e := range []*graph.Edge{selfRef, foreignRef, unusedAccess, otherSite} {
+					value, err := pendingGet(b.pending, append(observerScratch('v'), pendingEdgeKey(e)...), copyValue)
+					require.NoError(t, err)
+					require.Empty(t, value, "unexpected proof demand for %s to %s", e.From, e.To)
+				}
+				for _, n := range []*graph.Node{foreign, inactive} {
+					value, err := pendingGet(b.pending, observerScratch('n', n.ID), copyValue)
+					require.NoError(t, err)
+					require.Empty(t, value, "unexpected declaration proof demand for %s", n.ID)
+				}
+				yield(proof, nil)
+			}
+			makeCall := func(from *graph.Node, to, field string) *graph.Edge {
+				return setStateProofOutput(from, &graph.Node{ID: to}, field)
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildObserver(t.Context(), receipts,
+				func(name string) bool { return name == "subscribe" },
+				func(name string) bool { return name == "notify" },
+				func(from, to *graph.Node) bool { return from.WorkspaceID == to.WorkspaceID }, 40, makeCall)
+			require.NoError(t, err)
+			if livePair {
+				require.EqualValues(t, 1, stats.Edges)
+				checkSetStateProofOutput(t, b, makeCall(dispatch, allowed.ID, field), rebuildProofObserver)
+			} else {
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			}
 		})
 	}
 }
@@ -124,33 +199,48 @@ func TestRebuildObserverRefusalNamesOnlyRegistrarCallbacks(t *testing.T) {
 	edges := []*graph.Edge{access(bad), access(good), access(dispatch)}
 	edges = append(edges, at(good, a, 8)...)
 	edges = append(edges, at(bad, z, 9)...)
-	facts := setStateProofFacts([]*graph.Node{bad, good, dispatch, a, z}, edges...)
-	b, complete := seedSyntheticCustody(t, facts)
-	proof := facts
-	proof.Edges = proof.Edges[1:]
-	receipts := func(yield func(ParseFacts, error) bool) { yield(proof, nil) }
 	makeCall := func(from *graph.Node, to, field string) *graph.Edge {
 		return setStateProofOutput(from, &graph.Node{ID: to}, field)
 	}
-	run := func(receipts func(func(ParseFacts, error) bool)) (RebuildObserverStats, error) {
-		return b.RebuildObserver(t.Context(), receipts,
-			func(name string) bool { return name == "subscribe" },
-			func(name string) bool { return name == "notify" },
-			func(_, _ *graph.Node) bool { return true }, 40, makeCall)
+	for _, mode := range []string{"only the bad route", "shared with the proved registrar"} {
+		t.Run(mode, func(t *testing.T) {
+			input := edges
+			if mode == "shared with the proved registrar" {
+				// Good already has an inbound call at this site. A second
+				// reference makes the same callback reachable via both.
+				input = append(input, at(good, z, 8)[1])
+			}
+			facts := setStateProofFacts([]*graph.Node{bad, good, dispatch, a, z}, input...)
+			b, complete := seedSyntheticCustody(t, facts)
+			proof := facts
+			proof.Edges = proof.Edges[1:]
+			receipts := func(yield func(ParseFacts, error) bool) { yield(proof, nil) }
+			run := func(receipts func(func(ParseFacts, error) bool)) (RebuildObserverStats, error) {
+				return b.RebuildObserver(t.Context(), receipts,
+					func(name string) bool { return name == "subscribe" },
+					func(name string) bool { return name == "notify" },
+					func(_, _ *graph.Node) bool { return true }, 40, makeCall)
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := run(receipts)
+			if mode == "only the bad route" {
+				var refused *RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &RebuildUnknownProvenanceError{
+					Count: 1,
+					First: graph.EdgeIdentityFor(makeCall(dispatch, z.ID, field)),
+				}, refused)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+				stats, err = run(complete)
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 2, stats.Edges)
+			for _, cb := range []*graph.Node{a, z} {
+				checkSetStateProofOutput(t, b, makeCall(dispatch, cb.ID, field), rebuildProofObserver)
+			}
+		})
 	}
-	before := rebuildFrameworkCustodyRows(t, b)
-	stats, err := run(receipts)
-	var refused *RebuildUnknownProvenanceError
-	require.ErrorAs(t, err, &refused)
-	require.Equal(t, &RebuildUnknownProvenanceError{
-		Count: 1,
-		First: graph.EdgeIdentityFor(makeCall(dispatch, z.ID, field)),
-	}, refused)
-	require.Zero(t, stats)
-	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
-	stats, err = run(complete)
-	require.NoError(t, err)
-	require.EqualValues(t, 2, stats.Edges)
 }
 
 func TestRebuildObserverProofKinds(t *testing.T) {

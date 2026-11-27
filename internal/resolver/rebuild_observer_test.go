@@ -237,6 +237,51 @@ func TestRebuildObserverProofScopeWithAndWithoutCallbacks(t *testing.T) {
 	}
 }
 
+func TestRebuildObserverProofScopeWithInactiveRegistrar(t *testing.T) {
+	for _, proofCase := range []string{"exact proof", "missing access", "missing declaration"} {
+		t.Run(proofCase, func(t *testing.T) {
+			const file, lang = "bus.go", "go"
+			channel := newRebuildObserverChannel(file, lang)
+			otherRegistrar := rebuildEventNode(file, "register", lang, "")
+			otherRegistrar.Kind = graph.KindMethod
+			callback := rebuildEventNode(file, "callback", lang, "")
+			access := rebuildObserverEdge(otherRegistrar, channel.field, graph.EdgeAccessesField, 9)
+			channel.facts.Nodes = append(channel.facts.Nodes, otherRegistrar, callback)
+			channel.facts.Edges = append(channel.facts.Edges,
+				access,
+				// The second registrar has a call, but not at the callback's site.
+				rebuildObserverEdge(channel.caller, otherRegistrar, graph.EdgeCalls, 21),
+				rebuildObserverEdge(channel.caller, callback, graph.EdgeReads, 20),
+			)
+			proof, b, native := openRebuildObserverStores(t, nil, channel.facts)
+			selection := rebuildObserverSelection(t)
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
+			calls := rebuildObserverNativeDispatchCalls(native, channel.dispatch.ID)
+			require.Len(t, calls, 1)
+			require.Equal(t, callback.ID, calls[0].To)
+			require.Equal(t, channel.field.ID, calls[0].Meta["channel_field"])
+
+			// Leave all live rows intact and remove only the named proof.
+			switch proofCase {
+			case "missing access":
+				proof[0].Edges = slices.DeleteFunc(proof[0].Edges, func(e *graph.Edge) bool {
+					return graph.EdgeIdentityFor(e) == graph.EdgeIdentityFor(access)
+				})
+				require.Len(t, proof[0].Edges, len(channel.facts.Edges)-1)
+			case "missing declaration":
+				proof[0].Nodes = slices.DeleteFunc(proof[0].Nodes, func(n *graph.Node) bool {
+					return n.ID == otherRegistrar.ID
+				})
+				require.Len(t, proof[0].Nodes, len(channel.facts.Nodes)-1)
+			}
+			stats, err := RunRebuildObserver(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), stats.Edges)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
 func TestRebuildObserverCapBeforeWorkspaceAndLanguage(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -330,8 +375,8 @@ func TestRebuildObserverRefusesMissingWinnerReceipt(t *testing.T) {
 }
 
 type rebuildObserverChannelFixture struct {
-	facts                       store_pebble.ParseFacts
-	caller, registrar, dispatch *graph.Node
+	facts                              store_pebble.ParseFacts
+	caller, registrar, dispatch, field *graph.Node
 }
 
 func newRebuildObserverChannel(file, language string) rebuildObserverChannelFixture {
@@ -348,7 +393,7 @@ func newRebuildObserverChannel(file, language string) rebuildObserverChannelFixt
 		rebuildObserverEdge(dispatch, field, graph.EdgeAccessesField, 7),
 		rebuildObserverEdge(caller, registrar, graph.EdgeCalls, 20),
 	)
-	return rebuildObserverChannelFixture{facts: facts, caller: caller, registrar: registrar, dispatch: dispatch}
+	return rebuildObserverChannelFixture{facts: facts, caller: caller, registrar: registrar, dispatch: dispatch, field: field}
 }
 
 func rebuildObserverEdge(from, to *graph.Node, kind graph.EdgeKind, line int) *graph.Edge {
