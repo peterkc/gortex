@@ -272,3 +272,111 @@ func TestRebuildFnPointerStageCountsSkippedReceiptClaims(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildFnPointerStageMoveReceiptOrder(t *testing.T) {
+	const file, lang = "saved.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	target := rebuildEventNode(file, "work", lang, "")
+	var edges []*graph.Edge
+	for _, old := range []string{"unresolved::z", "unresolved::a"} {
+		reg := rebuildFnPointerReg(caller.ID, old, 1, "slot", target.Name)
+		call := rebuildFnPointerCall(caller.ID, old, 2, "slot")
+		reg.Meta["witness"], call.Meta["witness"] = old, old
+		edges = append(edges, reg, call)
+	}
+	facts := rebuildEventFacts(file, lang, []*graph.Node{caller, target}, edges...)
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthFnPointerDispatch})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name    string
+		reverse bool
+		first   string
+	}{
+		{"z first", false, "unresolved::z"},
+		{"a first", true, "unresolved::a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			receipt := facts
+			receipt.Edges = slices.Clone(facts.Edges)
+			if tc.reverse {
+				slices.Reverse(receipt.Edges)
+			}
+			// Keep the private key order fixed and change the SQLite row IDs.
+			b := openRebuildGRPCBuild(t, facts)
+			native := rebuildGRPCNative(t, rebuildEventFacts(file, lang, facts.Nodes))
+			for _, e := range receipt.Edges {
+				require.NoError(t, native.AddBatchChecked(nil, []*graph.Edge{e}))
+			}
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.NoError(t, FreezeRebuildFnPointerInputs(t.Context(), b, frozen))
+			report := RunFrameworkSynthesizersWithSelection(native, selected)
+			require.NoError(t, report.Err)
+			want := rebuildEventSQLiteRows(native)
+			require.Len(t, want.edges, 2)
+			for _, e := range want.edges {
+				require.Equal(t, target.ID, e.To)
+				require.Equal(t, tc.first, e.Meta["witness"], "%s", e.Kind)
+			}
+			stats, err := RunRebuildFnPointerStage(t.Context(), b, rebuildGRPCReceipts(receipt), frozen)
+			require.NoError(t, err)
+			require.EqualValues(t, 2, stats.RefMoves)
+			require.EqualValues(t, 2, stats.CallMoves)
+			require.Equal(t, want, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildFnPointerStageLimits(t *testing.T) {
+	const file, lang, stub = "saved.c", "c", "unresolved::*.fn"
+	caller := rebuildEventNode(file, "run", lang, "")
+	target := rebuildEventNode(file, "seed", lang, "")
+	nodes := []*graph.Node{caller, target}
+	edges := []*graph.Edge{rebuildFnPointerReg(caller.ID, target.ID, 1, "s0", target.Name)}
+	// All copy tuple fields except line are equal. Both native receipt order
+	// and private tuple order visit the downstream hop first each sweep.
+	for hop := 9; hop > 0; hop-- {
+		copyRef := rebuildFnPointerReg(caller.ID, stub, 11-hop, fmt.Sprint("s", hop), "")
+		copyRef.Meta["fnptr_copy_struct"], copyRef.Meta["fnptr_copy_field"] = fmt.Sprint("s", hop-1), "fn"
+		edges = append(edges, copyRef)
+	}
+	var wantTargets []string
+	for i := 64; i >= 0; i-- {
+		n := rebuildEventNode(file, fmt.Sprintf("target%02d", i), lang, "")
+		nodes = append(nodes, n)
+		edges = append(edges, rebuildFnPointerReg(caller.ID, n.ID, 100+i, "crowd", n.Name))
+		if i < 64 {
+			wantTargets = append(wantTargets, n.ID)
+		}
+	}
+	slices.Reverse(wantTargets)
+	edges = append(edges,
+		rebuildFnPointerCall(caller.ID, stub, 20, "s8"),
+		rebuildFnPointerCall(caller.ID, stub, 21, "s9"),
+		rebuildFnPointerCall(caller.ID, stub, 22, "crowd"),
+	)
+	facts := rebuildEventFacts(file, lang, nodes, edges...)
+	b, native := openRebuildEventStores(t, facts)
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthFnPointerDispatch})
+	require.NoError(t, err)
+	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selected)
+	require.NoError(t, err)
+	require.NoError(t, FreezeRebuildFnPointerInputs(t.Context(), b, frozen))
+	report := RunFrameworkSynthesizersWithSelection(native, selected)
+	require.NoError(t, report.Err)
+	want := rebuildEventSQLiteRows(native)
+	require.Equal(t, target.ID, rebuildFnPointerSavedAt(t, want.edges, graph.EdgeCalls, caller.ID, 20).To)
+	require.Equal(t, stub, rebuildFnPointerSavedAt(t, want.edges, graph.EdgeCalls, caller.ID, 21).To)
+	var gotTargets []string
+	for _, e := range want.edges {
+		if e.Kind == graph.EdgeCalls && e.From == caller.ID && e.Line == 22 {
+			gotTargets = append(gotTargets, e.To)
+		}
+	}
+	require.Equal(t, wantTargets, gotTargets)
+	stats, err := RunRebuildFnPointerStage(t.Context(), b, rebuildGRPCReceipts(facts), frozen)
+	require.NoError(t, err)
+	require.Equal(t, store_pebble.RebuildFnPointerStageStats{CallMoves: 2, Adds: 63, Resolved: 65, Sweeps: 8}, stats)
+	require.Equal(t, want, rebuildEventSavedRows(t, b))
+}
