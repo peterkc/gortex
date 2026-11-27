@@ -20,6 +20,7 @@ func TestRebuildConventionReceiptEntrants(t *testing.T) {
 		{SynthReactResolve, "App/view.tsx", "typescript", "Auth", "AuthContext", "react_context", "App/providers/auth.ts", FreezeRebuildReactResolveInputs, RunRebuildReactResolve},
 		{SynthSwiftUIResolve, "App/Panel.swift", "swift", "ProfileView", "ProfileView", "", "App/Views/Profile.swift", nil, RunRebuildSwiftUI},
 		{SynthVaporResolve, "App/routes.swift", "swift", "UserController", "UserController", "", "App/Controllers/User.swift", nil, RunRebuildVapor},
+		{SynthUIKitResolve, "App/Panel.swift", "swift", "DetailViewController", "DetailViewController", "", "App/ViewControllers/Detail.swift", FreezeRebuildUIKitInputs, RunRebuildUIKit},
 	} {
 		t.Run(tc.stage, func(t *testing.T) {
 			source := &graph.Node{ID: "source", Kind: graph.KindFunction, FilePath: tc.file, Language: tc.lang}
