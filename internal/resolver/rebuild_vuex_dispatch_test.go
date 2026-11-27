@@ -167,6 +167,13 @@ func TestRebuildVuexDispatchFrozenSelection(t *testing.T) {
 	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 	require.NoError(t, err)
 	require.False(t, frozen.allows(SynthVuexDispatch))
+	before := rebuildEventSavedRows(t, b)
+	stats, err := RunRebuildVuexDispatch(t.Context(), b, func(func(store_pebble.ParseFacts, error) bool) {
+		t.Fatal("an unrelated Call must not require receipts")
+	}, selection)
+	require.NoError(t, err)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
 	late := rebuildVuexTestCall(from, "unresolved::*.login", file, "user/login", "action", 3)
 	b.AddEdge(late)
 	bounded, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
@@ -175,7 +182,7 @@ func TestRebuildVuexDispatchFrozenSelection(t *testing.T) {
 
 	late.Meta["payload"] = unrelated.Meta["payload"]
 	b.AddEdge(late)
-	stats, err := RunRebuildVuexDispatch(t.Context(), b, nil, frozen)
+	stats, err = RunRebuildVuexDispatch(t.Context(), b, nil, frozen)
 	require.NoError(t, err)
 	require.Zero(t, stats)
 	refrozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)

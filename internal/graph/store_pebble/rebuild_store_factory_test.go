@@ -59,6 +59,55 @@ func TestRebuildStoreFactoryRejectsOccupiedScratch(t *testing.T) {
 	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 }
 
+func TestRebuildVuexDispatchInputs(t *testing.T) {
+	base := storeFactoryTestRules()
+	rules := RebuildVuexDispatchRules{
+		Action: base.Action, Getter: base.Getter, Rebind: base.Rebind,
+		Stub: func(e *graph.Edge) (string, string, string) {
+			binding, member := base.Stub(e)
+			return binding, member, member
+		},
+	}
+	for _, name := range []string{"nil Stub", "occupied gqV", "action", "caller"} {
+		t.Run(name, func(t *testing.T) {
+			rules := rules
+			action := storeFactoryTestAction("store.ts::reset", "store.ts", "workspace")
+			caller := storeFactoryTestCaller()
+			call := storeFactoryTestCall(storeFactoryTestStub, 2)
+			facts := producerProofFacts(caller)
+			facts.Edges = []*graph.Edge{call}
+			switch name {
+			case "nil Stub":
+				rules.Stub = nil
+			case "action":
+				action.Meta["large"] = strings.Repeat("x", 16<<20)
+			case "caller":
+				caller.Meta["large"] = strings.Repeat("x", 16<<20)
+			}
+			b, _ := seedSyntheticCustody(t, producerProofFacts(action), facts)
+			if name == "occupied gqV" {
+				require.NoError(t, b.pending.Set([]byte("gqVz"), []byte("sentinel"), pebble.NoSync))
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			stats, err := b.RebuildVuexDispatch(t.Context(), unreadStoreFactoryReceipts(t), rules)
+			require.ErrorIs(t, err, ErrRebuildVuexDispatch)
+			switch name {
+			case "nil Stub":
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "invalid Vuex Dispatch inputs")
+			case "occupied gqV":
+				require.ErrorIs(t, err, errInvalidRecord)
+				require.ErrorContains(t, err, "Vuex Dispatch scratch range occupied")
+			default:
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "Vuex Dispatch node row")
+			}
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
 func TestRebuildStoreFactoryRowCaps(t *testing.T) {
 	large := strings.Repeat("x", rebuildStoreFactoryRowBytes)
 	for _, tc := range []struct{ name, row string }{
