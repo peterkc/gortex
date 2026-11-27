@@ -226,3 +226,49 @@ func TestRebuildFnPointerStageProofFollowsDispatchSlots(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildFnPointerStageCountsSkippedReceiptClaims(t *testing.T) {
+	const file, lang = "saved.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	target := rebuildEventNode(file, "work", lang, "")
+	reg := rebuildFnPointerReg(caller.ID, target.ID, 1, "slot", target.Name)
+	call := rebuildFnPointerCall(caller.ID, "unresolved::*.fn", 2, "slot")
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthFnPointerDispatch})
+	require.NoError(t, err)
+	for _, kind := range []graph.EdgeKind{graph.EdgeReferences, graph.EdgeCalls} {
+		t.Run(string(kind), func(t *testing.T) {
+			for _, duplicate := range []bool{false, true} {
+				ctx := t.Context()
+				input := call
+				if kind == graph.EdgeReferences {
+					input = reg
+				}
+				facts := rebuildEventFacts(file, lang, []*graph.Node{caller, target}, reg, call)
+				b := openRebuildGRPCBuild(t, facts)
+				derived := *input
+				derived.To = "unresolved::alternate"
+				require.NoError(t, b.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &derived, OldTo: input.To}}))
+				if duplicate {
+					old := *input
+					old.Meta = map[string]any{"via": input.Meta["via"]}
+					b.AddEdge(&old)
+				}
+				before := rebuildEventSavedRows(t, b)
+				frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+				require.NoError(t, err)
+				require.NoError(t, FreezeRebuildFnPointerInputs(ctx, b, frozen))
+				stats, err := RunRebuildFnPointerStage(ctx, b, rebuildGRPCReceipts(facts), frozen)
+				if duplicate {
+					require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+					require.Zero(t, stats)
+					require.Equal(t, before, rebuildEventSavedRows(t, b))
+					continue
+				}
+				require.NoError(t, err)
+				require.EqualValues(t, 1, stats.CallMoves)
+				rows := rebuildEventSavedRows(t, b).edges
+				require.Equal(t, target.ID, rebuildFnPointerSavedAt(t, rows, graph.EdgeCalls, caller.ID, 2).To)
+			}
+		})
+	}
+}

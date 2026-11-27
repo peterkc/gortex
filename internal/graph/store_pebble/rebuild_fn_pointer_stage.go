@@ -178,22 +178,10 @@ func (p *rebuildFnPointerStage) capture(ctx context.Context) error {
 		}
 		moves := &p.rebuildCallMoves
 		col := byte('h')
-		if e.Kind == graph.EdgeReferences {
-			_, source, name := p.decide.Registration(e)
-			if source == "" && name == "" {
-				return nil
-			}
-			if name != "" {
-				if err := p.put(p.key('q', name), nil); err != nil {
-					return err
-				}
-			}
-		} else {
-			if _, _, ok := p.decide.Dispatch(e); !ok {
-				return nil
-			}
+		if e.Kind == graph.EdgeCalls {
 			moves = &p.calls
 		}
+		// A retained key can share raw custody even if it has lost its role.
 		raw, err := rebuildReceiptKey(p.b.pending, old)
 		if err != nil && !errors.Is(err, ErrRebuildUnknownProvenance) {
 			return err
@@ -207,6 +195,21 @@ func (p *rebuildFnPointerStage) capture(ctx context.Context) error {
 				raw = nil
 			} else if err := moves.claim(raw, old); err != nil {
 				return err
+			}
+		}
+		if e.Kind == graph.EdgeReferences {
+			_, source, name := p.decide.Registration(e)
+			if source == "" && name == "" {
+				return nil
+			}
+			if name != "" {
+				if err := p.put(p.key('q', name), nil); err != nil {
+					return err
+				}
+			}
+		} else {
+			if _, _, ok := p.decide.Dispatch(e); !ok {
+				return nil
 			}
 		}
 		return moves.put(append(moves.column(col), old...), raw)
