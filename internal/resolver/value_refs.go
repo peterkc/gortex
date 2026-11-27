@@ -2,7 +2,6 @@ package resolver
 
 import (
 	"iter"
-	"sort"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -123,11 +122,6 @@ func resolveValueRefs(g graph.Store, scope map[string]bool) int {
 	if len(constsByFile) == 0 {
 		return 0
 	}
-	for _, m := range constsByFile {
-		for _, ns := range m {
-			sort.SliceStable(ns, func(i, j int) bool { return ns[i].StartLine < ns[j].StartLine })
-		}
-	}
 
 	resolved := 0
 	var reindex []graph.EdgeReindex
@@ -152,15 +146,17 @@ func resolveValueRefs(g graph.Store, scope map[string]bool) int {
 		// Conditional def: more than one file-scope declarator of the name
 		// (try/except / #[cfg] / #ifdef) is legitimate — bind the read to the
 		// nearest preceding declarator rather than dropping.
-		conditional := len(consts) > 1
-		target := consts[0]
-		if conditional {
-			target = nearestPrecedingDecl(consts, e.Line)
-		}
-		if target == nil || target.ID == e.From {
+		target, conditional := electValueRefDeclaration(e.Line, func(yield func(string, int) bool) {
+			for _, n := range consts {
+				if !yield(n.ID, n.StartLine) {
+					return
+				}
+			}
+		})
+		if target == e.From {
 			continue
 		}
-		if move, changed := rebindValueRef(e, target.ID, conditional); changed {
+		if move, changed := rebindValueRef(e, target, conditional); changed {
 			reindex = append(reindex, move)
 		}
 		resolved++
@@ -246,9 +242,6 @@ func valueRefCandidateEdges(g graph.Store, scope map[string]bool) []*graph.Edge 
 // declarator shadows a bare read in the reader's own scope; a same-named
 // declarator in an unrelated function does not.
 func valueRefReaderShadowed(readerID string, locals []*graph.Node) bool {
-	if readerID == "" {
-		return false
-	}
 	for _, l := range locals {
 		if l != nil && valueRefShadowsReader(readerID, l.ID) {
 			return true
@@ -269,19 +262,21 @@ func valueRefShadowsReader(readerID, localID string) bool {
 	}
 }
 
-// nearestPrecedingDecl returns the conditional-def declarator with the greatest
-// line at or before readLine, falling back to the first when the read precedes
-// them all. decls is sorted ascending by line.
-func nearestPrecedingDecl(decls []*graph.Node, readLine int) *graph.Node {
-	best := decls[0]
-	for _, d := range decls {
-		if d.StartLine <= readLine {
-			best = d
-		} else {
-			break
+// electValueRefDeclaration picks the last declaration at the greatest line at
+// or before the read, or the first declaration at the earliest future line.
+// Ties follow encounter order, as in the stable sort by line. SQLite's file
+// index supplies ascending node IDs for that order.
+func electValueRefDeclaration(readLine int, decls iter.Seq2[string, int]) (id string, conditional bool) {
+	var line int
+	var seen bool
+	for candidate, start := range decls {
+		if !seen || line > readLine && start < line || start <= readLine && start >= line {
+			id, line = candidate, start
 		}
+		conditional = seen
+		seen = true
 	}
-	return best
+	return id, conditional
 }
 
 // isDistinctiveValueName reports whether name has the config-constant shape:

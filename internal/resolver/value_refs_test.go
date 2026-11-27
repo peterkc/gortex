@@ -273,3 +273,28 @@ func TestValueRefProjectionParityStaleAndOrder(t *testing.T) {
 	assert.Equal(t, "unresolved::valueref::ALPHA_LIMIT", projectedFixture.wrongKind.To)
 	assert.Equal(t, graph.EdgeCalls, projectedFixture.wrongKind.Kind)
 }
+
+func TestValueRefEmptyReaderDoesNotShadow(t *testing.T) {
+	// A separator at byte zero does not make the local a child of an empty ID.
+	local := &graph.Node{ID: "#LIMIT_KEY", Kind: graph.KindLocal, Name: "LIMIT_KEY"}
+	require.False(t, valueRefShadowsReader("", local.ID))
+	require.False(t, valueRefReaderShadowed("", []*graph.Node{local}))
+}
+
+func TestValueRefDeclarationElectionRetainsEncounterOrder(t *testing.T) {
+	decls := func(yield func(string, int) bool) {
+		if yield("z", 5) && yield("a", 12) {
+			yield("b", 5)
+		}
+	}
+	for _, tc := range []struct {
+		line int
+		want string
+	}{
+		{2, "z"}, {5, "b"}, {10, "b"}, {12, "a"},
+	} {
+		id, conditional := electValueRefDeclaration(tc.line, decls)
+		require.Equal(t, tc.want, id)
+		require.True(t, conditional)
+	}
+}
