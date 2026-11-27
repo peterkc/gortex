@@ -117,13 +117,13 @@ func TestRebuildClosureCollectionRawRoleCaps(t *testing.T) {
 				require.Equal(t, uint64(wantCount), stats.Edges)
 				require.Equal(t, want, rebuildEventSavedRows(t, b))
 				if raw > 8 {
-					// The foreign row cannot pair, but its count turns
-					// off a field that would otherwise have valid pairs.
-					proof[1].Nodes = nil
-					proof[1].File.NodeCount = 0
-					stats, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(proof...), selection, 1)
-					require.ErrorIs(t, err, store_pebble.ErrRebuildClosureCollection)
-					require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+					// Keep the live census, but omit witnesses from both
+					// buckets. The over-cap field must not replay receipts.
+					receipts := func(func(store_pebble.ParseFacts, error) bool) {
+						t.Fatal("replayed receipts for an over-cap field")
+					}
+					stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, selection, 1)
+					require.NoError(t, err)
 					require.Zero(t, stats)
 					require.Equal(t, want, rebuildEventSavedRows(t, b))
 				}
@@ -209,6 +209,10 @@ func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
 			}
 			var refusal *store_pebble.RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{
+				Count: 1,
+				First: graph.EdgeIdentityFor(closureCollectionEdge(lateDispatch, lateRegister, "zeta")),
+			}, refusal)
 			require.Zero(t, stats)
 			require.Equal(t, before, rebuildEventSavedRows(t, b))
 		})

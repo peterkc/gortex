@@ -24,9 +24,8 @@ type RebuildClosureCollectionStats struct {
 }
 
 // RebuildClosureCollection streams the native callable field join. Both
-// raw role counts precede the workspace and self filters. Prove counted
-// declarations even if a populated field cannot emit calls. Preserve SQLite
-// durable keys when installing calls.
+// raw role counts precede receipt proof and the workspace and self filters.
+// Preserve SQLite durable keys when installing calls.
 func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter.Seq2[ParseFacts, error], spillAt int,
 	maxFanout int, sameBoundary func(*graph.Node, *graph.Node) bool, makeEdge func(*graph.Node, *graph.Node, string) *graph.Edge,
 	appleLanguage func(string) bool,
@@ -126,18 +125,21 @@ func (p *rebuildClosurePass) pair(ctx context.Context, maxFanout int,
 		if err != nil {
 			return err
 		}
-		// An empty registrar bucket rules out the field without needing
-		// dispatcher proof. Keep the proof order for populated buckets.
-		found, err := rebuildGuardHasPrefix(ctx, p.b.pending, rebuildClosureKey('r', field))
-		if err != nil || !found {
-			return err
+		roles := [...]byte{'d', 'r'}
+		var counts [len(roles)]int
+		for i, col := range roles {
+			if err := p.visitRoleIDs(ctx, col, field, func(string) error {
+				counts[i]++
+				return nil
+			}); err != nil {
+				return err
+			}
 		}
-		for _, col := range [...]byte{'d', 'r'} {
-			count := 0
-			if err := p.visitRoleIDs(ctx, col, field, func(id string) error {
-				count++
-				return p.wantNode(id)
-			}); err != nil || count == 0 || count > maxFanout {
+		if counts[1] == 0 || counts[0] > maxFanout || counts[1] > maxFanout {
+			return nil
+		}
+		for _, col := range roles {
+			if err := p.visitRoleIDs(ctx, col, field, p.wantNode); err != nil {
 				return err
 			}
 		}
@@ -201,7 +203,7 @@ func (p *rebuildClosurePass) propose(e *graph.Edge) error {
 	if err != nil {
 		return err
 	}
-	// Both proposal endpoints were wanted by the role counts.
+	// Both proposal endpoints were wanted after the role counts.
 	p.changed = true
 	return p.put(proposal, raw)
 }
@@ -283,8 +285,8 @@ func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[Parse
 	}, nil); err != nil {
 		return err
 	}
-	// A counted declaration may have no proposed call to name, for example
-	// when its field is over cap. Report the unproved declaration in that case.
+	// An eligible declaration may have no proposed call to name, for example
+	// when the pair crosses a workspace boundary.
 	prefix := rebuildClosureKey('n')
 	var refused rebuildScratchRefusals
 	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {

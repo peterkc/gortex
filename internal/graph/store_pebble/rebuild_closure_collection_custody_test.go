@@ -79,7 +79,7 @@ func TestRebuildClosureCollectionCountsUnprovedRoleWithoutOutput(t *testing.T) {
 	before := rebuildFrameworkCustodyRows(t, b)
 	stats, err := b.RebuildClosureCollection(t.Context(), func(yield func(ParseFacts, error) bool) {
 		yield(facts, nil)
-	}, 1, 1, func(_, _ *graph.Node) bool { return true }, setStateProofOutput, closureTestApple)
+	}, 1, 2, func(_, _ *graph.Node) bool { return false }, setStateProofOutput, closureTestApple)
 	var refusal *RebuildUnknownProvenanceError
 	require.ErrorAs(t, err, &refusal)
 	require.Equal(t, &RebuildUnknownProvenanceError{
