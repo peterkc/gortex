@@ -419,7 +419,11 @@ func buildRebuildStages(
 			zap.Uint64("claim_scratch_bytes", stats.Signatures.Claims.ScratchBytes),
 			zap.Uint64("claim_observed_pending_flush_bytes", stats.Signatures.Claims.SpillBytes),
 			zap.Uint64("claim_peak_row_bytes", stats.Signatures.Claims.PeakRowBytes))
-		grpc, err := resolver.RunRebuildGRPC(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		selection, err := resolver.FreezeRebuildFrameworkSelection(ctx, private.RebuildView(), idx.frameworkSynthesizerSelection())
+		if err != nil {
+			return err
+		}
+		grpc, err := resolver.RunRebuildGRPC(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -431,7 +435,7 @@ func buildRebuildStages(
 				zap.Uint64("moves", grpc.Moves),
 				zap.Uint64("spill_bytes", grpc.SpillBytes))
 		}
-		temporal, err := resolver.RunRebuildTemporal(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		temporal, err := resolver.RunRebuildTemporal(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -444,7 +448,7 @@ func buildRebuildStages(
 				zap.Uint64("moves", temporal.Moves),
 				zap.Uint64("spill_bytes", temporal.SpillBytes))
 		}
-		eventChannel, err := resolver.RunRebuildEventChannel(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		eventChannel, err := resolver.RunRebuildEventChannel(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -453,7 +457,7 @@ func buildRebuildStages(
 				zap.Uint64("pairs", eventChannel.Pairs),
 				zap.Uint64("spill_bytes", eventChannel.SpillBytes))
 		}
-		swiftObjC, err := resolver.RunRebuildSwiftObjC(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		swiftObjC, err := resolver.RunRebuildSwiftObjC(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -462,7 +466,7 @@ func buildRebuildStages(
 				zap.Uint64("edges", swiftObjC.Edges),
 				zap.Uint64("spill_bytes", swiftObjC.SpillBytes))
 		}
-		reactNative, err := resolver.RunRebuildReactNativeBridge(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		reactNative, err := resolver.RunRebuildReactNativeBridge(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -471,7 +475,7 @@ func buildRebuildStages(
 				zap.Uint64("edges", reactNative.Edges),
 				zap.Uint64("spill_bytes", reactNative.SpillBytes))
 		}
-		nativePairing, err := resolver.RunRebuildReactNativeNativePairing(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		nativePairing, err := resolver.RunRebuildReactNativeNativePairing(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -480,7 +484,7 @@ func buildRebuildStages(
 				zap.Uint64("edges", nativePairing.Edges),
 				zap.Uint64("spill_bytes", nativePairing.SpillBytes))
 		}
-		observer, err := resolver.RunRebuildObserver(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		observer, err := resolver.RunRebuildObserver(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -489,7 +493,7 @@ func buildRebuildStages(
 				zap.Uint64("edges", observer.Edges),
 				zap.Uint64("spill_bytes", observer.SpillBytes))
 		}
-		closureCollection, err := resolver.RunRebuildClosureCollection(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		closureCollection, err := resolver.RunRebuildClosureCollection(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -498,7 +502,7 @@ func buildRebuildStages(
 				zap.Uint64("edges", closureCollection.Edges),
 				zap.Uint64("spill_bytes", closureCollection.SpillBytes))
 		}
-		reactSetState, err := resolver.RunRebuildReactSetState(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		reactSetState, err := resolver.RunRebuildReactSetState(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -507,7 +511,7 @@ func buildRebuildStages(
 				zap.Uint64("edges", reactSetState.Edges),
 				zap.Uint64("spill_bytes", reactSetState.SpillBytes))
 		}
-		flutterSetState, err := resolver.RunRebuildFlutterSetState(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		flutterSetState, err := resolver.RunRebuildFlutterSetState(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -516,7 +520,7 @@ func buildRebuildStages(
 				zap.Uint64("edges", flutterSetState.Edges),
 				zap.Uint64("spill_bytes", flutterSetState.SpillBytes))
 		}
-		kmp, err := resolver.RunRebuildKMPExpectActual(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		kmp, err := resolver.RunRebuildKMPExpectActual(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}
@@ -525,7 +529,7 @@ func buildRebuildStages(
 				zap.Uint64("edges", kmp.Edges),
 				zap.Uint64("spill_bytes", kmp.SpillBytes))
 		}
-		expoModules, err := resolver.RunRebuildExpoModuleBridge(ctx, private, receipts, idx.frameworkSynthesizerSelection(), 1<<20)
+		expoModules, err := resolver.RunRebuildExpoModuleBridge(ctx, private, receipts, selection, 1<<20)
 		if err != nil {
 			return err
 		}

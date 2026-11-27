@@ -79,7 +79,8 @@ type rebuildKMPPass struct {
 }
 
 // e/a: eligible expect/actual row by name, kind, ID; n: wanted endpoint
-// proof by ID; w: proposal by traversal ordinal then full edge key.
+// proof by ID; k: Kotlin marker proof by ID; w: proposal by traversal
+// ordinal then full edge key.
 func rebuildKMPKey(col byte, fields ...string) []byte {
 	return keyStrings([]byte{'g', 'M', col}, fields...)
 }
@@ -110,11 +111,15 @@ func rebuildKMPHasKotlin(ctx context.Context, view RebuildView) (bool, error) {
 		}
 		n, err := rebuildKMPNodeLight(r)
 		if err == nil {
-			found = strings.ToLower(strings.TrimSpace(n.Language)) == "kotlin"
+			found = isRebuildKotlin(n.Language)
 		}
 		return err
 	})
 	return found, err
+}
+
+func isRebuildKotlin(language string) bool {
+	return strings.ToLower(strings.TrimSpace(language)) == "kotlin"
 }
 
 func (p *rebuildKMPPass) collect(ctx context.Context, view RebuildView) error {
@@ -211,6 +216,17 @@ func (p *rebuildKMPPass) state(key []byte) (byte, error) {
 }
 
 func (p *rebuildKMPPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
+	// A live Kotlin label can open the census, but cannot authorize a
+	// proposed row. One exact receipt marker suffices for every pair.
+	if err := p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
+		n, err := rebuildKMPNodeLight(r)
+		if err != nil || !isRebuildKotlin(n.Language) {
+			return err
+		}
+		return p.put(rebuildKMPKey('k', n.ID), []byte{rebuildCapabilityWanted})
+	}); err != nil {
+		return err
+	}
 	if err := recordRebuildScratchReceipts(receipts, func(facts ParseFacts) error {
 		file := pathkey.Normalize(facts.File.FilePath)
 		for _, raw := range facts.Nodes {
@@ -225,16 +241,33 @@ func (p *rebuildKMPPass) prove(ctx context.Context, receipts iter.Seq2[ParseFact
 	}); err != nil {
 		return err
 	}
+	var kotlinProved bool
+	if err := pendingVisit(ctx, p.b.pending, rebuildKMPKey('k'), func(r row) error {
+		if len(r.value) != 1 {
+			return invalid("KMP Kotlin marker proof state")
+		}
+		kotlinProved = kotlinProved || r.value[0] == rebuildScratchExact
+		return nil
+	}); err != nil {
+		return err
+	}
 	return proveRebuildScratchEndpoints(ctx, p.visitProposals, func(id string) (bool, error) {
+		if !kotlinProved {
+			return false, nil
+		}
 		state, err := p.state(rebuildKMPKey('n', id))
 		return state == rebuildScratchExact, err
 	}, pendingEdgeKey)
 }
 
 func (p *rebuildKMPPass) noteReceipt(raw *graph.Node, file, language string) error {
-	key := rebuildKMPKey('n', raw.ID)
+	key, marker := rebuildKMPKey('n', raw.ID), rebuildKMPKey('k', raw.ID)
 	state, err := p.state(key)
-	if err != nil || state == 0 {
+	if err != nil {
+		return err
+	}
+	markerState, err := p.state(marker)
+	if err != nil || (state == 0 && markerState == 0) {
 		return err
 	}
 	live, err := p.b.pendingNode(raw.ID)
@@ -242,7 +275,16 @@ func (p *rebuildKMPPass) noteReceipt(raw *graph.Node, file, language string) err
 		return err
 	}
 	proved := language != "" && language == raw.Language && raw.FilePath == file && sameRebuildKMPInput(raw, live)
-	return noteRebuildScratchState(p.put, key, state, rebuildScratchProofBit(proved))
+	bit := rebuildScratchProofBit(proved)
+	if state != 0 {
+		if err := noteRebuildScratchState(p.put, key, state, bit); err != nil {
+			return err
+		}
+	}
+	if markerState != 0 {
+		return noteRebuildScratchState(p.put, marker, markerState, bit)
+	}
+	return nil
 }
 
 func sameRebuildKMPInput(raw, live *graph.Node) bool {

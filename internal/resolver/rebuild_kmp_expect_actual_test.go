@@ -197,6 +197,62 @@ func TestRebuildKMPExpectActualRejectsUnprovedDeclaration(t *testing.T) {
 	require.Equal(t, want, rebuildEventSavedRows(t, private))
 }
 
+func TestRebuildKMPExpectActualNeedsProvedKotlinMarker(t *testing.T) {
+	expect := rebuildKMPNode("common.go", "go", "clock", "expect", graph.KindFunction, 3)
+	actual := rebuildKMPNode("platform.ts", "typescript", "clock", "actual", graph.KindFunction, 7)
+	marker := rebuildKMPNode("support.kt", "kotlin", "Support", "", graph.KindType, 1)
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(expect.FilePath, expect.Language, []*graph.Node{expect}),
+		rebuildEventFacts(actual.FilePath, actual.Language, []*graph.Node{actual}),
+		rebuildEventFacts(marker.FilePath, marker.Language, []*graph.Node{marker}),
+	}
+	for i := range facts {
+		facts[i] = roundTripRebuildRNBridgeFacts(t, facts[i])
+	}
+	private := openRebuildGRPCBuild(t, facts...)
+	native := openRebuildTemporalOracle(t, facts...)
+	before := rebuildEventSavedRows(t, private)
+	require.Equal(t, rebuildEventSQLiteRows(native), before)
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthKMPExpectActual})
+	require.NoError(t, err)
+	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), private.RebuildView(), selection)
+	require.NoError(t, err)
+	require.True(t, frozen.allows(SynthKMPExpectActual))
+
+	decoy := *marker
+	decoy.Language = "java"
+	claim := rebuildEventFacts(decoy.FilePath, decoy.Language, []*graph.Node{&decoy})
+	claim = roundTripRebuildRNBridgeFacts(t, claim)
+	for _, proof := range [][]store_pebble.ParseFacts{
+		facts[:2],
+		{facts[0], facts[1], facts[2], claim},
+		{claim, facts[2], facts[0], facts[1]},
+	} {
+		stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(proof...), frozen, 1)
+		require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+		var refused *store_pebble.RebuildUnknownProvenanceError
+		require.ErrorAs(t, err, &refused)
+		require.EqualValues(t, 2, refused.Count)
+		require.Zero(t, stats)
+		require.Equal(t, before, rebuildEventSavedRows(t, private))
+	}
+
+	report := RunFrameworkSynthesizersWithSelection(native, selection)
+	require.NoError(t, report.Err)
+	require.Equal(t, 1, report.Total)
+	stats, err := RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts...), frozen, 1)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, stats.Edges)
+	want := rebuildEventSQLiteRows(native)
+	require.Equal(t, want, rebuildEventSavedRows(t, private))
+
+	// With both directions installed, missing marker proof cannot affect output.
+	stats, err = RunRebuildKMPExpectActual(t.Context(), private, rebuildGRPCReceipts(facts[:2]...), frozen, 1)
+	require.NoError(t, err)
+	require.Zero(t, stats.Edges)
+	require.Equal(t, want, rebuildEventSavedRows(t, private))
+}
+
 func TestRebuildKMPExpectActualSQLiteSpillAtMiB(t *testing.T) {
 	const pairs = 12
 	expect := rebuildKMPNode("common.kt", "kotlin", "Clock", "expect", graph.KindType, 2)
