@@ -80,6 +80,38 @@ func TestRebuildObserverSQLiteOracle(t *testing.T) {
 	}
 }
 
+func TestRebuildObserverOccupiedCallSkipsProof(t *testing.T) {
+	const file, lang = "bus.go", "go"
+	channel := newRebuildObserverChannel(file, lang)
+	callback := rebuildEventNode(file, "callback", lang, "")
+	ref := rebuildObserverEdge(channel.caller, callback, graph.EdgeReferences, 20)
+	incumbent := rebuildObserverEdge(channel.dispatch, callback, graph.EdgeCalls, channel.dispatch.StartLine)
+	incumbent.Meta = map[string]any{"fixture": "durable incumbent"}
+	channel.facts.Nodes = append(channel.facts.Nodes, callback)
+	channel.facts.Edges = append(channel.facts.Edges, ref, incumbent)
+	proof, b, native := openRebuildObserverStores(t, nil, channel.facts)
+	proof[0].Edges = slices.DeleteFunc(proof[0].Edges, func(e *graph.Edge) bool {
+		return graph.EdgeIdentityFor(e) == graph.EdgeIdentityFor(ref)
+	})
+	require.Len(t, proof[0].Edges, len(channel.facts.Edges)-1)
+
+	selection := rebuildObserverSelection(t)
+	report := RunFrameworkSynthesizersWithSelection(native, selection)
+	require.NoError(t, report.Err)
+	require.Equal(t, 1, report.Total)
+	require.Equal(t, []*graph.Edge{incumbent}, rebuildObserverNativeDispatchCalls(native, channel.dispatch.ID))
+	var replays int
+	receipts := func(yield func(store_pebble.ParseFacts, error) bool) {
+		replays++
+		rebuildGRPCReceipts(proof...)(yield)
+	}
+	stats, err := RunRebuildObserver(t.Context(), b, receipts, selection)
+	require.NoError(t, err)
+	require.Zero(t, replays, "occupied calls do not need proof")
+	require.Zero(t, stats)
+	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+}
+
 func TestRebuildObserverReplaysOwnCall(t *testing.T) {
 	const file, lang = "chain.ts", "typescript"
 	first := newRebuildObserverChannel(file, lang)
