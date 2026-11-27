@@ -207,29 +207,7 @@ func resolveFnValueCandidates(g graph.Store, candidates []*graph.Edge, prior *Fn
 			if target == "" || target == edge.From {
 				continue
 			}
-			meta := map[string]any{
-				"via":             fnValueRegistrationVia,
-				metaFnValueName:   name,
-				MetaSynthesizedBy: SynthFnValueCallback,
-				MetaProvenance:    ProvenanceHeuristic,
-			}
-			if form, _ := edge.Meta["fn_ref_form"].(string); form != "" {
-				meta["fn_ref_form"] = form
-			}
-			if len(targets) > 1 {
-				meta["overload_set"] = len(targets)
-			}
-			landed = append(landed, &graph.Edge{
-				From:            edge.From,
-				To:              target,
-				Kind:            graph.EdgeReferences,
-				FilePath:        edge.FilePath,
-				Line:            edge.Line,
-				Confidence:      conf,
-				ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeReferences, conf),
-				Origin:          origin,
-				Meta:            meta,
-			})
+			landed = append(landed, fnValueRegistration(edge, name, target, conf, origin, len(targets)))
 		}
 	}
 
@@ -244,6 +222,32 @@ func resolveFnValueCandidates(g graph.Store, candidates []*graph.Edge, prior *Fn
 		g.AddBatch(nil, landed[start:end])
 	}
 	return len(landed)
+}
+
+func fnValueRegistration(edge *graph.Edge, name, target string, conf float64, origin string, overloads int) *graph.Edge {
+	meta := map[string]any{
+		"via":             fnValueRegistrationVia,
+		metaFnValueName:   name,
+		MetaSynthesizedBy: SynthFnValueCallback,
+		MetaProvenance:    ProvenanceHeuristic,
+	}
+	if form, _ := edge.Meta["fn_ref_form"].(string); form != "" {
+		meta["fn_ref_form"] = form
+	}
+	if overloads > 1 {
+		meta["overload_set"] = overloads
+	}
+	return &graph.Edge{
+		From:            edge.From,
+		To:              target,
+		Kind:            graph.EdgeReferences,
+		FilePath:        edge.FilePath,
+		Line:            edge.Line,
+		Confidence:      conf,
+		ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeReferences, conf),
+		Origin:          origin,
+		Meta:            meta,
+	}
 }
 
 type fnValueFileName struct {
