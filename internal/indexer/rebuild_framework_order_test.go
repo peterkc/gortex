@@ -435,9 +435,26 @@ func TestRebuildNgRxEffectFrozenViaOversized(t *testing.T) {
 
 	call.Context = strings.Repeat("x", 16<<20)
 	b.AddEdge(call)
-	_, err = resolver.FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	frozen, err = resolver.FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.Equal(t, selection, frozen, "oversized via-only Call must not change admission")
+	receipts := func(func(store_pebble.ParseFacts, error) bool) {
+		t.Fatal("must not replay receipts")
+	}
+	stats, err := resolver.RunRebuildNgRxEffect(t.Context(), b, receipts, frozen)
+	require.NoError(t, err, "the stage does not own a via-only Call")
+	require.Zero(t, stats)
+
+	call.Meta["ngrx_action"] = "action"
+	b.AddEdge(call)
+	frozen, err = resolver.FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.Equal(t, selection, frozen)
+	stats, err = resolver.RunRebuildNgRxEffect(t.Context(), b, receipts, frozen)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildNgRxEffect)
 	require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
-	require.ErrorContains(t, err, "framework census edge")
+	require.ErrorContains(t, err, "NgRx Effect edge row")
+	require.Zero(t, stats)
 }
 
 func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {

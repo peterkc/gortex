@@ -166,12 +166,12 @@ func TestRebuildKMPExpectActualLightScanAndCandidateRowLimit(t *testing.T) {
 	require.ErrorIs(t, err, ErrRebuildKMPExpectActual)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 	require.Zero(t, stats)
-	// The same cap must apply when the oversized declaration is the expect.
+	// Replace the small expect so no small pair can propose before the cap.
 	n.Meta["kmp_role"] = "expect"
 	raw, err = encodeNode(n)
 	require.NoError(t, err)
 	require.NoError(t, b.pending.Set(key, raw, pebble.NoSync))
-	b.AddNode(&graph.Node{ID: "actual", Name: "clock", Kind: graph.KindFunction, Language: "kotlin",
+	b.AddNode(&graph.Node{ID: "counterpart", Name: "clock", Kind: graph.KindFunction, Language: "kotlin",
 		Meta: map[string]any{"kmp_role": "actual"}})
 	stats, err = b.RebuildKMPExpectActual(ctx, receipts, makeEdge)
 	require.ErrorIs(t, err, ErrRebuildKMPExpectActual)

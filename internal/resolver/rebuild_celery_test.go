@@ -149,18 +149,32 @@ func TestRebuildCeleryFrozenSelection(t *testing.T) {
 	caller := celeryTestNode(file, "dispatch", "", "")
 	large := &graph.Edge{From: caller.ID, To: "unresolved::x", FilePath: file, Kind: graph.EdgeCalls, Line: 2,
 		Meta: map[string]any{"payload": strings.Repeat("x", 16<<20)}}
-	b := openRebuildGRPCBuild(t, rebuildEventFacts(file, "python", []*graph.Node{caller}, large))
+	task := celeryTestNode(file, "mail", "mail", "")
+	b := openRebuildGRPCBuild(t, rebuildEventFacts(file, "python", []*graph.Node{caller, task}, large))
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthCelery})
 	require.NoError(t, err)
 	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 	require.NoError(t, err)
 	require.False(t, frozen.allows(SynthCelery))
 	late := celeryTestCall(caller.ID, "unresolved::*.mail", file, "mail", "", 3)
+	b.AddEdge(late)
+	bounded, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.True(t, bounded.allows(SynthCelery))
+
 	late.Meta["payload"] = large.Meta["payload"]
 	b.AddEdge(late)
 	stats, err := RunRebuildCelery(t.Context(), b, nil, frozen)
 	require.NoError(t, err)
 	require.Zero(t, stats)
-	_, err = FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	refrozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.True(t, refrozen.allows(SynthCelery), "oversized row must not change admission")
+	stats, err = RunRebuildCelery(t.Context(), b, func(func(store_pebble.ParseFacts, error) bool) {
+		t.Fatal("oversized Call must be refused before receipt replay")
+	}, refrozen)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildCelery)
 	require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+	require.ErrorContains(t, err, "Celery edge row")
+	require.Zero(t, stats)
 }

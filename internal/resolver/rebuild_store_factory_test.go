@@ -566,11 +566,11 @@ func TestRebuildStoreFactoryAndReduxThunkCandidateProof(t *testing.T) {
 						peers[2].WorkspaceID = "foreign"
 					}
 					left := rebuildEventFacts(callerFile, caller.Language, []*graph.Node{caller, winner}, call)
-					right := rebuildEventFacts(getterFile, caller.Language, []*graph.Node{getter})
+					rightNodes := []*graph.Node{getter}
 					if file == getterFile {
-						right.Nodes = append(right.Nodes, peers...)
+						rightNodes = append(rightNodes, peers...)
 					}
-					live := []store_pebble.ParseFacts{left, right}
+					live := []store_pebble.ParseFacts{left, rebuildEventFacts(getterFile, caller.Language, rightNodes)}
 					if file == peerFile {
 						live = append(live, rebuildEventFacts(peerFile, caller.Language, peers))
 					}
@@ -583,26 +583,26 @@ func TestRebuildStoreFactoryAndReduxThunkCandidateProof(t *testing.T) {
 					// Native falls through two getter-file peers. A duplicate
 					// receipt cannot prove the second peer. A foreign peer
 					// moved into the winning scope instead breaks a singleton.
-					right.Nodes = []*graph.Node{getter, peers[0], peers[1]}
+					rightNodes = []*graph.Node{getter, peers[0], peers[1]}
 					switch mode {
 					case "three exact peers":
-						right.Nodes = append(right.Nodes, peers[2])
+						rightNodes = append(rightNodes, peers[2])
 					case "duplicate receipt":
-						right.Nodes[2] = peers[0]
+						rightNodes[2] = peers[0]
 					case "scope enters winning file":
 						n := *peers[1]
 						n.WorkspaceID = caller.WorkspaceID
-						right.Nodes[2] = &n
+						rightNodes[2] = &n
 					case "entrant into ambiguous file":
 						n := *peers[2]
 						n.WorkspaceID = caller.WorkspaceID
-						right.Nodes = append(right.Nodes, &n)
+						rightNodes = append(rightNodes, &n)
 					case "empty getter file gains a candidate":
 						n := *peers[0]
 						n.FilePath = getterFile
-						right.Nodes = []*graph.Node{getter, &n}
+						rightNodes = []*graph.Node{getter, &n}
 					}
-					recorded := []store_pebble.ParseFacts{left, right}
+					recorded := []store_pebble.ParseFacts{left, rebuildEventFacts(getterFile, caller.Language, rightNodes)}
 					if file == peerFile {
 						// Keep the scoped pool ambiguous independently of the
 						// entrant into its otherwise empty getter-file bucket.
@@ -833,7 +833,7 @@ func TestRebuildStoreFactoryAndReduxThunkNodeRoleProof(t *testing.T) {
 					}
 					if tc.name == "workspace singleton ignores file" {
 						foreign := rebuildStoreFactoryAction(callerFile, "foreign")
-						facts[0].Nodes = append(slices.Clone(facts[0].Nodes), foreign)
+						facts[0] = rebuildEventFacts(callerFile, caller.Language, append(slices.Clone(leftNodes), foreign), call)
 					}
 					var tail []store_pebble.ParseFacts
 					if synth == SynthReduxThunk {

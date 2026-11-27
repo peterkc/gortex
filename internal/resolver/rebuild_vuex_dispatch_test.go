@@ -160,18 +160,32 @@ func TestRebuildVuexDispatchFrozenSelection(t *testing.T) {
 	caller := &graph.Node{ID: from, Name: "submit", Kind: graph.KindFunction, FilePath: file, Language: "typescript"}
 	unrelated := &graph.Edge{From: from, To: "unresolved::x", Kind: graph.EdgeCalls, FilePath: file, Line: 2,
 		Meta: map[string]any{"payload": strings.Repeat("x", 16<<20)}}
-	b := openRebuildGRPCBuild(t, rebuildEventFacts(file, "typescript", []*graph.Node{caller}, unrelated))
+	action := rebuildVuexTestNode(file, "login", "user", "login", "action", graph.KindFunction)
+	b := openRebuildGRPCBuild(t, rebuildEventFacts(file, "typescript", []*graph.Node{caller, action}, unrelated))
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthVuexDispatch})
 	require.NoError(t, err)
 	frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 	require.NoError(t, err)
 	require.False(t, frozen.allows(SynthVuexDispatch))
 	late := rebuildVuexTestCall(from, "unresolved::*.login", file, "user/login", "action", 3)
+	b.AddEdge(late)
+	bounded, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.True(t, bounded.allows(SynthVuexDispatch))
+
 	late.Meta["payload"] = unrelated.Meta["payload"]
 	b.AddEdge(late)
 	stats, err := RunRebuildVuexDispatch(t.Context(), b, nil, frozen)
 	require.NoError(t, err)
 	require.Zero(t, stats)
-	_, err = FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	refrozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.True(t, refrozen.allows(SynthVuexDispatch), "oversized row must not change admission")
+	stats, err = RunRebuildVuexDispatch(t.Context(), b, func(func(store_pebble.ParseFacts, error) bool) {
+		t.Fatal("oversized Call must be refused before receipt replay")
+	}, refrozen)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildVuexDispatch)
 	require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+	require.ErrorContains(t, err, "Vuex Dispatch edge row")
+	require.Zero(t, stats)
 }
