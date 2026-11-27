@@ -120,12 +120,12 @@ func (p *rebuildFnPointerStage) planReceiptSlots(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		return p.receiptRegistration(e, proved, false)
+		return p.receiptRegistration(old, e, proved, false)
 	}); err != nil {
 		return err
 	}
-	if err := p.visitRegistrations(ctx, 'A', func(_ []byte, e *graph.Edge) error {
-		return p.receiptRegistration(e, true, true)
+	if err := p.visitRegistrations(ctx, 'A', func(old []byte, e *graph.Edge) error {
+		return p.receiptRegistration(old, e, true, true)
 	}); err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func (p *rebuildFnPointerStage) planReceiptSlots(ctx context.Context) error {
 	return p.propagate(ctx, 'Z', 'Y', 'V')
 }
 
-func (p *rebuildFnPointerStage) receiptRegistration(e *graph.Edge, proved, alternate bool) error {
+func (p *rebuildFnPointerStage) receiptRegistration(old []byte, e *graph.Edge, proved, alternate bool) error {
 	slot, source, name := p.decide.Registration(e)
 	switch {
 	case name != "":
@@ -153,8 +153,24 @@ func (p *rebuildFnPointerStage) receiptRegistration(e *graph.Edge, proved, alter
 			}
 		}
 		if alternate && pick.target != "" && p.decide.BindRef(e, pick.target) {
-			if err := p.refuseOutput(e); err != nil {
+			planned, err := pendingGet(p.b.pending, append(p.column('m'), old...), decodeEdge)
+			if err != nil {
 				return err
+			}
+			raw, err := p.get(append(p.column('h'), old...))
+			if err != nil {
+				return err
+			}
+			exact, err := fnPointerInputProved(&p.rebuildCallMoves, old, raw)
+			if err != nil {
+				return err
+			}
+			// A singleton never reads store_binding. Its exact claim and
+			// matching live move already prove the alternate destination.
+			if !proved || !exact || planned == nil || planned.To != e.To {
+				if err := p.refuseOutput(e); err != nil {
+					return err
+				}
 			}
 		}
 		if proved {
