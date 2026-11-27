@@ -80,6 +80,9 @@ func (b *BuildStore) RebuildLaravelEvent(ctx context.Context, receipts iter.Seq2
 		if err := p.record(ctx, receipts); err != nil {
 			return stats, err
 		}
+		if err := p.projectReceiptRoles(ctx); err != nil {
+			return stats, err
+		}
 	}
 	if err := p.joinHandles(ctx); err != nil {
 		return stats, err
@@ -125,24 +128,31 @@ func laravelCallable(kind graph.NodeKind) bool {
 	return kind == graph.KindMethod || kind == graph.KindFunction
 }
 
-// t and q are the live typed listeners and class-to-event map. T and Q
-// are their receipt projections. Keep a map entry even without a handler.
-func (p *rebuildLaravelEventPass) roles(n *graph.Node, typed, mapped byte) (bool, error) {
+type laravelReceiptRole struct {
+	kind         byte
+	event, class string
+}
+
+func (p *rebuildLaravelEventPass) roles(n *graph.Node, visit func(laravelReceiptRole)) bool {
 	if n.Kind == graph.KindType {
 		var active bool
-		var err error
 		p.rules.Entries(p.rules.ListenMap(n), func(event, class string) {
-			if err == nil {
-				err = p.put(p.key(mapped, class, event), nil)
-			}
+			visit(laravelReceiptRole{kind: 'q', event: event, class: class})
 			active = true
 		})
-		return active, err
+		return active
 	}
-	if role := p.rules.ListenerType(n); laravelCallable(n.Kind) && role != "" {
-		return true, p.put(p.key(typed, p.rules.SimpleName(role), n.ID), nil)
+	if !laravelCallable(n.Kind) {
+		return false
 	}
-	return false, nil
+	if n.Name == "handle" {
+		visit(laravelReceiptRole{kind: 'h'})
+	}
+	if role := p.rules.ListenerType(n); role != "" {
+		visit(laravelReceiptRole{kind: 't', event: p.rules.SimpleName(role)})
+		return true
+	}
+	return false
 }
 
 func (p *rebuildLaravelEventPass) collectNodes(ctx context.Context) (bool, error) {
@@ -159,14 +169,18 @@ func (p *rebuildLaravelEventPass) collectNodes(ctx context.Context) (bool, error
 		if n.ID == "" || !bytes.Equal(r.key, pendingNodeKey(n.ID)) {
 			return invalid("Laravel node identity")
 		}
-		if laravelCallable(n.Kind) && n.Name == "handle" {
-			if err := p.put(p.key('h', n.ID), nil); err != nil {
-				return err
+		var hasRole bool
+		found := p.roles(n, func(role laravelReceiptRole) {
+			hasRole = true
+			if err == nil {
+				err = p.putRole(role.kind, n.ID, role.event, role.class)
 			}
-		}
-		found, err := p.roles(n, 't', 'q')
+		})
 		active = active || found
-		return err
+		if err != nil || !hasRole {
+			return err
+		}
+		return p.put(p.key('n', n.ID), nil)
 	})
 	return active, err
 }
@@ -262,7 +276,7 @@ func (p *rebuildLaravelEventPass) record(ctx context.Context, receipts iter.Seq2
 			if n.FilePath != file || facts.EffectiveLanguage == "" {
 				continue
 			}
-			if err := p.recordNode(n); err != nil {
+			if err := p.recordNode(ctx, n); err != nil {
 				return err
 			}
 		}
@@ -282,27 +296,111 @@ func (p *rebuildLaravelEventPass) record(ctx context.Context, receipts iter.Seq2
 	return nil
 }
 
-func (p *rebuildLaravelEventPass) recordNode(n *graph.Node) error {
-	if !laravelCallable(n.Kind) && n.Kind != graph.KindType {
-		return nil
+func (p *rebuildLaravelEventPass) putRole(col byte, id, event, class string) error {
+	switch col {
+	case 'h', 'H', 'I':
+		return p.put(p.key(col, id), nil)
+	case 'q', 'Q', 'Y':
+		return p.put(p.key(col, class, event), nil)
+	default:
+		return p.put(p.key(col, event, id), nil)
 	}
-	live, err := p.b.pendingNode(n.ID)
-	if err != nil || live == nil {
-		return err
-	}
-	active, err := p.roles(n, 'T', 'Q')
+}
+
+func (p *rebuildLaravelEventPass) recordNode(ctx context.Context, n *graph.Node) error {
+	next := make(map[string]bool)
+	active := p.roles(n, func(role laravelReceiptRole) {
+		next[string(keyStrings([]byte{role.kind}, role.event, role.class))] = true
+	})
+	seenKey := p.key('d', n.ID)
+	seen, err := p.present(seenKey)
 	if err != nil {
 		return err
 	}
-	if active {
-		if err := p.put(p.column('a'), nil); err != nil {
+	if !seen {
+		wanted, err := p.present(p.key('n', n.ID))
+		if err != nil || !wanted && len(next) == 0 {
+			return err
+		}
+		live, err := p.storeReceiptNode(n.ID)
+		if err != nil || live == nil {
+			return err
+		}
+		if err := p.put(seenKey, nil); err != nil {
 			return err
 		}
 	}
-	if laravelCallable(n.Kind) && n.Name == "handle" {
-		return p.put(p.key('H', n.ID), nil)
+	anchor := p.key('a', n.ID)
+	if !active && seen {
+		if err := p.b.pending.Delete(anchor, pebble.NoSync); err != nil {
+			return err
+		}
+	} else if active && !seen {
+		if err := p.put(anchor, nil); err != nil {
+			return err
+		}
+	}
+	// An admitted role is definite only if every receipt for the same ID
+	// reports it. Keep differences per role rather than per raw metadata blob.
+	prefix := p.key('R', n.ID)
+	const exact, possible = 1, 2
+	if err := p.visit(ctx, prefix, func(r row) error {
+		key := string(r.key[len(prefix):])
+		if next[key] {
+			delete(next, key)
+			return nil
+		}
+		return p.put(r.key, []byte{possible})
+	}); err != nil {
+		return err
+	}
+	state := byte(exact)
+	if seen {
+		state = possible
+	}
+	for key := range next {
+		if err := p.put(append(prefix[:len(prefix):len(prefix)], key...), []byte{state}); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func (p *rebuildLaravelEventPass) projectReceiptRoles(ctx context.Context) error {
+	prefix := p.column('R')
+	return p.visit(ctx, prefix, func(r row) error {
+		id, rest, err := readKeyString(r.key[len(prefix):])
+		if err != nil || len(rest) == 0 || len(r.value) != 1 {
+			return invalid("Laravel receipt role")
+		}
+		kind := rest[0]
+		event, rest, err := readKeyString(rest[1:])
+		if err != nil {
+			return err
+		}
+		class, rest, err := readKeyString(rest)
+		if err != nil || len(rest) != 0 {
+			return invalid("Laravel receipt role class")
+		}
+		if r.value[0] != 1 {
+			switch kind {
+			case 'q':
+				return p.putRole('Y', id, event, class)
+			case 'h':
+				return p.putRole('I', id, event, class)
+			default:
+				return p.putRole('x', id, event, class)
+			}
+		}
+		switch kind {
+		case 'q':
+			return p.putRole('Q', id, event, class)
+		case 'h':
+			return p.putRole('H', id, event, class)
+		default:
+			return p.putRole('T', id, event, class)
+		}
+	})
 }
 
 // z retains each Call's first exact receipt; w retains the last
@@ -346,7 +444,7 @@ func (p *rebuildLaravelEventPass) recordEdge(e *graph.Edge, admitted bool, order
 // receiver metadata. Receipt order witnesses the last retained raw row.
 func (p *rebuildLaravelEventPass) joinHandles(ctx context.Context) error {
 	var mapped bool
-	for _, col := range [...]byte{'q', 'Q'} {
+	for _, col := range [...]byte{'q', 'Q', 'Y'} {
 		found, err := rebuildGuardHasPrefix(ctx, p.b.pending, p.column(col))
 		if err != nil {
 			return err
@@ -377,9 +475,24 @@ func (p *rebuildLaravelEventPass) joinHandles(ctx context.Context) error {
 			return err
 		}
 		if proved && exact {
-			return p.join(ctx, 'Q', 'T', class, id)
+			if err := p.join(ctx, 'Q', 'T', class, id); err != nil {
+				return err
+			}
+			return p.join(ctx, 'Y', 'x', class, id)
+		}
+		if exact {
+			return p.possibleOwners(ctx, id)
 		}
 		return nil
+	}); err != nil {
+		return err
+	}
+	if err := p.visit(ctx, p.column('I'), func(r row) error {
+		id, _, err := readKeyString(r.key[len(p.prefix)+1:])
+		if err != nil {
+			return err
+		}
+		return p.possibleOwners(ctx, id)
 	}); err != nil {
 		return err
 	}
@@ -402,7 +515,10 @@ func (p *rebuildLaravelEventPass) joinHandles(ctx context.Context) error {
 		if uncertain || !exact {
 			return p.possibleOwners(ctx, id)
 		}
-		return p.join(ctx, 'Q', 'T', class, id)
+		if err := p.join(ctx, 'Q', 'T', class, id); err != nil {
+			return err
+		}
+		return p.join(ctx, 'Y', 'x', class, id)
 	})
 }
 
@@ -412,7 +528,10 @@ func (p *rebuildLaravelEventPass) possibleOwners(ctx context.Context, id string)
 		if err := p.join(ctx, 'q', 'x', class, id); err != nil {
 			return err
 		}
-		return p.join(ctx, 'Q', 'x', class, id)
+		if err := p.join(ctx, 'Q', 'x', class, id); err != nil {
+			return err
+		}
+		return p.join(ctx, 'Y', 'x', class, id)
 	})
 }
 
@@ -432,7 +551,7 @@ func (p *rebuildLaravelEventPass) join(ctx context.Context, mapped, listeners by
 }
 
 func (p *rebuildLaravelEventPass) classUsed(ctx context.Context, class string) (bool, error) {
-	for _, col := range [...]byte{'q', 'Q'} {
+	for _, col := range [...]byte{'q', 'Q', 'Y'} {
 		prefix := p.key(col, class)
 		var used bool
 		if err := p.visit(ctx, prefix, func(r row) error {
@@ -527,7 +646,7 @@ func (p *rebuildLaravelEventPass) hasPossibleListener(ctx context.Context, event
 }
 
 func (p *rebuildLaravelEventPass) planCalls(ctx context.Context) error {
-	anchor, err := p.present(p.column('a'))
+	anchor, err := rebuildGuardHasPrefix(ctx, p.b.pending, p.column('a'))
 	if err != nil {
 		return err
 	}

@@ -165,3 +165,41 @@ func TestRebuildLaravelUncertainOwnerScope(t *testing.T) {
 	require.Equal(t, 1, ResolveLaravelEventCalls(native))
 	require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 }
+
+func TestRebuildLaravelDuplicateReceiptRoles(t *testing.T) {
+	const file, lang = "app.php", "php"
+	publisher := rebuildEventNode(file, "publish", lang, "")
+	listener := rebuildEventNode(file, "listen", lang, "")
+	listener.Meta = map[string]any{"laravel_listener_type": "Notice"}
+	call := &graph.Edge{
+		From: publisher.ID, To: "unresolved::*.handle", Kind: graph.EdgeCalls, FilePath: file, Line: 3,
+		Meta: map[string]any{"via": laravelEventVia, "laravel_event_type": "Notice"},
+	}
+	for _, change := range []string{"identical", "conflict first", "conflict last"} {
+		t.Run(change, func(t *testing.T) {
+			facts := rebuildEventFacts(file, lang, []*graph.Node{publisher, listener}, call)
+			b, native := openRebuildEventStores(t, facts)
+			before := rebuildEventSavedRows(t, b)
+			changed := *listener
+			if change != "identical" {
+				changed.Meta = map[string]any{"laravel_listener_type": "Other"}
+			}
+			duplicate := rebuildEventFacts(file, lang, []*graph.Node{&changed})
+			receipts := rebuildGRPCReceipts(facts, duplicate)
+			if change == "conflict first" {
+				receipts = rebuildGRPCReceipts(duplicate, facts)
+			}
+			stats, err := RunRebuildLaravelEvent(t.Context(), b, receipts, rebuildLaravelTestSelection(t))
+			if change != "identical" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildLaravelEventStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+			require.Equal(t, 1, ResolveLaravelEventCalls(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		})
+	}
+}
