@@ -309,6 +309,17 @@ func Register(r Router) { r.GET("/api/users", Register) }`, "http::GET::/api/use
 			legacy, err := idx.extractPreparedRebuildFile(t.Context(), tc.path, tc.ext, src)
 			require.NoError(t, err)
 			require.Equal(t, legacy, parsed, "capture changes no ordinary parse facts")
+			candidate, err := store_pebble.EncodeContractParseFacts(parsed, facts)
+			require.NoError(t, err)
+			decoded, decodedFacts, factBytes, err := store_pebble.DecodeContractParseFacts(candidate)
+			require.NoError(t, err)
+			require.Positive(t, factBytes)
+			require.Equal(t, facts, decodedFacts)
+			legacyBytes, err := store_pebble.EncodeParseFacts(legacy)
+			require.NoError(t, err)
+			decodedBytes, err := store_pebble.EncodeParseFacts(decoded)
+			require.NoError(t, err)
+			require.Equal(t, legacyBytes, decodedBytes)
 
 			var fileID string
 			for _, n := range legacy.Nodes {
@@ -326,9 +337,9 @@ func Register(r Router) { r.GET("/api/users", Register) }`, "http::GET::/api/use
 			}
 			_, byLanguage := idx.buildPerFileContractExtractors()
 			want := idx.runContractExtractorsForFile(tc.path, src, legacy.Nodes, fileEdges, byLanguage[tc.ext.Language()], nil)
-			got, err := contracts.ResolveEndpointQuestions(facts.Records, facts.Questions, nil)
+			got, err := contracts.ResolveEndpointQuestions(decodedFacts.Records, decodedFacts.Questions, nil)
 			require.NoError(t, err)
-			require.Equal(t, want, got, "complete contract records must match the native nil-tree path")
+			require.Equal(t, want, got, "complete decoded records must match the native nil-tree path")
 		})
 	}
 }

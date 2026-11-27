@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/contracts"
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
 func TestRebuildParseStoreCreateAndReuse(t *testing.T) {
@@ -73,4 +76,42 @@ func TestRebuildParseStoreRefusesBadEntry(t *testing.T) {
 	dir, err := os.ReadDir(s.dir)
 	require.NoError(t, err)
 	require.Len(t, dir, 2)
+}
+
+func TestRebuildParseStoreInactiveContractReceiptBinding(t *testing.T) {
+	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+	const file = "src\xff.go"
+	input := rebuildInput{Path: file, Language: "go", Content: rebuildDigest{1}}
+	v2Key := input.parseKey(rebuildDigest{2})
+	v3Key := input.parseKey(rebuildDigest{3})
+	require.NotEqual(t, v2Key, v3Key)
+	base := store_pebble.ParseFacts{File: graph.FileMetaRow{FilePath: file}, EffectiveLanguage: "go"}
+	v2, err := store_pebble.EncodeParseFacts(base)
+	require.NoError(t, err)
+	require.NoError(t, store.write(v2Key, v2))
+	_, err = store.read(v3Key)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	facts := &contracts.FileFacts{Shapes: map[string]*contracts.Shape{}, Handlers: map[string]contracts.HandlerFacts{}}
+	v3, err := store_pebble.EncodeContractParseFacts(base, facts)
+	require.NoError(t, err)
+	require.NoError(t, store.write(v3Key, v3))
+
+	// Reopen the same private store; the original receipt is untouched.
+	reader := rebuildParseStore{dir: store.dir, limit: store.limit}
+	old, err := reader.read(v2Key)
+	require.NoError(t, err)
+	require.Equal(t, v2, old)
+	candidate, err := reader.read(v3Key)
+	require.NoError(t, err)
+	decoded, got, _, err := store_pebble.DecodeContractParseFacts(candidate)
+	require.NoError(t, err)
+	require.Equal(t, base, decoded)
+	require.Equal(t, facts, got)
+
+	wrongKey := input.parseKey(rebuildDigest{4})
+	wire, err := os.ReadFile(reader.entry(v3Key))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(reader.entry(wrongKey), wire, 0o600))
+	_, err = reader.read(wrongKey)
+	require.ErrorIs(t, err, errParseEntryCorrupt)
 }
