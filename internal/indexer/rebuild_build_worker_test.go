@@ -812,6 +812,77 @@ func TestRebuildExternalCallSynthesisWireRefusal(t *testing.T) {
 	require.Empty(t, acks.Bytes())
 }
 
+func TestRunRebuildCheckoutExternalCallSynthesis(t *testing.T) {
+	root, src := rebuildInputFixture(t)
+	// Main binds the Go terminal but leaves Python deferred. The Python
+	// caller sorts first and could change the language of the shared package.
+	for name, data := range map[string]string{
+		"go.mod": "module example.org/checkout\n\nrequire acme.tools v1.0.0\n",
+		"a.py":   "from acme import tools\n\ndef run():\n    tools.fetch()\n",
+		"z.go":   "package checkout\n\nimport tools \"acme.tools\"\n\nfunc Run() { tools.Send() }\n",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte(data), 0o600))
+	}
+	t.Setenv("GORTEX_TEST_REBUILD_BUILD_CHILD", "1")
+	t.Setenv("GORTEX_SYNTH_EXTERNAL_CALLS", "")
+	exe, err := os.Executable()
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "enabled", enabled: true},
+		{name: "disabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			cfg := config.Default().Index
+			cfg.SynthesizeExternalCalls = &tc.enabled
+			reg := parser.NewRegistry()
+			languages.RegisterAll(reg)
+			idx := New(graph.New(), reg, cfg, zap.NewNop())
+			t.Cleanup(idx.Close)
+			req := rebuildBuildRequest{
+				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
+				Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}, "python": {2}},
+				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
+				Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{2}, Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
+			}
+			headDir := filepath.Join(t.TempDir(), "head")
+			h, err := store_pebble.OpenHead(headDir, req.Incarnation, req.Witness.Profile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, h.Close()) })
+
+			var stages []store_pebble.Stage
+			err = idx.runRebuildCheckout(ctx, src, req, nil, false,
+				exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, t.TempDir(), headDir,
+				func(ctx context.Context, offer store_pebble.StageTables) error {
+					stages = append(stages, offer.Witness.Stage)
+					_, err := h.PublishStage(ctx, offer)
+					return err
+				})
+			require.ErrorIs(t, err, ErrRebuildWorker)
+			if tc.enabled {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildExternalCallSynthesis)
+				require.ErrorContains(t, err, `uncertain retained external-call package creator: "external-call::dep::acme.tools"`)
+			} else {
+				require.ErrorIs(t, err, errRebuildBuildIncomplete)
+			}
+			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, stages)
+			s := h.OpenSnapshot()
+			defer func() { require.NoError(t, s.Close()) }()
+			require.NoError(t, s.RequireStage(store_pebble.StageFileGraph))
+			require.NotNil(t, s.GetNode("a.py::run"))
+			require.NotNil(t, s.GetNode("z.go::Run"))
+			require.Nil(t, s.GetNode("external-call::dep::acme.tools"))
+			var pending *store_pebble.ErrStagePending
+			require.ErrorAs(t, s.RequireStage(store_pebble.StageRelations), &pending)
+		})
+	}
+}
+
 func TestRunRebuildCheckout(t *testing.T) {
 	for _, tc := range []struct {
 		name                             string
