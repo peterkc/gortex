@@ -350,8 +350,12 @@ func (p *rebuildGRPC) handlers(ctx context.Context, snap *pebble.Snapshot, servi
 }
 
 // order replays exact old call keys in receipt order, including the extractor's
-// order within each file. This is the insertion order for surviving raw stubs
-// in a native SQLite cold build fed the same receipt sequence. Do not infer an
+// order within each file. This is native SQLite's order only on its direct
+// write path, where a cold build inserts edges in receipt order and the global
+// pass reads them ORDER BY id. On the in-memory shadow path, DrainEdgeBatches
+// sorts each batch and the inline pass reindexes without 5,000-move windows, so
+// native can keep a different mover there. The rebuild always uses this order;
+// the VM proof labels such files as native-defect differences. Do not infer an
 // ordinal from the live Pebble key or from an unrelated same-site Call.
 func (p *rebuildGRPC) order(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
 	stubs := rebuildGRPCKey('s')
