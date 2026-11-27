@@ -3,7 +3,6 @@ package store_pebble
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"iter"
@@ -297,91 +296,26 @@ func (p *rebuildExpress) recordNode(raw *graph.Node, file, language string) erro
 }
 
 func (p *rebuildExpress) recordEdge(e *graph.Edge, exact bool, order uint64) error {
-	raw := pendingEdgeKey(e)
-	col := byte('r')
-	if e.Kind == graph.EdgeMemberOf {
-		col = 'u'
-	}
-	key := append(p.column(col), raw...)
-	claim, err := p.marked(key)
-	if err != nil || len(claim) <= 1 {
-		return err
-	}
-	live, err := p.edge(claim[1:])
-	if err != nil || live == nil {
-		return errors.Join(err, invalid("express receipt live edge missing"))
-	}
-	if col == 'r' {
+	return p.recordOwnerEdge(e, exact, order, func(live *graph.Edge) bool {
 		a, matched := p.query(e)
 		b, ok := p.query(live)
-		exact = exact && matched && ok && a == b
-	}
-	if exact && claim[0] == rebuildCapabilityWanted {
-		if col == 'r' {
-			if err := p.put(binary.BigEndian.AppendUint64(p.column('z'), order), raw); err != nil {
-				return err
-			}
-		} else if bytes.Equal(raw, claim[1:]) {
-			class, ok := p.rules.Owner(live)
-			if !ok {
-				return invalid("express member role changed")
-			}
-			if err := p.put(p.key('l', live.From), appendKeyString(nil, class)); err != nil {
-				return err
-			}
-		}
-	}
-	return noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(exact))
+		return matched && ok && a == b
+	}, p.rules.Owner, 'l', func(err error) error {
+		return errors.Join(err, invalid("express receipt live edge missing"))
+	})
 }
 
-func (p *rebuildExpress) owner(ctx context.Context, id string) (class string, exact, uncertain bool, err error) {
-	var seen, different, unproved, moved, movedConflict bool
-	var movedClass string
-	err = p.members(ctx, id, func(r row, candidate string) error {
-		if !seen {
-			class, seen = candidate, true
-		}
-		different = different || class != candidate
+func (p *rebuildExpress) owner(ctx context.Context, id string) (string, bool, bool, error) {
+	var owners rebuildMemberOwners
+	err := p.members(ctx, id, func(r row, candidate string) error {
+		owners.observe(candidate)
 		raw, err := p.inputKey(r.key)
 		if err != nil {
 			return err
 		}
-		if raw == nil {
-			unproved = true
-			return nil
-		}
-		claim, err := p.marked(append(p.column('u'), raw...))
-		if err != nil {
-			return err
-		}
-		ok := len(claim) > 1 && claim[0] == rebuildScratchExact && bytes.Equal(claim[1:], r.key)
-		exact, unproved = exact || ok, unproved || !ok
-		if !bytes.Equal(raw, r.key) {
-			movedConflict = movedConflict || moved && movedClass != candidate
-			moved, movedClass = true, candidate
-		}
-		return nil
+		return owners.prove(&p.rebuildCallMoves, raw, r.key, candidate)
 	})
-	if err != nil || !different {
-		return class, exact, false, err
-	}
-	// The SQLite resolved-to-resolved MemberOf rewrite appends after
-	// retained rows. Raw receipts don't order different rewritten owners.
-	if unproved || movedConflict {
-		return "", false, true, nil
-	}
-	if moved {
-		return movedClass, true, false, nil
-	}
-	last, err := p.get(p.key('l', id))
-	if err != nil {
-		return "", false, false, err
-	}
-	class, rest, err := readKeyString(last)
-	if err != nil || len(rest) != 0 {
-		return "", false, false, invalid("express last owner")
-	}
-	return class, true, false, nil
+	return owners.elect(&p.rebuildCallMoves, id, 'l', err)
 }
 
 func decodeExpressMethod(v []byte) (name, file string, err error) {
@@ -644,13 +578,7 @@ func (p *rebuildExpress) plan(ctx context.Context) error {
 
 func (p *rebuildExpress) order(ctx context.Context) error {
 	return p.visit(ctx, p.column('z'), func(r row) error {
-		key := append(p.column('r'), r.value...)
-		claim, err := p.marked(key)
-		if err != nil || len(claim) <= 1 || claim[0] != rebuildScratchExact {
-			return err
-		}
-		// Replay the first exact receipt now that moves have been planned.
-		claim[0] = rebuildCapabilityWanted
-		return p.noteReceipt(key, claim, true)
+		_, err := p.orderCallReceipt(r.value)
+		return err
 	})
 }

@@ -317,38 +317,16 @@ func (p *rebuildLaravelEventPass) recordNode(n *graph.Node, file string) error {
 // z retains each Call's first exact receipt; w retains the last
 // receipt-backed stationary owner per handle.
 func (p *rebuildLaravelEventPass) recordEdge(e *graph.Edge, admitted bool, order uint64) error {
-	col := byte('r')
-	if e.Kind == graph.EdgeMemberOf {
-		col = 'u'
-	}
-	raw := pendingEdgeKey(e)
-	key := append(p.column(col), raw...)
-	claim, err := p.marked(key)
-	if err != nil || len(claim) <= 1 {
-		return err
-	}
-	live, err := p.edge(claim[1:])
-	if err != nil {
-		return err
-	}
-	if live == nil {
-		return invalid("Laravel receipt live edge missing")
-	}
-	if col == 'r' {
-		admitted = admitted && p.rules.Call(e) == p.rules.Call(live)
-	}
-	if admitted && claim[0] == rebuildCapabilityWanted {
-		if col == 'r' {
-			if err := p.put(binary.BigEndian.AppendUint64(p.column('z'), order), raw); err != nil {
-				return err
-			}
-		} else if bytes.Equal(raw, claim[1:]) {
-			if err := p.put(p.key('w', live.From), appendKeyString(nil, p.rules.SimpleName(live.To))); err != nil {
-				return err
-			}
+	return p.recordOwnerEdge(e, admitted, order, func(live *graph.Edge) bool {
+		return p.rules.Call(e) == p.rules.Call(live)
+	}, func(live *graph.Edge) (string, bool) {
+		return p.rules.SimpleName(live.To), true
+	}, 'w', func(err error) error {
+		if err != nil {
+			return err
 		}
-	}
-	return noteRebuildScratchPayload(p.put, key, claim, rebuildScratchProofBit(admitted))
+		return invalid("Laravel receipt live edge missing")
+	})
 }
 
 // joinHandles elects the owner from MemberOf rows, not from a class node or
@@ -443,15 +421,12 @@ func (p *rebuildLaravelEventPass) classUsed(ctx context.Context, class string) (
 }
 
 func (p *rebuildLaravelEventPass) owner(ctx context.Context, id string) (string, bool, error) {
-	var class, movedClass string
-	var any, different, mapped, exact, unproved, moved, movedConflict bool
+	var owners rebuildMemberOwners
+	var mapped bool
 	var relevant graph.EdgeIdentity
 	err := p.members(ctx, id, func(r row, e *graph.Edge) error {
 		name := p.rules.SimpleName(e.To)
-		if !any {
-			class, any = name, true
-		}
-		different = different || class != name
+		owners.observe(name)
 		if !mapped {
 			var err error
 			mapped, err = p.classUsed(ctx, name)
@@ -464,48 +439,24 @@ func (p *rebuildLaravelEventPass) owner(ctx context.Context, id string) (string,
 		}
 		raw, err := rebuildReceiptKey(p.b.pending, r.key)
 		if errors.Is(err, ErrRebuildUnknownProvenance) {
-			unproved = true
-			return nil
+			raw, err = nil, nil
 		}
 		if err != nil {
 			return err
 		}
-		claim, err := p.marked(append(p.column('u'), raw...))
-		if err != nil {
-			return err
-		}
-		ok := len(claim) > 1 && claim[0] == rebuildScratchExact && bytes.Equal(claim[1:], r.key)
-		exact, unproved = exact || ok, unproved || !ok
-		if !bytes.Equal(raw, r.key) {
-			movedConflict = movedConflict || moved && movedClass != name
-			moved, movedClass = true, name
-		}
-		return nil
+		return owners.prove(&p.rebuildCallMoves, raw, r.key, name)
 	})
-	if err != nil || !any {
-		return "", !any, err
+	if err != nil || !owners.seen {
+		return "", !owners.seen, err
 	}
-	if !different || !mapped {
-		return class, exact, nil
+	if !mapped {
+		return owners.class, owners.exact, nil
 	}
-	// Resolved-to-resolved MemberOf reindexes use SQLite's delete/insert
-	// path, after retained rows. When rewritten rows disagree, raw receipt
-	// order cannot establish which rewrite the native pass inserted last.
-	if unproved || movedConflict {
+	name, exact, uncertain, err := owners.elect(&p.rebuildCallMoves, id, 'w', nil)
+	if uncertain {
 		return "", false, &RebuildUnknownProvenanceError{Count: 1, First: relevant}
 	}
-	if moved {
-		return movedClass, true, nil
-	}
-	last, err := p.get(p.key('w', id))
-	if err != nil {
-		return "", false, err
-	}
-	name, rest, err := readKeyString(last)
-	if err != nil || len(rest) != 0 {
-		return "", false, invalid("Laravel last owner")
-	}
-	return name, true, nil
+	return name, exact, err
 }
 
 func (p *rebuildLaravelEventPass) listeners(ctx context.Context, event string, visit func(string, bool) error) error {
@@ -616,15 +567,8 @@ func (p *rebuildLaravelEventPass) prepareOrdered(ctx context.Context, path strin
 	}
 	var adds uint64
 	if err := p.visit(ctx, p.column('z'), func(r row) error {
-		key := append(p.column('r'), r.value...)
-		claim, err := p.marked(key)
-		if err != nil || len(claim) <= 1 || claim[0] != rebuildScratchExact {
-			return err // a conflicting duplicate receipt cannot order a write
-		}
-		old := claim[1:]
-		// Expose this first exact receipt to the shared move-order writer.
-		claim[0] = rebuildCapabilityWanted
-		if err := p.noteReceipt(key, claim, true); err != nil {
+		old, err := p.orderCallReceipt(r.value)
+		if err != nil || old == nil {
 			return err
 		}
 		if write == nil {
