@@ -56,6 +56,7 @@ func TestRebuildReactNativeNativePairingScratch(t *testing.T) {
 			t.Fatal("refusal must precede pairing")
 			return nil
 		})
+	}
 	for _, limit := range []int{0, goldBufferBytes + 1} {
 		stats, err := run(limit)
 		require.ErrorIs(t, err, ErrRebuildReactNativeNativePairing)
