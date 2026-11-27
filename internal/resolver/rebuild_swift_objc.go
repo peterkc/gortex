@@ -48,7 +48,7 @@ func reduceRebuildSwiftObjC(ctx context.Context, view store_pebble.RebuildView, 
 	}); err != nil {
 		return err
 	}
-	if !(namedSwift && objcSelector) && !(swiftProtocol && objcConformer) {
+	if (!namedSwift || !objcSelector) && (!swiftProtocol || !objcConformer) {
 		return nil
 	}
 	link := func(swift, objc *graph.Node, selector string) error {
