@@ -19,11 +19,13 @@ const (
 func TestRebuildMyBatisCallerReceiptForAmbiguousWorkspace(t *testing.T) {
 	for _, tc := range []struct {
 		name, callerRepo, target string
-		secondMethod, wantMove   bool
+		secondRepo               string
+		wantMove                 bool
 	}{
 		{name: "workspace_unique", callerRepo: "mapper", target: myBatisTestLocal, wantMove: true},
-		{name: "workspace_many", callerRepo: "mapper", secondMethod: true, target: myBatisTestPlaceholder("find")},
-		{name: "repo_elects_winner", callerRepo: "local", secondMethod: true, target: myBatisTestLocal},
+		{name: "workspace_many", callerRepo: "mapper", secondRepo: "remote", target: myBatisTestPlaceholder("find")},
+		{name: "repo_elects_winner", callerRepo: "local", secondRepo: "remote", target: myBatisTestLocal},
+		{name: "no_unique_repo", callerRepo: "local", secondRepo: "local", target: myBatisTestPlaceholder("find"), wantMove: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newBuild(t, FullProfile)
@@ -40,14 +42,23 @@ func TestRebuildMyBatisCallerReceiptForAmbiguousWorkspace(t *testing.T) {
 			// Only the caller declaration is missing from the proof stream.
 			xml.Nodes, xml.File.NodeCount = nil, 0
 			receipts := []ParseFacts{xml, myBatisTestMethod(t, b, "local")}
-			if tc.secondMethod {
-				receipts = append(receipts, myBatisTestMethod(t, b, "remote"))
+			if tc.secondRepo != "" {
+				const file = "SecondMapper.java"
+				second := &graph.Node{ID: file + "::UserMapper.find", Name: "find", FilePath: file, Language: "java", Kind: graph.KindMethod,
+					Meta: map[string]any{"receiver": myBatisTestNamespace}}
+				facts := myBatisTestQualifiedFacts(t, tc.secondRepo, second)
+				require.NoError(t, b.AddParsedFile(tc.secondRepo, facts))
+				receipts = append(receipts, facts)
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
 			stats, err := runTestRebuildMyBatis(t, b, receipts...)
 			if tc.wantMove {
 				require.NoError(t, err)
-				require.Equal(t, RebuildMyBatisStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+				want := RebuildMyBatisStats{Stubs: 1, Moves: 1}
+				if tc.target == myBatisTestLocal {
+					want.Resolved = 1
+				}
+				require.Equal(t, want, stats)
 				requireRebuildMyBatisMove(t, b, old, old, tc.target)
 				return
 			}

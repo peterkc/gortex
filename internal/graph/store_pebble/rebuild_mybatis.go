@@ -84,6 +84,9 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 	if err := p.collect(ctx, rules.MethodKey); err != nil {
 		return stats, err
 	}
+	if err := p.markRepoSensitive(ctx); err != nil {
+		return stats, err
+	}
 	if err := p.plan(ctx, rules); err != nil || p.stats.Moves == 0 {
 		return p.stats, err
 	}
@@ -99,7 +102,8 @@ func (b *BuildStore) RebuildMyBatis(ctx context.Context, receipts iter.Seq2[Pars
 
 // s: live mapper stub by old out-key; j: join named by a live stub.
 // c: candidate by cohort and ID; e: election aggregate by cohort and repo
-// (empty repo is workspace); n: node proof by ID; u: affected cohort proof.
+// (empty repo is workspace); q: join with a unique nonempty repo cohort;
+// n: node proof by ID; u: affected cohort proof.
 // m: new payload by old out-key; d: destinations seen; x: conflicting outputs;
 // r: raw recorder proof and claiming old key.
 func rebuildMyBatisKey(col byte, fields ...string) []byte {
@@ -174,6 +178,27 @@ func (p *rebuildMyBatisPass) candidate(key []byte) (string, error) {
 	})
 }
 
+// Record each repo-sensitive join once, after all repo cohorts settle.
+func (p *rebuildMyBatisPass) markRepoSensitive(ctx context.Context) error {
+	prefix := rebuildMyBatisKey('e')
+	var marked string
+	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		if len(r.value) <= 1 {
+			return nil
+		}
+		join, rest, err := readKeyString(r.key[len(prefix):])
+		if err != nil || join == marked {
+			return err
+		}
+		repo, _, err := readKeyString(rest)
+		if err != nil || repo == "" {
+			return err
+		}
+		marked = join
+		return p.put(rebuildMyBatisKey('q', join), nil)
+	})
+}
+
 func (p *rebuildMyBatisPass) elect(join, from string) (method string, caller *graph.Node, err error) {
 	if join == "" {
 		return "", nil, nil
@@ -182,8 +207,12 @@ func (p *rebuildMyBatisPass) elect(join, from string) (method string, caller *gr
 	if err != nil {
 		return "", nil, err
 	}
-	// An empty or unique workspace cohort has the same result in every repo.
+	// Repo can change a workspace tie only if a repo has a unique method.
 	if state == "\x00" && from != "" {
+		sensitive, flagErr := p.present(rebuildMyBatisKey('q', join))
+		if flagErr != nil || !sensitive {
+			return "", nil, flagErr
+		}
 		caller, err = p.node(from)
 		if err != nil {
 			return "", nil, err
@@ -522,14 +551,7 @@ func (p *rebuildMyBatisPass) proved(old []byte, e *graph.Edge, rules RebuildMyBa
 	if err != nil || cohort != rebuildCapabilityWanted {
 		return false, err
 	}
-	if e.From == "" {
-		return true, nil // native skips the empty caller ID
-	}
-	workspace, err := p.candidate(rebuildMyBatisKey('e', join, ""))
-	if err != nil || workspace != "\x00" {
-		return err == nil, err
-	}
-	caller, err := p.node(e.From)
+	_, caller, err := p.elect(join, e.From)
 	if err != nil || caller == nil {
 		return err == nil, err // the exact caller point is absent
 	}
