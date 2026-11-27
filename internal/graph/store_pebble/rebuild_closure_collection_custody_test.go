@@ -157,6 +157,9 @@ func TestRebuildClosureCollectionInstalledCustody(t *testing.T) {
 		File:              graph.FileMetaRow{FilePath: file},
 		Nodes:             []*graph.Node{dispatch, registrar},
 	})
+	// A large callable without either closure role is not an input.
+	b.AddNode(&graph.Node{ID: "unrelated", Kind: graph.KindMethod, FilePath: file, Language: "go",
+		Meta: map[string]any{"padding": strings.Repeat("x", 16<<20)}})
 	stats, err := b.RebuildClosureCollection(t.Context(), receipts, 8,
 		func(d, r *graph.Node) bool { return d.WorkspaceID == r.WorkspaceID }, makeCall, closureTestApple)
 	require.NoError(t, err)

@@ -91,14 +91,17 @@ func (p *rebuildClosurePass) pair(ctx context.Context, maxFanout int,
 		if light.Kind != graph.KindMethod && light.Kind != graph.KindFunction {
 			return nil
 		}
-		if len(r.key)+len(r.value) > 16<<20 {
-			return fmt.Errorf("%w: closure collection input row", ErrRebuildLinkInputSize)
-		}
 		n, err := decodeNode(r.value)
 		if err != nil {
 			return err
 		}
 		dispatch, appendField := closureFields(n.Meta)
+		if dispatch == "" && appendField == "" {
+			return nil
+		}
+		if len(r.key)+len(r.value) > 16<<20 {
+			return fmt.Errorf("%w: closure collection input row", ErrRebuildLinkInputSize)
+		}
 		if dispatch != "" {
 			if err := p.put(rebuildClosureKey('f', dispatch), nil); err != nil {
 				return err
@@ -165,9 +168,23 @@ func (p *rebuildClosurePass) visitRoleIDs(ctx context.Context, col byte, field s
 	})
 }
 
+func (p *rebuildClosurePass) roleNode(id string) (*graph.Node, error) {
+	key := pendingNodeKey(id)
+	return pendingGet(p.b.pending, key, func(value []byte) (*graph.Node, error) {
+		if len(key)+len(value) > 16<<20 {
+			return nil, fmt.Errorf("%w: closure collection input row", ErrRebuildLinkInputSize)
+		}
+		n, err := decodeNode(value)
+		if err == nil && n.ID != id {
+			return nil, invalid("closure collection node identity")
+		}
+		return n, err
+	})
+}
+
 func (p *rebuildClosurePass) visitRole(ctx context.Context, col byte, field string, yield func(*graph.Node) error) error {
 	return p.visitRoleIDs(ctx, col, field, func(id string) error {
-		n, err := p.b.RebuildView().Node(ctx, id)
+		n, err := p.roleNode(id)
 		if err != nil {
 			return err
 		}
@@ -237,7 +254,7 @@ func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[Parse
 			if state == 0 {
 				continue
 			}
-			live, err := p.b.RebuildView().Node(ctx, n.ID)
+			live, err := p.roleNode(n.ID)
 			if err != nil {
 				return err
 			}
