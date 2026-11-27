@@ -26,19 +26,6 @@ func classifyBuiltin(method, lang string) (string, bool) {
 	return graph.LegacyBuiltinCategory(method, lang)
 }
 
-// langFromFilePath — "ts" and "js" both query jsBuiltins.
-func classifyBuiltin(method, lang string) (string, bool) {
-	switch lang {
-	case "js", "ts":
-		c, ok := jsBuiltins[method]
-		return c, ok
-	case "py":
-		c, ok := pyBuiltins[method]
-		return c, ok
-	}
-	return "", false
-}
-
 // langFromFilePath infers a language family from a file extension.
 // Returns "" when the extension isn't one we classify — callers should
 // fall back to the normal Unresolved path in that case.

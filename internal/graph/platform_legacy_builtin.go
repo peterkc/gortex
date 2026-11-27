@@ -97,5 +97,16 @@ var legacyPythonBuiltinsV1 = map[string]string{
 	"find": "str",
 }
 
-// classifyBuiltin returns the category for a built-in method name in a
-// given language family, if any. Languages are normalised upstream by
+// LegacyBuiltinCategory returns the native name-only category, not an
+// exact receiver match. The existing native classifier keeps this V1 mapping.
+func LegacyBuiltinCategory(method, lang string) (string, bool) {
+	switch lang {
+	case "js", "ts":
+		c, ok := legacyJSBuiltinsV1[method]
+		return c, ok
+	case "py":
+		c, ok := legacyPythonBuiltinsV1[method]
+		return c, ok
+	}
+	return "", false
+}
