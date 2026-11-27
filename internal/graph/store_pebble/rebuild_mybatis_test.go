@@ -73,11 +73,13 @@ func TestRebuildMyBatisEmptyRepoCandidates(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		firstRepo  string
+		single     bool
 		omitCaller bool
 		refuse     bool
 	}{
 		{name: "local wins with caller receipt", firstRepo: "local"},
 		{name: "local win requires caller receipt", firstRepo: "local", omitCaller: true, refuse: true},
+		{name: "one empty repo wins without caller receipt", single: true, omitCaller: true},
 		{name: "two empty repos restub without caller receipt", omitCaller: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,11 +92,15 @@ func TestRebuildMyBatisEmptyRepoCandidates(t *testing.T) {
 			}
 			receipts := []ParseFacts{xml}
 			target := myBatisTestPlaceholder("find")
-			for i, file := range []string{"FirstMapper.java", "SecondMapper.java"} {
+			files := []string{"FirstMapper.java", "SecondMapper.java"}
+			if tc.single {
+				files = files[:1]
+			}
+			for i, file := range files {
 				repo := ""
 				n := &graph.Node{ID: file + "::UserMapper.find", Name: "find", FilePath: file, Language: "java", Kind: graph.KindMethod,
 					Meta: map[string]any{"receiver": myBatisTestNamespace}}
-				if i == 0 && tc.firstRepo != "" {
+				if i == 0 && (tc.single || tc.firstRepo != "") {
 					repo, target = tc.firstRepo, n.ID
 				}
 				facts := myBatisTestQualifiedFacts(t, repo, n)
@@ -111,7 +117,7 @@ func TestRebuildMyBatisEmptyRepoCandidates(t *testing.T) {
 			}
 			require.NoError(t, err)
 			want := RebuildMyBatisStats{Stubs: 1, Moves: 1}
-			if tc.firstRepo != "" {
+			if tc.single || tc.firstRepo != "" {
 				want.Resolved = 1
 			}
 			require.Equal(t, want, stats)
