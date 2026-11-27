@@ -21,9 +21,9 @@ type RebuildClosureCollectionStats struct {
 	Edges uint64
 }
 
-// RebuildClosureCollection streams the native callable field join. Both
-// raw role counts precede receipt proof and the workspace and self filters.
-// Preserve SQLite durable keys when installing calls.
+// RebuildClosureCollection streams the native callable field join. Count both
+// raw roles before filtering pairs, then prove only the endpoints of new calls
+// and the Apple witness. Preserve occupied SQLite durable keys.
 func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	maxFanout int, sameBoundary func(*graph.Node, *graph.Node) bool, makeEdge func(*graph.Node, *graph.Node, string) *graph.Edge,
 	appleLanguage func(string) bool,
@@ -51,13 +51,11 @@ func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter
 	if err := p.pair(ctx, maxFanout, sameBoundary, makeEdge); err != nil {
 		return stats, err
 	}
-	if p.wants {
-		if err := p.prove(ctx, receipts, appleLanguage); err != nil {
-			return stats, err
-		}
-	}
 	if !p.changed {
 		return p.stats, nil
+	}
+	if err := p.prove(ctx, receipts, appleLanguage); err != nil {
+		return stats, err
 	}
 	err = b.withWrites(func() error { return p.apply(ctx) })
 	return p.stats, err
@@ -66,7 +64,6 @@ func (b *BuildStore) RebuildClosureCollection(ctx context.Context, receipts iter
 type rebuildClosurePass struct {
 	b       *BuildStore
 	changed bool
-	wants   bool
 	stats   RebuildClosureCollectionStats
 }
 
@@ -136,11 +133,6 @@ func (p *rebuildClosurePass) pair(ctx context.Context, maxFanout int,
 		if counts[1] == 0 || counts[0] > maxFanout || counts[1] > maxFanout {
 			return nil
 		}
-		for _, col := range roles {
-			if err := p.visitRoleIDs(ctx, col, field, p.wantNode); err != nil {
-				return err
-			}
-		}
 		return p.visitRole(ctx, 'd', field, func(d *graph.Node) error {
 			return p.visitRole(ctx, 'r', field, func(r *graph.Node) error {
 				if d.ID == r.ID || !sameBoundary(d, r) {
@@ -201,14 +193,16 @@ func (p *rebuildClosurePass) propose(e *graph.Edge) error {
 	if err != nil {
 		return err
 	}
-	// Both proposal endpoints were wanted after the role counts.
+	if err := p.put(proposal, raw); err != nil {
+		return err
+	}
+	for _, id := range [...]string{e.From, e.To} {
+		if err := p.put(rebuildClosureKey('n', id), []byte{rebuildCapabilityWanted}); err != nil {
+			return err
+		}
+	}
 	p.changed = true
-	return p.put(proposal, raw)
-}
-
-func (p *rebuildClosurePass) wantNode(id string) error {
-	p.wants = true
-	return p.put(rebuildClosureKey('n', id), []byte{rebuildCapabilityWanted})
+	return nil
 }
 
 func (p *rebuildClosurePass) state(key []byte) (byte, error) {
@@ -219,16 +213,13 @@ func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[Parse
 	// Turns before Closure may stamp node metadata but keep identity,
 	// language and file ownership. Reuse the frozen gate's family rule
 	// on those rows, including non-callables.
-	if p.changed {
-		err := p.b.RebuildView().VisitFrameworkGateNodes(ctx, func(n *graph.Node) error {
-			if !appleLanguage(n.Language) {
-				return nil
-			}
-			return p.put(rebuildClosureKey('a', n.ID), []byte{rebuildCapabilityWanted})
-		})
-		if err != nil {
-			return err
+	if err := p.b.RebuildView().VisitFrameworkGateNodes(ctx, func(n *graph.Node) error {
+		if !appleLanguage(n.Language) {
+			return nil
 		}
+		return p.put(rebuildClosureKey('a', n.ID), []byte{rebuildCapabilityWanted})
+	}); err != nil {
+		return err
 	}
 	for facts, err := range receipts {
 		if err != nil {
@@ -239,10 +230,8 @@ func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[Parse
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if p.changed {
-				if err := p.noteApple(n, file); err != nil {
-					return err
-				}
+			if err := p.noteApple(n, file); err != nil {
+				return err
 			}
 			key := rebuildClosureKey('n', n.ID)
 			state, err := p.state(key)
@@ -263,54 +252,22 @@ func (p *rebuildClosurePass) prove(ctx context.Context, receipts iter.Seq2[Parse
 		}
 	}
 	appleProved := false
-	if p.changed {
-		if err := pendingVisit(ctx, p.b.pending, rebuildClosureKey('a'), func(r row) error {
-			if len(r.value) != 1 {
-				return invalid("closure collection Apple proof state")
-			}
-			appleProved = appleProved || r.value[0] == rebuildScratchExact
-			return nil
-		}); err != nil {
-			return err
+	if err := pendingVisit(ctx, p.b.pending, rebuildClosureKey('a'), func(r row) error {
+		if len(r.value) != 1 {
+			return invalid("closure collection Apple proof state")
 		}
+		appleProved = appleProved || r.value[0] == rebuildScratchExact
+		return nil
+	}); err != nil {
+		return err
 	}
-	if err := proveRebuildScratchEndpoints(ctx, p.visit, func(id string) (bool, error) {
+	return proveRebuildScratchEndpoints(ctx, p.visit, func(id string) (bool, error) {
 		if !appleProved {
 			return false, nil
 		}
 		state, err := p.state(rebuildClosureKey('n', id))
 		return state == rebuildScratchExact, err
-	}, nil); err != nil {
-		return err
-	}
-	// An eligible declaration may have no proposed call to name, for example
-	// when the pair crosses a workspace boundary.
-	prefix := rebuildClosureKey('n')
-	var refused rebuildScratchRefusals
-	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		if len(r.value) != 1 {
-			return invalid("closure collection proof state")
-		}
-		if r.value[0] == rebuildScratchExact {
-			return nil
-		}
-		id, _, err := readKeyString(r.key[len(prefix):])
-		if err != nil {
-			return err
-		}
-		n, err := p.b.RebuildView().Node(ctx, id)
-		if err != nil {
-			return err
-		}
-		if n == nil {
-			return invalid("closure collection lost a role")
-		}
-		refused.add(graph.EdgeIdentity{From: n.ID, FilePath: n.FilePath}, nil)
-		return nil
-	}); err != nil {
-		return err
-	}
-	return refused.err()
+	}, nil)
 }
 
 func (p *rebuildClosurePass) noteApple(raw *graph.Node, file string) error {

@@ -155,6 +155,52 @@ func TestRebuildClosureCollectionSkipsReceiptsWithoutRegistrars(t *testing.T) {
 	}
 }
 
+func TestRebuildClosureCollectionIgnoresUnprovedRolesWithoutOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		addRegistrar bool
+	}{
+		{name: "no new call"},
+		{name: "one new call", addRegistrar: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const file, language, field = "bus.swift", "swift", "listeners"
+			dispatch := rebuildClosureCollectionNode(file, "dispatch", language, rebuildCCDispatch, field)
+			foreign := rebuildClosureCollectionNode("foreign.swift", "register", language, rebuildCCAppend, field)
+			self := rebuildClosureCollectionNode("self.swift", "both", language, rebuildCCDispatch, "self")
+			self.Meta[rebuildCCAppend] = "self"
+			nodes := []*graph.Node{dispatch}
+			var wantCalls int
+			if tc.addRegistrar {
+				nodes = append(nodes, rebuildClosureCollectionNode(file, "register", language, rebuildCCAppend, field))
+				wantCalls = 1
+			}
+			proof, b, native := openRebuildObserverStores(t, map[string]string{foreign.ID: "elsewhere"},
+				rebuildEventFacts(file, language, nodes),
+				rebuildEventFacts(foreign.FilePath, language, []*graph.Node{foreign}),
+				rebuildEventFacts(self.FilePath, language, []*graph.Node{self}),
+			)
+			selection := rebuildClosureCollectionSelection(t)
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selection).Err)
+			want := rebuildEventSQLiteRows(native)
+			require.Len(t, want.edges, wantCalls)
+
+			// Neither the cross-workspace registrar nor the sole self pair
+			// contributes an endpoint to a new call.
+			receipts := rebuildGRPCReceipts(proof[0])
+			if !tc.addRegistrar {
+				receipts = func(func(store_pebble.ParseFacts, error) bool) {
+					t.Fatal("replayed receipts without a new call")
+				}
+			}
+			stats, err := RunRebuildClosureCollection(t.Context(), b, receipts, selection)
+			require.NoError(t, err)
+			require.Equal(t, uint64(wantCalls), stats.Edges)
+			require.Equal(t, want, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
 func TestRebuildClosureCollectionRefusesUnprovedNode(t *testing.T) {
 	for _, mode := range []string{"complete", "missing", "changed field", "changed dispatch field", "absent versus nil", "nil versus absent", "absent versus empty", "absent versus non-string", "different non-strings"} {
 		t.Run(mode, func(t *testing.T) {

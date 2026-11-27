@@ -70,26 +70,6 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 	}
 }
 
-func TestRebuildClosureCollectionCountsUnprovedRoleWithoutOutput(t *testing.T) {
-	dispatch, register := closureProofPair("one", "listeners")
-	_, missing := closureProofPair("two", "listeners")
-	facts := setStateProofFacts([]*graph.Node{dispatch, register, missing})
-	b, _ := seedSyntheticCustody(t, facts)
-	facts.Nodes = facts.Nodes[:2]
-	before := rebuildFrameworkCustodyRows(t, b)
-	stats, err := b.RebuildClosureCollection(t.Context(), func(yield func(ParseFacts, error) bool) {
-		yield(facts, nil)
-	}, 2, func(_, _ *graph.Node) bool { return false }, setStateProofOutput, closureTestApple)
-	var refusal *RebuildUnknownProvenanceError
-	require.ErrorAs(t, err, &refusal)
-	require.Equal(t, &RebuildUnknownProvenanceError{
-		Count: 1,
-		First: graph.EdgeIdentity{From: missing.ID, FilePath: missing.FilePath},
-	}, refusal)
-	require.Zero(t, stats)
-	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
-}
-
 func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
 	for _, mode := range []string{"fanout", "nil boundary", "nil builder", "nil Apple predicate", "scratch occupied", "input row", "proposal row"} {
 		t.Run(mode, func(t *testing.T) {
