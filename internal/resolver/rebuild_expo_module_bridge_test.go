@@ -83,26 +83,85 @@ func TestRebuildExpoModuleBridgeSQLiteOracle(t *testing.T) {
 }
 
 func TestRebuildExpoModuleBridgeFamilyGroups(t *testing.T) {
-	required, family := expoBridgeFamilyMask()
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthExpoModules})
+	require.NoError(t, err)
 	for _, tc := range []struct {
 		name      string
 		languages []string
-		want      bool
+		wantEdges int
 	}{
-		{"web and Apple", []string{"TypeScript", " Swift "}, true},
-		{"web and JVM", []string{"tsx", "Java"}, true},
-		{"web only", []string{"javascript", "go"}, false},
-		{"Apple and JVM without web", []string{"swift", "kotlin", "go"}, false},
+		{"web and Apple", []string{"TypeScript", " Swift "}, 1},
+		{"web and JVM", []string{"tsx", "Java"}, 1},
+		{"web only", []string{"javascript"}, 0},
+		{"Apple and JVM without web", []string{"swift", "kotlin"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			present := map[string]int{}
-			var seen uint8
-			for _, language := range tc.languages {
-				seen |= family(language)
-				present[frameworkLanguageFamily(language)]++
+			// Keep the matching endpoints out of the web, Apple, and JVM families
+			// so only the independent census rows can satisfy the gate.
+			const file = "bridge.go"
+			caller := &graph.Node{ID: file + "::call", Kind: graph.KindFunction, Name: "call", FilePath: file, Language: "go"}
+			target := &graph.Node{ID: file + "::add", Kind: graph.KindMethod, Name: "add", FilePath: file, Language: "go",
+				Meta: map[string]any{"expo_module": "Math", "expo_method": "add"}}
+			marker := &graph.Edge{From: caller.ID, To: "unresolved::rn::Math::add", Kind: graph.EdgeCalls, FilePath: file, Line: 4,
+				Meta: map[string]any{"via": "rn.native", "rn_module": "Math", "rn_method": "add"}}
+			facts := []store_pebble.ParseFacts{rebuildEventFacts(file, "go", []*graph.Node{caller, target}, marker)}
+			for i, language := range tc.languages {
+				path := fmt.Sprintf("family-%d", i)
+				node := &graph.Node{ID: path + "::witness", Kind: graph.KindFunction, Name: "witness", FilePath: path, Language: language}
+				facts = append(facts, rebuildEventFacts(path, language, []*graph.Node{node}))
 			}
-			require.Equal(t, tc.want, frameworkSynthNodeGatesPass(SynthExpoModules, present, nil))
-			require.Equal(t, tc.want, seen&required == required)
+			native := openRebuildTemporalOracle(t, facts...)
+			private := openRebuildGRPCBuild(t, facts...)
+			before := rebuildEventSQLiteRows(native)
+			require.Len(t, before.nodes, 2+len(tc.languages))
+			require.Len(t, before.edges, 1)
+			require.Equal(t, before, rebuildEventSavedRows(t, private))
+
+			want := before
+			if tc.wantEdges != 0 {
+				want.edges = append(slices.Clone(before.edges), &graph.Edge{
+					From:            caller.ID,
+					To:              target.ID,
+					Kind:            graph.EdgeCalls,
+					FilePath:        file,
+					Line:            4,
+					Confidence:      0.6,
+					ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeCalls, 0.6),
+					Origin:          graph.OriginASTInferred,
+					Meta: map[string]any{
+						"via":             "expo.bridge",
+						"expo_module":     "Math",
+						"expo_method":     "add",
+						"native_language": "go",
+						MetaSynthesizedBy: SynthExpoModules,
+						MetaProvenance:    ProvenanceHeuristic,
+					},
+				})
+				want.sort()
+			}
+			report := RunFrameworkSynthesizersWithSelection(native, selection)
+			require.NoError(t, report.Err)
+			require.Equal(t, tc.wantEdges, report.Total)
+			nativeRows := rebuildEventSQLiteRows(native)
+			require.Equal(t, want, nativeRows)
+
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), private.RebuildView(), selection)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantEdges != 0, frozen.allows(SynthExpoModules))
+			receipts := rebuildGRPCReceipts(facts...)
+			stats, err := RunRebuildExpoModuleBridge(t.Context(), private, receipts, frozen)
+			require.NoError(t, err)
+			require.EqualValues(t, tc.wantEdges, stats.Edges)
+			require.Equal(t, nativeRows, rebuildEventSavedRows(t, private))
+
+			if tc.wantEdges == 0 {
+				// The frozen selection skips Expo. Keep it selected here to test the
+				// adapter's own family gate against the still-matchable marker and method.
+				stats, err := RunRebuildExpoModuleBridge(t.Context(), private, receipts, selection)
+				require.NoError(t, err)
+				require.Zero(t, stats)
+				require.Equal(t, nativeRows, rebuildEventSavedRows(t, private))
+			}
 		})
 	}
 }
