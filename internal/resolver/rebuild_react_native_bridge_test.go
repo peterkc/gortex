@@ -578,3 +578,71 @@ func roundTripRebuildRNBridgeFacts(t *testing.T, facts store_pebble.ParseFacts) 
 	require.NoError(t, err)
 	return decoded
 }
+
+func TestRebuildNativeBridgeNodeRowCaps(t *testing.T) {
+	const module, method = "Calendar", "open"
+	caller := &graph.Node{ID: "app.ts::caller", Kind: graph.KindFunction, FilePath: "app.ts", Language: "typescript"}
+	ios := &graph.Node{ID: "Calendar.swift::open", Kind: graph.KindMethod, FilePath: "Calendar.swift", Language: "swift",
+		Meta: map[string]any{"rn_module": module, "rn_method": method, "expo_module": module, "expo_method": method}}
+	android := &graph.Node{ID: "Calendar.java::open", Kind: graph.KindMethod, FilePath: "Calendar.java", Language: "java",
+		Meta: map[string]any{"rn_module": module, "rn_method": method}}
+	call := &graph.Edge{From: caller.ID, To: "unresolved::Calendar.open", Kind: graph.EdgeCalls, FilePath: caller.FilePath, Line: 5,
+		Meta: map[string]any{"via": rnNativeVia, "rn_module": module, "rn_method": method}}
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(caller.FilePath, caller.Language, []*graph.Node{caller}, call),
+		rebuildEventFacts(ios.FilePath, ios.Language, []*graph.Node{ios}),
+		rebuildEventFacts(android.FilePath, android.Language, []*graph.Node{android}),
+	}
+	padding := strings.Repeat("x", 16<<20)
+	for _, stage := range []struct {
+		name     string
+		stageErr error
+		edges    uint64
+	}{
+		{SynthReactNative, store_pebble.ErrRebuildReactNativeBridge, 2},
+		{SynthReactNativePair, store_pebble.ErrRebuildReactNativeNativePairing, 2},
+		{SynthExpoModules, store_pebble.ErrRebuildExpoModuleBridge, 1},
+	} {
+		t.Run(stage.name, func(t *testing.T) {
+			selected, err := NewFrameworkSynthesizerSelection([]string{stage.name})
+			require.NoError(t, err)
+			for _, reached := range []bool{false, true} {
+				b := openRebuildGRPCBuild(t, facts...)
+				selection, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selected)
+				require.NoError(t, err)
+				require.True(t, selection.allows(stage.name))
+				large := *ios
+				large.Meta = maps.Clone(ios.Meta)
+				large.Meta["unrelated"] = padding
+				if !reached {
+					large.ID = "Calendar.swift::unused"
+					large.Meta["rn_method"], large.Meta["expo_method"] = "unused", "unused"
+				}
+				// Freeze the shared census before changing the live row size.
+				b.AddNode(&large)
+				receipts := rebuildGRPCReceipts(facts...)
+				var edges uint64
+				switch stage.name {
+				case SynthReactNative:
+					stats, runErr := RunRebuildReactNativeBridge(t.Context(), b, receipts, selection)
+					edges, err = stats.Edges, runErr
+				case SynthReactNativePair:
+					stats, runErr := RunRebuildReactNativeNativePairing(t.Context(), b, receipts, selection)
+					edges, err = stats.Edges, runErr
+				case SynthExpoModules:
+					stats, runErr := RunRebuildExpoModuleBridge(t.Context(), b, receipts, selection)
+					edges, err = stats.Edges, runErr
+				}
+				if reached {
+					require.ErrorIs(t, err, stage.stageErr)
+					require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+					require.Zero(t, edges)
+					require.Equal(t, []*graph.Edge{call}, rebuildEventSavedRows(t, b).edges)
+				} else {
+					require.NoError(t, err)
+					require.Equal(t, stage.edges, edges)
+				}
+			}
+		})
+	}
+}

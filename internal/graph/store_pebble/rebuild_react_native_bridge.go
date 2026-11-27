@@ -206,12 +206,38 @@ func checkedRebuildLightNode(r row, label string) (*graph.Node, error) {
 	return n, err
 }
 
+// rebuildNativeBridgeNode bounds exact node reads once a Call or pair reaches them.
+func (b *BuildStore) rebuildNativeBridgeNode(ctx context.Context, id, label string) (*graph.Node, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	key := pendingNodeKey(id)
+	return pendingGet(b.pending, key, func(raw []byte) (*graph.Node, error) {
+		if len(key)+len(raw) > 16<<20 {
+			return nil, fmt.Errorf("%w: %s node row", ErrRebuildLinkInputSize, label)
+		}
+		n, err := decodeNode(raw)
+		if err == nil && n.ID != id {
+			return nil, invalid(label + " node identity")
+		}
+		return n, err
+	})
+}
+
 func (p *rebuildReactNativeBridge) capture(ctx context.Context, isCall func(*graph.Edge) bool) (bool, error) {
 	view := p.b.RebuildView()
 	var methods bool
-	if err := view.VisitNodes(ctx, func(n *graph.Node) error {
+	if err := view.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
+		n, err := checkedRebuildLightNode(r, p.policy.label)
+		if err != nil || n.Kind != graph.KindMethod || n.ID == "" {
+			return err
+		}
+		n, err = decodeNode(r.value)
+		if err != nil {
+			return err
+		}
 		mod, method := p.policy.names(n.Meta)
-		if n.Kind != graph.KindMethod || n.ID == "" || mod == "" || method == "" {
+		if mod == "" || method == "" {
 			return nil
 		}
 		methods = true
@@ -434,7 +460,6 @@ func (p *rebuildReactNativeBridge) refusedOutputs(ctx context.Context) error {
 }
 
 func (p *rebuildReactNativeBridge) elect(ctx context.Context, buildCall func(*graph.Edge, *graph.Node) *graph.Edge) error {
-	view := p.b.RebuildView()
 	return pendingVisit(ctx, p.b.pending, rebuildRNKey('o'), func(r row) error {
 		e, err := p.b.pendingEdge(r.value)
 		if err != nil {
@@ -461,7 +486,7 @@ func (p *rebuildReactNativeBridge) elect(ctx context.Context, buildCall func(*gr
 				return err
 			}
 			key := rebuildRNKey('w', e.From, id)
-			native, err := view.Node(ctx, id)
+			native, err := p.b.rebuildNativeBridgeNode(ctx, id, p.policy.label)
 			if err != nil {
 				return err
 			}
@@ -481,6 +506,9 @@ func (p *rebuildReactNativeBridge) elect(ctx context.Context, buildCall func(*gr
 			if err != nil {
 				return err
 			}
+			if _, err := p.b.rebuildNativeBridgeNode(ctx, out.From, p.policy.label); err != nil {
+				return err
+			}
 			for _, endpoint := range [...]string{out.From, out.To} {
 				if err := p.put(rebuildRNKey('d', endpoint), []byte{rebuildCapabilityWanted}); err != nil {
 					return err
@@ -496,7 +524,6 @@ func (p *rebuildReactNativeBridge) prove(ctx context.Context, receipts iter.Seq2
 	if !p.changes {
 		return nil
 	}
-	view := p.b.RebuildView()
 	for facts, err := range receipts {
 		if err != nil {
 			return err
@@ -514,7 +541,7 @@ func (p *rebuildReactNativeBridge) prove(ctx context.Context, receipts iter.Seq2
 			if len(state) == 0 {
 				continue
 			}
-			live, err := view.Node(ctx, n.ID)
+			live, err := p.b.rebuildNativeBridgeNode(ctx, n.ID, p.policy.label)
 			if err != nil {
 				return err
 			}

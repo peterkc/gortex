@@ -127,13 +127,17 @@ func (p *rebuildRNPairPass) pair(ctx context.Context, platform func(string) stri
 		if err != nil {
 			return err
 		}
-		ios, err := rebuildRNPairCandidate(ctx, view, tail)
+		prefix := rebuildRNPairKey('a', module, method)
+		found, err := rebuildGuardHasPrefix(ctx, p.b.pending, prefix)
+		if err != nil || !found {
+			return err
+		}
+		ios, err := p.candidate(ctx, tail)
 		if err != nil {
 			return err
 		}
-		prefix := rebuildRNPairKey('a', module, method)
 		return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-			android, err := rebuildRNPairCandidate(ctx, view, r.key[len(prefix):])
+			android, err := p.candidate(ctx, r.key[len(prefix):])
 			if err != nil {
 				return err
 			}
@@ -148,7 +152,7 @@ func (p *rebuildRNPairPass) pair(ctx context.Context, platform func(string) stri
 	})
 }
 
-func rebuildRNPairCandidate(ctx context.Context, view RebuildView, key []byte) (*graph.Node, error) {
+func (p *rebuildRNPairPass) candidate(ctx context.Context, key []byte) (*graph.Node, error) {
 	id, tail, err := readKeyString(key)
 	if err != nil {
 		return nil, err
@@ -156,7 +160,7 @@ func rebuildRNPairCandidate(ctx context.Context, view RebuildView, key []byte) (
 	if len(tail) != 0 {
 		return nil, invalid("React Native pairing candidate key")
 	}
-	n, err := view.Node(ctx, id)
+	n, err := p.b.rebuildNativeBridgeNode(ctx, id, "React Native native pairing")
 	if err == nil && n == nil {
 		err = invalid("React Native pairing lost a method")
 	}
@@ -211,7 +215,7 @@ func (p *rebuildRNPairPass) prove(ctx context.Context, receipts iter.Seq2[ParseF
 			if state == 0 {
 				continue
 			}
-			live, err := p.b.RebuildView().Node(ctx, n.ID)
+			live, err := p.b.rebuildNativeBridgeNode(ctx, n.ID, "React Native native pairing")
 			if err != nil {
 				return err
 			}
