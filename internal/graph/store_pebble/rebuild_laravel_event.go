@@ -177,6 +177,15 @@ func (p *rebuildLaravelEventPass) collectCalls(ctx context.Context) error {
 		if err != nil || kind != graph.EdgeCalls {
 			return err
 		}
+		raw, err := rebuildReceiptKey(snap, r.key)
+		if err != nil && !errors.Is(err, ErrRebuildUnknownProvenance) {
+			return err
+		}
+		if raw != nil {
+			if err := p.claim(raw, r.key); err != nil {
+				return err
+			}
+		}
 		e, err := p.decodeKeyedEdge(r.key, r.value)
 		if err != nil || p.rules.Call(e) == "" {
 			return err
@@ -188,20 +197,12 @@ func (p *rebuildLaravelEventPass) collectCalls(ctx context.Context) error {
 		if err := p.put(p.key('e', p.rules.SimpleName(p.rules.Call(e))), nil); err != nil {
 			return err
 		}
-		raw, err := rebuildReceiptKey(snap, r.key)
-		if err != nil && !errors.Is(err, ErrRebuildUnknownProvenance) {
-			return err
-		}
 		if raw != nil {
 			id, err := decodeLinkRecorder(raw)
 			if err != nil {
 				return err
 			}
-			if id.Kind == graph.EdgeCalls && id.From == e.From && id.FilePath == e.FilePath && id.Line == e.Line {
-				if err := p.claim(raw, r.key); err != nil {
-					return err
-				}
-			} else {
+			if id.Kind != graph.EdgeCalls || id.From != e.From || id.FilePath != e.FilePath || id.Line != e.Line {
 				raw = nil
 			}
 		}
@@ -317,6 +318,17 @@ func (p *rebuildLaravelEventPass) recordNode(n *graph.Node, file string) error {
 // z retains each Call's first exact receipt; w retains the last
 // receipt-backed owner with a retained position per handle.
 func (p *rebuildLaravelEventPass) recordEdge(e *graph.Edge, admitted bool, order uint64) error {
+	if e.Kind == graph.EdgeCalls {
+		raw := pendingEdgeKey(e)
+		claim, err := p.marked(append(p.column('r'), raw...))
+		if err != nil || len(claim) <= 1 {
+			return err
+		}
+		owned, err := p.get(append(p.column('c'), claim[1:]...))
+		if err != nil || !bytes.Equal(owned, raw) {
+			return err
+		}
+	}
 	return p.recordOwnerEdge(e, admitted, order, func(live *graph.Edge) bool {
 		return p.rules.Call(e) == p.rules.Call(live)
 	}, func(live *graph.Edge) (string, bool) {
