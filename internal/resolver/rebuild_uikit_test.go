@@ -126,3 +126,46 @@ func TestRebuildUIKitSQLiteOracle(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildUIKitKeepsPreLoopSharedSites(t *testing.T) {
+	const file, lang = "App/Use.swift", "swift"
+	source := rebuildEventNode(file, "run", lang, "")
+	target := rebuildEventNode(file, "DetailViewController", lang, "")
+	target.Kind = graph.KindType
+	call := &graph.Edge{From: source.ID, To: "unresolved::" + target.Name, Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+	ref := &graph.Edge{From: source.ID, To: call.To, Kind: graph.EdgeReferences, FilePath: file, Line: 2}
+	lateCall, lateRef := *call, *ref
+	lateCall.Line, lateRef.Line = 3, 4
+	late := []*graph.Edge{&lateCall, &lateRef}
+	facts := rebuildEventFacts(file, lang, []*graph.Node{source, target}, call, ref)
+	build, native := openRebuildEventStores(t, facts)
+	ctx := t.Context()
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthUIKitResolve})
+	require.NoError(t, err)
+	frozen, err := FreezeRebuildFrameworkSelection(ctx, build.RebuildView(), selected)
+	require.NoError(t, err)
+	require.True(t, frozen.allows(SynthUIKitResolve))
+	require.NoError(t, FreezeRebuildUIKitInputs(ctx, build, frozen))
+	streams := newFrameworkStreamCandidates(native, map[string]int{"apple": 1}, map[string]int{SynthUIKitResolve: 1})
+	collectFrameworkEdgeCensus(native, streams)
+
+	// An earlier turn introduces two eligible, receipt-backed sites.
+	// They are live when UIKit runs but not in either shared snapshot.
+	build.AddBatch(nil, late)
+	require.NoError(t, native.AddBatchChecked(nil, late))
+	bundle := streams.passStreams(native, SynthUIKitResolve)
+	require.NotNil(t, bundle)
+	defer streams.releasePass(SynthUIKitResolve, bundle)
+	require.Len(t, bundle.calls, 1)
+	require.Len(t, bundle.refs, 1)
+	require.Equal(t, 2, runLegacyFrameworkSynth(native, func(g graph.Store) int { return resolveUIKitRefs(g, bundle) }))
+	want := rebuildEventSQLiteRows(native)
+	require.Contains(t, want.edges, &lateCall)
+	require.Contains(t, want.edges, &lateRef)
+
+	facts.Edges = []*graph.Edge{call, ref, &lateCall, &lateRef}
+	moves, err := RunRebuildUIKit(ctx, build, rebuildGRPCReceipts(facts), frozen)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, moves)
+	require.Equal(t, want, rebuildEventSavedRows(t, build))
+}
