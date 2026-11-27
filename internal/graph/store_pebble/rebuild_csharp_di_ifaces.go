@@ -225,7 +225,12 @@ func (p *rebuildCSharpDI) captureCandidates(ctx context.Context) error {
 			if err := p.want(snap, r.key, ""); err != nil {
 				return err
 			}
-			for _, id := range [...]string{from, impl.ID, iface.ID} {
+			if source != nil {
+				if err := p.put(p.key('s', from), []byte{0}); err != nil {
+					return err
+				}
+			}
+			for _, id := range [...]string{impl.ID, iface.ID} {
 				if err := p.put(p.key('n', id), []byte{0}); err != nil {
 					return err
 				}
@@ -247,17 +252,34 @@ func (p *rebuildCSharpDI) record(ctx context.Context, receipts iter.Seq2[ParseFa
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			key := p.key('n', n.ID)
+			key, source := p.key('n', n.ID), p.key('s', n.ID)
 			wanted, err := p.present(key)
 			if err != nil {
 				return err
 			}
-			if !wanted {
+			sourceWanted, err := p.present(source)
+			if err != nil {
+				return err
+			}
+			if !wanted && !sourceWanted {
 				continue
 			}
 			live, err := p.b.pendingNode(n.ID)
 			if err != nil {
 				return err
+			}
+			if sourceWanted {
+				good := lang != "" && n.FilePath == file && live != nil && live.RepoPrefix == n.RepoPrefix
+				state, err := rebuildScratchState(p.b.pending, source, "csharp DI source proof")
+				if err != nil {
+					return err
+				}
+				if err := noteRebuildScratchState(p.put, source, state, rebuildScratchProofBit(good)); err != nil {
+					return err
+				}
+			}
+			if !wanted {
+				continue
 			}
 			good := lang != "" && sameRebuildLanguageMarker(n, live, file) && live.Kind == n.Kind && live.Name == n.Name &&
 				live.RepoPrefix == n.RepoPrefix && (!p.rules.Iface(live) || live.StartLine == n.StartLine)
@@ -386,12 +408,22 @@ func (p *rebuildCSharpDI) offer(ctx context.Context, e *graph.Edge, from, name, 
 	if err != nil {
 		return err
 	}
+	const exact, installed = byte(1), byte(2)
 	if prior != nil {
-		// A lost offer can affect the result only if it could land a
-		// different payload or distinct free key.
-		if !occupied && !bytes.Equal(raw, prior[9:]) &&
-			(prior[0] == 0 || ordinal == math.MaxUint64 && bytes.Equal(line, prior[1:9])) {
+		if bytes.Equal(raw, prior[9:]) {
+			return nil
+		}
+		unknownOrder := ordinal == math.MaxUint64 && bytes.Equal(line, prior[1:9])
+		if !occupied && (prior[0]&exact == 0 || unknownOrder) {
 			p.refused.add(graph.EdgeIdentityFor(e), out)
+		} else if occupied && unknownOrder && prior[0]&installed != 0 {
+			// An occupied offer still claims the semantic slot. If it ran
+			// first, the free row already planned for that slot would vanish.
+			winner, err := decodeEdge(prior[9:])
+			if err != nil {
+				return err
+			}
+			p.refused.add(graph.EdgeIdentityFor(winner), pendingEdgeKey(winner))
 		}
 		return nil
 	}
@@ -400,12 +432,15 @@ func (p *rebuildCSharpDI) offer(ctx context.Context, e *graph.Edge, from, name, 
 		return err
 	}
 	proved = proved && ordinal != math.MaxUint64
-	claim := []byte{0}
+	var state byte
 	if proved {
-		claim[0] = 1
+		state |= exact
+		if !occupied && physicalWinner == nil {
+			state |= installed
+		}
 	}
 	// Native records semantic dedup even when the physical key is blocked.
-	if err := p.put(semantic, append(append(claim, line...), raw...)); err != nil {
+	if err := p.put(semantic, append(append([]byte{state}, line...), raw...)); err != nil {
 		return err
 	}
 	if occupied {
@@ -430,17 +465,18 @@ func (p *rebuildCSharpDI) offer(ctx context.Context, e *graph.Edge, from, name, 
 }
 
 func (p *rebuildCSharpDI) prove(ctx context.Context, from, name, impl, iface string) (bool, error) {
-	for _, id := range [...]string{from, impl, iface} {
-		// A missing registration source selects the empty repo natively.
-		if id == from {
-			found, err := p.present(pendingNodeKey(id))
-			if err != nil {
-				return false, err
-			}
-			if !found {
-				continue
-			}
+	// A missing registration source selects the empty repo natively.
+	found, err := p.present(pendingNodeKey(from))
+	if err != nil {
+		return false, err
+	}
+	if found {
+		state, err := rebuildScratchState(p.b.pending, p.key('s', from), "csharp DI source proof")
+		if err != nil || state != rebuildCapabilityProved {
+			return false, err
 		}
+	}
+	for _, id := range [...]string{impl, iface} {
 		state, err := rebuildScratchState(p.b.pending, p.key('n', id), "C# DI declaration proof")
 		if err != nil || state != rebuildCapabilityProved {
 			return false, err

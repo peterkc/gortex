@@ -111,3 +111,95 @@ func TestRebuildCSharpDIIfacesFrozenSelection(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, adds)
 }
+
+func TestRebuildCSharpDIIfacesOccupiedTie(t *testing.T) {
+	const file = "Module.cs"
+	impl := ifaceRebuildNode(file, "Svc", "csharp", graph.KindType)
+	reg := &graph.Node{ID: file, Kind: graph.KindFile, FilePath: file, Language: "csharp"}
+	winner := ifaceRebuildNode(file, "Win", "csharp", graph.KindInterface)
+	loser := ifaceRebuildNode(file, "Lose", "csharp", graph.KindInterface)
+	winner.Name, loser.Name = "IThing", "IThing"
+	winner.StartLine, loser.StartLine = 11, 12
+	marker := diIfacesMarker(file, "Svc")
+	first := ifaceRebuildEdge(impl, winner.ID, graph.EdgeImplements, 3)
+	second := ifaceRebuildEdge(impl, loser.ID, graph.EdgeImplements, 3)
+	blocked := csharpDIProvideEdge(file, "Svc", loser)
+	blocked.Meta = nil // The key is occupied without a semantic UseClass binding.
+	for _, line := range []int{3, 4} {
+		second.Line = line
+		facts := rebuildEventFacts(file, "csharp", []*graph.Node{reg, impl, winner, loser}, marker, first, second, blocked)
+		build, native := openRebuildEventStores(t, facts)
+		before := rebuildEventSavedRows(t, build)
+		require.Equal(t, 1, ResolveCSharpDIImplementedInterfaces(native))
+		receipt := facts
+		receipt.Edges = []*graph.Edge{marker, first, blocked}
+		adds, err := RunRebuildCSharpDIIfaces(t.Context(), build, rebuildGRPCReceipts(receipt), diRebuildSelection(t, build))
+		if line == 3 {
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.Zero(t, adds)
+			require.ErrorAs(t, err, &refused)
+			require.EqualValues(t, 1, refused.Count)
+			require.Equal(t, graph.EdgeIdentityFor(csharpDIProvideEdge(file, "Svc", winner)), refused.First)
+			require.Equal(t, before, rebuildEventSavedRows(t, build))
+			continue
+		}
+		require.NoError(t, err)
+		require.EqualValues(t, 1, adds)
+		require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, build))
+	}
+}
+
+func TestRebuildCSharpDIIfacesPhysicalKeyAndProof(t *testing.T) {
+	const file = "Module.cs"
+	impl := ifaceRebuildNode(file, "Svc", "csharp", graph.KindType)
+	reg := &graph.Node{ID: file, Kind: graph.KindFile, FilePath: file, Language: "csharp"}
+	one := ifaceRebuildNode(file, "IOne", "csharp", graph.KindInterface)
+	two := ifaceRebuildNode(file, "ITwo", "csharp", graph.KindInterface)
+	one.StartLine, two.StartLine = 11, 11
+	marker := diIfacesMarker(file, "Svc")
+	oneArc := ifaceRebuildEdge(impl, one.ID, graph.EdgeImplements, 3)
+	twoArc := ifaceRebuildEdge(impl, two.ID, graph.EdgeImplements, 3)
+	facts := rebuildEventFacts(file, "csharp", []*graph.Node{reg, impl, one, two}, marker, oneArc, twoArc)
+	winner := csharpDIProvideEdge(file, "Svc", one)
+	require.Equal(t, graph.EdgeIdentityFor(winner), graph.EdgeIdentityFor(csharpDIProvideEdge(file, "Svc", two)))
+	for _, tc := range []string{"exact", "source repo only", "marker", "declaration", "physical order"} {
+		t.Run(tc, func(t *testing.T) {
+			build, native := openRebuildEventStores(t, facts)
+			before := rebuildEventSavedRows(t, build)
+			var count int
+			if tc == "exact" || tc == "source repo only" {
+				count = ResolveCSharpDIImplementedInterfaces(native)
+				require.Equal(t, 2, count, "native counts both offers")
+			}
+			receipt := facts
+			switch tc {
+			case "source repo only":
+				source := *reg
+				source.Name, source.Language, source.Kind = "renamed", "go", graph.KindVariable
+				receipt.Nodes = []*graph.Node{&source, impl, one, two}
+			case "marker":
+				receipt.Edges = []*graph.Edge{oneArc, twoArc}
+			case "declaration":
+				changed := *one
+				changed.StartLine++
+				receipt.Nodes = []*graph.Node{reg, impl, &changed, two}
+			case "physical order":
+				receipt.Edges = []*graph.Edge{marker, oneArc}
+			}
+			adds, err := RunRebuildCSharpDIIfaces(t.Context(), build, rebuildGRPCReceipts(receipt), diRebuildSelection(t, build))
+			if count != 0 {
+				require.NoError(t, err)
+				require.EqualValues(t, 1, adds)
+				saved := rebuildEventSavedRows(t, build)
+				require.Contains(t, saved.edges, winner)
+				require.Equal(t, rebuildEventSQLiteRows(native), saved)
+				return
+			}
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, graph.EdgeIdentityFor(winner), refused.First)
+			require.Zero(t, adds)
+			require.Equal(t, before, rebuildEventSavedRows(t, build))
+		})
+	}
+}
