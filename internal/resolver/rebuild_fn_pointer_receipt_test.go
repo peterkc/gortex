@@ -1,6 +1,8 @@
 package resolver
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -200,4 +202,190 @@ func TestRebuildFnPointerStageCapsOnlyRoleRows(t *testing.T) {
 		require.Zero(t, stats)
 		require.Equal(t, shrink(before), shrink(rebuildEventSavedRows(t, b)))
 	})
+}
+
+// A receipt may put a callable in an otherwise empty registration cohort.
+// Native then enters the dispatch loop and resets even an unrelated slot.
+func TestRebuildFnPointerStagePossibleSeedResetsUnrelatedSlot(t *testing.T) {
+	const file, lang, stub = "saved.c", "c", "unresolved::*.fn"
+	caller := rebuildEventNode(file, "run", lang, "")
+	current := rebuildEventNode(file, "current", lang, "")
+	seed := rebuildEventNode(file, "seed", lang, "")
+	variable := *seed
+	variable.Kind = graph.KindVariable
+	reg := rebuildFnPointerReg(caller.ID, seed.ID, 1, "root", seed.Name)
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthFnPointerDispatch})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name    string
+		to      string
+		rawSeed bool
+		refuse  bool
+	}{
+		{name: "no seed in either graph", to: current.ID},
+		{name: "possible seed resets settled call", to: current.ID, rawSeed: true, refuse: true},
+		{name: "possible seed leaves unresolved call", to: stub, rawSeed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			call := rebuildFnPointerCall(caller.ID, tc.to, 2, "unrelated")
+			live := rebuildEventFacts(file, lang, []*graph.Node{caller, current, &variable}, reg, call)
+			raw := live
+			want := tc.to
+			if tc.rawSeed {
+				raw.Nodes = []*graph.Node{caller, current, seed}
+				want = stub
+			}
+			calls := rebuildFnPointerReceiptCalls(t, raw, selected)
+			require.Len(t, calls, 1)
+			require.Equal(t, want, calls[0].To)
+
+			b := openRebuildGRPCBuild(t, live)
+			before := rebuildEventSavedRows(t, b)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.NoError(t, FreezeRebuildFnPointerInputs(ctx, b, frozen))
+			stats, err := RunRebuildFnPointerStage(ctx, b, rebuildGRPCReceipts(raw), frozen)
+			if tc.refuse {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorIs(t, err, store_pebble.ErrRebuildFnPointer)
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refused)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+// A different receipt role can introduce a target into the source of an
+// unproved copy. The proved fanout is unchanged, but the possible one grows.
+func TestRebuildFnPointerStageReceiptFanoutComparison(t *testing.T) {
+	const file, lang, stub = "saved.c", "c", "unresolved::*.fn"
+	caller := rebuildEventNode(file, "run", lang, "")
+	primary := rebuildEventNode(file, "a", lang, "")
+	secondary := rebuildEventNode(file, "b", lang, "")
+	third := rebuildEventNode(file, "c", lang, "")
+	nodes := []*graph.Node{caller, primary, secondary, third}
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthFnPointerDispatch})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name        string
+		includeCopy bool
+	}{
+		{name: "unchanged secondary"},
+		{name: "possible additional secondary", includeCopy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			call := rebuildFnPointerCall(caller.ID, primary.ID, 5, "slot")
+			liveReg := rebuildFnPointerReg(caller.ID, third.ID, 3, "elsewhere", third.Name)
+			rawReg := rebuildFnPointerReg(caller.ID, third.ID, 3, "source", third.Name)
+			live := rebuildEventFacts(file, lang, nodes,
+				rebuildFnPointerReg(caller.ID, primary.ID, 1, "slot", primary.Name),
+				rebuildFnPointerReg(caller.ID, secondary.ID, 2, "slot", secondary.Name),
+				liveReg, call)
+			raw := live
+			raw.Edges = slices.Clone(live.Edges)
+			raw.Edges[2] = rawReg
+			if tc.includeCopy {
+				copyRef := rebuildFnPointerReg(caller.ID, stub, 4, "slot", "")
+				copyRef.Meta["fnptr_copy_struct"], copyRef.Meta["fnptr_copy_field"] = "source", "fn"
+				live.Edges = append(live.Edges, copyRef)
+				// If the omitted copy belonged to the raw world too, native
+				// would add a third target without changing the primary.
+				possible := raw
+				possible.Edges = append(slices.Clone(raw.Edges), copyRef)
+				calls := rebuildFnPointerReceiptCalls(t, possible, selected)
+				require.Len(t, calls, 3)
+				slices.SortFunc(calls, rebuildGRPCCallLess)
+				require.Equal(t, primary.ID, calls[0].To)
+				require.Equal(t, secondary.ID, calls[1].To)
+				require.Equal(t, third.ID, calls[2].To)
+			}
+			calls := rebuildFnPointerReceiptCalls(t, raw, selected)
+			require.Len(t, calls, 2)
+			slices.SortFunc(calls, rebuildGRPCCallLess)
+			require.Equal(t, call, calls[0])
+			require.Equal(t, secondary.ID, calls[1].To)
+
+			b, native := openRebuildEventStores(t, live)
+			before := rebuildEventSavedRows(t, b)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.NoError(t, FreezeRebuildFnPointerInputs(ctx, b, frozen))
+			stats, err := RunRebuildFnPointerStage(ctx, b, rebuildGRPCReceipts(raw), frozen)
+			if tc.includeCopy {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorIs(t, err, store_pebble.ErrRebuildFnPointer)
+				require.ErrorAs(t, err, &refused)
+				want := graph.EdgeIdentityFor(call)
+				want.To = third.ID
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildFnPointerStageStats{Adds: 1, Resolved: 2, Sweeps: 1}, stats)
+			report := RunFrameworkSynthesizersWithSelection(native, selected)
+			require.NoError(t, report.Err)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildFnPointerStageCFamilyMarkerNodeCap(t *testing.T) {
+	const file, lang = "saved.js", "javascript"
+	caller := rebuildEventNode(file, "run", lang, "")
+	target := rebuildEventNode(file, "work", lang, "")
+	reg := rebuildFnPointerReg(caller.ID, "unresolved::*.work", 1, "slot", target.Name)
+	call := rebuildFnPointerCall(caller.ID, "unresolved::*.fn", 2, "slot")
+	reg.FilePath, call.FilePath = file, file
+	marker := &graph.Node{ID: "a.c", Kind: graph.KindFile, Language: "c", FilePath: "a.c"}
+	spare := &graph.Node{ID: "b.c", Kind: graph.KindFile, Language: "c", FilePath: "b.c"}
+	facts := []store_pebble.ParseFacts{
+		rebuildEventFacts(file, lang, []*graph.Node{caller, target}, reg, call),
+		rebuildEventFacts(marker.FilePath, marker.Language, []*graph.Node{marker}),
+		rebuildEventFacts(spare.FilePath, spare.Language, []*graph.Node{spare}),
+	}
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthFnPointerDispatch})
+	require.NoError(t, err)
+	for _, count := range []int{2, 3} {
+		t.Run(fmt.Sprintf("%d receipts", count), func(t *testing.T) {
+			ctx := t.Context()
+			b, native := openRebuildEventStores(t, facts...)
+			large := *marker
+			large.Meta = map[string]any{"padding": strings.Repeat("x", 16<<20)}
+			b.AddNode(&large)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthFnPointerDispatch))
+			require.NoError(t, FreezeRebuildFnPointerInputs(ctx, b, frozen))
+			stats, err := RunRebuildFnPointerStage(ctx, b, rebuildGRPCReceipts(facts[:count]...), frozen)
+			var edges []*graph.Edge
+			require.NoError(t, b.RebuildView().VisitEdges(ctx, func(e *graph.Edge) error {
+				edges = append(edges, e)
+				return nil
+			}))
+			if count == 2 {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildFnPointer)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "function pointer C-family marker node")
+				require.Zero(t, stats)
+				require.ElementsMatch(t, facts[0].Edges, edges)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildFnPointerStageStats{RefMoves: 1, CallMoves: 1, Resolved: 1, Sweeps: 1}, stats)
+			report := RunFrameworkSynthesizersWithSelection(native, selected)
+			require.NoError(t, report.Err)
+			want := rebuildEventSQLiteRows(native)
+			require.Equal(t, target.ID, rebuildFnPointerSavedAt(t, want.edges, graph.EdgeReferences, caller.ID, reg.Line).To)
+			require.Equal(t, target.ID, rebuildFnPointerSavedAt(t, want.edges, graph.EdgeCalls, caller.ID, call.Line).To)
+			require.ElementsMatch(t, want.edges, edges)
+		})
+	}
 }
