@@ -427,7 +427,12 @@ func buildRebuildStages(
 			zap.Uint64("claim_peak_row_bytes", stats.Signatures.Claims.PeakRowBytes))
 		// Positions 1–12 preserve node Language, Kind and Name used by the live
 		// KMP and RN/Expo gates. Temporal can stamp node metadata.
-		selection, err := resolver.FreezeRebuildFrameworkSelection(ctx, private.RebuildView(), idx.frameworkSynthesizerSelection())
+		requestedSelection := idx.frameworkSynthesizerSelection()
+		familyGate, err := resolver.FreezeRebuildFrameworkFamilyGate(ctx, private.RebuildView(), requestedSelection)
+		if err != nil {
+			return err
+		}
+		selection, err := resolver.FreezeRebuildFrameworkSelection(ctx, private.RebuildView(), requestedSelection)
 		if err != nil {
 			return err
 		}
@@ -829,6 +834,13 @@ func buildRebuildStages(
 		}
 		if valueRefMoves != 0 {
 			logger.Info("rebuild value refs applied to private build", zap.Uint64("moves", valueRefMoves))
+		}
+		familyDrops, err := resolver.RunRebuildFrameworkFamilyGate(ctx, private, familyGate)
+		if err != nil {
+			return err
+		}
+		if familyDrops != 0 {
+			logger.Info("rebuild framework family gate applied to private build", zap.Uint64("drops", familyDrops))
 		}
 	}
 	// The supported tails only changed private scratch. Relation projection
