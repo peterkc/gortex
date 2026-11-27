@@ -173,6 +173,10 @@ func TestRebuildMediatRNotificationProofTerms(t *testing.T) {
 	changeWorkspace.WorkspaceID = "other"
 	entrant := *other
 	entrant.Meta = second.Meta
+	remoteCaller := *caller
+	remoteCaller.WorkspaceID = "other"
+	remoteEntrant := entrant
+	remoteEntrant.WorkspaceID = "other"
 	wrongCall := *call
 	wrongCall.Meta = map[string]any{"via": mediatrVia, "mediatr_kind": "notification", "mediatr_request_type": "Other"}
 	for _, tc := range []struct {
@@ -192,6 +196,8 @@ func TestRebuildMediatRNotificationProofTerms(t *testing.T) {
 		{"handler workspace", caller, &changeWorkspace, other, call, false, true, false},
 		{"global scope without caller", nil, &changeWorkspace, other, call, true, false, false},
 		{"receipt-only caller in the shared workspace", caller, second, other, call, true, false, false},
+		{"receipt-only caller in another workspace", &remoteCaller, second, other, call, true, true, false},
+		{"no caller receipt and extra global handler", nil, second, &remoteEntrant, call, false, true, false},
 		{"receipt-only caller filters a handler", caller, &changeWorkspace, other, call, true, true, false},
 		{"no caller receipt and two workspaces", nil, &changeWorkspace, other, call, false, true, true},
 	} {
@@ -257,5 +263,59 @@ func TestRebuildMediatRNotificationCallerWorkspace(t *testing.T) {
 		require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 		require.Zero(t, stats)
 		require.Equal(t, before, rebuildEventSavedRows(t, b))
+	}
+}
+
+func TestRebuildMediatRReceiptOnlyRequestCaller(t *testing.T) {
+	const file, lang = "Requests.cs", "csharp"
+	handler := &graph.Node{ID: file + "::handler", Kind: graph.KindMethod, FilePath: file, Language: lang, WorkspaceID: "local",
+		Meta: map[string]any{"mediatr_kind": "request", "mediatr_request_type": "Message"}}
+	caller := &graph.Node{ID: file + "::caller", Kind: graph.KindMethod, FilePath: file, Language: lang, WorkspaceID: "local"}
+	spare := &graph.Node{ID: file + "::spare", Kind: graph.KindMethod, FilePath: file, Language: lang, WorkspaceID: "foreign"}
+	call := &graph.Edge{From: caller.ID, To: "unresolved::*.Handle", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
+		Meta: map[string]any{"via": mediatrVia, "mediatr_kind": "request", "mediatr_request_type": "Message"}}
+	input := rebuildEventFacts(file, lang, []*graph.Node{handler, spare}, call)
+	remoteCaller := *caller
+	remoteCaller.WorkspaceID = "foreign"
+	remoteHandler := *handler
+	remoteHandler.WorkspaceID = "foreign"
+	entrant := *spare
+	entrant.Meta = handler.Meta
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMediatR})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name   string
+		nodes  []*graph.Node
+		refuse bool
+	}{
+		{"no caller on either side", []*graph.Node{handler, spare}, false},
+		{"same workspace", []*graph.Node{handler, caller, spare}, false},
+		{"receipt caller filters the global winner", []*graph.Node{handler, &remoteCaller, spare}, true},
+		{"receipt handler leaves the caller workspace", []*graph.Node{&remoteHandler, caller, spare}, true},
+		{"receipt caller excludes extra global handler", []*graph.Node{handler, caller, &entrant}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, input)
+			before := rebuildEventSavedRows(t, b)
+			receipt := rebuildEventFacts(file, lang, tc.nodes, call)
+			_, native := openRebuildEventStores(t, receipt)
+			resolved := ResolveMediatRCalls(native)
+			stats, err := RunRebuildMediatR(t.Context(), b, rebuildGRPCReceipts(receipt), selection)
+			if tc.refuse {
+				require.Zero(t, resolved)
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				want := graph.EdgeIdentityFor(call)
+				want.To = handler.ID
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
+				require.Zero(t, stats)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.Equal(t, 1, resolved)
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildMediatRStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+			require.Equal(t, rebuildEventSQLiteRows(native).edges, rebuildEventSavedRows(t, b).edges)
+		})
 	}
 }

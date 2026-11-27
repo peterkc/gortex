@@ -221,7 +221,7 @@ func (p *rebuildMediatRPass) planCalls(ctx context.Context) error {
 			return err
 		}
 		if !pick.getter {
-			return p.planCall(r.key, e, call, pick)
+			return p.planRequest(r.key, e, call, pick)
 		}
 		deferred = true
 		if err := p.want(p.key('b', call.getter)); err != nil {
@@ -249,7 +249,7 @@ func (p *rebuildMediatRPass) planCalls(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		return p.planCall(old, e, call, pick)
+		return p.planRequest(old, e, call, pick)
 	})
 }
 
@@ -301,7 +301,109 @@ func (p *rebuildMediatRPass) planNotification(ctx context.Context, r row, e *gra
 	return p.put(append(p.key('h'), r.key...), r.value)
 }
 
+// Only moving requests with a nonempty global cohort can change their
+// election when receipts introduce an otherwise missing caller.
+func (p *rebuildMediatRPass) planRequest(old []byte, e *graph.Edge, call rebuildStoreDispatchCall, pick rebuildStoreFactoryElection) error {
+	moves := p.stats.Moves
+	if err := p.planCall(old, e, call, pick); err != nil {
+		return err
+	}
+	if p.stats.Moves != moves && pick.nonempty && pick.caller == nil {
+		return p.put(p.key('R', e.From), nil)
+	}
+	return nil
+}
+
+// Mark the deciding receipt-only caller buckets before recording handler
+// receipts. A scoped decision does not need proof of an unrelated global row.
+func (p *rebuildMediatRPass) prepareRequestCallerProof(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
+	wanted, err := rebuildGuardHasPrefix(ctx, p.b.pending, p.key('R'))
+	if err != nil || !wanted {
+		return err
+	}
+	for facts, err := range receipts {
+		if err != nil {
+			return err
+		}
+		if facts.EffectiveLanguage == "" {
+			continue
+		}
+		file := pathkey.Normalize(facts.File.FilePath)
+		for _, n := range facts.Nodes {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if n == nil || n.FilePath != file {
+				continue
+			}
+			key := p.key('R', n.ID)
+			wanted, err := p.present(key)
+			if err != nil {
+				return err
+			}
+			if wanted {
+				// Like the native node upsert, keep the last admitted row.
+				if err := p.put(key, keyStrings(nil, n.WorkspaceID, file)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return p.moves(ctx, func(_ []byte, e *graph.Edge) error {
+		call := p.rules.call(e)
+		if call.group == rebuildMediatRNotification {
+			return nil
+		}
+		pick, err := p.receiptRequestPick(e.From, call)
+		if err != nil || pick.caller == nil {
+			return err
+		}
+		return p.wantCandidateBuckets(pick.buckets)
+	})
+}
+
+func (p *rebuildMediatRPass) receiptRequestPick(from string, call rebuildStoreDispatchCall) (rebuildStoreFactoryElection, error) {
+	val, err := p.get(p.key('R', from))
+	if err != nil || len(val) == 0 {
+		return rebuildStoreFactoryElection{}, err
+	}
+	return p.electWithCaller(call, true, func() (*graph.Node, error) {
+		workspace, tail, err := readKeyString(val)
+		if err != nil {
+			return nil, err
+		}
+		file, _, err := readKeyString(tail)
+		if err != nil {
+			return nil, err
+		}
+		return &graph.Node{WorkspaceID: workspace, FilePath: file}, nil
+	})
+}
+
+func (p *rebuildMediatRPass) requestProved(old []byte, e *graph.Edge, anchor bool) (bool, error) {
+	call := p.rules.call(e)
+	pick, err := p.receiptRequestPick(e.From, call)
+	if err != nil {
+		return false, err
+	}
+	if pick.caller == nil {
+		return p.proved(old, e, anchor)
+	}
+	ok, err := p.callProved(old)
+	if err != nil || !ok {
+		return ok, err
+	}
+	live, err := p.elect(e.From, call, true)
+	if err != nil || live.target != pick.target {
+		return false, err
+	}
+	return p.electionProved(call, pick, anchor)
+}
+
 func (p *rebuildMediatRPass) proveCalls(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
+	if err := p.prepareRequestCallerProof(ctx, receipts); err != nil {
+		return err
+	}
 	for facts, err := range receipts {
 		if err != nil {
 			return err
@@ -331,7 +433,7 @@ func (p *rebuildMediatRPass) proveCalls(ctx context.Context, receipts iter.Seq2[
 		if p.rules.call(e).group == rebuildMediatRNotification {
 			return nil // notification moves and adds share one source proof below
 		}
-		ok, err := p.proved(old, e, anchor)
+		ok, err := p.requestProved(old, e, anchor)
 		if err == nil && !ok {
 			refused.add(graph.EdgeIdentityFor(e), pendingEdgeKey(e))
 		}

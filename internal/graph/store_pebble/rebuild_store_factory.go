@@ -213,7 +213,13 @@ type rebuildStoreFactoryElection struct {
 	getterProof bool // the getter file can change the decision
 }
 
-func (p *rebuildStoreFactoryPass) elect(from string, call rebuildStoreDispatchCall, resolveGetter bool) (pick rebuildStoreFactoryElection, err error) {
+func (p *rebuildStoreFactoryPass) elect(from string, call rebuildStoreDispatchCall, resolveGetter bool) (rebuildStoreFactoryElection, error) {
+	return p.electWithCaller(call, resolveGetter, func() (*graph.Node, error) { return p.node(from) })
+}
+
+func (p *rebuildStoreFactoryPass) electWithCaller(call rebuildStoreDispatchCall, resolveGetter bool,
+	caller func() (*graph.Node, error),
+) (pick rebuildStoreFactoryElection, err error) {
 	scoped := p.key('a', call.group, call.member)
 	id, seen, err := p.unique(scoped)
 	if err != nil {
@@ -223,7 +229,7 @@ func (p *rebuildStoreFactoryPass) elect(from string, call rebuildStoreDispatchCa
 		pick.buckets = []rebuildStoreCandidateWitness{{scoped, 0}}
 		return pick, nil
 	}
-	pick.caller, err = p.node(from)
+	pick.caller, err = caller()
 	if err != nil {
 		return pick, err
 	}
@@ -501,7 +507,7 @@ func (p *rebuildStoreFactoryPass) proveActions(ctx context.Context) (anchor bool
 	return anchor, err
 }
 
-func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool) (bool, error) {
+func (p *rebuildStoreFactoryPass) callProved(old []byte) (bool, error) {
 	raw, err := rebuildReceiptKey(p.b.pending, old)
 	if errors.Is(err, ErrRebuildUnknownProvenance) {
 		return false, nil
@@ -513,11 +519,30 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 	if err != nil || len(claim) <= 1 || claim[0] != rebuildScratchExact || !bytes.Equal(claim[1:], old) {
 		return false, err
 	}
+	return true, nil
+}
+
+func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool) (bool, error) {
+	ok, err := p.callProved(old)
+	if err != nil || !ok {
+		return ok, err
+	}
 	call := p.rules.call(e)
 	pick, err := p.elect(e.From, call, true)
 	if err != nil {
 		return false, err
 	}
+	if ok, err := p.electionProved(call, pick, anchor); err != nil || !ok {
+		return false, err
+	}
+	if pick.caller != nil {
+		state, err := p.state(p.key('n', pick.caller.ID))
+		return state == rebuildScratchExact, err
+	}
+	return true, nil
+}
+
+func (p *rebuildStoreFactoryPass) electionProved(call rebuildStoreDispatchCall, pick rebuildStoreFactoryElection, anchor bool) (bool, error) {
 	if !pick.nonempty && !anchor {
 		// An empty scoped cohort has no candidate witness of its own.
 		return false, nil
@@ -536,10 +561,6 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 		if err != nil || !ok {
 			return false, err
 		}
-	}
-	if pick.caller != nil {
-		state, err := p.state(p.key('n', pick.caller.ID))
-		return state == rebuildScratchExact, err
 	}
 	return true, nil
 }
