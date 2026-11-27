@@ -120,3 +120,62 @@ end
 		require.Equal(t, before, rebuildEventSavedRows(t, b))
 	})
 }
+
+func TestRebuildRailsConflictingEFCoreReceipt(t *testing.T) {
+	const modelPath, callerPath = "shop/app/models/Widget.cs", "shop/app/controllers/widgets_controller.rb"
+	model := &graph.Node{ID: modelPath + "::Widget", Name: "Widget", Kind: graph.KindType, Language: "csharp", FilePath: modelPath}
+	fluent := &graph.Node{ID: modelPath, Name: modelPath, Kind: graph.KindFile, Language: "csharp", FilePath: modelPath,
+		Meta: map[string]any{"ef_fluent": []map[string]any{efMappingAction("First", "Widget", "widgets", "", "table", 0, 8)}}}
+	conflicting := *fluent
+	conflicting.Meta = map[string]any{"ef_fluent": []map[string]any{
+		efMappingAction("First", "Widget", "widgets", "", "table", 0, 8),
+		efMappingAction("Second", "Widget", "other_widgets", "", "table", 0, 12),
+	}}
+	caller := &graph.Node{ID: callerPath + "::find", Name: "index", Kind: graph.KindMethod, Language: "ruby", FilePath: callerPath}
+	call := &graph.Edge{From: caller.ID, To: "unresolved::*.find", Kind: graph.EdgeCalls, FilePath: callerPath, Line: 3,
+		Meta: map[string]any{"recv_const": "Widget"}}
+	ruby := rebuildEventFacts(callerPath, "ruby", []*graph.Node{caller}, call)
+	settled := rebuildEventFacts(modelPath, "csharp", []*graph.Node{model, fluent})
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthCSharpEFCoreModels, SynthRailsResolve})
+	require.NoError(t, err)
+	for _, fixture := range []struct {
+		name string
+		file *graph.Node
+		want int
+	}{
+		{"matching mapping", fluent, 1},
+		{"conflicting receipt", &conflicting, 0},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			raw := rebuildEventFacts(modelPath, "csharp", []*graph.Node{model, fixture.file})
+			build := openRebuildGRPCBuild(t, ruby, settled)
+			_, native := openRebuildEventStores(t, ruby, raw)
+			require.Equal(t, fixture.want, efResolveModels(t, native))
+			require.Equal(t, fixture.want, ResolveRailsRefs(native))
+			before := rebuildEventSavedRows(t, build)
+			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), build.RebuildView(), selection)
+			require.NoError(t, err)
+			require.True(t, frozen.allows(SynthCSharpEFCoreModels))
+			require.True(t, frozen.allows(SynthRailsResolve))
+			require.NoError(t, FreezeRebuildRailsInputs(t.Context(), build, frozen))
+			seq := rebuildGRPCReceipts(ruby, raw)
+			changed, err := RunRebuildEFCoreModels(t.Context(), build, seq, frozen)
+			if fixture.want == 0 {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildEFCoreModels)
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, graph.EdgeIdentity{From: model.ID, To: "db::orm::widgets", Kind: graph.EdgeModelsTable, FilePath: modelPath, Line: 8}, refused.First)
+				require.Zero(t, changed)
+				require.Equal(t, before, rebuildEventSavedRows(t, build))
+			} else {
+				require.NoError(t, err)
+				require.EqualValues(t, 1, changed)
+			}
+			// The worker stops on the EF refusal. Calling Rails directly also
+			// proves that the rejected turn left no usable model witness.
+			_, err = RunRebuildRails(t.Context(), build, seq, frozen)
+			require.NoError(t, err)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, build))
+		})
+	}
+}
