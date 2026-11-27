@@ -146,6 +146,12 @@ func receiveRebuildStages(
 			if (cause == store_pebble.ErrRebuildUnknownProvenance) != (r.UnknownProvenance > 0) {
 				return fmt.Errorf("%w: invalid unknown provenance count", errRebuildBuildWire)
 			}
+			if (cause == store_pebble.ErrRebuildMyBatisOrder) != (r.MyBatisOrder > 0) {
+				return fmt.Errorf("%w: invalid MyBatis move order count", errRebuildBuildWire)
+			}
+			if r.MyBatisOrder != 0 {
+				return fmt.Errorf("%w: %w: mybatis_order=%d: %s", ErrRebuildWorker, cause, r.MyBatisOrder, r.Detail)
+			}
 			if r.AttributionChains != 0 {
 				return fmt.Errorf("%w: %w: attribution_chains=%d: %s", ErrRebuildWorker, cause, r.AttributionChains, r.Detail)
 			}
@@ -159,6 +165,9 @@ func receiveRebuildStages(
 		}
 		if r.UnknownProvenance != 0 {
 			return fmt.Errorf("%w: unknown provenance count on a stage offer", errRebuildBuildWire)
+		}
+		if r.MyBatisOrder != 0 {
+			return fmt.Errorf("%w: MyBatis move order count on a stage offer", errRebuildBuildWire)
 		}
 		if next > store_pebble.StageSearch || r.Witness.Stage != next {
 			return fmt.Errorf("%w: expected %s, got %s", store_pebble.ErrStageOrder, next, r.Witness.Stage)
@@ -546,6 +555,15 @@ func buildRebuildStages(
 			logger.Info("rebuild Fabric applied to private build",
 				zap.Uint64("edges", fabric.Edges),
 				zap.Uint64("spill_bytes", fabric.SpillBytes))
+		}
+		mybatis, err := resolver.RunRebuildMyBatis(ctx, private, receipts, selection, 1<<20)
+		if err != nil {
+			return err
+		}
+		if mybatis.Stubs != 0 || mybatis.SpillBytes != 0 {
+			logger.Info("rebuild MyBatis applied to private build",
+				zap.Uint64("stubs", mybatis.Stubs), zap.Uint64("resolved", mybatis.Resolved),
+				zap.Uint64("moves", mybatis.Moves), zap.Uint64("spill_bytes", mybatis.SpillBytes))
 		}
 	}
 	// The supported tails only changed private scratch. Relation projection

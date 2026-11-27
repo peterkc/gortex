@@ -37,6 +37,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"KMP expect/actual", "edges", 2},
 		{"Expo module bridge", "edges", 1},
 		{"Fabric", "edges", 2},
+		{"MyBatis", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name  string
@@ -60,7 +61,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				BaseRecipe:   store_pebble.HeadDigest{1},
 				ProvidersOff: true,
 				Recipes: map[string]rebuildDigest{
-					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1}, "kotlin": {1},
+					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1}, "kotlin": {1}, "mybatis": {1},
 				},
 				Policy:  freezeRebuildParsePolicy(root, cfg),
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
@@ -173,7 +174,14 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	appendHandler := node(swift.FilePath, "swift", "appendHandler", graph.KindMethod, 9)
 	appendHandler.Meta = map[string]any{"cc_append_field": "queuedHandlers"}
 	java := node("Calendar.java", "java", method, graph.KindMethod, 5)
-	java.Meta = map[string]any{"rn_module": module, "rn_method": method}
+	java.Meta = map[string]any{"rn_module": module, "rn_method": method, "receiver": module}
+	mapper := node("Calendar.xml", "mybatis", method, graph.KindMethod, 2)
+	const namespace = "demo.Calendar"
+	mapper.ID = namespace + "::" + method
+	mapperFacts := receipt([]*graph.Node{mapper},
+		edge(mapper, "unresolved::mybatis::"+mapper.ID, graph.EdgeCalls, 2,
+			map[string]any{"via": "mybatis.mapper", "mybatis_namespace": namespace, "mybatis_statement": method}),
+	)
 	manager := node(java.FilePath, java.Language, "RCTClockView", graph.KindType, 8)
 	manager.Meta = map[string]any{"fabric_component": "RCTClockView", "fabric_native": "java"}
 
@@ -261,6 +269,7 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
 		receipt([]*graph.Node{java, manager}),
+		mapperFacts,
 		appFacts, grpcFacts, widgetFacts, temporalFacts,
 		receipt([]*graph.Node{expect}),
 		receipt([]*graph.Node{actual}),

@@ -31,6 +31,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"kmp expect/actual", store_pebble.ErrRebuildKMPExpectActual, 52},
 		{"expo module bridge", store_pebble.ErrRebuildExpoModuleBridge, 53},
 		{"fabric", store_pebble.ErrRebuildFabric, 54},
+		{"mybatis", store_pebble.ErrRebuildMyBatis, 56},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {
@@ -75,6 +76,42 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 					require.Empty(t, acks.Bytes())
 				})
 			}
+		})
+	}
+}
+
+func TestRebuildMyBatisOrderWireRefusal(t *testing.T) {
+	cause := &store_pebble.RebuildMyBatisOrderError{
+		Count: 2,
+		First: graph.EdgeIdentity{From: "statement", To: "method", Kind: graph.EdgeCalls, FilePath: "mapper.xml", Line: 7},
+	}
+	valid := buildRefusal(fmt.Errorf("%w: %w", store_pebble.ErrRebuildMyBatis, cause))
+	require.EqualValues(t, 55, valid.Refusal)
+	require.EqualValues(t, 2, valid.MyBatisOrder)
+	for _, tc := range []struct {
+		name  string
+		reply rebuildBuildReply
+		want  error
+	}{
+		{"valid", valid, store_pebble.ErrRebuildMyBatisOrder},
+		{"missing count", rebuildBuildReply{Refusal: valid.Refusal}, errRebuildBuildWire},
+		{"wrong refusal", rebuildBuildReply{Refusal: 56, MyBatisOrder: 2}, errRebuildBuildWire},
+		{"offer with count", rebuildBuildReply{MyBatisOrder: 2}, errRebuildBuildWire},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reply, acks bytes.Buffer
+			require.NoError(t, writeRebuildBuildReply(&reply, tc.reply))
+			err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
+				func(context.Context, store_pebble.StageTables) error {
+					t.Fatal("a refusal must not publish")
+					return nil
+				})
+			require.ErrorIs(t, err, tc.want)
+			if tc.want == store_pebble.ErrRebuildMyBatisOrder {
+				require.ErrorContains(t, err, "mybatis_order=2")
+				require.ErrorContains(t, err, `first=("statement","calls","method","mapper.xml",7)`)
+			}
+			require.Empty(t, acks.Bytes())
 		})
 	}
 }

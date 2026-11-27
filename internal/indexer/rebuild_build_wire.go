@@ -150,6 +150,7 @@ type rebuildBuildReply struct {
 	Detail            string
 	AttributionChains uint64 // present only on a refused attribution pass
 	UnknownProvenance uint64 // present only on a refused provenance check
+	MyBatisOrder      uint64 // present only on a refused MyBatis move order
 }
 
 var rebuildFailureKinds = [...]error{
@@ -180,6 +181,8 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildKMPExpectActual,
 	store_pebble.ErrRebuildExpoModuleBridge,
 	store_pebble.ErrRebuildFabric,
+	store_pebble.ErrRebuildMyBatisOrder,
+	store_pebble.ErrRebuildMyBatis,
 }
 
 func buildRefusal(err error) rebuildBuildReply {
@@ -207,6 +210,9 @@ func buildRefusal(err error) rebuildBuildReply {
 	}
 	if unknown, ok := errors.AsType[*store_pebble.RebuildUnknownProvenanceError](err); ok {
 		r.UnknownProvenance = unknown.Count
+	}
+	if order, ok := errors.AsType[*store_pebble.RebuildMyBatisOrderError](err); ok {
+		r.MyBatisOrder = order.Count
 	}
 	return r
 }
