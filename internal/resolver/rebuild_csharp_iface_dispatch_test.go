@@ -107,6 +107,15 @@ func TestRebuildCSharpIfaceDispatchSQLiteCap(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, uint64(want), adds)
 		require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, build))
+		if count == csharpIfaceDispatchCap {
+			before := rebuildEventSavedRows(t, build)
+			missing := facts
+			missing.Nodes = nodes[:len(nodes)-1]
+			adds, err := RunRebuildCSharpIfaceDispatch(t.Context(), build, rebuildGRPCReceipts(missing), ifaceRebuildSelection(t, build))
+			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+			require.Zero(t, adds)
+			require.Equal(t, before, rebuildEventSavedRows(t, build))
+		}
 	}
 }
 
@@ -157,4 +166,76 @@ func TestRebuildCSharpIfaceDispatchFrozenSelection(t *testing.T) {
 	adds, err := RunRebuildCSharpIfaceDispatch(t.Context(), build, nil, frozen)
 	require.NoError(t, err)
 	require.Zero(t, adds)
+}
+
+func TestRebuildCSharpIfaceDispatchReceiptFamily(t *testing.T) {
+	const file = "Types.cs"
+	iface := ifaceRebuildNode(file, "IFoo", "csharp", graph.KindInterface)
+	anchor := ifaceRebuildNode(file, "Run", "csharp", graph.KindMethod)
+	anchor.Meta = map[string]any{"iface_member": true}
+	owner := ifaceRebuildNode(file, "Foo", "csharp", graph.KindType)
+	method := ifaceRebuildNode(file, "Foo.Run", "csharp", graph.KindMethod)
+	method.Name = anchor.Name
+	competitor := ifaceRebuildNode(file, "Other", "csharp", graph.KindInterface)
+	caller := ifaceRebuildNode(file, "call", "csharp", graph.KindFunction)
+	call := ifaceRebuildEdge(caller, anchor.ID, graph.EdgeCalls, 3)
+	arcs := []*graph.Edge{
+		ifaceRebuildEdge(owner, "unresolved::IFoo", graph.EdgeImplements, 1),
+		ifaceRebuildEdge(anchor, iface.ID, graph.EdgeMemberOf, 1),
+		ifaceRebuildEdge(method, owner.ID, graph.EdgeMemberOf, 1),
+		call,
+	}
+	facts := rebuildEventFacts(file, "csharp", []*graph.Node{iface, anchor, owner, method, competitor, caller}, arcs...)
+	for _, role := range []string{"method name", "unresolved parent"} {
+		t.Run(role, func(t *testing.T) {
+			other := facts
+			other.Nodes = slices.Clone(facts.Nodes)
+			if role == "method name" {
+				changed := *method
+				changed.Name = "Other"
+				other.Nodes[3] = &changed
+			} else {
+				ambiguous := *competitor
+				ambiguous.Name = iface.Name
+				other.Nodes[4] = &ambiguous
+			}
+			// Check both removal and entrance to the family.
+			for _, inputs := range [][2]store_pebble.ParseFacts{{facts, other}, {other, facts}} {
+				build := openRebuildGRPCBuild(t, inputs[0])
+				before := rebuildEventSavedRows(t, build)
+				adds, err := RunRebuildCSharpIfaceDispatch(t.Context(), build, rebuildGRPCReceipts(inputs[1]), ifaceRebuildSelection(t, build))
+				require.Zero(t, adds)
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.EqualValues(t, 1, refused.Count)
+				require.Equal(t, graph.EdgeIdentityFor(csharpIfaceDispatchEdge(call, method.ID, iface.ID, 1)), refused.First)
+				require.Equal(t, before, rebuildEventSavedRows(t, build))
+			}
+		})
+	}
+}
+
+// U5 records ties between native families at one physical Call key.
+func TestRebuildCSharpIfaceDispatchTwoFamiliesOneKey(t *testing.T) {
+	const file = "Types.cs"
+	a := ifaceRebuildNode(file, "IA", "csharp", graph.KindInterface)
+	z := ifaceRebuildNode(file, "IZ", "csharp", graph.KindInterface)
+	anchor := ifaceRebuildNode(file, "Run", "csharp", graph.KindMethod)
+	anchor.Meta = map[string]any{"iface_member": true}
+	owner := ifaceRebuildNode(file, "Foo", "csharp", graph.KindType)
+	method := ifaceRebuildNode(file, "Foo.Run", "csharp", graph.KindMethod)
+	method.Name = anchor.Name
+	caller := ifaceRebuildNode(file, "call", "csharp", graph.KindFunction)
+	call := ifaceRebuildEdge(caller, anchor.ID, graph.EdgeCalls, 3)
+	facts := rebuildEventFacts(file, "csharp", []*graph.Node{z, a, anchor, owner, method, caller},
+		ifaceRebuildEdge(anchor, z.ID, graph.EdgeMemberOf, 1),
+		ifaceRebuildEdge(anchor, a.ID, graph.EdgeMemberOf, 1),
+		ifaceRebuildEdge(owner, z.ID, graph.EdgeImplements, 2),
+		ifaceRebuildEdge(owner, a.ID, graph.EdgeImplements, 2),
+		ifaceRebuildEdge(method, owner.ID, graph.EdgeMemberOf, 2), call)
+	build := openRebuildGRPCBuild(t, facts)
+	adds, err := RunRebuildCSharpIfaceDispatch(t.Context(), build, rebuildGRPCReceipts(facts), ifaceRebuildSelection(t, build))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, adds)
+	require.Contains(t, rebuildEventSavedRows(t, build).edges, csharpIfaceDispatchEdge(call, method.ID, a.ID, 1))
 }
