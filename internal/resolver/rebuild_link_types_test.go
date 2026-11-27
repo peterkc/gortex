@@ -29,7 +29,9 @@ func typeTestEdge(from, file, name string, kind graph.EdgeKind, fqn string) *gra
 // Run the pinned selectors with their real warmed SQLite lookup caches. The
 // expected IDs below are independent of both implementations. Compare the
 // complete persisted rows, not just the number of resolved edges.
-func checkRebuildTypeRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge, targets []string, refusal string) {
+func checkRebuildTypeRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge, targets []string, refusal string,
+	receipts ...store_pebble.ParseFacts,
+) {
 	t.Helper()
 	require.Len(t, targets, len(edges))
 	for i, e := range edges {
@@ -68,7 +70,11 @@ func checkRebuildTypeRows(t *testing.T, nodes []*graph.Node, edges []*graph.Edge
 
 	ctx, b, opts := frontierFixture(t, 0)
 	b.AddBatch(nodes, edges)
-	err = runRebuildMain(ctx, b, opts, false, RebuildMainInputs{})
+	in := RebuildMainInputs{}
+	if len(receipts) != 0 {
+		in.Receipts = rebuildGRPCReceipts(receipts...)
+	}
+	err = runRebuildMain(ctx, b, opts, false, in)
 	if refusal != "" {
 		require.ErrorIs(t, err, store_pebble.ErrRebuildLink)
 		require.ErrorContains(t, err, refusal)
@@ -122,17 +128,19 @@ func TestRebuildTypeNamespaceChoices(t *testing.T) {
 	const php, cs = "loc/use.php", "loc/use.cs"
 	inScope := typeTestNode("z-factory", "Factory", graph.KindFunction, "php", "defs/F.php")
 	inScope.Meta = map[string]any{MetaScopeNamespace: "Model"}
+	csCaller := typeTestNode("cs", "CSCaller", graph.KindFunction, "csharp", cs)
+	aDialog := testNamespacedType("a-dialog", "Dialog", "csharp", "UI")
+	bDialog := testNamespacedType("b-dialog", "Dialog", "csharp", "UI")
 	nodes := []*graph.Node{
 		testNamespacedType("a-factory-type", "Factory", "php", "Other"), inScope,
 		typeTestNode("php", "PHPCaller", graph.KindFunction, "php", php),
-		typeTestNode("cs", "CSCaller", graph.KindFunction, "csharp", cs),
+		csCaller,
 		testNamespacedType("a-decoy", "User", "php", "Other"),
 		testNamespacedType("z-user", "User", "php", "Model"),
 		testNamespacedType("alias-decoy", "Nickname", "php", "Model"),
 		testNamespacedType("a-button", "Button", "csharp", "Other.UI"),
 		testNamespacedType("z-button", "Button", "csharp", "Product.Widgets"),
-		testNamespacedType("b-dialog", "Dialog", "csharp", "UI"),
-		testNamespacedType("a-dialog", "Dialog", "csharp", "UI"),
+		bDialog, aDialog,
 	}
 	edges := []*graph.Edge{
 		typeTestEdge("php", php, "User", graph.EdgeReferences, `Model\User`),
@@ -146,7 +154,13 @@ func TestRebuildTypeNamespaceChoices(t *testing.T) {
 	}
 	// This alias itself warms its canonical short name in a PHP-visible scope.
 	edges[3].Meta["receiver_type"] = "User"
-	checkRebuildTypeRows(t, nodes, edges, []string{"z-user", "a-decoy", "unresolved::Nickname", "z-user", "z-button", "a-dialog", "z-factory", "unresolved::Factory"}, "")
+	// The two UI.Dialog candidates tie for type selection and form a partial
+	// group in the cold tail. Keep the tie and supply its original facts.
+	checkRebuildTypeRows(t, nodes, edges, []string{"z-user", "a-decoy", "unresolved::Nickname", "z-user", "z-button", "a-dialog", "z-factory", "unresolved::Factory"}, "",
+		rebuildEventFacts(aDialog.FilePath, "csharp", []*graph.Node{aDialog}),
+		rebuildEventFacts(bDialog.FilePath, "csharp", []*graph.Node{bDialog}),
+		rebuildEventFacts(cs, "csharp", []*graph.Node{csCaller}, edges[5]),
+	)
 }
 
 func TestRebuildTypeMissingPageScopes(t *testing.T) {
