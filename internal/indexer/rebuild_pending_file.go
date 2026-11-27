@@ -104,6 +104,9 @@ func checkPendingRebuildReply(header, entry []byte, key rebuildDigest, path, lan
 	if facts.File.Size != len(prepared) || facts.File.ContentHash != contentHashForSource(prepared) {
 		return nil, fmt.Errorf("%w: parser worker entry does not match the prepared content", errParseEntryCorrupt)
 	}
+	if err := checkRebuildReceiptBuiltinNodes(path, facts.Nodes); err != nil {
+		return nil, err
+	}
 	return entry, nil
 }
 

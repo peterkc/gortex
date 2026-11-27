@@ -128,7 +128,19 @@ func (idx *Indexer) decodeRebuildFileReceipt(input rebuildInput, payload []byte)
 		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: %s: invalid effective parse language %q for admitted language %q",
 			errParseEntryCorrupt, input.Path, base.EffectiveLanguage, input.Language)
 	}
+	if err := checkRebuildReceiptBuiltinNodes(input.Path, base.Nodes); err != nil {
+		return store_pebble.ParseFacts{}, nil, err
+	}
 	return base, facts, nil
+}
+
+func checkRebuildReceiptBuiltinNodes(path string, nodes []*graph.Node) error {
+	for _, n := range nodes {
+		if n.Kind == graph.KindBuiltin {
+			return fmt.Errorf("%w: %s: explicit builtin node %q", errParseEntryCorrupt, path, n.ID)
+		}
+	}
+	return nil
 }
 
 // possibleRebuildLanguageRefinement checks the range of the pinned native
