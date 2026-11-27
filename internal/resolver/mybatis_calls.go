@@ -23,12 +23,11 @@ const myBatisStubPrefix = unresolvedPrefix + "mybatis::"
 //
 // The `<mapper namespace>` is the Java interface FQCN
 // (`com.app.UserMapper`); the statement `id` is the method name
-// (`findUser`). The Java extractor emits interface methods as
-// `<filePath>::<SimpleClassName>.<method>`-shaped nodes carrying
-// `Meta["receiver"]=<SimpleClassName>`. The join therefore suffix-matches
-// `<SimpleClassName>.<id>` (the trailing `::Class.method` component of the
-// Java node ID) against every Java method node, preferring a same-repo
-// candidate and falling back to a unique workspace-wide match.
+// (`findUser`). Java method keys come from the simple name in
+// `Meta["receiver"]` and the node's `Name` when both are present. Otherwise,
+// the join uses the trailing `::`-delimited component of the node ID if it
+// contains a dot. It prefers a same-repo candidate and falls back to a
+// unique workspace-wide match.
 //
 // The pass is a full recompute and idempotent: every mybatis.mapper
 // edge's target is recomputed from its own `mybatis_namespace` /
@@ -183,9 +182,8 @@ func (idx *myBatisMethodIndex) lookup(namespace, statement, callerRepo string) s
 }
 
 // buildMyBatisMethodIndex walks every Java method node once and indexes
-// it by its "<SimpleClassName>.<method>" key, derived from the trailing
-// `::Class.method` component of the node ID (with the node's `receiver`
-// Meta as a cross-check). One pass replaces an AllNodes scan per edge.
+// it by the key returned by javaMethodJoinKey. One pass replaces an
+// AllNodes scan per edge.
 func buildMyBatisMethodIndex(g graph.Store) *myBatisMethodIndex {
 	idx := &myBatisMethodIndex{byKey: map[string][]*graph.Node{}}
 	for n := range g.NodesByKind(graph.KindMethod) {
@@ -220,11 +218,9 @@ func myBatisJoinKey(namespace, statement string) string {
 }
 
 // javaMethodJoinKey returns the "<SimpleClassName>.<method>" key for a
-// Java method node. The Java extractor emits method node IDs shaped
-// `<filePath>::<ClassName>.<method>` and stamps `Meta["receiver"]` with
-// the class name; the trailing `::`-delimited component of the ID is the
-// canonical source, with the receiver Meta as a fallback when the ID
-// carries a disambiguating suffix (e.g. `_L42`).
+// Java method node. It uses the simple name from `Meta["receiver"]` and
+// the node's `Name` when both are present. Otherwise it uses the last
+// `::`-delimited component of the node ID if that component contains a dot.
 func javaMethodJoinKey(n *graph.Node) string {
 	if n == nil {
 		return ""
