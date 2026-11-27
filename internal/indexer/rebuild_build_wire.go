@@ -194,6 +194,9 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildCelery,
 	store_pebble.ErrRebuildSpringEvents,
 	store_pebble.ErrRebuildMediatR,
+	nil, // 69: reserved
+	nil, // 70: reserved
+	store_pebble.ErrRebuildSidekiq,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

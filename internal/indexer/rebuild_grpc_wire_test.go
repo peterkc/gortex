@@ -42,6 +42,7 @@ func TestRebuildGRPCWireRefusals(t *testing.T) {
 		{"Celery", store_pebble.ErrRebuildCelery, 66},
 		{"Spring events", store_pebble.ErrRebuildSpringEvents, 67},
 		{"MediatR", store_pebble.ErrRebuildMediatR, 68},
+		{"Sidekiq", store_pebble.ErrRebuildSidekiq, 71},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
 			for _, tc := range []struct {

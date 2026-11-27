@@ -638,6 +638,15 @@ func buildRebuildStages(
 				zap.Uint64("stubs", mediatr.Stubs), zap.Uint64("resolved", mediatr.Resolved),
 				zap.Uint64("moves", mediatr.Moves), zap.Uint64("adds", mediatr.Adds))
 		}
+		sidekiq, err := resolver.RunRebuildSidekiq(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if sidekiq.Stubs != 0 {
+			logger.Info("rebuild Sidekiq applied to private build",
+				zap.Uint64("stubs", sidekiq.Stubs), zap.Uint64("resolved", sidekiq.Resolved),
+				zap.Uint64("moves", sidekiq.Moves))
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.

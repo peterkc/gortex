@@ -51,6 +51,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"Celery", "moves", 1},
 		{"Spring events", "moves", 1},
 		{"MediatR", "moves", 1},
+		{"Sidekiq", "moves", 1},
 	}
 	for _, tc := range []struct {
 		name              string
@@ -78,7 +79,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				ProvidersOff: true,
 				Recipes: map[string]rebuildDigest{
 					"go": {1}, "typescript": {1}, "swift": {1}, "objc": {1}, "java": {1}, "kotlin": {1}, "mybatis": {1},
-					"sql": {1}, "python": {1}, "csharp": {1},
+					"sql": {1}, "python": {1}, "csharp": {1}, "ruby": {1},
 				},
 				Policy:  freezeRebuildParsePolicy(root, cfg),
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
@@ -619,6 +620,13 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	mediatrFacts := receipt([]*graph.Node{mediatrDispatch, handler}, edge(mediatrDispatch, mediatrDispatch.ID, graph.EdgeCalls, 2,
 		map[string]any{"via": "mediatr-dispatch", "mediatr_kind": "request", "mediatr_request_type": "UpdateClock"}))
 
+	const sidekiqFile = "workers.rb"
+	enqueue := node(sidekiqFile, "ruby", "enqueue", graph.KindMethod, 1)
+	perform := node(sidekiqFile, "ruby", "perform", graph.KindMethod, 4)
+	perform.Meta = map[string]any{"sidekiq_worker": "ClockJob"}
+	sidekiqFacts := receipt([]*graph.Node{enqueue, perform}, edge(enqueue, enqueue.ID, graph.EdgeCalls, 2,
+		map[string]any{"via": "sidekiq-dispatch", "sidekiq_worker": "Jobs::ClockJob"}))
+
 	return []store_pebble.ParseFacts{
 		receipt([]*graph.Node{objc}),
 		receipt([]*graph.Node{swift, dispatch, appendHandler, expo}),
@@ -629,6 +637,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
-		celeryFacts, springFacts, mediatrFacts,
+		celeryFacts, springFacts, mediatrFacts, sidekiqFacts,
 	}
 }
