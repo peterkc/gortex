@@ -61,6 +61,8 @@ const (
 	rebuildProofFnPointerFanout
 	// Exact macro declaration, body Call and use-site receipts.
 	rebuildProofMacroExpansion
+	// Exact EF Core entity, mapping and sibling receipts for ModelsTable.
+	rebuildProofEFCoreModel
 	rebuildProofLimit
 )
 

@@ -408,6 +408,6 @@ func (p *rebuildEFCore) apply(ctx context.Context) error {
 		if err != nil || occupied {
 			return err // SQLite keeps a non-owned row at the same key.
 		}
-		return p.b.addEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofUntrackedMove})
+		return p.b.addEdgeWithCustody(e, rebuildEdgeCustody{proof: rebuildProofEFCoreModel})
 	})
 }
