@@ -33,17 +33,10 @@ func ResolveReduxThunkCalls(g graph.Store) int {
 	thunkByName := map[string][]*graph.Node{}
 	actionByMember := map[string][]*graph.Node{}
 	for _, n := range nodesByKindsOrAll(g, graph.KindFunction, graph.KindMethod, graph.KindVariable, graph.KindConstant) {
-		if n == nil || n.Meta == nil {
-			continue
+		if name := reduxThunkName(n); name != "" {
+			thunkByName[name] = append(thunkByName[name], n)
 		}
-		if t, _ := n.Meta["redux_thunk"].(string); t != "" {
-			thunkByName[t] = append(thunkByName[t], n)
-		}
-		if sf, _ := n.Meta["store_factory"].(string); sf != "" {
-			member, _ := n.Meta["store_member"].(string)
-			if member == "" {
-				member = n.Name
-			}
+		if binding, member := storeFactoryAction(n); binding != "" {
 			actionByMember[member] = append(actionByMember[member], n)
 		}
 	}
@@ -54,43 +47,21 @@ func ResolveReduxThunkCalls(g graph.Store) int {
 	resolved := 0
 	var reindex []graph.EdgeReindex
 	for e := range g.EdgesByKind(graph.EdgeCalls) {
-		if e == nil || e.Meta == nil {
-			continue
-		}
-		if v, _ := e.Meta["via"].(string); v != reduxThunkVia {
-			continue
-		}
-		callee, _ := e.Meta["thunk_dispatch"].(string)
+		callee := reduxThunkCallee(e)
 		if callee == "" {
 			continue
 		}
 		target := pickReduxThunkTarget(g, e, callee, thunkByName, actionByMember)
 
-		want := "unresolved::*." + callee
-		if target != nil {
-			want = target.ID
-		}
-		if e.To == want {
-			if target != nil {
-				resolved++
-			}
-			continue
-		}
 		oldTo := e.To
-		e.To = want
+		var id string
 		if target != nil {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = ConfidenceHeuristic
-			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceHeuristic)
-			StampSynthesized(e, SynthReduxThunk)
+			id = target.ID
 			resolved++
-		} else {
-			e.Origin = graph.OriginASTInferred
-			e.Confidence = 0
-			e.ConfidenceLabel = ""
-			UnstampSynthesized(e)
 		}
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		if rebindReduxThunkCall(e, callee, id, target != nil) {
+			reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		}
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
@@ -108,4 +79,41 @@ func pickReduxThunkTarget(g graph.Store, call *graph.Edge, callee string, thunks
 		return t
 	}
 	return pickStoreAction(g, call, sameBoundaryCandidates(g, call.From, actions[callee]))
+}
+
+func reduxThunkName(n *graph.Node) string {
+	if n == nil {
+		return ""
+	}
+	name, _ := n.Meta["redux_thunk"].(string)
+	return name
+}
+
+func reduxThunkCallee(e *graph.Edge) string {
+	if e == nil || e.Meta["via"] != reduxThunkVia {
+		return ""
+	}
+	callee, _ := e.Meta["thunk_dispatch"].(string)
+	return callee
+}
+
+func rebindReduxThunkCall(e *graph.Edge, callee, target string, matched bool) bool {
+	if !matched {
+		target = "unresolved::*." + callee
+	}
+	if e.To == target {
+		return false
+	}
+	e.To = target
+	e.Origin = graph.OriginASTInferred
+	if matched {
+		e.Confidence = ConfidenceHeuristic
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, ConfidenceHeuristic)
+		StampSynthesized(e, SynthReduxThunk)
+	} else {
+		e.Confidence = 0
+		e.ConfidenceLabel = ""
+		UnstampSynthesized(e)
+	}
+	return true
 }
