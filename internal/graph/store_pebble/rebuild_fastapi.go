@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
@@ -13,37 +14,50 @@ import (
 
 var ErrRebuildFastAPI = errors.New("pebble rebuild FastAPI fallback failed")
 
-var rebuildFastAPIPrefix = []byte{'g', 'q', 'A'}
+var ErrRebuildReactResolve = errors.New("pebble rebuild React hooks and context failed")
 
-// RebuildFastAPIRules keeps the native marker and rebind payload in the resolver.
-type RebuildFastAPIRules struct {
-	Shape    func(string, string) (string, []string)
+var (
+	rebuildFastAPIPrefix      = []byte{'g', 'q', 'A'}
+	rebuildReactResolvePrefix = []byte{'g', 'q', 'H'}
+)
+
+// RebuildConventionRules keeps native classification and payload in the resolver.
+type RebuildConventionRules struct {
+	Shape    func(string, string) (names, dirs []string)
 	Source   func(string) bool
 	Eligible func(*graph.Node) bool
 	Rank     func(file, caller string, dirs []string) int
 	Rebind   func(*graph.Edge, string, float64) graph.EdgeReindex
 }
 
-type rebuildFastAPI struct {
+type rebuildConventionPass struct {
 	rebuildCallMoves
-	rules RebuildFastAPIRules
+	rules RebuildConventionRules
 	count uint64
 }
 
 // FreezeFastAPIInputs retains exact pre-loop identities, not edge payloads.
-func (b *BuildStore) FreezeFastAPIInputs(ctx context.Context, match func(graph.FrameworkCensusEdge) bool) (err error) {
+func (b *BuildStore) FreezeFastAPIInputs(ctx context.Context, match func(graph.FrameworkCensusEdge) bool) error {
+	return b.freezeConventionInputs(ctx, rebuildFastAPIColumns(b), ErrRebuildFastAPI, match)
+}
+
+// FreezeReactResolveInputs captures Calls and References. RendersChild stays live.
+func (b *BuildStore) FreezeReactResolveInputs(ctx context.Context, match func(graph.FrameworkCensusEdge) bool) error {
+	return b.freezeConventionInputs(ctx, rebuildReactResolveColumns(b), ErrRebuildReactResolve, match)
+}
+
+func (b *BuildStore) freezeConventionInputs(ctx context.Context, p rebuildCallMoves, stageErr error, match func(graph.FrameworkCensusEdge) bool) (err error) {
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("%w: %w", ErrRebuildFastAPI, err)
+			err = fmt.Errorf("%w: %w", stageErr, err)
 		}
 	}()
-	p := rebuildFastAPIColumns(b)
 	busy, err := rebuildGuardHasPrefix(ctx, b.pending, p.prefix)
 	if err != nil {
 		return err
 	}
 	if busy || match == nil {
-		return invalid("fastapi census inputs")
+		return invalid(p.label + " census inputs")
 	}
 	err = b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
 		id, err := decodeLinkRecorder(r.key)
@@ -73,38 +87,56 @@ func rebuildFastAPIColumns(b *BuildStore) rebuildCallMoves {
 	return rebuildCallMoves{b: b, prefix: rebuildFastAPIPrefix, rowBytes: 16 << 20, label: "FastAPI", inputRow: "edge row"}
 }
 
+func rebuildReactResolveColumns(b *BuildStore) rebuildCallMoves {
+	return rebuildCallMoves{b: b, prefix: rebuildReactResolvePrefix, rowBytes: 16 << 20, label: "react hooks and context", inputRow: "edge row"}
+}
+
 // RebuildFastAPI resolves residual dependency and router rows. Calls and
 // References share native move windows, with each kind in receipt order.
-func (b *BuildStore) RebuildFastAPI(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules RebuildFastAPIRules) (count uint64, err error) {
+func (b *BuildStore) RebuildFastAPI(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules RebuildConventionRules) (uint64, error) {
+	return b.rebuildConvention(ctx, receipts, rebuildFastAPIColumns(b), rules, ErrRebuildFastAPI, false)
+}
+
+// RebuildReactResolve runs after Express and before FastAPI.
+func (b *BuildStore) RebuildReactResolve(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules RebuildConventionRules) (uint64, error) {
+	return b.rebuildConvention(ctx, receipts, rebuildReactResolveColumns(b), rules, ErrRebuildReactResolve, true)
+}
+
+func (b *BuildStore) rebuildConvention(ctx context.Context, receipts iter.Seq2[ParseFacts, error], cols rebuildCallMoves,
+	rules RebuildConventionRules, stageErr error, renders bool,
+) (count uint64, err error) {
 	defer func() {
 		if err != nil {
 			count = 0
-			err = fmt.Errorf("%w: %w", ErrRebuildFastAPI, err)
+			err = fmt.Errorf("%w: %w", stageErr, err)
 		}
 	}()
 	if receipts == nil || rules.Shape == nil || rules.Source == nil || rules.Eligible == nil || rules.Rank == nil || rules.Rebind == nil {
-		return 0, invalid("fastapi fallback inputs")
+		return 0, invalid(cols.label + " fallback inputs")
 	}
-	cols := rebuildFastAPIColumns(b)
 	frozen, err := cols.present(cols.column('I'))
 	if err != nil {
 		return 0, err
 	}
 	if !frozen {
-		return 0, invalid("fastapi census missing")
+		return 0, invalid(cols.label + " census missing")
 	}
 	defer func() {
 		err = errors.Join(err, b.pending.DeleteRange(cols.prefix, prefixEnd(cols.prefix), pebble.NoSync))
 	}()
-	p := rebuildFastAPI{rebuildCallMoves: cols, rules: rules}
-	if err := p.capture(ctx); err != nil {
+	p := rebuildConventionPass{rebuildCallMoves: cols, rules: rules}
+	if err := p.capture(ctx, renders); err != nil {
 		return 0, err
 	}
 	active, err := rebuildGuardHasPrefix(ctx, b.pending, p.column('h'))
 	if err != nil || !active {
 		return 0, err
 	}
-	for _, kind := range [...]graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences} {
+	kinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
+	if renders {
+		kinds = append(kinds, graph.EdgeRendersChild)
+	}
+	for _, kind := range kinds {
 		if err := p.record(ctx, receipts, kind); err != nil {
 			return 0, err
 		}
@@ -120,109 +152,131 @@ func (b *BuildStore) RebuildFastAPI(ctx context.Context, receipts iter.Seq2[Pars
 // Rank uses one bit for caller directory and another for preferred directory.
 // A tie at the highest rank is ambiguous; caller directory cannot break a
 // tie among preferred candidates unless exactly one of them is local.
-type rebuildFastAPIPick struct {
+type rebuildConventionPick struct {
 	id     string
 	rank   int
 	tied   bool
 	chosen bool
 }
 
-func (p *rebuildFastAPIPick) add(id string, rank int) {
+func (p *rebuildConventionPick) add(id string, rank int) {
 	if !p.chosen || rank > p.rank {
-		*p = rebuildFastAPIPick{id: id, rank: rank, chosen: true}
+		*p = rebuildConventionPick{id: id, rank: rank, chosen: true}
 	} else if rank == p.rank {
 		p.tied = true
 	}
 }
 
-func (p rebuildFastAPIPick) result() (string, float64) {
+func (p rebuildConventionPick) result() (string, float64) {
 	if !p.chosen || p.tied || p.id == "" {
 		return "", 0
 	}
 	return p.id, [...]float64{0.7, 0.85, 0.9, 0.9}[p.rank]
 }
 
-func (p *rebuildFastAPI) pick(ctx context.Context, name, file string, dirs []string, prove bool) (live, proved rebuildFastAPIPick, err error) {
-	err = p.b.RebuildView().VisitNameCandidates(ctx, name, nil, func(n *graph.Node) error {
-		if !p.rules.Eligible(n) {
-			return nil
+func (p *rebuildConventionPass) pick(ctx context.Context, names, dirs []string, file string, prove bool) (live, proved rebuildConventionPick, err error) {
+	// Exact primary Name is indexed once per ID. The suffix-stripped key
+	// is distinct, so the native ID dedup adds no extra state here.
+	for _, name := range names {
+		if err := p.b.RebuildView().VisitNameCandidates(ctx, name, nil, func(n *graph.Node) error {
+			if !p.rules.Eligible(n) {
+				return nil
+			}
+			rank := p.rules.Rank(n.FilePath, file, dirs)
+			live.add(n.ID, rank)
+			if !prove {
+				return nil
+			}
+			exact, err := p.present(p.key('p', n.ID))
+			if exact {
+				proved.add(n.ID, rank)
+			}
+			return err
+		}); err != nil {
+			return live, proved, err
 		}
-		rank := p.rules.Rank(n.FilePath, file, dirs)
-		live.add(n.ID, rank)
-		if !prove {
-			return nil
-		}
-		exact, err := p.present(p.key('p', n.ID))
-		if exact {
-			proved.add(n.ID, rank)
-		}
-		return err
-	})
-	return live, proved, err
+	}
+	return live, proved, nil
 }
 
-func (p *rebuildFastAPI) source(id string) (*graph.Node, error) {
+func (p *rebuildConventionPass) source(id string) (*graph.Node, error) {
 	return pendingGet(p.b.pending, pendingNodeKey(id), decodeNodeLight)
 }
 
 // h holds active sites and their raw keys; n and s request only the possible
 // name candidates and source paths used by these sites.
-func (p *rebuildFastAPI) capture(ctx context.Context) error {
+func (p *rebuildConventionPass) capture(ctx context.Context, renders bool) error {
 	prefix := p.column('i')
-	return pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
-		old := r.key[len(prefix):]
-		val, err := p.get(old)
+	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
+		key := r.key[len(prefix):]
+		val, err := p.get(key)
 		if err != nil || val == nil {
-			return err // An earlier turn settled or removed the exact key.
+			return err // An earlier turn moved or removed the exact key.
 		}
-		e, err := p.decodeKeyedEdge(old, val)
-		if err != nil {
+		return p.captureSite(ctx, key, val)
+	}); err != nil || !renders {
+		return err
+	}
+	// Native streams current RendersChild rows instead of freezing them.
+	return p.b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
+		kind, err := rebuildAttributionEdgeKind(r.key)
+		if err != nil || kind != graph.EdgeRendersChild {
 			return err
 		}
-		via, _ := e.Meta["via"].(string)
-		name, dirs := p.rules.Shape(e.To, via)
-		if name == "" || dirs == nil {
-			return nil
-		}
-		source, err := p.source(e.From)
-		if err != nil || source == nil || !p.rules.Source(source.FilePath) {
-			return err
-		}
-		live, _, err := p.pick(ctx, name, source.FilePath, dirs, false)
-		if err != nil || !live.chosen {
-			return err
-		}
-		if err := p.input(old, val); err != nil {
-			return err
-		}
-		if err := p.put(p.key('n', name), nil); err != nil {
-			return err
-		}
-		if err := p.put(p.key('s', source.ID), nil); err != nil {
-			return err
-		}
-		var raw []byte
-		if target, confidence := live.result(); target != "" {
-			raw, err = rebuildReceiptKey(p.b.pending, old)
-			if err != nil && !errors.Is(err, ErrRebuildUnknownProvenance) {
-				return err
-			}
-			if raw != nil {
-				if err := p.claim(raw, old); err != nil {
-					return err
-				}
-			}
-			p.rules.Rebind(e, target, confidence)
-			if err := p.stage(old, e); err != nil {
-				return err
-			}
-			p.count++
-		}
-		return p.put(append(p.column('h'), old...), raw)
+		return p.captureSite(ctx, r.key, r.value)
 	})
 }
 
-func (p *rebuildFastAPI) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error], kind graph.EdgeKind) error {
+func (p *rebuildConventionPass) captureSite(ctx context.Context, old, val []byte) error {
+	e, err := p.decodeKeyedEdge(old, val)
+	if err != nil {
+		return err
+	}
+	via, _ := e.Meta["via"].(string)
+	names, dirs := p.rules.Shape(e.To, via)
+	if len(names) == 0 {
+		return nil
+	}
+	source, err := p.source(e.From)
+	if err != nil || source == nil || !p.rules.Source(source.FilePath) {
+		return err
+	}
+	live, _, err := p.pick(ctx, names, dirs, source.FilePath, false)
+	if err != nil || !live.chosen {
+		return err
+	}
+	if err := p.input(old, val); err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := p.put(p.key('n', name), nil); err != nil {
+			return err
+		}
+	}
+	if err := p.put(p.key('s', source.ID), nil); err != nil {
+		return err
+	}
+	var raw []byte
+	if target, confidence := live.result(); target != "" {
+		raw, err = rebuildReceiptKey(p.b.pending, old)
+		if err != nil && !errors.Is(err, ErrRebuildUnknownProvenance) {
+			return err
+		}
+		if raw != nil {
+			if err := p.claim(raw, old); err != nil {
+				return err
+			}
+		}
+		p.rules.Rebind(e, target, confidence)
+		if err := p.stage(old, e); err != nil {
+			return err
+		}
+		p.count++
+	}
+	return p.put(append(p.column('h'), old...), raw)
+}
+
+func (p *rebuildConventionPass) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error], kind graph.EdgeKind) error {
 	for facts, err := range receipts {
 		if err != nil {
 			return err
@@ -257,7 +311,7 @@ func (p *rebuildFastAPI) record(ctx context.Context, receipts iter.Seq2[ParseFac
 	return ctx.Err()
 }
 
-func (p *rebuildFastAPI) recordNode(raw *graph.Node) error {
+func (p *rebuildConventionPass) recordNode(raw *graph.Node) error {
 	source, err := p.present(p.key('s', raw.ID))
 	if err != nil {
 		return err
@@ -281,7 +335,7 @@ func (p *rebuildFastAPI) recordNode(raw *graph.Node) error {
 	return nil
 }
 
-func (p *rebuildFastAPI) recordEdge(raw *graph.Edge, file string) error {
+func (p *rebuildConventionPass) recordEdge(raw *graph.Edge, file string) error {
 	key := append(p.column('r'), pendingEdgeKey(raw)...)
 	claim, err := p.marked(key)
 	if err != nil || len(claim) < 2 {
@@ -289,31 +343,32 @@ func (p *rebuildFastAPI) recordEdge(raw *graph.Edge, file string) error {
 	}
 	live, err := p.edge(claim[1:])
 	if err != nil || live == nil {
-		return errors.Join(err, invalid("fastapi receipt has no live edge"))
+		return errors.Join(err, invalid(p.label + " receipt has no live edge"))
 	}
 	rawVia, _ := raw.Meta["via"].(string)
 	liveVia, _ := live.Meta["via"].(string)
-	rawName, _ := p.rules.Shape(raw.To, rawVia)
-	liveName, _ := p.rules.Shape(live.To, liveVia)
-	return p.noteReceipt(key, claim, raw.FilePath == file && raw.Kind == live.Kind && rawVia == liveVia && rawName == liveName)
+	rawNames, _ := p.rules.Shape(raw.To, rawVia)
+	liveNames, _ := p.rules.Shape(live.To, liveVia)
+	exact := raw.FilePath == file && raw.Kind == live.Kind && rawVia == liveVia && slices.Equal(rawNames, liveNames)
+	return p.noteReceipt(key, claim, exact)
 }
 
-func (p *rebuildFastAPI) prove(ctx context.Context) error {
+func (p *rebuildConventionPass) prove(ctx context.Context) error {
 	var refused rebuildScratchRefusals
 	prefix := p.column('h')
 	if err := pendingVisit(ctx, p.b.pending, prefix, func(r row) error {
 		old := r.key[len(prefix):]
 		e, err := p.edge(old)
 		if err != nil || e == nil {
-			return errors.Join(err, invalid("fastapi site disappeared"))
+			return errors.Join(err, invalid(p.label + " site disappeared"))
 		}
 		source, err := p.source(e.From)
 		if err != nil || source == nil {
-			return errors.Join(err, invalid("fastapi source disappeared"))
+			return errors.Join(err, invalid(p.label + " source disappeared"))
 		}
 		via, _ := e.Meta["via"].(string)
-		name, dirs := p.rules.Shape(e.To, via)
-		live, proved, err := p.pick(ctx, name, source.FilePath, dirs, true)
+		names, dirs := p.rules.Shape(e.To, via)
+		live, proved, err := p.pick(ctx, names, dirs, source.FilePath, true)
 		if err != nil {
 			return err
 		}

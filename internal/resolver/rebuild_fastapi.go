@@ -22,16 +22,24 @@ func RunRebuildFastAPI(ctx context.Context, build *store_pebble.BuildStore, rece
 	if !selection.allows(SynthFastAPIResolve) {
 		return 0, nil
 	}
-	return build.RebuildFastAPI(ctx, receipts, store_pebble.RebuildFastAPIRules{
-		Shape:    fastapiResolveShape,
+	return build.RebuildFastAPI(ctx, receipts, store_pebble.RebuildConventionRules{
+		Shape:    rebuildFastAPIShape,
 		Source:   fastapiResolveSource,
 		Eligible: isConventionResolvable,
-		Rank:     rebuildFastAPIConventionRank,
+		Rank:     rebuildConventionRank,
 		Rebind:   fastapiResolveRebind,
 	})
 }
 
-func rebuildFastAPIConventionRank(file, caller string, dirs []string) int {
+func rebuildFastAPIShape(target, via string) ([]string, []string) {
+	name, dirs := fastapiResolveShape(target, via)
+	if name == "" || dirs == nil {
+		return nil, nil
+	}
+	return []string{name}, dirs
+}
+
+func rebuildConventionRank(file, caller string, dirs []string) int {
 	rank := 0
 	if dirMatchesAny(file, dirs) {
 		rank = 2

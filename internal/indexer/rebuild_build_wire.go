@@ -204,7 +204,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildMacroExpansion,
 	store_pebble.ErrRebuildGinMiddleware,
 	store_pebble.ErrRebuildExpress,
-	nil, // 79: React hooks and context
+	store_pebble.ErrRebuildReactResolve,
 	store_pebble.ErrRebuildFastAPI,
 }
 

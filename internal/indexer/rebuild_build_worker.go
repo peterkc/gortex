@@ -434,6 +434,9 @@ func buildRebuildStages(
 		if err := resolver.FreezeRebuildMacroExpansionInputs(ctx, private, selection); err != nil {
 			return err
 		}
+		if err := resolver.FreezeRebuildReactResolveInputs(ctx, private, selection); err != nil {
+			return err
+		}
 		if err := resolver.FreezeRebuildFastAPIInputs(ctx, private, selection); err != nil {
 			return err
 		}
@@ -719,6 +722,13 @@ func buildRebuildStages(
 		if express.Stubs != 0 {
 			logger.Info("rebuild Express applied to private build",
 				zap.Uint64("stubs", express.Stubs), zap.Uint64("moves", express.Moves))
+		}
+		reactResolveMoves, err := resolver.RunRebuildReactResolve(ctx, private, receipts, selection)
+		if err != nil {
+			return err
+		}
+		if reactResolveMoves != 0 {
+			logger.Info("rebuild React hooks and context applied to private build", zap.Uint64("moves", reactResolveMoves))
 		}
 		fastapiMoves, err := resolver.RunRebuildFastAPI(ctx, private, receipts, selection)
 		if err != nil {

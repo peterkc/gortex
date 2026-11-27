@@ -60,6 +60,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"macro expansion", "adds", 1},
 		{"Gin middleware", "offers", 1},
 		{"Express", "moves", 1},
+		{"React hooks and context", "moves", 1},
 		{"FastAPI", "moves", 1},
 	}
 	for _, tc := range []struct {
@@ -714,6 +715,12 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		edge(expressAnchor, "unresolved::routeAuthMiddleware", graph.EdgeCalls, 2,
 			map[string]any{"express_handler_ref": true, "express_ref_name": "routeAuthMiddleware"}))
 
+	const reactFallbackPath = "react-fallback.ts"
+	reactFallbackSource := node(reactFallbackPath, "typescript", "fallbackCaller", graph.KindFunction, 1)
+	reactFallbackContext := node(reactFallbackPath, "typescript", "Session", graph.KindVariable, 4)
+	reactFallbackFacts := receipt([]*graph.Node{reactFallbackSource, reactFallbackContext},
+		edge(reactFallbackSource, "unresolved::SessionProvider", graph.EdgeReferences, 2, nil))
+
 	const fastapiFile = "api.py"
 	fastapiSource := node(fastapiFile, "python", "dependencyCaller", graph.KindFunction, 1)
 	fastapiFacts := receipt([]*graph.Node{fastapiSource},
@@ -730,6 +737,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{actual}),
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
-		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, fastapiFacts,
+		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts,
 	}
 }
