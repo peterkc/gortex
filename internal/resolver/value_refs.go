@@ -160,37 +160,41 @@ func resolveValueRefs(g graph.Store, scope map[string]bool) int {
 		if target == nil || target.ID == e.From {
 			continue
 		}
-		if e.To == target.ID {
-			// A file-scoped replay may see an already-bound candidate. Its
-			// certified same-file target also invalidates any old failure stamp;
-			// persist the metadata even though the edge identity stays put.
-			_, hadTerminal := e.Meta[metaResolveTerminal]
-			_, hadReason := e.Meta[metaResolveTerminalReason]
-			if hadTerminal || hadReason {
-				clearEdgeTerminal(e)
-				reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: e.To})
-			}
-			resolved++
-			continue
+		if move, changed := rebindValueRef(e, target.ID, conditional); changed {
+			reindex = append(reindex, move)
 		}
-		oldTo := e.To
-		clearEdgeTerminal(e)
-		e.To = target.ID
-		e.Origin = graph.OriginASTResolved
-		e.Confidence = 0.7
-		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeReads, 0.7)
-		e.Meta["via"] = valueRefVia
-		if conditional {
-			e.Meta["conditional_def"] = true
-		}
-		StampSynthesized(e, SynthValueRef)
-		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		resolved++
 	}
 	if len(reindex) > 0 {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+func rebindValueRef(e *graph.Edge, target string, conditional bool) (graph.EdgeReindex, bool) {
+	if e.To == target {
+		// A file-scoped replay can see an already-bound candidate. Its
+		// certified target invalidates an old failure stamp.
+		_, hadTerminal := e.Meta[metaResolveTerminal]
+		_, hadReason := e.Meta[metaResolveTerminalReason]
+		if !hadTerminal && !hadReason {
+			return graph.EdgeReindex{}, false
+		}
+		clearEdgeTerminal(e)
+		return graph.EdgeReindex{Edge: e, OldTo: e.To}, true
+	}
+	oldTo := e.To
+	clearEdgeTerminal(e)
+	e.To = target
+	e.Origin = graph.OriginASTResolved
+	e.Confidence = 0.7
+	e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeReads, 0.7)
+	e.Meta["via"] = valueRefVia
+	if conditional {
+		e.Meta["conditional_def"] = true
+	}
+	StampSynthesized(e, SynthValueRef)
+	return graph.EdgeReindex{Edge: e, OldTo: oldTo}, true
 }
 
 // valueRefCandidateEdges returns the extractor-emitted placeholder read edges
@@ -246,15 +250,23 @@ func valueRefReaderShadowed(readerID string, locals []*graph.Node) bool {
 		return false
 	}
 	for _, l := range locals {
-		if l == nil || !strings.HasPrefix(l.ID, readerID) || len(l.ID) <= len(readerID) {
-			continue
-		}
-		switch l.ID[len(readerID)] {
-		case '.', '#', ':':
+		if l != nil && valueRefShadowsReader(readerID, l.ID) {
 			return true
 		}
 	}
 	return false
+}
+
+func valueRefShadowsReader(readerID, localID string) bool {
+	if readerID == "" || len(localID) <= len(readerID) || !strings.HasPrefix(localID, readerID) {
+		return false
+	}
+	switch localID[len(readerID)] {
+	case '.', '#', ':':
+		return true
+	default:
+		return false
+	}
 }
 
 // nearestPrecedingDecl returns the conditional-def declarator with the greatest
