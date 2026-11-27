@@ -484,3 +484,62 @@ func TestRebuildSpringEventsReceiptOnlyActivation(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildSpringEventsSoleInheritedListener(t *testing.T) {
+	pub := springRebuildNode("publish", "")
+	listener := springRebuildNode("A", "Base")
+	call := springRebuildCall(pub.ID, listener.ID, "Sub", 10)
+	arc := springRebuildArc("Sub", "Base", graph.EdgeExtends, 1)
+	nodes := []*graph.Node{pub, listener}
+	input := rebuildEventFacts(springRebuildFile, "java", nodes, call, arc)
+	for _, proved := range []bool{false, true} {
+		b := openRebuildGRPCBuild(t, input)
+		before := rebuildEventSavedRows(t, b)
+		receipt := input
+		if !proved {
+			receipt.Edges = []*graph.Edge{call}
+		}
+		_, native := openRebuildEventStores(t, receipt)
+		ResolveSpringEventCalls(native)
+		stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(receipt), springRebuildSelection(t, b))
+		if proved {
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildSpringEventStats{Stubs: 1, Resolved: 1}, stats)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+		} else {
+			want := graph.EdgeIdentityFor(call)
+			want.To = "unresolved::*.Sub"
+			require.NotContains(t, rebuildEventSQLiteRows(native).edges, call)
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
+			require.Zero(t, stats)
+		}
+		require.Equal(t, before, rebuildEventSavedRows(t, b))
+	}
+}
+
+func TestRebuildSpringEventsInertReceiptEntrants(t *testing.T) {
+	pub := springRebuildNode("publish", "")
+	listener := springRebuildNode("A", "Other")
+	call := springRebuildCall(pub.ID, pub.ID, "Event", 10)
+	input := rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub}, call)
+	arc := springRebuildArc("Event", "Other", graph.EdgeExtends, 1)
+	for _, tc := range []struct {
+		name    string
+		receipt store_pebble.ParseFacts
+	}{
+		{"arc without any listener", rebuildEventFacts(springRebuildFile, "java", nil, arc)},
+		{"misfiled listener", rebuildEventFacts("Other.java", "java", []*graph.Node{listener})},
+		{"listener without effective language", rebuildEventFacts(springRebuildFile, "", []*graph.Node{listener})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := openRebuildGRPCBuild(t, input)
+			before := rebuildEventSavedRows(t, b)
+			stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(input, tc.receipt), springRebuildSelection(t, b))
+			require.NoError(t, err)
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}

@@ -333,8 +333,9 @@ func (p *rebuildSpringEventPass) recordListener(raw *graph.Node, file, lang stri
 	if err != nil {
 		return err
 	}
-	if role && !present {
-		// An entrant is not an exact proof, even if this is an admitted receipt.
+	admitted := lang != "" && raw.FilePath == file
+	if role && !present && admitted {
+		// Like a receipt-only arc, an entrant needs an admitted receipt.
 		p.entrants, p.entrantListener = true, true
 		if err := p.put(p.key('j', cohort, raw.ID), nil); err != nil {
 			return err
@@ -344,8 +345,7 @@ func (p *rebuildSpringEventPass) recordListener(raw *graph.Node, file, lang stri
 		return nil
 	}
 	// The live posting already establishes kind eligibility and simple type.
-	valid := role && present && lang != "" && raw.FilePath == file
-	return p.note(key, rebuildScratchProofBit(valid))
+	return p.note(key, rebuildScratchProofBit(role && present && admitted))
 }
 
 func (p *rebuildSpringEventPass) recordCall(raw *graph.Edge, valid bool) error {
@@ -554,11 +554,15 @@ func (p *rebuildSpringEventPass) proveMoves(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if p.liveListeners == 1 && !p.entrantListener {
-			return nil // Dropping the sole listener also disables native resets.
-		}
 		t := p.rules.Event(e)
-		_, first, err := p.listeners(ctx, p.rules.Simple(t), 'T')
+		root := p.rules.Simple(t)
+		if p.liveListeners == 1 && !p.entrantListener {
+			direct, err := p.present(p.key('l', root, e.To))
+			if err != nil || direct {
+				return err // A direct listener needs no arc; if it disappears, resets are disabled.
+			}
+		}
+		_, first, err := p.listeners(ctx, root, 'T')
 		if err != nil || first == e.To {
 			return err
 		}
