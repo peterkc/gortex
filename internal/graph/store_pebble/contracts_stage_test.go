@@ -396,7 +396,7 @@ func TestContractStageRejectsInvalidBatch(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newBuild(t, FullProfile)
-			err := b.writeContractBatch(t.Context(), tc.batch)
+			err := b.writeContractBatch(t.Context(), tc.batch, nil)
 			require.ErrorIs(t, err, errInvalidRecord)
 			require.ErrorContains(t, err, tc.want)
 		})

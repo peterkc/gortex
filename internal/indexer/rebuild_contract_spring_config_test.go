@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"iter"
 	"os"
 	"path/filepath"
 	"testing"
@@ -104,6 +105,110 @@ func TestRebuildSpringConfigLabelsSkippedConfigFile(t *testing.T) {
 				})
 			}))
 			require.ElementsMatch(t, want, actual)
+		})
+	}
+}
+
+func TestRebuildSpringConfigCheckedSkipSeals(t *testing.T) {
+	for _, mode := range []string{"legacy", "isolated", "forged-path", "no-authority"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			idx := newTestIndexer(graph.New())
+			idx.SetRootPath(t.TempDir())
+			t.Cleanup(idx.Close)
+			b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, b.Close()) })
+			head, err := store_pebble.OpenHead(t.TempDir(), rebuildTestIncarnation, store_pebble.FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, head.Close()) })
+			const config, goFile = "application.yml", "main.go"
+			fact := rebuildClassificationFact{Language: "yaml", Size: 64, MaxFileSize: 32}
+			idx.registry.Register(languages.NewYAMLExtractor())
+			idx.config.MaxFileSize = fact.MaxFileSize
+			require.NoError(t, idx.checkRebuildClassification(config, fact, idx.newContentAdmissionGate()))
+			isolate := mode == "isolated"
+			n := rebuildCheckedSkipNode(config, fact)
+			require.NotNil(t, n)
+			if isolate {
+				require.NoError(t, b.AddRebuildHeldSkip(n))
+			} else {
+				b.AddNode(n)
+			}
+			parsed := store_pebble.ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: goFile, Size: 1, NodeCount: 1}, Nodes: []*graph.Node{{ID: goFile, FilePath: goFile, Kind: graph.KindFile, Language: "go"}}}
+			require.NoError(t, b.AddParsedFile("", parsed))
+			manifest, err := store_pebble.PrepareManifest(ctx, t.TempDir(), []store_pebble.ManifestFile{{Path: goFile, Language: "go", Kind: 'f', Size: 1}}, store_pebble.Witness{
+				Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2}, Stage: store_pebble.StageManifest,
+				Profile: store_pebble.FullProfile, PlatformCatalogRevision: graph.PlatformCatalogRevision,
+			}, rebuildTestIncarnation)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, manifest)
+			require.NoError(t, err)
+			files, err := b.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, rebuildTestIncarnation)
+			require.NoError(t, err)
+			fileBase, err := b.RetainFileGraph(ctx, files)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, files)
+			require.NoError(t, err)
+			if isolate {
+				require.NoError(t, b.IsolateRebuildLinks(ctx))
+			}
+			r := rebuildContractReceiptReader{idx: idx, isolate: isolate, job: rebuildFileStages{classifications: map[string]rebuildClassificationFact{config: fact}},
+				census: &rebuildExtractorCensus{admitted: 1, byPath: map[string]string{goFile: "go"}, originByGraphPath: map[string]string{goFile: goFile, config: config}}}
+			want := store_pebble.RebuildSpringConfigUnknownOmission("", config)
+			var tables store_pebble.StageTables
+			err = r.withRebuildContractProducer(ctx, b, func(func(contracts.Contract) error) error { return nil }, make(rebuildEarlyContractIDs),
+				func(preflight iter.Seq2[store_pebble.RebuildContractBatch, error], seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
+					var omitted []store_pebble.RebuildContractOmission
+					for batch, err := range preflight {
+						require.NoError(t, err)
+						omitted = append(omitted, batch.Omitted...)
+					}
+					require.Equal(t, []store_pebble.RebuildContractOmission{want}, omitted)
+					if isolate {
+						require.NoError(t, b.RestoreRebuildDeclarations(ctx))
+					}
+					relations, err := b.PrepareRelations(ctx, t.TempDir(), fileBase, r.extractorOf)
+					require.NoError(t, err)
+					langs, err := r.deferredContractLanguages()
+					require.NoError(t, err)
+					relations.Witness.Relations = &store_pebble.RelationCoverage{DeferredLanguages: langs}
+					base, err := b.RetainRelations(ctx, fileBase, relations)
+					require.NoError(t, err)
+					_, err = head.PublishStage(ctx, relations)
+					require.NoError(t, err)
+					if mode == "forged-path" || mode == "no-authority" {
+						o := want
+						if mode == "forged-path" {
+							o = store_pebble.RebuildSpringConfigUnknownOmission("", "application-other.yml")
+						}
+						batches := func(yield func(store_pebble.RebuildContractBatch, error) bool) {
+							yield(store_pebble.RebuildContractBatch{Omitted: []store_pebble.RebuildContractOmission{o}}, nil)
+						}
+						if mode == "forged-path" {
+							tables, err = b.PrepareContractsWithCheckedSizeSkips(ctx, t.TempDir(), base, batches, store_pebble.ContractCoverage{OmittedRecords: 1}, r.checkedSpringConfigSizeSkip)
+						} else {
+							tables, err = b.PrepareContracts(ctx, t.TempDir(), base, batches, store_pebble.ContractCoverage{OmittedRecords: 1})
+						}
+						return err
+					}
+					tables, err = seal(t.TempDir(), base)
+					return err
+				})
+			if mode == "forged-path" || mode == "no-authority" {
+				require.ErrorContains(t, err, "contract omission lacks admitted file scope")
+				require.Zero(t, tables)
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, tables.Witness.Contracts.OmittedRecords)
+			_, err = head.PublishStage(ctx, tables)
+			require.NoError(t, err)
+			snap := head.OpenSnapshot()
+			defer snap.Close()
+			partial, err := snap.ContractCoverageContext(ctx, contracts.ReadScope{FilePaths: []string{config}, Types: []contracts.ContractType{contracts.ContractType(graph.EdgeReadsConfig)}}, true)
+			require.ErrorIs(t, err, contracts.ErrContractCoverageIncomplete)
+			require.True(t, partial)
 		})
 	}
 }

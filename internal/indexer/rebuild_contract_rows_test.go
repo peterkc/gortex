@@ -119,7 +119,7 @@ func TestRebuildContractGraphRowsNativeOwners(t *testing.T) {
 					return
 				}
 			}
-		}, store_pebble.ContractCoverage{}, nil)
+		}, store_pebble.ContractCoverage{}, nil, nil)
 	require.NoError(t, err)
 	_, err = head.PublishStage(ctx, tables)
 	require.NoError(t, err)

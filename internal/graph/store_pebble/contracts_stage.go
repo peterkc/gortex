@@ -182,6 +182,15 @@ func decodeContractOmission(key, value []byte) (RebuildContractOmission, error) 
 // leaves no offer and this private build must be discarded.
 func (b *BuildStore) PrepareContracts(ctx context.Context, dir string, base RelationsBase,
 	batches iter.Seq2[RebuildContractBatch, error], coverage ContractCoverage,
+) (StageTables, error) {
+	return b.PrepareContractsWithCheckedSizeSkips(ctx, dir, base, batches, coverage, nil)
+}
+
+// PrepareContractsWithCheckedSizeSkips requires the caller's frozen checked
+// classification proof for an unknown Spring config omission without file metadata.
+// No other omission may bypass admitted file scope.
+func (b *BuildStore) PrepareContractsWithCheckedSizeSkips(ctx context.Context, dir string, base RelationsBase,
+	batches iter.Seq2[RebuildContractBatch, error], coverage ContractCoverage, checkedSizeSkip func(repo, file string) bool,
 ) (tables StageTables, err error) {
 	defer func() {
 		if err != nil {
@@ -213,7 +222,7 @@ func (b *BuildStore) PrepareContracts(ctx context.Context, dir string, base Rela
 		if err != nil {
 			return StageTables{}, err
 		}
-		if err := b.withWrites(func() error { return b.writeContractBatch(ctx, batch) }); err != nil {
+		if err := b.withWrites(func() error { return b.writeContractBatch(ctx, batch, checkedSizeSkip) }); err != nil {
 			return StageTables{}, err
 		}
 	}
@@ -366,7 +375,7 @@ func (b *BuildStore) claimContractRow(tag byte, key []byte) error {
 	return b.pending.Set(marker, nil, pebble.NoSync)
 }
 
-func (b *BuildStore) writeContractBatch(ctx context.Context, batch RebuildContractBatch) error {
+func (b *BuildStore) writeContractBatch(ctx context.Context, batch RebuildContractBatch, checkedSizeSkip func(repo, file string) bool) error {
 	for _, n := range batch.Nodes {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -477,7 +486,10 @@ func (b *BuildStore) writeContractBatch(ctx context.Context, batch RebuildContra
 			return err
 		}
 		if file.FilePath == "" {
-			return invalid("contract omission lacks admitted file scope")
+			if omitted != RebuildSpringConfigUnknownOmission(omitted.RepoPrefix, omitted.FilePath) ||
+				checkedSizeSkip == nil || !checkedSizeSkip(omitted.RepoPrefix, omitted.FilePath) {
+				return invalid("contract omission lacks admitted file scope")
+			}
 		}
 		if err := b.claimContractRow('o', key); err != nil {
 			return err

@@ -88,7 +88,7 @@ func TestPrepareRebuildContractsChecksActualSeal(t *testing.T) {
 				selection = nil
 			}
 			tables, err := prepareRebuildContracts(ctx, b, t.TempDir(), retained, early, orderedEarlyContractIDs(complete),
-				selection, batches, store_pebble.ContractCoverage{OmittedRecords: 1}, func(string) string { return "go" })
+				selection, batches, store_pebble.ContractCoverage{OmittedRecords: 1}, func(string) string { return "go" }, nil)
 			switch mode {
 			case "equal":
 				require.NoError(t, err)

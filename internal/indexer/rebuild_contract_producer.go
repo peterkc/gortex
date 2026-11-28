@@ -123,7 +123,7 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 					if err := base.CheckDeferredLanguages(deferred); err != nil {
 						return tables, err
 					}
-					return prepareRebuildContracts(ctx, b, dir, base, early, s.CompleteIDs(), s.SelectedIDs(), batches, coverage, r.extractorOf)
+					return prepareRebuildContracts(ctx, b, dir, base, early, s.CompleteIDs(), s.SelectedIDs(), batches, coverage, r.extractorOf, r.checkedSpringConfigSizeSkip)
 				})
 				active = false
 				if err == nil && !attempted {

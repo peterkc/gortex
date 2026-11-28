@@ -4,11 +4,27 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"maps"
+	"slices"
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/pathkey"
 )
+
+// checkedSpringConfigSizeSkip binds this exact graph path and repository to
+// the owner's validated literal classification, not to a KindFile stub.
+func (r rebuildContractReceiptReader) checkedSpringConfigSizeSkip(repo, file string) bool {
+	if r.idx == nil || r.census == nil || repo != r.idx.repoPrefix || !r.sizeSkippedContractSource(file) {
+		return false
+	}
+	origin := r.census.originByGraphPath[file]
+	fact := r.job.classifications[origin]
+	languages, extensions := contracts.SpringConfigFileProjection()
+	_, profile := contracts.SpringConfigProfile(file)
+	return profile && graph.ProjectionMatches(file, fact.Language, languages, extensions)
+}
 
 // visitHeldOutContractOmissions inventories checked raw observations only.
 // It must not resolve endpoint questions, elect registry/DI/config winners,
@@ -18,6 +34,17 @@ func (r rebuildContractReceiptReader) visitHeldOutContractOmissions(ctx context.
 		return nil
 	}
 	scope := contracts.SpringConfigScope{RepoPrefix: r.idx.repoPrefix, WorkspaceID: r.idx.workspaceID}
+	for _, path := range slices.Sorted(maps.Keys(r.job.classifications)) {
+		fact := r.job.classifications[path]
+		file := pathkey.Normalize(path)
+		if rebuildHoldsOutCheckedSkip(fact) && r.checkedSpringConfigSizeSkip(scope.RepoPrefix, file) {
+			if err := yield(store_pebble.RebuildContractBatch{Omitted: []store_pebble.RebuildContractOmission{
+				store_pebble.RebuildSpringConfigUnknownOmission(scope.RepoPrefix, file),
+			}}); err != nil {
+				return err
+			}
+		}
+	}
 	for _, input := range r.job.inputs {
 		held, err := r.holdsOut(input.Path)
 		if err != nil {

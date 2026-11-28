@@ -19,7 +19,7 @@ import (
 func prepareRebuildContracts(ctx context.Context, b *store_pebble.BuildStore, dir string, base store_pebble.RelationsBase,
 	early rebuildEarlyContractIDs, complete, selected iter.Seq2[string, error],
 	batches iter.Seq2[store_pebble.RebuildContractBatch, error], coverage store_pebble.ContractCoverage,
-	extractorOf func(string) string,
+	extractorOf func(string) string, checkedSizeSkip func(repo, file string) bool,
 ) (store_pebble.StageTables, error) {
 	if err := compareRebuildContractIDs(ctx, orderedEarlyContractIDs(early), complete); err != nil {
 		return store_pebble.StageTables{}, fmt.Errorf("compare complete private contract IDs: %w", err)
@@ -43,7 +43,7 @@ func prepareRebuildContracts(ctx context.Context, b *store_pebble.BuildStore, di
 			}
 		}
 	}
-	tables, err := b.PrepareContracts(ctx, dir, base, checked, coverage)
+	tables, err := b.PrepareContractsWithCheckedSizeSkips(ctx, dir, base, checked, coverage, checkedSizeSkip)
 	if err != nil {
 		return store_pebble.StageTables{}, err
 	}
