@@ -47,6 +47,10 @@ func applyBodyFactsToHTTPContract(c *Contract, fileNodes []*graph.Node, tree *pa
 
 // applyProviderFacts handles the server-side enrichment.
 func applyProviderFacts(c *Contract, fileNodes []*graph.Node, bf BodyFacts) {
+	applyProviderFactsWithLookup(c, bf, func(name string) string { return resolveTypeInFile(name, fileNodes) })
+}
+
+func applyProviderFactsWithLookup(c *Contract, bf BodyFacts, lookup func(string) string) {
 	if writes := bf.StatusWrites(); len(writes) > 0 {
 		mergeIntStrings(c.Meta, "status_codes", writes)
 	}
@@ -59,7 +63,7 @@ func applyProviderFacts(c *Contract, fileNodes []*graph.Node, bf BodyFacts) {
 		if rb.Helper == "Marshal" || rb.Helper == "MarshalIndent" {
 			continue
 		}
-		applyRequestBindingToContract(c, fileNodes, bf, rb)
+		applyRequestBindingToContract(c, bf, rb, lookup)
 		break
 	}
 	calls := bf.ResponseCalls()
@@ -67,7 +71,7 @@ func applyProviderFacts(c *Contract, fileNodes []*graph.Node, bf BodyFacts) {
 		return
 	}
 	rc := lastSuccessResponseCall(calls)
-	applyResponseCallToContract(c, fileNodes, bf, rc)
+	applyResponseCallToContract(c, bf, rc, lookup)
 }
 
 // applyConsumerFacts handles the client-side enrichment.
@@ -145,15 +149,15 @@ func lastSuccessResponseCall(calls []ResponseCall) ResponseCall {
 // applyResponseCallToContract turns one ResponseCall's value
 // argument into Meta updates: response_type, response_envelope,
 // response_repeated, schema_source.
-func applyResponseCallToContract(c *Contract, fileNodes []*graph.Node, bf BodyFacts, rc ResponseCall) {
+func applyResponseCallToContract(c *Contract, bf BodyFacts, rc ResponseCall, lookup func(string) string) {
 	if rc.ValueArg == nil {
 		return
 	}
 	switch rc.ValueArg.Kind() {
 	case "composite_literal":
-		applyCompositeResponse(c, fileNodes, bf, rc.ValueArg)
+		applyCompositeResponse(c, bf, rc.ValueArg, lookup)
 	case "identifier":
-		applyIdentResponse(c, fileNodes, bf, rc.ValueExpr)
+		applyIdentResponse(c, bf, rc.ValueExpr, lookup)
 	case "interpreted_string_literal", "raw_string_literal":
 		applyLiteralResponse(c, "string")
 	case "int_literal":
@@ -170,9 +174,9 @@ func applyResponseCallToContract(c *Contract, fileNodes []*graph.Node, bf BodyFa
 		}
 		switch inner.Kind() {
 		case "composite_literal":
-			applyCompositeResponse(c, fileNodes, bf, inner)
+			applyCompositeResponse(c, bf, inner, lookup)
 		case "identifier":
-			applyIdentResponse(c, fileNodes, bf, inner.Text())
+			applyIdentResponse(c, bf, inner.Text(), lookup)
 		}
 	}
 }
@@ -192,9 +196,9 @@ func applyLiteralResponse(c *Contract, typeName string) {
 //     type (e.g. `var req CreateRequest; Decode(&req)` → CreateRequest)
 //  3. Leave c.Meta alone (regex pass might have set it, or it stays
 //     unset)
-func applyRequestBindingToContract(c *Contract, fileNodes []*graph.Node, bf BodyFacts, rb RequestBinding) {
+func applyRequestBindingToContract(c *Contract, bf BodyFacts, rb RequestBinding, lookup func(string) string) {
 	if rb.CompositeType != "" {
-		c.Meta["request_type"] = resolveTypeInFile(rb.CompositeType, fileNodes)
+		c.Meta["request_type"] = lookup(rb.CompositeType)
 		c.Meta["schema_source"] = "extracted"
 		delete(c.Meta, "request_expr")
 		return
@@ -206,7 +210,7 @@ func applyRequestBindingToContract(c *Contract, fileNodes []*graph.Node, bf Body
 	if b.TypeID == "" {
 		return
 	}
-	c.Meta["request_type"] = resolveTypeInFile(b.TypeID, fileNodes)
+	c.Meta["request_type"] = lookup(b.TypeID)
 	c.Meta["schema_source"] = "extracted"
 	delete(c.Meta, "request_expr")
 }
@@ -214,7 +218,7 @@ func applyRequestBindingToContract(c *Contract, fileNodes []*graph.Node, bf Body
 // applyCompositeResponse handles `WriteJSON(w, code, Foo{...})` and
 // `WriteJSON(w, code, map[string]any{...})`. For map composites we
 // walk the entries into an envelope.
-func applyCompositeResponse(c *Contract, fileNodes []*graph.Node, bf BodyFacts, valueNode *Node) {
+func applyCompositeResponse(c *Contract, bf BodyFacts, valueNode *Node, lookup func(string) string) {
 	if valueNode == nil || valueNode.Inner() == nil {
 		return
 	}
@@ -228,7 +232,7 @@ func applyCompositeResponse(c *Contract, fileNodes []*graph.Node, bf BodyFacts, 
 		if len(entries) == 0 {
 			return
 		}
-		env := buildEnvelopeFromEntries(bf, fileNodes, entries)
+		env := buildEnvelopeFromEntries(bf, entries, lookup)
 		if len(env) == 0 {
 			return
 		}
@@ -249,7 +253,7 @@ func applyCompositeResponse(c *Contract, fileNodes []*graph.Node, bf BodyFacts, 
 		if goBF, ok := bf.(*goBodyFacts); ok {
 			b := goBF.bindingFromComposite(valueNode.Inner())
 			if b.TypeID != "" {
-				c.Meta["response_type"] = resolveTypeInFile(b.TypeID, fileNodes)
+				c.Meta["response_type"] = lookup(b.TypeID)
 				if b.Repeated {
 					c.Meta["response_repeated"] = true
 				}
@@ -262,7 +266,7 @@ func applyCompositeResponse(c *Contract, fileNodes []*graph.Node, bf BodyFacts, 
 		if goBF, ok := bf.(*goBodyFacts); ok {
 			b := goBF.bindingFromComposite(valueNode.Inner())
 			if b.TypeID != "" {
-				c.Meta["response_type"] = resolveTypeInFile(b.TypeID, fileNodes)
+				c.Meta["response_type"] = lookup(b.TypeID)
 				c.Meta["schema_source"] = "extracted"
 				delete(c.Meta, "response_expr")
 			}
@@ -274,7 +278,7 @@ func applyCompositeResponse(c *Contract, fileNodes []*graph.Node, bf BodyFacts, 
 // repos's binding; if it resolves to a known type or a method call,
 // stamps the response_type or leaves a clean response_expr for the
 // post-pass to trace.
-func applyIdentResponse(c *Contract, fileNodes []*graph.Node, bf BodyFacts, ident string) {
+func applyIdentResponse(c *Contract, bf BodyFacts, ident string, lookup func(string) string) {
 	ident = strings.TrimSpace(ident)
 	if ident == "" {
 		return
@@ -283,7 +287,7 @@ func applyIdentResponse(c *Contract, fileNodes []*graph.Node, bf BodyFacts, iden
 	switch b.Kind {
 	case BindingComposite, BindingSliceLit, BindingMakeSlice, BindingMakeMap:
 		if b.TypeID != "" {
-			c.Meta["response_type"] = resolveTypeInFile(b.TypeID, fileNodes)
+			c.Meta["response_type"] = lookup(b.TypeID)
 			if b.Repeated {
 				c.Meta["response_repeated"] = true
 			}
@@ -313,7 +317,7 @@ func applyIdentResponse(c *Contract, fileNodes []*graph.Node, bf BodyFacts, iden
 // expression is matched against the body's bindings to resolve a
 // type; when no fact is available the row stays with just an `expr`
 // field for the post-pass to chase.
-func buildEnvelopeFromEntries(bf BodyFacts, fileNodes []*graph.Node, entries []KeyValue) []map[string]any {
+func buildEnvelopeFromEntries(bf BodyFacts, entries []KeyValue, lookup func(string) string) []map[string]any {
 	out := make([]map[string]any, 0, len(entries))
 	for _, e := range entries {
 		row := map[string]any{"name": e.Key, "expr": e.ValueExpr}
@@ -322,7 +326,7 @@ func buildEnvelopeFromEntries(bf BodyFacts, fileNodes []*graph.Node, entries []K
 			if goBF, ok := bf.(*goBodyFacts); ok {
 				b := goBF.bindingFromComposite(e.ValueNode.Inner())
 				if b.TypeID != "" {
-					row["type"] = resolveTypeInFile(b.TypeID, fileNodes)
+					row["type"] = lookup(b.TypeID)
 					if b.Repeated {
 						row["repeated"] = true
 					}
@@ -334,7 +338,7 @@ func buildEnvelopeFromEntries(bf BodyFacts, fileNodes []*graph.Node, entries []K
 			if isPlainIdent(ident) {
 				b := bf.VarBinding(ident)
 				if b.TypeID != "" {
-					row["type"] = resolveTypeInFile(b.TypeID, fileNodes)
+					row["type"] = lookup(b.TypeID)
 				}
 				if b.Repeated {
 					row["repeated"] = true
