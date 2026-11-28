@@ -34,21 +34,11 @@ func (idx *Indexer) readRebuildEarlyContractFacts(ctx context.Context, view stor
 ) (*rebuildEarlyContractFacts, error) {
 	out := &rebuildEarlyContractFacts{registry: contracts.NewRegistry(), routers: make(map[string]contracts.RouterFacts)}
 	constants := rebuildEndpointConstants{ctx: ctx, view: view}
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
 	for _, input := range job.inputs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		recipe := idx.rebuildExtractorRecipe(job.recipes[input.Language], input)
-		raw, err := store.read(input.parseKey(recipe))
-		if err != nil {
-			return nil, fmt.Errorf("%w: reload %q for early contracts: %w", errParseEntryCorrupt, input.Path, err)
-		}
-		base, facts, err := idx.decodeRebuildFileReceipt(input, raw)
+		_, facts, err := reader.load(ctx, input)
 		if err != nil {
 			return nil, err
-		}
-		if base.EffectiveLanguage != census.byPath[input.Path] {
-			return nil, fmt.Errorf("%w: early contract receipt attribution for %q", errParseEntryCorrupt, input.Path)
 		}
 		// The checked receipt already enforces question positions. Keep
 		// the resolver's defensive error rather than treating a failure as empty.
