@@ -128,9 +128,9 @@ app.use("/api", router);
 	}
 	require.NotContains(t, want, goframe)
 	require.Equal(t, rebuildEarlyContractIDs{
-		"dep::example.com/lib":       "go.mod",
-		"di::Token":                  "routes.go",
-		"http::GET::/items":          "routes.go",
+		"dep::example.com/lib":  "go.mod",
+		"di::Token":             "routes.go",
+		"http::GET::/items":     "routes.go",
 		"http::GET::/api/users": "users.ts",
 	}, want)
 	got, err := f.finish(ctx, build.RebuildView(), "", "", "")

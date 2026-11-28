@@ -89,7 +89,10 @@ func TestSelectRebuildContractRecordProofGuards(t *testing.T) {
 	plain := hinted
 	plain.ID, plain.Meta = "http::GET::/y", map[string]any{}
 	base := store_pebble.ParseFacts{EffectiveLanguage: "java", File: graph.FileMetaRow{FilePath: file, NodeCount: 2}, Nodes: []*graph.Node{owner, target}, Edges: []*graph.Edge{e}}
-	facts := &contracts.FileFacts{Records: []contracts.Contract{hinted, plain}, Shapes: map[string]*contracts.Shape{owner.ID: nil, target.ID: nil}}
+	facts := &contracts.FileFacts{
+		Records: []contracts.Contract{hinted, plain}, Shapes: map[string]*contracts.Shape{owner.ID: nil, target.ID: nil},
+		Handlers: map[string]contracts.HandlerFacts{},
+	}
 	wire, err := store_pebble.EncodeContractParseFacts(base, facts)
 	require.NoError(t, err)
 	input := rebuildInput{Path: file, Language: "java"}

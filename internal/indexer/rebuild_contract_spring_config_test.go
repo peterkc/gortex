@@ -239,7 +239,9 @@ func TestRebuildSpringConfigWrapperRefusesUnprovedEdges(t *testing.T) {
 				parsed.Nodes = append(parsed.Nodes, target)
 			}
 			parsed.File.NodeCount = len(parsed.Nodes)
-			facts := &contracts.FileFacts{Shapes: map[string]*contracts.Shape{reader.ID: nil}}
+			facts := &contracts.FileFacts{
+				Shapes: map[string]*contracts.Shape{reader.ID: nil}, Handlers: map[string]contracts.HandlerFacts{},
+			}
 			wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
 			require.NoError(t, err)
 			input := rebuildInput{Path: file, Language: lang}

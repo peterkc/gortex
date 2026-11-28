@@ -94,4 +94,28 @@ func TestRebuildEndpointConstantCandidateLimit(t *testing.T) {
 	b.AddNode(&graph.Node{ID: "foreign/site.go::extra", Name: name, FilePath: "foreign/site.go", Kind: graph.KindConstant, Language: "go", RepoPrefix: "foreign"})
 	require.Empty(t, constants.lookup(name, file, "repo"))
 	require.ErrorIs(t, constants.err, graph.ErrContractProjectionLimit)
+
+	// Reuse the over-limit name bucket to test a read failure in the early
+	// pass itself. Keep the store and receipt valid up to the lookup.
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	const routeFile = "routes.go"
+	src := []byte("package p\nfunc Register(r Router) { r.GET(ROUTE, Handle) }\n")
+	ext, ok := idx.registry.GetByLanguage("go")
+	require.True(t, ok)
+	parsed, facts, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, routeFile, ext, src, src)
+	require.NoError(t, err)
+	require.Len(t, facts.Questions, 1)
+	wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
+	require.NoError(t, err)
+	input := rebuildInput{Path: routeFile, Language: "go", Size: int64(len(src))}
+	job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{"go": {1}}}
+	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+	require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
+	census := rebuildExtractorCensus{admitted: 1, byPath: map[string]string{routeFile: "go"}, originByGraphPath: map[string]string{routeFile: routeFile}}
+	got, err := idx.readRebuildEarlyContractFacts(ctx, b.RebuildView(), job, store, &census, nil, nil)
+	require.Nil(t, got)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildView)
+	require.ErrorIs(t, err, graph.ErrContractProjectionLimit)
+	require.ErrorContains(t, err, `resolve endpoint constants for "routes.go"`)
 }

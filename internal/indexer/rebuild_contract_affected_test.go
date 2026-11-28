@@ -38,7 +38,10 @@ func TestRebuildContractAffectedUsesHeldScopeNotCandidates(t *testing.T) {
 	input := rebuildInput{Path: source, Language: "go"}
 	job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{"go": {1}}}
 	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
-	wire, err := store_pebble.EncodeContractParseFacts(retained, &contracts.FileFacts{Records: []contracts.Contract{c}, Questions: []contracts.EndpointContractQuestion{q}})
+	wire, err := store_pebble.EncodeContractParseFacts(retained, &contracts.FileFacts{
+		Records: []contracts.Contract{c}, Questions: []contracts.EndpointContractQuestion{q},
+		Shapes: map[string]*contracts.Shape{}, Handlers: map[string]contracts.HandlerFacts{},
+	})
 	require.NoError(t, err)
 	require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
 	marks := 0
@@ -95,7 +98,9 @@ func TestRebuildContractAffectedUsesHeldScopeNotCandidates(t *testing.T) {
 	heldRecord := contracts.Contract{ID: heldID, Type: contracts.ContractHTTP, Role: contracts.RoleProvider, FilePath: heldSource, Line: 1,
 		Meta: map[string]any{"response_type": typ.ID}}
 	meta := graph.FileMetaRow{FilePath: heldSource}
-	wire, err = store_pebble.EncodeContractParseFacts(store_pebble.ParseFacts{EffectiveLanguage: "python", File: meta}, &contracts.FileFacts{Records: []contracts.Contract{heldRecord}})
+	wire, err = store_pebble.EncodeContractParseFacts(store_pebble.ParseFacts{EffectiveLanguage: "python", File: meta}, &contracts.FileFacts{
+		Records: []contracts.Contract{heldRecord}, Shapes: map[string]*contracts.Shape{}, Handlers: map[string]contracts.HandlerFacts{},
+	})
 	require.NoError(t, err)
 	require.NoError(t, store.write(heldInput.parseKey(idx.rebuildExtractorRecipe(r.job.recipes["python"], heldInput)), wire))
 	var rawO []store_pebble.RebuildContractOmission

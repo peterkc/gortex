@@ -584,7 +584,7 @@ func TestRebuildLateRouterJoinError(t *testing.T) {
 func TestRebuildEarlyContractReceiptRefusals(t *testing.T) {
 	const path = "routes.go"
 	src := []byte("package p\nfunc Register(r Router) { r.GET(Route, Handle) }\n")
-	for _, mode := range []string{"reload", "decode", "old base only", "admitted language", "census language", "constant view"} {
+	for _, mode := range []string{"reload", "decode", "old base only", "admitted language", "census language"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := t.Context()
 			idx := newTestIndexer(graph.New())
@@ -600,7 +600,10 @@ func TestRebuildEarlyContractReceiptRefusals(t *testing.T) {
 			}
 			job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{input.Language: {1}}}
 			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
-			census := rebuildExtractorCensus{byPath: map[string]string{path: parsed.EffectiveLanguage}}
+			census := rebuildExtractorCensus{
+				admitted: 1, byPath: map[string]string{path: parsed.EffectiveLanguage},
+				originByGraphPath: map[string]string{path: path},
+			}
 			var payload []byte
 			switch mode {
 			case "reload":
@@ -620,22 +623,11 @@ func TestRebuildEarlyContractReceiptRefusals(t *testing.T) {
 			if mode == "census language" {
 				census.byPath[path] = "python"
 			}
-			var view store_pebble.RebuildView
-			if mode == "constant view" {
-				build, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
-				require.NoError(t, err)
-				t.Cleanup(func() { require.NoError(t, build.Close()) })
-				// Preserve a real working-store failure rather than omit constants.
-				build.AddNode(&graph.Node{ID: "remote:repo~unpublishable"})
-				view = build.RebuildView()
-			}
-			got, err := idx.readRebuildEarlyContractFacts(ctx, view, job, store, &census, nil, nil)
+			build, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, build.Close()) })
+			got, err := idx.readRebuildEarlyContractFacts(ctx, build.RebuildView(), job, store, &census, nil, nil)
 			require.Nil(t, got)
-			if mode == "constant view" {
-				require.ErrorIs(t, err, store_pebble.ErrRebuildView)
-				require.ErrorContains(t, err, `resolve endpoint constants for "routes.go"`)
-				return
-			}
 			require.ErrorIs(t, err, errParseEntryCorrupt)
 			require.ErrorContains(t, err, path)
 			switch mode {
