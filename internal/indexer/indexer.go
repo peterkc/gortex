@@ -9405,20 +9405,11 @@ func (idx *Indexer) resolveCallExprTypeNames(keys []contractCallKey) map[contrac
 	infos := make(map[contractCallKey]callInfo, len(keys))
 	methodSet := make(map[string]struct{})
 	for _, key := range keys {
-		if key.callExpr == "" {
-			continue
+		name, receiver := contractCallName(key.callExpr)
+		if name != "" {
+			infos[key] = callInfo{methodName: name, receiverHint: receiver}
+			methodSet[name] = struct{}{}
 		}
-		parts := strings.Split(key.callExpr, ".")
-		methodName := parts[len(parts)-1]
-		if methodName == "" {
-			continue
-		}
-		info := callInfo{methodName: methodName}
-		if len(parts) >= 2 {
-			info.receiverHint = parts[len(parts)-2]
-		}
-		infos[key] = info
-		methodSet[methodName] = struct{}{}
 	}
 
 	methodNames := make([]string, 0, len(methodSet))
@@ -9432,63 +9423,66 @@ func (idx *Indexer) resolveCallExprTypeNames(keys []contractCallKey) map[contrac
 	}
 
 	for key, info := range infos {
-		var matches []*graph.Node
+		var choice contractCallReturnChoice
 		for _, node := range candidatesByName[info.methodName] {
-			if node.Kind != graph.KindMethod && node.Kind != graph.KindFunction {
-				continue
-			}
-			if key.repoPrefix != "" && !strings.HasPrefix(node.ID, key.repoPrefix+"/") {
-				continue
-			}
-			if info.receiverHint != "" && !receiverMatchesHint(node, info.receiverHint) {
-				continue
-			}
-			matches = append(matches, node)
-		}
-		if len(matches) == 0 {
-			continue
-		}
-
-		var returnType string
-		ambiguous := false
-		for _, match := range matches {
-			if match.Meta == nil {
-				continue
-			}
-			signature, _ := match.Meta["signature"].(string)
-			typeName := parseFirstNonErrorReturnType(signature)
-			if typeName == "" {
-				continue
-			}
-			if returnType == "" {
-				returnType = typeName
-				continue
-			}
-			if typeName != returnType {
-				ambiguous = true
+			choice.observe(node, key.repoPrefix, info.receiverHint)
+			if choice.ambiguous {
 				break
 			}
 		}
-		if ambiguous || returnType == "" {
-			continue
-		}
-
-		repeated := strings.HasPrefix(returnType, "[]")
-		pointer := strings.HasPrefix(returnType, "*") ||
-			(repeated && strings.HasPrefix(returnType[2:], "*"))
-		returnType = strings.TrimLeft(returnType, "*[]")
-		if dot := strings.LastIndex(returnType, "."); dot >= 0 {
-			returnType = returnType[dot+1:]
-		}
-		if returnType != "" {
-			resolved[key] = rawContractCallType{
-				typeName: returnType,
-				repeated: repeated,
-				pointer:  pointer,
-			}
+		if result := choice.result(); result.typeName != "" {
+			resolved[key] = result
 		}
 	}
 	return resolved
+}
+
+func contractCallName(expr string) (name, receiverHint string) {
+	if dot := strings.LastIndex(expr, "."); dot >= 0 {
+		head := expr[:dot]
+		name = expr[dot+1:]
+		if priorDot := strings.LastIndex(head, "."); priorDot >= 0 {
+			head = head[priorDot+1:]
+		}
+		return name, head
+	}
+	return expr, ""
+}
+
+// contractCallReturnChoice compares full raw return names before normalizing
+// them. An absent signature does not vote and conflicting candidates miss.
+type contractCallReturnChoice struct {
+	raw       string
+	ambiguous bool
+}
+
+func (c *contractCallReturnChoice) observe(n *graph.Node, repo, receiver string) {
+	if c.ambiguous || (n.Kind != graph.KindMethod && n.Kind != graph.KindFunction) ||
+		repo != "" && !strings.HasPrefix(n.ID, repo+"/") ||
+		receiver != "" && !receiverMatchesHint(n, receiver) {
+		return
+	}
+	signature, _ := n.Meta["signature"].(string)
+	if raw := parseFirstNonErrorReturnType(signature); raw != "" {
+		c.ambiguous = c.raw != "" && c.raw != raw
+		c.raw = raw
+	}
+}
+
+func (c contractCallReturnChoice) result() rawContractCallType {
+	if c.ambiguous || c.raw == "" {
+		return rawContractCallType{}
+	}
+	repeated := strings.HasPrefix(c.raw, "[]")
+	pointer := strings.HasPrefix(c.raw, "*") || (repeated && strings.HasPrefix(c.raw[2:], "*"))
+	name := strings.TrimLeft(c.raw, "*[]")
+	if dot := strings.LastIndex(name, "."); dot >= 0 {
+		name = name[dot+1:]
+	}
+	if name == "" {
+		return rawContractCallType{}
+	}
+	return rawContractCallType{typeName: name, repeated: repeated, pointer: pointer}
 }
 
 // lookupVarTypeForContract resolves a variable to its return type
