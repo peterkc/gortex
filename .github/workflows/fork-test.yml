@@ -1,0 +1,226 @@
+name: fork-test
+
+# Fork-only (peterkc/gortex), not for upstream. Push ci/<branch> = a head H
+# plus ONE commit that adds this workflow and .github/fork-test.txt, to run
+# go test on a chosen package list for H without a full CI run. H is this
+# commit's parent. The result counts only for H, and only when the top commit
+# changes nothing but these two files (the plan job checks that).
+#
+# .github/fork-test.txt, one directive per line ('#' starts a comment):
+#   pkg <pattern> [<regex>]
+#                   package pattern, for example ./internal/graph/...; one or more,
+#                   each pattern once. The optional regex is this pattern's own
+#                   go test -run filter (no spaces) and replaces the run line for
+#                   it; ^$ runs no test functions for it. Overlapping patterns
+#                   (./x/... and ./x/y, or ./x and ./x/) are not detected: such a
+#                   package runs once in each group that matches it.
+#   run <regex>     optional go test -run filter for packages without their own
+#                   regex, no spaces (at most one)
+#   compile-only <bool>
+#                   true or false; default false. When true, every package runs
+#                   with go test -run '^$': it compiles and links, init and
+#                   TestMain still run, no test function runs, and an empty
+#                   selection passes. No run line or package regex is allowed
+#                   with it.
+#   os <runner>     ubuntu-24.04 (default), macos-latest or windows-latest; repeatable
+#   race <bool>     true or false; default true; applies on Linux only, with the
+#                   SQLite race exclusions of ci.yml
+# Packages that share a filter form a group: one go test -list call and one
+# go test call each, groups one after another in the same job. Without
+# compile-only, the run fails when all groups together select no test, or when
+# there is more than one group and one group's filter (other than ^$ or no
+# filter) selects no test. A group whose -list or
+# go test fails does not stop later groups; the step fails at the end. The
+# job's 45 minute limit covers all groups together, while each go test call
+# keeps -timeout=40m, so a hang in a later group can end at the job limit
+# without Go's timeout dump.
+on:
+  push:
+    branches: ['ci/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-test-${{ github.ref }}
+  cancel-in-progress: true
+
+# Same compiler flags as ci.yml.
+env:
+  CGO_CFLAGS: -O2 -g -fno-strict-aliasing
+  CGO_CXXFLAGS: -O2 -g -fno-strict-aliasing
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      head: ${{ steps.parse.outputs.head }}
+      os: ${{ steps.parse.outputs.os }}
+      groups: ${{ steps.parse.outputs.groups }}
+      compile_only: ${{ steps.parse.outputs.compile_only }}
+      race: ${{ steps.parse.outputs.race }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Check the top commit and read the package list
+        id: parse
+        run: |
+          set -euo pipefail
+          parents="$(git rev-list --parents -n 1 HEAD | wc -w)"
+          if [[ "$parents" -ne 2 ]]; then
+            echo "::error::the top commit must have exactly one parent (H)"; exit 1
+          fi
+          head="$(git rev-parse HEAD^)"
+          changed="$(git diff --no-renames --name-only HEAD^ HEAD)"
+          extra="$(grep -vxF -e .github/workflows/fork-test.yml -e .github/fork-test.txt <<<"$changed" || true)"
+          if [[ -n "$extra" ]]; then
+            echo "::error::the top commit changes files other than the workflow and the list: $extra"
+            exit 1
+          fi
+          if [[ ! -f .github/fork-test.txt || -L .github/fork-test.txt ]]; then
+            echo "::error::.github/fork-test.txt is missing or not a regular file"; exit 1
+          fi
+          declare -A seen=()
+          pkgs=() regex=() oses=() run="" race=true nrun=0 compile=false hasregex=false
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line%%#*}"
+            read -r key value extra rest <<<"$line" || true
+            [[ -z "${key:-}" ]] && continue
+            if [[ -z "${value:-}" || -n "${rest:-}" || ( -n "${extra:-}" && "$key" != pkg ) ]]; then
+              echo "::error::bad line: $line"; exit 1
+            fi
+            case "$key" in
+              pkg)
+                [[ "$value" =~ ^\./[A-Za-z0-9_./-]*$ && "$value" != *.go ]] || { echo "::error::bad package pattern: $value"; exit 1; }
+                [[ -z "${seen[$value]:-}" ]] || { echo "::error::package pattern listed twice: $value"; exit 1; }
+                seen[$value]=1
+                pkgs+=("$value")
+                regex+=("${extra:-}")
+                [[ -z "${extra:-}" ]] || hasregex=true ;;
+              run)
+                nrun=$((nrun + 1)); run="$value" ;;
+              compile-only)
+                case "$value" in true|false) compile="$value" ;; *) echo "::error::compile-only must be true or false"; exit 1 ;; esac ;;
+              os)
+                case "$value" in
+                  ubuntu-24.04|macos-latest|windows-latest) oses+=("$value") ;;
+                  *) echo "::error::unsupported runner: $value"; exit 1 ;;
+                esac ;;
+              race)
+                case "$value" in true|false) race="$value" ;; *) echo "::error::race must be true or false"; exit 1 ;; esac ;;
+              *) echo "::error::unknown directive: $key"; exit 1 ;;
+            esac
+          done < .github/fork-test.txt
+          (( ${#pkgs[@]} > 0 )) || { echo "::error::no pkg lines"; exit 1; }
+          (( nrun <= 1 )) || { echo "::error::more than one run line"; exit 1; }
+          if [[ "$compile" == true ]]; then
+            if (( nrun > 0 )) || [[ "$hasregex" == true ]]; then
+              echo "::error::compile-only true cannot be combined with a run line or package regex"; exit 1
+            fi
+          fi
+          (( ${#oses[@]} > 0 )) || oses=(ubuntu-24.04)
+          os_json="$(printf '%s\n' "${oses[@]}" | jq -cRn '[inputs] | unique')"
+          # One group per distinct filter, in first-appearance order.
+          groups="$(
+            for i in "${!pkgs[@]}"; do
+              if [[ "$compile" == true ]]; then r='^$'; else r="${regex[$i]:-$run}"; fi
+              printf '%s\t%s\n' "$r" "${pkgs[$i]}"
+            done | jq -cRn '[inputs | split("\t") | {run: .[0], pkg: .[1]}]
+              | reduce .[] as $e ([];
+                  if any(.[]; .run == $e.run)
+                  then map(if .run == $e.run then .pkgs += [$e.pkg] else . end)
+                  else . + [{run: $e.run, pkgs: [$e.pkg]}] end)'
+          )"
+          {
+            echo "head=$head"
+            echo "os=$os_json"
+            echo "groups=$groups"
+            echo "compile_only=$compile"
+            echo "race=$race"
+          } >> "$GITHUB_OUTPUT"
+          echo "Head under test (H): $head"
+          {
+            echo "### fork-test for H = \`$head\`"
+            echo
+            echo "Branch \`${GITHUB_REF_NAME}\`. Runners: \`$os_json\`. Race on Linux: \`$race\`. Compile-only: \`$compile\`."
+            echo
+            jq -r '.[] | "- Run filter `\(if .run == "" then "(all tests)" else .run end)`: `\(.pkgs | join(" "))`"' <<<"$groups"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Head under test
+        shell: bash
+        env:
+          HEAD_UNDER_TEST: ${{ needs.plan.outputs.head }}
+        run: 'echo "Head under test (H): $HEAD_UNDER_TEST"'
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: go test
+        shell: bash
+        env:
+          GROUPS_JSON: ${{ needs.plan.outputs.groups }}
+          COMPILE_ONLY: ${{ needs.plan.outputs.compile_only }}
+          RACE: ${{ needs.plan.outputs.race == 'true' && matrix.os == 'ubuntu-24.04' }}
+        run: |
+          set -euo pipefail
+          build=()
+          # The same SQLite exclusions as ci.yml and internal/citest raceFlags.
+          if [[ "$RACE" == "true" ]]; then
+            build+=(-race -gcflags=modernc.org/sqlite/lib=-race=false -gcflags=modernc.org/libc/...=-race=false)
+          fi
+          # jq.exe on Windows writes CRLF; strip CR from every jq output.
+          jqr() { jq -r "$@" <<<"$GROUPS_JSON" | tr -d '\r'; }
+          ngroups="$(jqr length)"
+          # go test passes when -run matches nothing, so count the selected
+          # tests first and refuse an empty selection unless compile-only.
+          total=0 failed=0 emptyown=0 listok=()
+          for ((i = 0; i < ngroups; i++)); do
+            run="$(jqr ".[$i].run")"
+            mapfile -t pkgs < <(jqr ".[$i].pkgs[]")
+            if ! listed="$(go test "${build[@]}" -list "${run:-.}" "${pkgs[@]}")"; then
+              echo "::error::group $((i + 1)): go test -list failed (no test runs for this group): ${pkgs[*]}"
+              failed=1 listok+=(0); continue
+            fi
+            listok+=(1)
+            n="$(grep -cE '^(Test|Example|Fuzz)' <<<"$listed" || true)"
+            echo "Group $((i + 1)): run filter '${run:-(all tests)}', ${n} selected, packages ${pkgs[*]}"
+            total=$((total + n))
+            if [[ "$COMPILE_ONLY" != "true" && "$n" -eq 0 && -n "$run" && "$run" != '^$' ]]; then
+              emptyown=1
+            fi
+          done
+          echo "Selected tests: $total"
+          if [[ "$COMPILE_ONLY" != "true" && "$failed" -eq 0 ]]; then
+            if [[ "$total" -eq 0 ]]; then
+              echo "::error::the package list and run filter select no tests"; exit 1
+            fi
+            if (( ngroups > 1 && emptyown )); then
+              echo "::error::a group's run filter selects no tests (see the Group lines)"; exit 1
+            fi
+          fi
+          for ((i = 0; i < ngroups; i++)); do
+            [[ "${listok[$i]}" == 1 ]] || continue
+            run="$(jqr ".[$i].run")"
+            mapfile -t pkgs < <(jqr ".[$i].pkgs[]")
+            args=("${build[@]}" -count=1 -timeout=40m)
+            if [[ -n "$run" ]]; then args+=("-run=$run"); fi
+            echo "go test ${args[*]} ${pkgs[*]}"
+            go test "${args[@]}" "${pkgs[@]}" || failed=1
+          done
+          exit "$failed"
