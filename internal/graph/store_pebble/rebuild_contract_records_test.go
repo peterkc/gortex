@@ -133,7 +133,7 @@ func TestRebuildContractRecordsKeepLiveAndRawBucketViews(t *testing.T) {
 		require.ErrorContains(t, r.VisitRepresentatives(func(RebuildContractRecord) error { return nil }), "ambiguous contract representative identity across IDs")
 		for _, relevantID := range []string{"", "a", "a|b"} {
 			var ids []string
-			err := r.VisitRepresentatives(func(item RebuildContractRecord) error {
+			err := r.VisitRelevantRepresentatives(func(item RebuildContractRecord) error {
 				ids = append(ids, item.ID)
 				return nil
 			}, func(item RebuildContractRecord) bool { return item.ID == relevantID })

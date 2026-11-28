@@ -154,3 +154,38 @@ func TestRebuildContractBareTypeTurnCount(t *testing.T) {
 		return nil
 	}))
 }
+
+func TestRebuildContractBareTypeOnlyUnprovedRepresentative(t *testing.T) {
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	for _, n := range []*graph.Node{
+		{ID: "r/type.go::Unique", Name: "Unique", Kind: graph.KindType},
+		{ID: "r/a.go::Ambiguous", Name: "Ambiguous", Kind: graph.KindType},
+		{ID: "r/b.go::Ambiguous", Name: "Ambiguous", Kind: graph.KindType},
+		{ID: "Same", Name: "Same", Kind: graph.KindType},
+	} {
+		b.AddNode(n)
+	}
+	require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(records *store_pebble.RebuildContractRecords) error {
+		const id = "http::GET::/route"
+		names := []string{"Stale", "Missing", "Ambiguous", "Same", "Unique"}
+		for i, name := range names {
+			c := contracts.Contract{ID: id, SymbolID: "S", FilePath: "r/route.go", RepoPrefix: "r", Line: i + 1,
+				Meta: map[string]any{"request_type": name}}
+			require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c, BodyUnproved: i == 0}))
+		}
+		require.NoError(t, records.UpgradeBareTypeRefs())
+		var got []store_pebble.RebuildContractRecord
+		require.NoError(t, records.VisitByID(id, func(item store_pebble.RebuildContractRecord) error {
+			got = append(got, item)
+			return nil
+		}))
+		require.Len(t, got, len(names))
+		for i, name := range names {
+			require.Equal(t, name, got[i].Meta["request_type"])
+			require.Equal(t, i == 0 || name == "Unique", got[i].BodyUnproved, name)
+		}
+		return nil
+	}))
+}

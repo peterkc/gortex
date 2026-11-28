@@ -179,20 +179,25 @@ func (r *RebuildContractRecords) UpdateByID(id string, update func(*RebuildContr
 // VisitRepresentatives freezes the current rows for this scan. It uses the
 // first member of each Registry.All key. Callbacks can update live buckets
 // without affecting this scan. Cross-ID delimiter collisions have no stable
-// native winner. The optional relevance predicate can prove a collision
-// immaterial to this pass; without it, keep the conservative refusal.
-func (r *RebuildContractRecords) VisitRepresentatives(yield func(RebuildContractRecord) error, relevant ...func(RebuildContractRecord) bool) error {
-	return r.visitRepresentatives(false, yield, relevant...)
+// native winner; keep the conservative refusal.
+func (r *RebuildContractRecords) VisitRepresentatives(yield func(RebuildContractRecord) error) error {
+	return r.visitRepresentatives(false, yield, nil)
+}
+
+// VisitRelevantRepresentatives allows collisions proved immaterial to this pass.
+// A nil predicate keeps the conservative rule.
+func (r *RebuildContractRecords) VisitRelevantRepresentatives(yield func(RebuildContractRecord) error, relevant func(RebuildContractRecord) bool) error {
+	return r.visitRepresentatives(false, yield, relevant)
 }
 
 // VisitCurrentRepresentatives freezes representative membership and reads each
 // member's current value when visited. The callback may change metadata, not
 // bucket identity or order. This models Registry.All snapshots of shared Meta.
 func (r *RebuildContractRecords) VisitCurrentRepresentatives(yield func(RebuildContractRecord) error) error {
-	return r.visitRepresentatives(true, yield)
+	return r.visitRepresentatives(true, yield, nil)
 }
 
-func (r *RebuildContractRecords) visitRepresentatives(current bool, yield func(RebuildContractRecord) error, relevant ...func(RebuildContractRecord) bool) (err error) {
+func (r *RebuildContractRecords) visitRepresentatives(current bool, yield func(RebuildContractRecord) error, relevant func(RebuildContractRecord) bool) (err error) {
 	if err := r.ready(); err != nil {
 		return err
 	}
@@ -211,7 +216,7 @@ func (r *RebuildContractRecords) visitRepresentatives(current bool, yield func(R
 		if err != nil {
 			return err
 		}
-		affects := len(relevant) == 0 || relevant[0](item)
+		affects := relevant == nil || relevant(item)
 		if len(first) != 0 {
 			if string(first[1:]) != item.ID && (first[0] != 0 || affects) {
 				return invalid("ambiguous contract representative identity across IDs")

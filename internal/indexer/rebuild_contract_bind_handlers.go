@@ -13,7 +13,7 @@ import (
 // writes keep the exact logical symbol move, but cannot publish a payload.
 func (r rebuildContractReceiptReader) bindRebuildProviderHandlers(ctx context.Context, view store_pebble.RebuildView, records *store_pebble.RebuildContractRecords) error {
 	pass := r.handlerPass()
-	if err := records.VisitRepresentatives(func(task store_pebble.RebuildContractRecord) error {
+	if err := records.VisitRelevantRepresentatives(func(task store_pebble.RebuildContractRecord) error {
 		winner, err := pass.providerHandler(ctx, view, task.Contract)
 		if err != nil || winner == nil {
 			return err
@@ -53,7 +53,7 @@ func (r rebuildContractReceiptReader) bindRebuildProviderHandlers(ctx context.Co
 	}
 	// Native takes a fresh All turn for hint cleanup. An unresolved or
 	// already enriched representative may still open its live ByID bucket.
-	return records.VisitRepresentatives(func(item store_pebble.RebuildContractRecord) error {
+	return records.VisitRelevantRepresentatives(func(item store_pebble.RebuildContractRecord) error {
 		if !hasRebuildHandlerHints(item.Contract) {
 			return nil
 		}

@@ -8,8 +8,9 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// UpgradeBareTypeRefs opens type lookups from frozen representatives, then
-// applies those answers to every live record, including hidden siblings.
+// UpgradeBareTypeRefs opens type lookups from proved frozen representatives,
+// then applies those answers to proved live records, including hidden siblings.
+// Mark a row unproved if an unproved representative could open a real upgrade.
 func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 	if err := r.ready(); err != nil {
 		return err
@@ -20,7 +21,7 @@ func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 	}()
 	var opened, uncertain bool
 	fields := [...]string{"request_type", "response_type"}
-	if err := r.VisitRepresentatives(func(item RebuildContractRecord) error {
+	if err := r.VisitRelevantRepresentatives(func(item RebuildContractRecord) error {
 		if item.BodyUnproved {
 			uncertain = true
 			return nil
@@ -70,20 +71,16 @@ func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 					if name == "" || strings.Contains(name, "::") {
 						break
 					}
-					if uncertain {
-						state, err := rebuildScratchState(r.build.pending, rebuildContractRecordKey('t', name), "invalid contract bare type key")
-						if err != nil {
-							return false, err
-						}
-						if state == 0 {
-							item.BodyUnproved = true
-							return true, nil
-						}
+					state, err := rebuildScratchState(r.build.pending, rebuildContractRecordKey('t', name), "invalid contract bare type key")
+					if err != nil {
+						return false, err
+					}
+					if state == 0 && !uncertain {
+						break
 					}
 					key := [2]string{name, item.RepoPrefix}
 					value, known := answers[key]
 					if !known {
-						var err error
 						value, err = r.bareTypeID(name, item.RepoPrefix)
 						if err != nil {
 							return false, err
@@ -92,6 +89,10 @@ func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 					}
 					if value == "" || value == name {
 						break
+					}
+					if state == 0 {
+						item.BodyUnproved = true
+						return true, nil
 					}
 					item.Meta[field] = value
 					changed = true
@@ -103,13 +104,9 @@ func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 }
 
 func (r *RebuildContractRecords) bareTypeID(name, repo string) (string, error) {
-	opened, err := rebuildScratchState(r.build.pending, rebuildContractRecordKey('t', name), "invalid contract bare type key")
-	if err != nil || opened == 0 {
-		return "", err
-	}
 	var same, other string
 	var sameCount, otherCount int
-	err = r.build.RebuildView().VisitNameCandidates(r.ctx, name, nil, func(n *graph.Node) error {
+	err := r.build.RebuildView().VisitNameCandidates(r.ctx, name, nil, func(n *graph.Node) error {
 		if n.Kind != graph.KindType {
 			return nil
 		}
