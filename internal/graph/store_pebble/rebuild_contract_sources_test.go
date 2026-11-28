@@ -169,3 +169,85 @@ func TestRebuildContractSourcesLostRunRefuses(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, left)
 }
+
+func TestRebuildContractSourceRunFailures(t *testing.T) {
+	for _, mode := range []string{"final write", "replay", "empty", "tail"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, lease := t.Context(), t.TempDir()
+			var dir string
+			stats, err := WithRebuildContractSources(ctx, lease, 1,
+				func(add func(contracts.Contract) error) error {
+					entries, err := os.ReadDir(lease)
+					require.NoError(t, err)
+					require.Len(t, entries, 1)
+					dir = filepath.Join(lease, entries[0].Name())
+					if mode == "empty" {
+						return nil
+					}
+					for i := range 2 {
+						require.NoError(t, add(contracts.Contract{ID: "env::A", Line: i + 1}))
+					}
+					if mode == "final write" {
+						return os.Mkdir(contractSourceRunPath(dir, 1), 0o700)
+					}
+					return nil
+				},
+				func(read func(func(contracts.Contract) error) error) error {
+					require.NotEqual(t, "final write", mode)
+					if mode == "replay" {
+						require.NoError(t, os.Remove(contractSourceRunPath(dir, 1)))
+					}
+					var lines []int
+					err := read(func(c contracts.Contract) error {
+						lines = append(lines, c.Line)
+						return nil
+					})
+					switch mode {
+					case "replay":
+						require.Error(t, err)
+						require.Equal(t, []int{1}, lines)
+					case "empty":
+						require.NoError(t, err)
+						require.Empty(t, lines)
+					case "tail":
+						require.NoError(t, err)
+						require.Equal(t, []int{1, 2}, lines)
+					}
+					return nil // an ignored replay failure must still abort
+				})
+			if mode == "final write" || mode == "replay" {
+				require.Error(t, err)
+				require.Zero(t, stats)
+			} else {
+				require.NoError(t, err)
+				if mode == "tail" {
+					require.Equal(t, 2, stats.Records)
+					require.Equal(t, 1, stats.SpillRuns)
+				} else {
+					require.Zero(t, stats)
+				}
+			}
+			entries, err := os.ReadDir(lease)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+		})
+	}
+}
+
+func TestRebuildContractSourceRecordSizeLimit(t *testing.T) {
+	// Lengths in the final range have the same uvarint width.
+	c := contracts.Contract{ID: strings.Repeat("a", goldBufferBytes)}
+	e := contractFactsEncoder{}
+	writeFactRecord(&e, c)
+	require.NoError(t, e.err)
+	c.ID = c.ID[:len(c.ID)-(len(e.buf)+8+48-goldBufferBytes-1)]
+	e = contractFactsEncoder{}
+	writeFactRecord(&e, c)
+	require.NoError(t, e.err)
+	require.Equal(t, goldBufferBytes+1, len(e.buf)+8+48)
+	var runs sortedRuns
+	var stats RebuildContractSourceStats
+	require.ErrorIs(t, appendContractSource(t.Context(), &runs, &stats, c), ErrRebuildLinkInputSize)
+	require.Zero(t, stats)
+	require.Empty(t, runs.rows)
+}
