@@ -21,7 +21,7 @@ func TestRebuildContractShapeBatchesFromCheckedReceipts(t *testing.T) {
 	idx := newTestIndexer(nativeGraph)
 	idx.SetRootPath(root)
 	t.Cleanup(idx.Close)
-	src := []byte("package p\ntype Payload struct {\n ID int `json:\"id\"`\n Label string `json:\"label,omitempty\"`\n internal bool\n}\nfunc Handler() {}\ntype Scalar string\ntype Sibling struct {\n Key string\n}\n")
+	src := []byte("package p\ntype Payload struct {\n ID int `json:\"id\"`\n Label string `json:\"label,omitempty\"`\n internal bool\n}\nfunc Handler() {}\ntype Sibling struct {\n Key string\n}\ntype Scalar string\n")
 	name := filepath.Join(root, path)
 	require.NoError(t, os.WriteFile(name, src, 0o600))
 	ext, ok := idx.registry.GetByLanguage("go")
@@ -71,6 +71,11 @@ func TestRebuildContractShapeBatchesFromCheckedReceipts(t *testing.T) {
 	require.NotEmpty(t, handler)
 	require.NotEmpty(t, scalar)
 	require.NotEmpty(t, sibling)
+	// Keep Scalar last: native extractGoShape falls forward to the next
+	// opening brace when the selected declaration has no brace of its own.
+	scalarNode := nativeGraph.GetNode(scalar)
+	require.NotNil(t, scalarNode)
+	require.Nil(t, contracts.ExtractShape(path, src, scalarNode.StartLine, scalarNode.EndLine))
 	require.Contains(t, facts.Shapes, scalar)
 	require.Nil(t, facts.Shapes[scalar], "accepted no-shape declaration")
 	c := contracts.Contract{
@@ -81,6 +86,7 @@ func TestRebuildContractShapeBatchesFromCheckedReceipts(t *testing.T) {
 	registry := contracts.NewRegistry()
 	registry.Add(c)
 	idx.snapshotContractShapes(registry)
+	require.NotContains(t, nativeGraph.GetNode(scalar).Meta, "shape")
 	want, ok := nativeGraph.GetNode(payload).Meta["shape"].(*contracts.Shape)
 	require.True(t, ok)
 	require.NotNil(t, want)

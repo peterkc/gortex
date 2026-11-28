@@ -208,13 +208,16 @@ func TestRebuildEarlyRouterHandlerElection(t *testing.T) {
 			}
 			sources := []struct{ path, language, text string }{
 				{handlerPath, handlerLanguage, handlerSource},
+				// A state member call is still an Express route for the native
+				// contract and mount patterns. Its root is not app/router, so
+				// the parser does not give each line its own synthetic owner.
 				{"routes.ts", "typescript", `import express from 'express';
-const app = express();
 const router = express.Router();
+const state = { app: express(), router };
 export function register() {
-    app.get("/x", first);
-    router.get("/x", second);
-    app.use("/api", router);
+    state.app.get("/x", first);
+    state.router.get("/x", second);
+    state.app.use("/api", router);
 }
 `},
 			}
@@ -250,7 +253,11 @@ export function register() {
 				native.AddAllScoped(cloneContractRecords(facts.Records), "", "", "")
 			}
 			const raw, mounted = "http::GET::/x", "http::GET::/api/x"
-			require.Len(t, native.ByID(raw), 2)
+			registrations := native.ByID(raw)
+			require.Len(t, registrations, 2)
+			require.Equal(t, "routes.ts::register", registrations[0].SymbolID)
+			require.Equal(t, registrations[0].SymbolID, registrations[1].SymbolID)
+			require.NotEqual(t, registrations[0].Line, registrations[1].Line)
 			require.Len(t, native.All(), 1, "the raw registry hides the mounted registration")
 			require.Equal(t, "first", native.All()[0].Meta["handler_ident"])
 			f, err := idx.readRebuildEarlyContractFacts(ctx, b.RebuildView(), job, store, &census, nil)
