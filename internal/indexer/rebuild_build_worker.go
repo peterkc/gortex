@@ -284,7 +284,7 @@ func buildRebuildStages(
 	var classifications map[string]rebuildClassificationFact
 	var gitPolicy rebuildGitPolicyProof
 	var exactCheckout, rootDepFact bool
-	var rootDeps []string
+	var rootFact rebuildGoManifest
 	if digest := rebuildDigest(req.Witness.FrozenInputs); digest != (rebuildDigest{}) {
 		if err := visitRebuildInputSidecar(ctx, lease, digest, func(row rebuildSidecarRow) error {
 			if err := gitPolicy.add(row); err != nil {
@@ -298,8 +298,10 @@ func buildRebuildStages(
 					return fmt.Errorf("%w: duplicate root Go manifest", errRebuildGoEvidence)
 				}
 				rootDepFact = true
-				if row.Config != nil {
-					rootDeps = row.Config.DirectDeps
+				rootFact = rebuildGoManifest{Path: string(row.Path), Present: row.Present, Digest: row.Digest}
+				if p := row.Config; p != nil {
+					rootFact.RootClaim, rootFact.OwnerModule, rootFact.DirectDeps, rootFact.Replace = p.RootClaim, p.OwnerModule, p.DirectDeps, p.Replace
+					rootFact.ContractDeps = p.ContractDeps
 				}
 			}
 			if row.Classification == nil {
@@ -370,66 +372,98 @@ func buildRebuildStages(
 	if err != nil {
 		return err
 	}
-	var earlyFacts *rebuildEarlyContractFacts
-	if exactCheckout {
-		if !rootDepFact {
-			return fmt.Errorf("%w: manifest row %q not covered", errRebuildGoEvidence, "go.mod")
-		}
-		earlyFacts, err = idx.readRebuildEarlyContractFacts(ctx, private.RebuildView(), job, store, counts.census, rootDeps)
-		if err != nil {
-			return err
-		}
-	}
-	if err := runRebuildFrozenMain(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, counts.census, link, req.SkipPlaceholderSources); err != nil {
-		return err
-	}
-	// Rebuild leaves deferred-language file imports off. Native cold
-	// materialization runs that turn before frameworks.
-	// As in native cold materialization, dataflow runs even if main had
-	// no pending frontier.
-	receipts := counts.census.receipts
-	if err := runRebuildArgOf(ctx, private, receipts); err != nil {
-		return err
-	}
-	if err := runRebuildReturnsTo(ctx, private, receipts); err != nil {
-		return err
-	}
-	if err := resolver.RunRebuildImplements(ctx, private, receipts); err != nil {
-		return err
-	}
-	if err := resolver.RunRebuildOverrides(ctx, private, receipts); err != nil {
-		return err
-	}
-	// Legacy test/standalone captures without a checkout namespace were never
-	// qualified to continue through the full native cold tail.
-	if exactCheckout && cfg.Coverage.IsEnabled("modules") {
-		digest := rebuildDigest(req.Witness.FrozenInputs)
-		if err := runRebuildModules(ctx, lease, digest, private, inputs); err != nil {
-			return err
-		}
-		if err := runRebuildPackageWorkspace(ctx, lease, digest, private); err != nil {
-			return err
-		}
-	}
 	var earlyIDs rebuildEarlyContractIDs
-	if exactCheckout {
-		earlyIDs, err = earlyFacts.finish(ctx, private.RebuildView(), idx.repoPrefix, idx.workspaceID, idx.projectID)
-		if err != nil {
-			return err
-		}
-		if paths := earlyFacts.routerOverlapFiles; len(paths) != 0 {
-			logger.Info("rebuild router native map-order differences", zap.Int("files", len(paths)))
-			for _, path := range paths {
-				logger.Debug("rebuild router native map-order difference", zap.String("path", path))
+	runMain := func() error {
+		var earlyFacts *rebuildEarlyContractFacts
+		var err error
+		if exactCheckout {
+			if !rootDepFact {
+				return fmt.Errorf("%w: manifest row %q not covered", errRebuildGoEvidence, "go.mod")
+			}
+			earlyFacts, err = idx.readRebuildEarlyContractFacts(ctx, private.RebuildView(), job, store, counts.census, rootFact.DirectDeps)
+			if err != nil {
+				return err
 			}
 		}
-		earlyFacts = nil
-		// The Manifest and FileGraph offers are complete. Only private readers
-		// run until the overlay is removed below, before any later stage seal.
-		if err := private.BeginRebuildContractOverlay(ctx, earlyIDs); err != nil {
+
+		if err := runRebuildFrozenMain(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, counts.census, link, req.SkipPlaceholderSources); err != nil {
 			return err
 		}
+		// Rebuild leaves deferred-language file imports off. Native cold
+		// materialization runs that turn before frameworks.
+		// As in native cold materialization, dataflow runs even if main had
+		// no pending frontier.
+		receipts := counts.census.receipts
+		if err := runRebuildArgOf(ctx, private, receipts); err != nil {
+			return err
+		}
+		if err := runRebuildReturnsTo(ctx, private, receipts); err != nil {
+			return err
+		}
+		if err := resolver.RunRebuildImplements(ctx, private, receipts); err != nil {
+			return err
+		}
+		if err := resolver.RunRebuildOverrides(ctx, private, receipts); err != nil {
+			return err
+		}
+		// Legacy test/standalone captures without a checkout namespace were never
+		// qualified to continue through the full native cold tail.
+		if exactCheckout && cfg.Coverage.IsEnabled("modules") {
+			digest := rebuildDigest(req.Witness.FrozenInputs)
+			if err := runRebuildModules(ctx, lease, digest, private, inputs); err != nil {
+				return err
+			}
+			if err := runRebuildPackageWorkspace(ctx, lease, digest, private); err != nil {
+				return err
+			}
+		}
+		if exactCheckout {
+			ids, err := earlyFacts.finish(ctx, private.RebuildView(), idx.repoPrefix, idx.workspaceID, idx.projectID)
+			if err != nil {
+				return err
+			}
+			earlyIDs = ids
+			if paths := earlyFacts.routerOverlapFiles; len(paths) != 0 {
+				logger.Info("rebuild router native map-order differences", zap.Int("files", len(paths)))
+				for _, path := range paths {
+					logger.Debug("rebuild router native map-order difference", zap.String("path", path))
+				}
+			}
+			earlyFacts = nil
+		}
+		return nil
 	}
+	runTail := func() error {
+		if exactCheckout {
+			if err := private.BeginRebuildContractOverlay(ctx, earlyIDs); err != nil {
+				return err
+			}
+		}
+		if err := idx.runRebuildPrivateTail(ctx, lease, private, req, cfg, &counts, classifications, exactCheckout, earlyIDs, logger); err != nil {
+			return err
+		}
+		if exactCheckout {
+			return private.EndRebuildContractOverlay(ctx)
+		}
+		return nil
+	}
+	if err := runMain(); err != nil {
+		return err
+	}
+	if err := runTail(); err != nil {
+		return err
+	}
+	// The supported tails only changed private scratch. Relation projection
+	// and its remaining tails, derived and search stages are incomplete.
+	return errRebuildBuildIncomplete
+}
+
+// runRebuildPrivateTail preserves the native post-contract-ID turn order.
+func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, private *store_pebble.BuildStore,
+	req rebuildBuildRequest, cfg config.IndexConfig, counts *rebuildParsedCounts, classifications map[string]rebuildClassificationFact,
+	exactCheckout bool, earlyIDs rebuildEarlyContractIDs, logger *zap.Logger,
+) error {
+	receipts := counts.census.receipts
 	if err := runRebuildTestFiles(ctx, private, receipts, classifications); err != nil {
 		return err
 	}
@@ -920,12 +954,5 @@ func buildRebuildStages(
 	}); err != nil {
 		return fmt.Errorf("settle platform calls: %w", err)
 	}
-	if exactCheckout {
-		if err := private.EndRebuildContractOverlay(ctx); err != nil {
-			return err
-		}
-	}
-	// The supported tails only changed private scratch. Relation projection
-	// and its remaining tails, derived and search stages are incomplete.
-	return errRebuildBuildIncomplete
+	return nil
 }
