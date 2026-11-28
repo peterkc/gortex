@@ -330,3 +330,75 @@ func TestRebuildGoBuiltinPackageScope(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildGoBuiltinScopeRejectsMalformedReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scope any
+		want  string
+	}{
+		{"non-string", true, "Go builtin package scope receipt"},
+		{"empty scope", "", "Go builtin package scope receipt"},
+		{"whitespace scope", " ", "Go builtin package identifier"},
+		{"invalid package", "invalid-pkg", "Go builtin package identifier"},
+		{"invalid declaration", "p notABuiltin", "Go builtin package declaration name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			worker, _, _, owner, _, _, _ := relationsStageFixture(t, FullProfile)
+			const path = "invalid.go"
+			node := &graph.Node{ID: path, FilePath: path, Name: path, Kind: graph.KindFile, Language: "go", RepoPrefix: owner.RepoPrefix,
+				Meta: map[string]any{RebuildGoBuiltinScopeReceiptMeta: tc.scope}}
+			err := worker.AddParsedFile(owner.RepoPrefix, ParseFacts{
+				EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: path, NodeCount: 1}, Nodes: []*graph.Node{node},
+			})
+			require.ErrorIs(t, err, errInvalidRecord)
+			require.ErrorContains(t, err, tc.want)
+			stored, err := worker.pendingNode(path)
+			require.NoError(t, err)
+			require.Nil(t, stored)
+		})
+	}
+}
+
+func TestRebuildGoBuiltinScopeMissingPackageWithoutBlocker(t *testing.T) {
+	worker, _, _, owner, _, _, _ := relationsStageFixture(t, FullProfile)
+	const path = "other/caller.go"
+	worker.AddNode(&graph.Node{ID: path, FilePath: path, Name: path, Kind: graph.KindFile, Language: "go", RepoPrefix: owner.RepoPrefix})
+	clear, err := rebuildGoBuiltinPackageClear(worker.pending, path, owner.RepoPrefix, "len")
+	require.NoError(t, err)
+	require.False(t, clear, "missing caller package is not evidence of absence")
+	putTestGoBuiltinScope(t, worker, owner.RepoPrefix, path, "p")
+	clear, err = rebuildGoBuiltinPackageClear(worker.pending, path, owner.RepoPrefix, "len")
+	require.NoError(t, err)
+	require.True(t, clear)
+}
+
+func TestRebuildGoLanguageProbeDoesNotBoundNamedNodeMetadata(t *testing.T) {
+	worker, _, _, _, _, _, _ := relationsStageFixture(t, FullProfile)
+	worker.AddNode(&graph.Node{ID: "a.go", Name: "a", Kind: graph.KindFunction, Language: "go",
+		Meta: map[string]any{"body": strings.Repeat("A", 16<<20)}})
+	ok, err := worker.rebuildHasNamedGo(t.Context())
+	require.NoError(t, err)
+	require.True(t, ok)
+}
+
+func TestRebuildReceiptNodeDigestIgnoresOnlyPrivateGoScope(t *testing.T) {
+	ctx := t.Context()
+	worker, _, _, _, _, _, _ := relationsStageFixture(t, FullProfile)
+	// The package incumbent census is by ID prefix, not node kind. A file
+	// with this spelling can also be an incumbent candidate.
+	const id = "external-call::dep::example.go"
+	receipt := &graph.Node{ID: id, FilePath: id, Name: id, Kind: graph.KindFile, Language: "go",
+		Meta: map[string]any{RebuildGoBuiltinScopeReceiptMeta: "p len", "other": "keep"}}
+	facts := ParseFacts{Nodes: []*graph.Node{receipt}, File: graph.FileMetaRow{FilePath: id, NodeCount: 1}, EffectiveLanguage: "go"}
+	require.NoError(t, worker.AddParsedFile("", facts))
+	pass := rebuildExternalCallPass{b: worker}
+	require.NoError(t, pass.receipts(ctx, func(yield func(ParseFacts, error) bool) { yield(facts, nil) }))
+	require.NoError(t, pass.provePackage(id))
+	live, err := worker.pendingNode(id)
+	require.NoError(t, err)
+	require.NotNil(t, live)
+	live.Meta["other"] = "different"
+	worker.AddNode(live)
+	require.ErrorContains(t, pass.provePackage(id), "unproved retained external-call package incumbent")
+}

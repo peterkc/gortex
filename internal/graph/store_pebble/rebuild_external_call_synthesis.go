@@ -260,7 +260,7 @@ func (p *rebuildExternalCallPass) receipts(ctx context.Context, receipts iter.Se
 				return err
 			}
 			if strings.HasPrefix(n.ID, "external-call::") {
-				digest, err := rebuildExternalCallNodeDigest(n)
+				digest, err := rebuildExternalCallNodeDigest(projectRebuildReceiptNode(n))
 				if err != nil {
 					return err
 				}

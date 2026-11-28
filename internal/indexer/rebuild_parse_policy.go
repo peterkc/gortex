@@ -67,7 +67,9 @@ func (idx *Indexer) installRebuildParsePolicy(policy rebuildParsePolicy) {
 // binary layout or the shared native contract extraction policy.
 const rebuildContractCaptureVersion = 1
 
-const rebuildBuiltinReceiverCaptureVersion = 3
+// 3: Go package-scope builtin declarations on the file receipt.
+// 4: JS/TS lexical-scope receiver bindings, including host delegates.
+const rebuildBuiltinReceiverCaptureVersion = 4
 
 // The same language selection controls parser opt-in and receipt invalidation.
 func capturesRebuildBuiltinReceiverFacts(lang string) bool {

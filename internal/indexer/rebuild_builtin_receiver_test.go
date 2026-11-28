@@ -13,6 +13,7 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/resolver"
 	"go.uber.org/zap"
 )
 
@@ -199,4 +200,181 @@ func TestRebuildReceiverFingerprintKeepsRawEdgesProof(t *testing.T) {
 	edge.Meta["receiver_type"] = "T"
 	stampRebuildExtractionGraphFingerprint(result)
 	require.NotEqual(t, raw, file.Meta[sourceRawEdgesFingerprintMeta])
+}
+
+func TestRebuildGoBuiltinScopeFromExtraction(t *testing.T) {
+	for _, file := range []string{"pkg/use.go", "pkg/use_test.go"} {
+		for _, blocked := range []bool{false, true} {
+			name := file + "/unbound"
+			if blocked {
+				name = file + "/same_package_declaration"
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx := t.Context()
+				idx := newTestIndexer(graph.New())
+				t.Cleanup(idx.Close)
+				idx.SetRootPath(t.TempDir())
+				ext := languages.NewGoExtractor()
+				caller, err := idx.extractPreparedRebuildFile(ctx, file, ext, []byte("package p\nfunc use(xs []int) int { return len(xs) }\n"))
+				require.NoError(t, err)
+				siblingSource := "package p\nfunc other(xs []int) int { return 1 }\n"
+				if blocked {
+					siblingSource = "package p\nfunc len(xs []int) int { return 1 }\n"
+				}
+				sibling, err := idx.extractPreparedRebuildFile(ctx, "pkg/sibling.go", ext, []byte(siblingSource))
+				require.NoError(t, err)
+				for _, facts := range []store_pebble.ParseFacts{sibling, caller} {
+					var scope string
+					for _, n := range facts.Nodes {
+						if n.Kind == graph.KindFile {
+							scope, _ = n.Meta[store_pebble.RebuildGoBuiltinScopeReceiptMeta].(string)
+						}
+					}
+					want := "p"
+					if blocked && facts.File.FilePath == sibling.File.FilePath {
+						want = "p len"
+					}
+					require.Equal(t, want, scope)
+				}
+				receipts := func(yield func(store_pebble.ParseFacts, error) bool) {
+					if yield(sibling, nil) {
+						yield(caller, nil)
+					}
+				}
+				build, dir := openRebuildTestFileStore(t)
+				claims, err := build.ReduceRebuildSharedClaims(ctx, 1<<20, receipts, func(keep func(string, uint64) (bool, error)) error {
+					for i, facts := range []store_pebble.ParseFacts{sibling, caller} {
+						if err := build.AddParsedFileSelected("", facts, func(id string) (bool, error) {
+							return keep(id, uint64(i+1))
+						}); err != nil {
+							return err
+						}
+					}
+					return nil
+				})
+				require.NoError(t, err)
+				require.Zero(t, claims.UnexplainedNodes)
+				for _, path := range []string{file, sibling.File.FilePath} {
+					n, err := build.RebuildView().Node(ctx, path)
+					require.NoError(t, err)
+					require.NotNil(t, n)
+					require.NotContains(t, n.Meta, store_pebble.RebuildGoBuiltinScopeReceiptMeta)
+				}
+				opts := store_pebble.RebuildLinkOptions{ScratchParent: dir, SpillBytes: 1 << 20}
+				require.NoError(t, resolver.RunRebuildMain(ctx, build, opts, resolver.RebuildMainInputs{
+					SelectCallers: func(page []*graph.Edge) ([]*graph.Edge, error) { return page, nil },
+					Receipts:      receipts,
+				}))
+				require.NoError(t, runRebuildTestFiles(ctx, build, receipts, nil))
+				_, err = applyRebuildCloneRelations(ctx, build, receipts, rebuildClonePredecessors{fileClaims: &claims}, 0.8)
+				require.NoError(t, err)
+				const builtin = "builtin::go::len"
+				var calls []*graph.Edge
+				require.NoError(t, build.RebuildView().VisitEdges(ctx, func(e *graph.Edge) error {
+					if e.From == file+"::use" && e.Kind == graph.EdgeCalls {
+						calls = append(calls, e)
+					}
+					return nil
+				}))
+				require.Len(t, calls, 1)
+				if blocked {
+					// Main can resolve the ordinary declaration before builtin fallback.
+					// On a separate build, keep the same raw caller and receipts, and
+					// exercise status settlement on a selected native builtin move.
+					extractor := func(string) string { return "go" }
+					require.NoError(t, build.SettleRebuildPlatformCalls(ctx, extractor))
+					require.Equal(t, "pkg/sibling.go::len", calls[0].To)
+					status, ok := calls[0].LinkStatus()
+					require.True(t, ok)
+					require.Equal(t, graph.LinkStatusResolved, status)
+					build, _ = openRebuildTestFileStore(t)
+					require.NoError(t, build.AddParsedFile("", sibling))
+					require.NoError(t, build.AddParsedFile("", caller))
+					require.NoError(t, build.RebuildGoBuiltins(ctx, true, 1<<20, func(e *graph.Edge, _ func(string) (*graph.Node, error)) (string, error) {
+						if e.Kind == graph.EdgeCalls && e.To == "unresolved::len" {
+							return builtin, nil
+						}
+						return "", nil
+					}))
+				} else {
+					require.Equal(t, builtin, calls[0].To)
+				}
+				require.NoError(t, build.SettleRebuildPlatformCalls(ctx, func(string) string { return "go" }))
+				var matches []*graph.Edge
+				require.NoError(t, build.RebuildView().VisitEdges(ctx, func(e *graph.Edge) error {
+					if e.Kind == graph.EdgeCalls && e.From == file+"::use" && e.To == builtin {
+						matches = append(matches, e)
+					}
+					return nil
+				}))
+				require.Len(t, matches, 1)
+				status, ok := matches[0].LinkStatus()
+				require.True(t, ok)
+				want := graph.LinkStatusPlatform
+				if blocked {
+					want = graph.LinkStatusProbablePlatform
+				}
+				require.Equal(t, want, status)
+			})
+		}
+	}
+}
+
+func TestRebuildReceiverV2AndV3ReceiptsAreStale(t *testing.T) {
+	for _, tc := range []struct {
+		file, language, source string
+		extractor              parser.Extractor
+		versions               []uint64
+	}{
+		{"a.go", "go", "package p\nfunc use(xs []int) int { return len(xs) }\n", languages.NewGoExtractor(), []uint64{2, 3}},
+		{"a.js", "javascript", "function use(xs) { xs.slice(0); }", languages.NewJavaScriptExtractor(), []uint64{3}},
+		{"a.ts", "typescript", "function use(xs: number[]) { xs.slice(0); }", languages.NewTypeScriptExtractor(), []uint64{3}},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			ctx := t.Context()
+			root, src := rebuildInputFixture(t)
+			writeFile(t, filepath.Join(root, tc.file), tc.source)
+			reg := parser.NewRegistry()
+			reg.Register(tc.extractor)
+			idx := New(graph.New(), reg, config.Default().Index, zap.NewNop())
+			t.Cleanup(idx.Close)
+			idx.SetRootPath(root)
+			idx.installRebuildParsePolicy(freezeRebuildParsePolicy(root, idx.config))
+			input, _, err := readRebuildInput(ctx, src, tc.file, tc.language, 1024)
+			require.NoError(t, err)
+			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			recipe := rebuildDigest{1}
+			ordinary := idx.rebuildBaseExtractorRecipe(recipe, input)
+			payload := encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
+				File: graph.FileMetaRow{FilePath: tc.file}, EffectiveLanguage: tc.language,
+			})
+			oldKeys := make([]rebuildDigest, 0, len(tc.versions))
+			for _, version := range tc.versions {
+				old := append([]byte("gortex/rebuild/contract-parse-receiver\x00"), ordinary[:]...)
+				old = append(old, store_pebble.ContractParseFactsFormat)
+				old = binary.AppendUvarint(old, version)
+				old = binary.AppendUvarint(old, rebuildContractCaptureVersion)
+				old = binary.AppendUvarint(old, postExtractionPolicyVersion)
+				old = binary.AppendUvarint(old, uint64(extractorVersionForLang(tc.language)))
+				old = binary.AppendUvarint(old, 0)
+				key := input.parseKey(blake3.Sum256(append(old, idx.rebuildContractPolicy().suffix...)))
+				require.NoError(t, store.write(key, payload))
+				oldKeys = append(oldKeys, key)
+			}
+			bounds := rebuildTransformBounds{FileBytes: 1024, CaptureBytes: 1024}
+			fresh, reused, err := idx.loadRebuildFile(ctx, src, store, input, recipe, bounds)
+			require.NoError(t, err)
+			require.False(t, reused)
+			require.NotEmpty(t, fresh.Nodes)
+			for _, key := range oldKeys {
+				saved, err := store.read(key)
+				require.NoError(t, err)
+				require.Equal(t, payload, saved)
+			}
+			cached, reused, err := idx.loadRebuildFile(ctx, nil, store, input, recipe, bounds)
+			require.NoError(t, err)
+			require.True(t, reused)
+			require.Equal(t, fresh, cached)
+		})
+	}
 }
