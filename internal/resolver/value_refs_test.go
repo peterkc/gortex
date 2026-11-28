@@ -297,4 +297,12 @@ func TestValueRefDeclarationElectionRetainsEncounterOrder(t *testing.T) {
 		require.Equal(t, tc.want, id)
 		require.True(t, conditional)
 	}
+	id, conditional := electValueRefDeclaration(5, func(yield func(string, int) bool) {
+		yield("only", 9)
+	})
+	require.Equal(t, "only", id)
+	require.False(t, conditional)
+	id, conditional = electValueRefDeclaration(5, func(func(string, int) bool) {})
+	require.Empty(t, id)
+	require.False(t, conditional)
 }

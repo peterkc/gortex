@@ -385,7 +385,7 @@ func contractOwnerEndpoint(c contracts.Contract, files map[contractFileOwnerKey]
 	return files[contractFileOwnerKey{c.RepoPrefix, c.FilePath}]
 }
 
-// contractGraphNode writes the selected record for one full contract ID.
+// contractGraphNode builds the contract node row for c, the record chosen for its ID.
 func contractGraphNode(c contracts.Contract, hasOwner bool) *graph.Node {
 	return &graph.Node{
 		ID: c.ID, Kind: graph.KindContract, Name: c.ID, FilePath: c.FilePath, Language: "contract",

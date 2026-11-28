@@ -7,7 +7,10 @@ import (
 )
 
 // classifyBuiltin gives unresolved JS/TS or Python methods their legacy
-// name-only UI category. See graph.LegacyBuiltinCategory for the tables.
+// name-only UI category. A category containing "/" means shared across
+// multiple builtin types, which the UI displays as "multi". Go stdlib
+// calls use parser import aliases instead. See graph.LegacyBuiltinCategory
+// for the tables.
 func classifyBuiltin(method, lang string) (string, bool) {
 	return graph.LegacyBuiltinCategory(method, lang)
 }
