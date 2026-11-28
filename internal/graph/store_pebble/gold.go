@@ -76,15 +76,25 @@ func (e *sortedRunLimitError) Error() string {
 	return fmt.Sprintf("pebble %s exceeds %d sorted runs", e.name, goldFileCap)
 }
 
-func (s *sortedRuns) flush() (err error) {
+func (s *sortedRuns) flush() error {
 	if len(s.rows) == 0 {
 		return nil
 	}
 	if len(s.paths) >= goldFileCap {
 		return &sortedRunLimitError{name: s.name}
 	}
-	slices.SortFunc(s.rows, func(a, b row) int { return bytes.Compare(a.key, b.key) })
 	path := filepath.Join(s.dir, fmt.Sprintf("%s-%04d.sst", s.name, len(s.paths)))
+	if err := s.writeRun(path); err != nil {
+		return err
+	}
+	s.paths = append(s.paths, path)
+	return nil
+}
+
+// writeRun writes just one buffer. The owner tracks its path for a merge or
+// reconstructs the name when runs already have disjoint ordered ranges.
+func (s *sortedRuns) writeRun(path string) (err error) {
+	slices.SortFunc(s.rows, func(a, b row) int { return bytes.Compare(a.key, b.key) })
 	w, err := newTable(path, s.options.MakeWriterOptions(goldLevel, s.format))
 	if err != nil {
 		return err
@@ -100,7 +110,6 @@ func (s *sortedRuns) flush() (err error) {
 		}
 		last = row.key
 	}
-	s.paths = append(s.paths, path)
 	clear(s.rows)
 	s.rows = s.rows[:0]
 	s.bytes = 0
