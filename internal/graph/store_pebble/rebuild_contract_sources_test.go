@@ -112,3 +112,31 @@ func TestRebuildContractSourcesFailureCleansOwnedScratch(t *testing.T) {
 		require.Equal(t, "unowned", contents[0].Name())
 	}
 }
+
+func TestRebuildContractSourcesReplayBeyondMergeRunCap(t *testing.T) {
+	const count = goldFileCap + 1
+	stats, err := WithRebuildContractSources(t.Context(), t.TempDir(), 1,
+		func(add func(contracts.Contract) error) error {
+			for i := range count {
+				if err := add(contracts.Contract{ID: "env::REPEATED", Line: i + 1}); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		func(read func(func(contracts.Contract) error) error) error {
+			var seen int
+			err := read(func(c contracts.Contract) error {
+				seen++
+				require.Equal(t, seen, c.Line)
+				return nil
+			})
+			require.NoError(t, err)
+			require.Equal(t, count, seen)
+			return nil
+		})
+	require.NoError(t, err)
+	require.Equal(t, count, stats.Records)
+	require.Equal(t, count-1, stats.SpillRuns)
+	require.Positive(t, stats.SpillBytes)
+}

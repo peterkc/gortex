@@ -45,7 +45,7 @@ func WithRebuildContractSources(ctx context.Context, scratchParent string, spill
 			stats = RebuildContractSourceStats{}
 		}
 	}()
-	runs := sortedRuns{dir: dir, name: "source", options: headOptions(), format: sstable.TableFormatPebblev4, limit: min(spillAt, goldBufferBytes)}
+	runs := sortedRuns{dir: dir, options: headOptions(), format: sstable.TableFormatPebblev4, limit: min(spillAt, goldBufferBytes)}
 	var captureErr error
 	collecting := true
 	err = collect(func(c contracts.Contract) error {
@@ -61,8 +61,12 @@ func WithRebuildContractSources(ctx context.Context, scratchParent string, spill
 	if err = errors.Join(err, captureErr, ctx.Err()); err != nil {
 		return stats, err
 	}
-	if err := runs.flush(); err != nil {
-		return stats, err
+	count := stats.SpillRuns
+	if len(runs.rows) != 0 {
+		if err := runs.writeRun(contractSourceRunPath(dir, count)); err != nil {
+			return stats, err
+		}
+		count++
 	}
 	runs.rows = nil
 	active := true
@@ -74,8 +78,8 @@ func WithRebuildContractSources(ctx context.Context, scratchParent string, spill
 		// Ordinals are monotone between runs as well as inside each run. Read
 		// one table at a time rather than opening all runs to merge them.
 		var next uint64
-		for _, path := range runs.paths {
-			if err := visitContractSourceRun(ctx, &runs, path, &next, yield); err != nil {
+		for i := range count {
+			if err := visitContractSourceRun(ctx, &runs, contractSourceRunPath(dir, i), &next, yield); err != nil {
 				return err
 			}
 		}
@@ -85,6 +89,10 @@ func WithRebuildContractSources(ctx context.Context, scratchParent string, spill
 		return ctx.Err()
 	})
 	return stats, errors.Join(err, ctx.Err())
+}
+
+func contractSourceRunPath(dir string, ordinal int) string {
+	return filepath.Join(dir, fmt.Sprintf("source-%08d.sst", ordinal))
 }
 
 func appendContractSource(ctx context.Context, runs *sortedRuns, stats *RebuildContractSourceStats, c contracts.Contract) error {
@@ -97,21 +105,24 @@ func appendContractSource(ctx context.Context, runs *sortedRuns, stats *RebuildC
 		return e.err
 	}
 	key := binary.BigEndian.AppendUint64(nil, uint64(stats.Records))
-	if len(key)+len(e.buf)+48 > goldBufferBytes {
+	size := len(key) + len(e.buf) + 48
+	if size > goldBufferBytes {
 		return fmt.Errorf("%w: contract source record", ErrRebuildLinkInputSize)
 	}
-	previous := len(runs.paths)
-	if err := runs.add(key, e.buf); err != nil {
-		return err
-	}
-	if len(runs.paths) != previous {
-		info, err := os.Stat(runs.paths[previous])
+	if len(runs.rows) != 0 && runs.bytes+size > runs.limit {
+		path := contractSourceRunPath(runs.dir, stats.SpillRuns)
+		if err := runs.writeRun(path); err != nil {
+			return err
+		}
+		info, err := os.Stat(path)
 		if err != nil {
 			return err
 		}
 		stats.SpillRuns++
 		stats.SpillBytes += info.Size()
 	}
+	runs.rows = append(runs.rows, row{key, e.buf})
+	runs.bytes += size
 	stats.Records++
 	stats.PeakBatchBytes = max(stats.PeakBatchBytes, runs.bytes)
 	return nil
