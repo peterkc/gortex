@@ -27,6 +27,13 @@ func TestRebuildContractSelectionKeepsIndependentSets(t *testing.T) {
 		require.NoError(t, r.ClearID("empty"))
 		var escaped iter.Seq2[string, error]
 		require.NoError(t, r.WithContractSelection(func(s *RebuildContractSelection) error {
+			require.Error(t, s.SelectID("z"))
+			for id, err := range s.CompleteIDs() {
+				require.Empty(t, id)
+				require.Error(t, err)
+			}
+			require.NoError(t, s.FreezeCompleteIDs())
+			require.Error(t, s.FreezeCompleteIDs())
 			escaped = s.CompleteIDs()
 			require.Equal(t, []string{"a", "z"}, collect(s.CompleteIDs()))
 			require.Empty(t, collect(s.SelectedIDs()))
@@ -55,6 +62,7 @@ func TestRebuildContractSelectionKeepsIndependentSets(t *testing.T) {
 		require.NoError(t, r.ClearID("z"))
 		require.NoError(t, r.ClearID("a"))
 		return r.WithContractSelection(func(s *RebuildContractSelection) error {
+			require.NoError(t, s.FreezeCompleteIDs())
 			require.Empty(t, collect(s.CompleteIDs()))
 			require.Empty(t, collect(s.SelectedIDs()))
 			require.Empty(t, collect(s.ShapeRefs()))

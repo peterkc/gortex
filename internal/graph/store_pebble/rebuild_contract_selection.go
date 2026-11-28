@@ -13,11 +13,11 @@ import (
 // The selection is serial and valid only inside WithContractSelection.
 type RebuildContractSelection struct {
 	records *RebuildContractRecords
+	frozen  bool
 }
 
-// WithContractSelection freezes the complete native representative ID set,
-// including omitted records but excluding empty registry buckets. It runs
-// before selecting any output. An empty complete set is still built.
+// WithContractSelection lends the independent ID and shape-reference scratch.
+// FreezeCompleteIDs must run after the final native ID rewrite, before selection.
 func (r *RebuildContractRecords) WithContractSelection(use func(*RebuildContractSelection) error) (err error) {
 	if err := r.ready(); err != nil {
 		return err
@@ -38,12 +38,25 @@ func (r *RebuildContractRecords) WithContractSelection(use func(*RebuildContract
 		s.records = nil
 		err = errors.Join(err, r.build.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
 	}()
-	if err := r.VisitRepresentatives(func(c RebuildContractRecord) error {
+	return use(s)
+}
+
+// FreezeCompleteIDs captures native representatives, including omitted records
+// but excluding empty registry buckets. A frozen empty set is built evidence.
+func (s *RebuildContractSelection) FreezeCompleteIDs() error {
+	if err := s.ready(); err != nil {
+		return err
+	}
+	if s.frozen {
+		return invalid("complete contract IDs already frozen")
+	}
+	if err := s.records.VisitRepresentatives(func(c RebuildContractRecord) error {
 		return s.put('c', c.ID)
 	}); err != nil {
 		return err
 	}
-	return use(s)
+	s.frozen = true
+	return nil
 }
 
 func (s *RebuildContractSelection) ready() error {
@@ -82,6 +95,9 @@ func (s *RebuildContractSelection) contains(tag byte, id string) (bool, error) {
 // SelectID records the positive D83 decision for the elected native winner,
 // before encoding any batch. Never use it for a later replacement winner.
 func (s *RebuildContractSelection) SelectID(id string) error {
+	if err := s.checkFrozen(); err != nil {
+		return err
+	}
 	known, err := s.contains('c', id)
 	if err != nil {
 		return err
@@ -93,12 +109,18 @@ func (s *RebuildContractSelection) SelectID(id string) error {
 }
 
 func (s *RebuildContractSelection) Selected(id string) (bool, error) {
+	if err := s.checkFrozen(); err != nil {
+		return false, err
+	}
 	return s.contains('s', id)
 }
 
 // RememberShapeRef records one checked full type reference at the shape cut.
 // Duplicate references share a key; bare names cannot mint shape rows.
 func (s *RebuildContractSelection) RememberShapeRef(id string) error {
+	if err := s.checkFrozen(); err != nil {
+		return err
+	}
 	if !strings.Contains(id, "::") {
 		return invalid("contract shape reference is not a full ID")
 	}
@@ -109,9 +131,19 @@ func (s *RebuildContractSelection) CompleteIDs() iter.Seq2[string, error] { retu
 func (s *RebuildContractSelection) SelectedIDs() iter.Seq2[string, error] { return s.stream('s') }
 func (s *RebuildContractSelection) ShapeRefs() iter.Seq2[string, error]   { return s.stream('t') }
 
+func (s *RebuildContractSelection) checkFrozen() error {
+	if err := s.ready(); err != nil {
+		return err
+	}
+	if !s.frozen {
+		return invalid("complete contract IDs not frozen")
+	}
+	return nil
+}
+
 func (s *RebuildContractSelection) stream(tag byte) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
-		if err := s.ready(); err != nil {
+		if err := s.checkFrozen(); err != nil {
 			yield("", err)
 			return
 		}

@@ -23,6 +23,15 @@ type RelationsBase struct {
 // PlatformCatalogRevision returns the catalog revision of the retained witness.
 func (r RelationsBase) PlatformCatalogRevision() uint32 { return r.witness.PlatformCatalogRevision }
 
+// CheckDeferredLanguages binds the pre-tail contract selection census to the
+// retained Relations witness. Nil coverage is not a proved empty census.
+func (r RelationsBase) CheckDeferredLanguages(want []string) error {
+	if r.witness.Relations == nil || !slices.Equal(want, r.witness.Relations.DeferredLanguages) {
+		return invalid("contract selection differs from retained relation coverage")
+	}
+	return nil
+}
+
 // RetainRelations keeps the sealed relation tables before ingest consumes
 // their outward names. Nothing is ingested into the private working store.
 func (b *BuildStore) RetainRelations(ctx context.Context, base FileGraphBase, relations StageTables) (RelationsBase, error) {

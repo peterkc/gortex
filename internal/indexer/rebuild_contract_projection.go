@@ -1,0 +1,171 @@
+package indexer
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
+	"maps"
+	"reflect"
+	"slices"
+	"strings"
+
+	"github.com/zzet/gortex/internal/contracts"
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_pebble"
+)
+
+func (r rebuildContractReceiptReader) extractorOf(file string) string {
+	return r.census.byPath[r.census.originByGraphPath[file]]
+}
+
+func rebuildContractLinkedExtractor(id string) bool {
+	// The same effective-extractor admission as selectPendingCallers.
+	return id == "go" || id == "typescript" || id == "javascript"
+}
+
+func (r rebuildContractReceiptReader) deferredContractLanguages() ([]string, error) {
+	if r.census == nil || r.census.byPath == nil || r.census.originByGraphPath == nil || uint64(len(r.census.byPath)) != r.census.admitted {
+		return nil, fmt.Errorf("%w: incomplete contract extractor census", graph.ErrContractProjectionStale)
+	}
+	deferred := make(map[string]struct{})
+	for _, id := range r.census.byPath {
+		if id == "" {
+			return nil, fmt.Errorf("%w: missing effective contract extractor", graph.ErrContractProjectionStale)
+		}
+		if !rebuildContractLinkedExtractor(id) {
+			deferred[id] = struct{}{}
+		}
+	}
+	return slices.Sorted(maps.Keys(deferred)), nil
+}
+
+func (r rebuildContractReceiptReader) scopedRawContract(c contracts.Contract) contracts.Contract {
+	c.RepoPrefix = r.idx.repoPrefix
+	if c.WorkspaceID == "" {
+		c.WorkspaceID = r.idx.workspaceID
+	}
+	if c.ProjectID == "" {
+		c.ProjectID = r.idx.projectID
+	}
+	return c
+}
+
+// selectRebuildContractRecord proves the registration source, owner and late
+// field consumers. The complete record and its election survive a negative
+// decision. A checked source without a linked-dependence proof is not an error,
+// but may not supply payload. Invalid or stale receipt evidence is an error.
+func (r rebuildContractReceiptReader) selectRebuildContractRecord(ctx context.Context, view store_pebble.RebuildView,
+	item store_pebble.RebuildContractRecord, owner string,
+) (bool, error) {
+	c := item.Contract
+	if c.Type == contracts.ContractDependency && c.FilePath == "go.mod" {
+		return true, nil // checked root dependency replay, before main
+	}
+	lang := r.extractorOf(c.FilePath)
+	if lang == "" {
+		return false, fmt.Errorf("%w: missing contract source %q", graph.ErrContractProjectionStale, c.FilePath)
+	}
+	if item.BodyUnproved {
+		return false, nil
+	}
+	var n *graph.Node
+	if owner != "" {
+		var err error
+		n, err = view.Node(ctx, owner)
+		if err != nil {
+			return false, err
+		}
+		if n == nil || n.RepoPrefix != c.RepoPrefix {
+			return false, fmt.Errorf("%w: elected contract owner %q changed", graph.ErrContractProjectionStale, owner)
+		}
+	}
+	if rebuildContractLinkedExtractor(lang) && (n == nil || rebuildContractLinkedExtractor(r.extractorOf(n.FilePath))) {
+		return true, nil // checked source and fully linked owner; late consumers have run
+	}
+	if n == nil || n.FilePath != c.FilePath {
+		// A missing/raw foreign owner or a moved handler may have depended
+		// on the deferred link turn. Do not promote its registration owner.
+		return false, nil
+	}
+	base, facts, err := r.forLinkedDeclaration(ctx, n)
+	if err != nil {
+		return false, err
+	}
+	if c.Type == contracts.ContractDI {
+		// DI reads live Provides/Consumes. Only a checked identical parse
+		// edge whose concrete endpoint is already admitted is link-free.
+		for _, e := range base.Edges {
+			raw, ok := diContractFromEdge(e)
+			if !ok || !reflect.DeepEqual(r.scopedRawContract(raw), c) {
+				continue
+			}
+			for _, field := range []string{graph.DIBindingBean, graph.DIBindingUseClass} {
+				id, _ := c.Meta[field].(string)
+				if id == "" {
+					continue
+				}
+				target, err := view.Node(ctx, id)
+				if err != nil || target == nil {
+					return false, err
+				}
+				if _, _, err := r.forLinkedDeclaration(ctx, target); err != nil {
+					return false, err
+				}
+			}
+			return true, nil
+		}
+		return false, nil
+	}
+	// Native consumes these fields during bare-type, return-type and shape
+	// passes. A deferred source needs a positive proof that none of those
+	// graph-dependent consumers ran. Pure raw records (for example EnvVar
+	// source and parse owner) have no such input. Router rewrites and handler
+	// ownership must also be independent; require the exact checked raw row.
+	for _, key := range []string{"request_type", "response_type", "response_envelope", "response_expr"} {
+		if _, present := c.Meta[key]; present {
+			return false, nil
+		}
+	}
+	for _, raw := range facts.Records {
+		trail, fallback, _ := contracts.ProviderHandlerHints(raw)
+		if trail != "" || fallback != "" || !reflect.DeepEqual(r.scopedRawContract(raw), c) {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func rebuildContractRecordOmission(c contracts.Contract) store_pebble.RebuildContractOmission {
+	var raw []byte
+	for _, part := range []string{c.RepoPrefix, c.FilePath, c.SymbolID, c.ID, string(c.Role)} {
+		raw = binary.AppendUvarint(raw, uint64(len(part)))
+		raw = append(raw, part...)
+	}
+	raw = binary.AppendVarint(raw, int64(c.Line))
+	return store_pebble.RebuildContractOmission{RepoPrefix: c.RepoPrefix, FilePath: c.FilePath,
+		Type: c.Type, ID: c.ID, RecordKey: store_pebble.HeadDigest(sha256.Sum256(raw))}
+}
+
+func rememberRebuildShapeRefs(s *store_pebble.RebuildContractSelection, c contracts.Contract) error {
+	remember := func(raw any) error {
+		id, _ := raw.(string)
+		if !strings.Contains(id, "::") {
+			return nil
+		}
+		return s.RememberShapeRef(id)
+	}
+	for _, key := range []string{"request_type", "response_type"} {
+		if err := remember(c.Meta[key]); err != nil {
+			return err
+		}
+	}
+	env, _ := c.Meta["response_envelope"].([]map[string]any)
+	for _, row := range env {
+		if err := remember(row["type"]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
