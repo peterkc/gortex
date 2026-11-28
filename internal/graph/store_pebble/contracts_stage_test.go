@@ -344,8 +344,12 @@ func TestContractOmissionNativeIDTypes(t *testing.T) {
 		{Type: contracts.ContractDependency, ID: "dep::example.org/pkg"},
 		{Type: contracts.ContractDI, ID: "di::Notifier"},
 		{Type: contracts.ContractTRPC, ID: "trpc::userRouter.getUser"},
+		{Type: contracts.ContractType(graph.EdgeReadsConfig), ID: "cfg::spring::w::r::server.port"},
 	} {
 		require.True(t, contractOmissionIDMatchesType(record), "%s: %s", record.Type, record.ID)
+	}
+	for _, id := range []string{"", "cfg::spring::", "env::MISSING"} {
+		require.False(t, contractOmissionIDMatchesType(RebuildContractOmission{Type: contracts.ContractType(graph.EdgeReadsConfig), ID: id}))
 	}
 }
 

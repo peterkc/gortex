@@ -132,12 +132,29 @@ func (r rebuildContractReceiptReader) loadLinkedFile(ctx context.Context, n *gra
 	if n.FilePath == "" || n.RepoPrefix != "" {
 		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: no admitted contract declaration for %q", graph.ErrContractProjectionStale, n.ID)
 	}
-	path := r.census.originByGraphPath[n.FilePath]
+	return r.forGraphPath(ctx, n.FilePath)
+}
+
+func (r rebuildContractReceiptReader) forGraphPath(ctx context.Context, file string) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
+	path := r.census.originByGraphPath[file]
 	i, ok := slices.BinarySearchFunc(r.job.inputs, path, func(in rebuildInput, key string) int {
 		return strings.Compare(in.Path, key)
 	})
 	if !ok {
-		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: no admitted contract receipt for %q", graph.ErrContractProjectionStale, n.FilePath)
+		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: no admitted contract receipt for %q", graph.ErrContractProjectionStale, file)
 	}
 	return r.load(ctx, r.job.inputs[i])
+}
+
+func (r rebuildContractReceiptReader) visitSpringConfig(ctx context.Context, records *store_pebble.RebuildContractRecords,
+	yield func(store_pebble.RebuildContractBatch) error,
+) error {
+	scope := contracts.SpringConfigScope{RepoRoot: r.idx.rootPath, RepoPrefix: r.idx.repoPrefix, WorkspaceID: r.idx.workspaceID}
+	return records.VisitSpringConfig(scope, func(path string) ([]*graph.Node, error) {
+		_, facts, err := r.forGraphPath(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		return facts.ConfigKeys, nil
+	}, yield)
 }
