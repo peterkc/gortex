@@ -192,6 +192,7 @@ func TestRebuildCallReturnBindingsDeclarationGuards(t *testing.T) {
 				want = "ambiguous or renamed binding declaration"
 			case "duplicate":
 				receipt.Nodes = append(append([]*graph.Node(nil), receipt.Nodes...), handler)
+				receipt.File.NodeCount = len(receipt.Nodes)
 				want = "ambiguous or renamed binding declaration"
 			}
 			wire, err := store_pebble.EncodeContractParseFacts(receipt, facts)
