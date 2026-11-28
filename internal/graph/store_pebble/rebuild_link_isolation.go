@@ -39,19 +39,12 @@ func (b *BuildStore) captureRebuildHeldNode(id, receipt, language string) error 
 	return b.pending.Set(rebuildHoldoutKey('l', key), []byte(language), pebble.NoSync)
 }
 
-// AddRebuildHeldSkip keeps a checked deferred skip in FileGraph only. Skip
-// rows have no parse receipt or declaration to restore at Relations.
+// AddRebuildHeldSkip keeps a checked deferred skip out of linking.
+// Restore its original file node, not receipt evidence or test metadata.
 func (b *BuildStore) AddRebuildHeldSkip(n *graph.Node) error {
 	return b.withWrites(func() error {
 		if b.rebuildLinksIsolated || n == nil || n.Kind != graph.KindFile || n.ID == "" {
 			return fmt.Errorf("%w: invalid held skip", ErrRebuildLinkIsolation)
-		}
-		prev, err := b.pendingNode(n.ID)
-		if err != nil {
-			return err
-		}
-		if prev != nil {
-			return fmt.Errorf("%w: held skip collides with node %q", ErrRebuildLinkIsolation, n.ID)
 		}
 		if err := b.writeNode(n); err != nil {
 			return err
@@ -109,11 +102,11 @@ func (b *BuildStore) isolateRebuildLinks(ctx context.Context) error {
 		if !match {
 			return fmt.Errorf("held raw node %q differs from receipt capture", n.ID)
 		}
-		language, err := rebuildHeldLanguage(b.pending, n.ID)
-		if err != nil {
-			return err
-		}
 		if receipt != "" && n.Name != "" {
+			language, err := rebuildHeldLanguage(b.pending, n.ID)
+			if err != nil {
+				return err
+			}
 			key := keyStrings(rebuildHoldoutKey('m', nil), n.Name, string(n.Kind), language)
 			return b.pending.Set(key, nil, pebble.NoSync)
 		}
@@ -272,10 +265,7 @@ func (b *BuildStore) restoreRebuildDeclarations(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	if err := b.visitRebuildHeldNodes(ctx, func(n *graph.Node, receipt string, raw []byte) error {
-		if receipt == "" {
-			return nil
-		}
+	if err := b.visitRebuildHeldNodes(ctx, func(n *graph.Node, _ string, raw []byte) error {
 		return b.writeNodeRecord(n, nil, raw)
 	}); err != nil {
 		return err

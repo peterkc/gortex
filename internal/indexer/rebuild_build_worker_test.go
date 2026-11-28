@@ -1181,6 +1181,9 @@ func TestRunRebuildCheckout(t *testing.T) {
 			if partial {
 				require.NoError(t, os.WriteFile(filepath.Join(root, "test_large.py"), []byte(strings.Repeat("x", 129)), 0o600))
 			}
+			if tc.skipOnly {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "test_document.txt"), []byte(strings.Repeat("x", 96)), 0o600))
+			}
 			if tc.denied {
 				writeRebuildTSAliasFixtureFile(t, root, "caller.ts", `import "@lib/x"`)
 				writeRebuildTSAliasFixtureFile(t, root, "tsconfig.json", `{"compilerOptions":{"paths":{"@lib/*":["./excluded/*"]}}}`)
@@ -1188,6 +1191,8 @@ func TestRunRebuildCheckout(t *testing.T) {
 			}
 			cfg := config.Default().Index
 			cfg.MaxFileSize = 128
+			cfg.Content.MaxDocumentBytes = 64
+			cfg.SkipUntrackedAssets = false
 			cfg.Coverage.Clones.Threshold = 0.95 // the owner must seal this before dispatch
 			req := rebuildBuildRequest{
 				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
@@ -1218,6 +1223,10 @@ func TestRunRebuildCheckout(t *testing.T) {
 			}
 			var stages []store_pebble.Stage
 			var pinnedRelations *store_pebble.Snapshot
+			wantDeferred := []string{"python"}
+			if tc.skipOnly {
+				wantDeferred = append(wantDeferred, "text")
+			}
 			err = idx.runRebuildCheckout(ctx, src, req, excludes.New([]string{"excluded/"}), false,
 				exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, leases, headDir,
 				func(ctx context.Context, offer store_pebble.StageTables) error {
@@ -1245,6 +1254,11 @@ func TestRunRebuildCheckout(t *testing.T) {
 								require.NotNil(t, raw.GetNode("test_deferred.py::test_deferred"))
 							}
 							require.NotNil(t, raw.GetNode("test_large.py"))
+							if tc.skipOnly {
+								doc := raw.GetNode("test_document.txt")
+								require.NotNil(t, doc)
+								require.Equal(t, skipReasonLargeDocument, doc.Meta["skip_reason"])
+							}
 							require.Zero(t, raw.EdgeCount())
 							require.NoError(t, raw.Close())
 						}
@@ -1256,7 +1270,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 						}
 					case store_pebble.StageRelations:
 						if partial {
-							require.Equal(t, &store_pebble.RelationCoverage{DeferredLanguages: []string{"python"}}, offer.Witness.Relations)
+							require.Equal(t, &store_pebble.RelationCoverage{DeferredLanguages: wantDeferred}, offer.Witness.Relations)
 							var missing *store_pebble.ErrLinksNotAvailable
 							require.ErrorAs(t, offer.Witness.RequireRelationCoverage([]string{"python"}), &missing)
 							require.Equal(t, []string{"python"}, missing.Languages)
@@ -1278,7 +1292,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 					case store_pebble.StageContracts, store_pebble.StageDerived, store_pebble.StageSearch:
 						require.Equal(t, &store_pebble.ContractCoverage{}, offer.Witness.Contracts)
 						if partial {
-							require.Equal(t, &store_pebble.RelationCoverage{DeferredLanguages: []string{"python"}}, offer.Witness.Relations)
+							require.Equal(t, &store_pebble.RelationCoverage{DeferredLanguages: wantDeferred}, offer.Witness.Relations)
 						}
 					}
 					return nil
@@ -1390,7 +1404,16 @@ func TestRunRebuildCheckout(t *testing.T) {
 				}
 			}
 			if partial {
-				require.Nil(t, s.GetNode("test_large.py"))
+				skipped := s.GetNode("test_large.py")
+				require.NotNil(t, skipped)
+				require.Equal(t, true, skipped.Meta["skipped_due_to_size"])
+				require.NotContains(t, skipped.Meta, "is_test_file")
+			}
+			if tc.skipOnly {
+				doc := s.GetNode("test_document.txt")
+				require.NotNil(t, doc)
+				require.Equal(t, skipReasonLargeDocument, doc.Meta["skip_reason"])
+				require.NotContains(t, doc.Meta, "is_test_file")
 			}
 			if tc.deferredOnly {
 				require.Nil(t, s.GetNode("sample.go::Frozen"))

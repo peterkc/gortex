@@ -25,6 +25,7 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 	contains := &graph.Edge{From: parent.ID, To: win.ID, Kind: graph.EdgeContains, FilePath: py}
 	cross := &graph.Edge{From: parent.ID, To: r.ID, Kind: graph.EdgeContains, FilePath: py}
 	call := &graph.Edge{From: win.ID, To: g.ID, Kind: graph.EdgeCalls, FilePath: py}
+	flow := &graph.Edge{From: "unresolved::extern::net/http::Foo", To: g.ID, Kind: graph.EdgeValueFlow, FilePath: goFile, Line: 2, Origin: graph.OriginASTResolved}
 	ref := &graph.Edge{From: g.ID, To: win.ID, Kind: graph.EdgeReferences, FilePath: goFile, Meta: map[string]any{"receiver_expr": "x"}}
 	evidence := &graph.Edge{From: win.ID, To: "unresolved::extern::net/http::Foo", Kind: graph.EdgeCalls, FilePath: goFile, Meta: map[string]any{"receiver_expr": "x"}}
 	imports := &graph.Edge{From: parent.ID, To: "unresolved::pyrel::foo", Kind: graph.EdgeImports, FilePath: py}
@@ -34,7 +35,7 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 			Edges:     []*graph.Edge{defines, &later, contains, cross, call, imports, arg},
 			Constants: []graph.ConstantValueRow{{NodeID: parent.ID, FilePath: py, Value: "python"}, {NodeID: g.ID, FilePath: py, Value: "not a Go input"}},
 			Shingles:  map[string][]uint64{parent.ID: {11}}},
-		{File: graph.FileMetaRow{FilePath: goFile, NodeCount: 2}, EffectiveLanguage: "go", Nodes: []*graph.Node{loser, g}, Edges: []*graph.Edge{ref, evidence},
+		{File: graph.FileMetaRow{FilePath: goFile, NodeCount: 2}, EffectiveLanguage: "go", Nodes: []*graph.Node{loser, g}, Edges: []*graph.Edge{ref, evidence, flow},
 			Constants: []graph.ConstantValueRow{{NodeID: g.ID, FilePath: goFile, Value: "go"}}, Shingles: map[string][]uint64{g.ID: {22}}},
 		{File: graph.FileMetaRow{FilePath: rb, NodeCount: 1}, EffectiveLanguage: "ruby", Nodes: []*graph.Node{r}},
 	}
@@ -104,7 +105,15 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, found, "ordinary raw receipt installed evidence at %x", prefix)
 	}
+	flowRaw, err := pendingGet(b.pending, pendingEdgeKey(flow), copyValue)
+	require.NoError(t, err)
+	require.NotEmpty(t, flowRaw)
+	requireRebuildLinkCustody(t, b, flow, rebuildEdgeCustody{proof: rebuildProofGoDataflowSource})
 	require.NoError(t, b.IsolateRebuildLinks(ctx))
+	kept, err := pendingGet(b.pending, pendingEdgeKey(flow), copyValue)
+	require.NoError(t, err)
+	require.Equal(t, flowRaw, kept)
+	requireRebuildLinkCustody(t, b, flow, rebuildEdgeCustody{proof: rebuildProofGoDataflowSource})
 	_, err = b.PrepareRelations(ctx, t.TempDir(), base, nil)
 	require.ErrorIs(t, err, ErrRebuildLinkIsolation)
 	view := b.RebuildView()
@@ -112,7 +121,7 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 	require.NoError(t, view.VisitNodes(ctx, func(n *graph.Node) error { linkedIDs = append(linkedIDs, n.ID); return nil }))
 	require.Equal(t, []string{g.ID}, linkedIDs)
 	linkCopy, err := b.SelectRebuildLinkFacts(ctx, ParseFacts{
-		File: facts[1].File, Nodes: []*graph.Node{loser, g}, Edges: []*graph.Edge{ref, evidence},
+		File: facts[1].File, Nodes: []*graph.Node{loser, g}, Edges: []*graph.Edge{ref, evidence, flow},
 		Constants: []graph.ConstantValueRow{{NodeID: loser.ID}, {NodeID: g.ID}},
 		Shingles:  map[string][]uint64{loser.ID: {10}, g.ID: {22}},
 		Symbols:   []graph.SymbolFTSItem{{NodeID: loser.ID}, {NodeID: g.ID}},
@@ -120,12 +129,17 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []*graph.Node{g}, linkCopy.Nodes)
 	require.Equal(t, 1, linkCopy.File.NodeCount)
-	require.Empty(t, linkCopy.Edges)
+	require.Equal(t, []*graph.Edge{flow}, linkCopy.Edges)
+	for _, e := range []*graph.Edge{defines, contains, cross, call, ref, evidence, imports, arg} {
+		n, err := b.pendingEdge(pendingEdgeKey(e))
+		require.NoError(t, err)
+		require.Nil(t, n)
+	}
 	require.Equal(t, []graph.ConstantValueRow{{NodeID: g.ID}}, linkCopy.Constants)
 	require.Equal(t, map[string][]uint64{g.ID: {22}}, linkCopy.Shingles)
 	require.Equal(t, []graph.SymbolFTSItem{{NodeID: g.ID}}, linkCopy.Symbols)
 	for _, prefix := range [][]byte{
-		{familyEdge}, keyStrings([]byte{familyFile}, py), keyStrings([]byte{familyFile}, rb), keyStrings([]byte{familyFile}, skip.FilePath),
+		keyStrings([]byte{familyFile}, py), keyStrings([]byte{familyFile}, rb), keyStrings([]byte{familyFile}, skip.FilePath),
 		keyStrings([]byte{familyRepo}, "", win.ID), pendingSymbolKey(win.ID), parsedConstantKey(parent.ID), shingleKey("", parent.ID),
 		factoryChainReceiptKey(pendingEdgeKey(evidence)), rebuildExternalEvidenceKey('r', pendingEdgeKey(evidence)), rebuildExternalEvidenceKey('r', pendingEdgeKey(imports)),
 	} {
@@ -161,16 +175,25 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 		require.Equal(t, rawEdges[i], raw)
 		requireRebuildLinkCustody(t, b, e, rebuildEdgeCustody{})
 	}
-	relations, err := b.PrepareRelations(ctx, t.TempDir(), base, nil)
+	kept, err = pendingGet(b.pending, pendingEdgeKey(flow), copyValue)
+	require.NoError(t, err)
+	require.Equal(t, flowRaw, kept)
+	requireRebuildLinkCustody(t, b, flow, rebuildEdgeCustody{proof: rebuildProofGoDataflowSource})
+	relations, err := b.PrepareRelations(ctx, t.TempDir(), base, func(path string) string {
+		if path == goFile {
+			return "go"
+		}
+		return ""
+	})
 	require.NoError(t, err)
 	relations.Witness.Relations = &RelationCoverage{DeferredLanguages: []string{"python", "ruby"}}
 	_, err = h.PublishStage(ctx, relations)
 	require.NoError(t, err)
 	selected := stageRead(t, h)
-	require.Equal(t, 2, selected.EdgeCount())
+	require.Equal(t, 3, selected.EdgeCount())
 	require.Equal(t, win.Name, selected.GetNode(win.ID).Name)
 	require.Equal(t, g.Name, selected.GetNode(g.ID).Name)
-	require.Nil(t, selected.GetNode(skip.ID))
+	require.Equal(t, published.GetNode(skip.ID), selected.GetNode(skip.ID))
 	require.NotNil(t, published.GetNode(skip.ID), "the pinned FileGraph cut remains complete")
 	metadata, err := selected.FileMetadata("", py)
 	require.NoError(t, err)
@@ -298,4 +321,29 @@ func TestRebuildHeldDeclarationAttribution(t *testing.T) {
 	file, _, _, _, err = view.RebuildHeldDeclaration(api.ID)
 	require.NoError(t, err)
 	require.Empty(t, file)
+}
+
+func TestRebuildHeldSkipRestoresNativeUpsert(t *testing.T) {
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	file := &graph.Node{ID: "asset.txt", FilePath: "asset.txt", Kind: graph.KindFile, Name: "raw"}
+	b.AddNode(file)
+	skip := *file
+	skip.Name = "asset.txt"
+	skip.Meta = map[string]any{"skipped_due_to_content": true}
+	require.NoError(t, b.AddRebuildHeldSkip(&skip))
+	raw, err := pendingGet(b.pending, pendingNodeKey(skip.ID), copyValue)
+	require.NoError(t, err)
+	require.NoError(t, b.IsolateRebuildLinks(ctx))
+	n, err := b.RebuildView().Node(ctx, skip.ID)
+	require.NoError(t, err)
+	require.Nil(t, n)
+	require.NoError(t, b.RestoreRebuildDeclarations(ctx))
+	restored, err := pendingGet(b.pending, pendingNodeKey(skip.ID), copyValue)
+	require.NoError(t, err)
+	require.Equal(t, raw, restored)
+	n, err = b.RebuildView().Node(ctx, skip.ID)
+	require.NoError(t, err)
+	require.Equal(t, skip.Name, n.Name)
+	require.Equal(t, true, n.Meta["skipped_due_to_content"])
 }
