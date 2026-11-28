@@ -562,6 +562,24 @@ func TestRebuildSpringEventsSoleInheritedListener(t *testing.T) {
 	}
 }
 
+func TestRebuildSpringEventsUnprovedSoleInheritedListener(t *testing.T) {
+	pub := springRebuildNode("publish", "")
+	listener := springRebuildNode("A", "Base")
+	call := springRebuildCall(pub.ID, listener.ID, "Sub", 10)
+	arc := springRebuildArc("Sub", "Base", graph.EdgeExtends, 1)
+	b := openRebuildGRPCBuild(t, rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, listener}, call, arc))
+	before := rebuildEventSavedRows(t, b)
+	receipt := rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, springRebuildNode("A", "")}, call, arc)
+	_, native := openRebuildEventStores(t, receipt)
+	require.Zero(t, ResolveSpringEventCalls(native))
+	require.Contains(t, rebuildEventSQLiteRows(native).edges, call)
+
+	stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(receipt), springRebuildSelection(t, b))
+	require.NoError(t, err)
+	require.Equal(t, store_pebble.RebuildSpringEventStats{Stubs: 1, Resolved: 1}, stats)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
+}
+
 func TestRebuildSpringEventsInertReceiptEntrants(t *testing.T) {
 	pub := springRebuildNode("publish", "")
 	listener := springRebuildNode("A", "Other")
