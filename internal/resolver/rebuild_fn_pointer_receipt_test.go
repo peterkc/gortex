@@ -98,6 +98,54 @@ func TestRebuildFnPointerStageBindingOnlyForElection(t *testing.T) {
 	}
 }
 
+// The receipt changes a copy into a named registration at the same key. The
+// live copy has no registration move, but the missing receipt move must refuse.
+func TestRebuildFnPointerStageReceiptRegistrationWithoutLiveMove(t *testing.T) {
+	const file, lang = "saved.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	target := rebuildEventNode(file, "work", lang, "")
+	live := rebuildFnPointerReg(caller.ID, "unresolved::*.work", 1, "branch", "")
+	live.Meta["fnptr_copy_struct"], live.Meta["fnptr_copy_field"] = "root", "fn"
+	raw := rebuildFnPointerReg(caller.ID, live.To, live.Line, "branch", target.Name)
+	require.Equal(t, graph.EdgeIdentityFor(live), graph.EdgeIdentityFor(raw))
+	slot, source, name := fnPtrRegistration(live)
+	require.Equal(t, "branch\x00fn", slot)
+	require.Equal(t, "root\x00fn", source)
+	require.Empty(t, name)
+	rawSlot, rawSource, rawName := fnPtrRegistration(raw)
+	require.Equal(t, slot, rawSlot)
+	require.Empty(t, rawSource)
+	require.Equal(t, target.Name, rawName)
+	facts := rebuildEventFacts(file, lang, []*graph.Node{caller, target}, live)
+	receipt := facts
+	receipt.Edges = []*graph.Edge{raw}
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthFnPointerDispatch})
+	require.NoError(t, err)
+
+	b, native := openRebuildEventStores(t, facts)
+	before := rebuildEventSavedRows(t, b)
+	require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selected).Err)
+	require.Equal(t, before, rebuildEventSQLiteRows(native))
+	rawNative := rebuildGRPCNative(t, receipt)
+	require.NoError(t, RunFrameworkSynthesizersWithSelection(rawNative, selected).Err)
+	want := *raw
+	want.To = target.ID
+	require.Equal(t, []*graph.Edge{&want}, rebuildEventSQLiteRows(rawNative).edges)
+
+	ctx := t.Context()
+	frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+	require.NoError(t, err)
+	require.True(t, frozen.allows(SynthFnPointerDispatch))
+	require.NoError(t, FreezeRebuildFnPointerInputs(ctx, b, frozen))
+	stats, err := RunRebuildFnPointerStage(ctx, b, rebuildGRPCReceipts(receipt), frozen)
+	var refused *store_pebble.RebuildUnknownProvenanceError
+	require.ErrorIs(t, err, store_pebble.ErrRebuildFnPointer)
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(&want)}, refused)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
+}
+
 // The census admits a row by via alone. A row with no slot has no role, so
 // native skips it and its size must not refuse; a row with a role still does.
 func TestRebuildFnPointerStageCapsOnlyRoleRows(t *testing.T) {
