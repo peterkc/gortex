@@ -68,6 +68,11 @@ func (r rebuildContractReceiptReader) rebuildCallReturnBody(ctx context.Context,
 	if err != nil || handler == nil {
 		return empty, err
 	}
+	// The handler binder retains the logical owner and marks its body
+	// unproved. There is no checked late binding to apply to that row.
+	if r.sizeSkippedContractSource(handler.FilePath) {
+		return empty, nil
+	}
 	lang := handler.Language
 	if lang == "" {
 		lang = detectLangFromPath(handler.FilePath)

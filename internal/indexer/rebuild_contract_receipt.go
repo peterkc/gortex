@@ -35,7 +35,7 @@ func (r rebuildContractReceiptReader) load(ctx context.Context, input rebuildInp
 		return store_pebble.ParseFacts{}, nil, err
 	}
 	if base.EffectiveLanguage != r.census.byPath[input.Path] {
-		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: early contract receipt attribution for %q", errParseEntryCorrupt, input.Path)
+		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: contract receipt attribution for %q", errParseEntryCorrupt, input.Path)
 	}
 	return base, facts, ctx.Err()
 }

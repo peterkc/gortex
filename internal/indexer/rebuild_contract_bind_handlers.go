@@ -25,12 +25,16 @@ func (r rebuildContractReceiptReader) bindRebuildProviderHandlers(ctx context.Co
 				return false, nil
 			}
 			if !bodyLoaded {
-				checked, err := r.providerBody(ctx, view, winner)
-				unproved = errors.Is(err, errRebuildContractBodyUnproved)
-				if err != nil && !unproved {
-					return false, err
+				unproved = r.sizeSkippedContractSource(winner.FilePath)
+				if !unproved {
+					var err error
+					body, err = r.providerBody(ctx, view, winner)
+					unproved = errors.Is(err, errRebuildContractBodyUnproved)
+					if err != nil && !unproved {
+						return false, err
+					}
 				}
-				body, bodyLoaded = checked, true
+				bodyLoaded = true
 			}
 			if unproved {
 				live.SymbolID = winner.ID
@@ -69,4 +73,10 @@ func hasRebuildHandlerHints(c contracts.Contract) bool {
 func removeRebuildHandlerHints(c *contracts.Contract) {
 	delete(c.Meta, "handler_ident")
 	delete(c.Meta, "handler_trail")
+}
+
+// sizeSkippedContractSource proves native source presence, not a body answer.
+func (r rebuildContractReceiptReader) sizeSkippedContractSource(file string) bool {
+	origin := r.census.originByGraphPath[file]
+	return origin != "" && r.census.byPath[origin] == "" && r.job.classifications[origin].sizeSkipped()
 }

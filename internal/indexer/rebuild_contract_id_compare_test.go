@@ -37,6 +37,7 @@ func TestCompareRebuildContractIDs(t *testing.T) {
 		{name: "missing at end", expected: private, actual: ids(deferred), wantErr: `missing id "env::RETAINED"`},
 		{name: "same broken order is not equality", expected: ids(retained, deferred), actual: ids(retained, deferred), wantErr: "out of order"},
 		{name: "same duplicate is not equality", expected: ids(retained, retained), actual: ids(retained, retained), wantErr: "repeated"},
+		{name: "duplicate only in actual is extra", expected: private, actual: ids(deferred, deferred), wantErr: `extra id "env::DEFERRED"`},
 		{name: "empty id is not built-empty", expected: ids(""), actual: ids(""), wantErr: "empty"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

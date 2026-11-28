@@ -38,9 +38,6 @@ func compareRebuildContractIDs(ctx context.Context, expected, actual iter.Seq2[s
 		if haveExpected && want <= previous {
 			return fmt.Errorf("%w: expected id %q after %q is empty, repeated or out of order", errRebuildContractIDs, want, previous)
 		}
-		if haveActual && got <= previous {
-			return fmt.Errorf("%w: actual id %q after %q is empty, repeated or out of order", errRebuildContractIDs, got, previous)
-		}
 		switch {
 		case !haveActual || haveExpected && want < got:
 			return fmt.Errorf("%w: missing id %q", errRebuildContractIDs, want)

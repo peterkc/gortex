@@ -611,7 +611,7 @@ func TestRebuildEarlyContractReceiptRefusals(t *testing.T) {
 			case "admitted language":
 				require.ErrorContains(t, err, "invalid effective parse language")
 			case "census language":
-				require.ErrorContains(t, err, "early contract receipt attribution")
+				require.ErrorContains(t, err, "contract receipt attribution")
 			default:
 				require.ErrorContains(t, err, "contract")
 			}

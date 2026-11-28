@@ -175,7 +175,7 @@ func (f *rebuildEarlyContractFacts) bindRouterHandlerIDs(ctx context.Context, vi
 		// The early capture already checked every admitted receipt. The ID
 		// move does not use a body range or any body-derived schema value.
 		origin := f.receipts.census.originByGraphPath[winner.FilePath]
-		if f.receipts.census.byPath[origin] == "" {
+		if f.receipts.census.byPath[origin] == "" && !f.receipts.sizeSkippedContractSource(winner.FilePath) {
 			return fmt.Errorf("%w: no admitted router handler source for %q", graph.ErrContractProjectionStale, winner.ID)
 		}
 		for i, c := range items {

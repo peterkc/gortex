@@ -180,11 +180,12 @@ func TestRebuildEarlyContractIDsBuiltEmpty(t *testing.T) {
 
 func TestRebuildEarlyRouterHandlerElection(t *testing.T) {
 	for _, tc := range []struct {
-		name, firstDecl string
-		wantMounted     bool
+		name, firstDecl          string
+		wantMounted, skipHandler bool
 	}{
 		{name: "handler_move_opens_bucket", firstDecl: "export function first(req, res) {}", wantMounted: true},
 		{name: "unresolved_handler_keeps_bucket"},
+		{name: "size_skipped_handler_still_moves", wantMounted: true, skipHandler: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, root := t.Context(), t.TempDir()
@@ -197,11 +198,17 @@ func TestRebuildEarlyRouterHandlerElection(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, b.Close()) })
 			store := rebuildParseStore{dir: t.TempDir(), limit: 16 << 20}
-			job := rebuildFileStages{recipes: map[string]rebuildDigest{"typescript": {1}}}
+			job := rebuildFileStages{recipes: map[string]rebuildDigest{"typescript": {1}}, classifications: make(map[string]rebuildClassificationFact)}
 			census := rebuildExtractorCensus{byPath: map[string]string{}, originByGraphPath: map[string]string{}}
-			sources := []struct{ path, text string }{
-				{"handlers.ts", tc.firstDecl + "\nexport function second(req, res) {}\n"},
-				{"routes.ts", `import express from 'express';
+			handlerPath, handlerLanguage := "handlers.ts", "typescript"
+			handlerSource := tc.firstDecl + "\nexport function second(req, res) {}\n"
+			if tc.skipHandler {
+				// A Go handler falls outside the TypeScript router census.
+				handlerPath, handlerLanguage, handlerSource = "handlers.go", "go", "package handlers\nfunc first() {}\n"
+			}
+			sources := []struct{ path, language, text string }{
+				{handlerPath, handlerLanguage, handlerSource},
+				{"routes.ts", "typescript", `import express from 'express';
 const app = express();
 const router = express.Router();
 export function register() {
@@ -211,22 +218,35 @@ export function register() {
 }
 `},
 			}
-			ext, ok := idx.registry.GetByLanguage("typescript")
-			require.True(t, ok)
 			native := contracts.NewRegistry()
 			for _, file := range sources {
 				src := []byte(file.text)
 				require.NoError(t, os.WriteFile(filepath.Join(root, file.path), src, 0o600))
+				ext, ok := idx.registry.GetByLanguage(file.language)
+				require.True(t, ok)
 				parsed, facts, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, file.path, ext, src, src)
 				require.NoError(t, err)
+				g.AddBatch(parsed.Nodes, parsed.Edges)
+				census.originByGraphPath[file.path] = file.path
+				if tc.skipHandler && file.path == handlerPath {
+					skip := rebuildClassificationFact{Language: file.language, Size: int64(len(src)), MaxFileSize: 1}
+					job.classifications[file.path] = skip
+					b.AddNode(rebuildCheckedSkipNode(file.path, skip))
+					// Represent a live linked candidate from the skipped path.
+					for _, n := range parsed.Nodes {
+						if n.Kind == graph.KindFunction {
+							b.AddNode(n)
+						}
+					}
+					continue
+				}
 				payload, err := store_pebble.EncodeContractParseFacts(parsed, facts)
 				require.NoError(t, err)
-				input := rebuildInput{Path: file.path, Language: "typescript", Size: int64(len(src))}
+				input := rebuildInput{Path: file.path, Language: file.language, Size: int64(len(src))}
 				require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), payload))
 				job.inputs = append(job.inputs, input)
-				census.byPath[file.path], census.originByGraphPath[file.path] = parsed.EffectiveLanguage, file.path
+				census.byPath[file.path] = parsed.EffectiveLanguage
 				require.NoError(t, b.AddParsedFile("", parsed))
-				g.AddBatch(parsed.Nodes, parsed.Edges)
 				native.AddAllScoped(cloneContractRecords(facts.Records), "", "", "")
 			}
 			const raw, mounted = "http::GET::/x", "http::GET::/api/x"
@@ -249,6 +269,24 @@ export function register() {
 			require.Equal(t, want, nativeIDs)
 			for _, file := range sources {
 				require.NoError(t, os.Remove(filepath.Join(root, file.path)))
+			}
+			if tc.skipHandler {
+				require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+					for _, c := range f.registry.ByID(raw) {
+						require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c}))
+					}
+					require.NoError(t, f.receipts.bindRebuildProviderHandlers(ctx, b.RebuildView(), records))
+					var moved int
+					require.NoError(t, records.VisitByID(raw, func(item store_pebble.RebuildContractRecord) error {
+						if item.SymbolID == handlerPath+"::first" {
+							moved++
+							require.True(t, item.BodyUnproved)
+						}
+						return nil
+					}))
+					require.Equal(t, 1, moved)
+					return nil
+				}))
 			}
 			got, err := f.finish(ctx, b.RebuildView(), "", "", "")
 			require.NoError(t, err)
