@@ -28,13 +28,17 @@ func TestRebuildEarlyRouterHiddenBucketSibling(t *testing.T) {
 			for _, path := range []string{own, mount} {
 				build.AddNode(&graph.Node{ID: path, Kind: graph.KindFile, FilePath: path, Language: "typescript"})
 			}
-			reg := contracts.NewRegistry()
-			for i, framework := range []string{"nestjs", "express"} {
-				reg.Add(contracts.Contract{
-					ID: id, Type: contracts.ContractHTTP, Role: contracts.RoleProvider, FilePath: own, Line: i + 1,
-					Meta: map[string]any{"framework": framework, "method": "GET", "path": "/x"},
-				})
+			newRegistry := func() *contracts.Registry {
+				reg := contracts.NewRegistry()
+				for i, framework := range []string{"nestjs", "express"} {
+					reg.Add(contracts.Contract{
+						ID: id, Type: contracts.ContractHTTP, Role: contracts.RoleProvider, FilePath: own, Line: i + 1,
+						Meta: map[string]any{"framework": framework, "method": "GET", "path": "/x"},
+					})
+				}
+				return reg
 			}
+			reg := newRegistry()
 			require.Len(t, reg.All(), 1, "the second record cannot open the bucket")
 			require.Len(t, reg.ByID(id), 2)
 			facts := map[string]contracts.RouterFacts{
@@ -56,7 +60,18 @@ func TestRebuildEarlyRouterHiddenBucketSibling(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			require.ElementsMatch(t, tc.want, reg.AllIDs())
+			native := newRegistry()
+			contracts.JoinRouterPrefixFacts(native, facts)
+			records := reg.All()
+			require.ElementsMatch(t, native.All(), records)
+			ids := make([]string, 0, len(records))
+			for _, c := range records {
+				ids = append(ids, c.ID)
+			}
+			require.ElementsMatch(t, tc.want, ids)
+			if tc.checkedMount {
+				require.Empty(t, reg.ByID(id), "the old map key holds no records")
+			}
 		})
 	}
 }
