@@ -145,14 +145,15 @@ func (p *rebuildSpringEventPass) captureListeners(ctx context.Context) error {
 		if n.ID == "" {
 			return invalid("Spring event listener has no ID")
 		}
-		if err := p.input(r.key, r.value); err != nil {
-			return err
+		var large []byte
+		if len(r.key)+len(r.value) > p.rowBytes {
+			large = []byte{1}
 		}
 		p.liveListeners++
 		if err := p.put(p.key('n', n.ID), []byte{rebuildCapabilityWanted}); err != nil {
 			return err
 		}
-		return p.put(p.key('l', p.rules.Simple(t), n.ID), nil)
+		return p.put(p.key('l', p.rules.Simple(t), n.ID), large)
 	})
 }
 
@@ -415,6 +416,9 @@ func (p *rebuildSpringEventPass) listeners(ctx context.Context, root string, res
 				id, _, err := readKeyString(r.key[len(posting):])
 				if err != nil {
 					return err
+				}
+				if len(r.value) != 0 {
+					return fmt.Errorf("%w: Spring events row", ErrRebuildLinkInputSize)
 				}
 				if result == 'T' {
 					state, err := p.state(p.key('n', id))

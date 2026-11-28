@@ -38,12 +38,18 @@ func springRebuildSelection(t *testing.T, b *store_pebble.BuildStore) FrameworkS
 
 func TestRebuildSpringEventsNodeInputCaps(t *testing.T) {
 	padding := strings.Repeat("x", 16<<20)
-	for _, role := range []string{"listener", "unrelated"} {
+	for _, role := range []string{"listener", "unrelated listener", "unrelated"} {
 		t.Run(role, func(t *testing.T) {
 			pub := springRebuildNode("publish", "")
 			listener := springRebuildNode("listen", "Notice")
 			unrelated := springRebuildNode("other", "")
-			large := map[string]*graph.Node{"listener": listener, "unrelated": unrelated}[role]
+			large := unrelated
+			switch role {
+			case "listener":
+				large = listener
+			case "unrelated listener":
+				large.Meta["spring_listener_type"] = "OtherEvent"
+			}
 			large.Meta["padding"] = padding
 			call := springRebuildCall(pub.ID, "unresolved::*.Notice", "Notice", 4)
 			facts := rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, listener, unrelated}, call)

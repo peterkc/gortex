@@ -118,7 +118,8 @@ func rebuildMediatRHandlerKind(kind graph.NodeKind) bool {
 
 // y and j retain notification members in handler ID order, globally and by
 // workspace. W records whether all handlers of a type share one workspace.
-// c is the shared per-handler receipt claim.
+// c is the shared per-handler receipt claim. A nonempty y/j value or B
+// marker flags an oversized member of a notification or request bucket.
 func (p *rebuildMediatRPass) collectHandlers(ctx context.Context) (bool, error) {
 	active := false
 	err := p.b.RebuildView().visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
@@ -137,24 +138,31 @@ func (p *rebuildMediatRPass) collectHandlers(ctx context.Context) (bool, error) 
 		if n.ID == "" {
 			return invalid("MediatR handler has no ID")
 		}
-		if err := p.nodeInput(r.key, r.value); err != nil {
-			return err
-		}
 		active = true
 		cohort := p.key('u', kind, reqType)
+		var large []byte
+		if len(r.key)+len(r.value) > p.rowBytes {
+			p.hasLargeHandlers = true
+			large = []byte{1}
+		}
 		if err := p.put(p.key('c', n.ID), append([]byte{rebuildCapabilityWanted}, cohort...)); err != nil {
 			return err
 		}
 		if kind == rebuildMediatRNotification {
-			if err := p.put(p.key('y', reqType, n.ID), nil); err != nil {
+			if err := p.put(p.key('y', reqType, n.ID), large); err != nil {
 				return err
 			}
 			if err := p.addUnique(p.key('W', reqType), "="+n.WorkspaceID); err != nil {
 				return err
 			}
-			return p.put(p.key('j', reqType, n.WorkspaceID, n.ID), nil)
+			return p.put(p.key('j', reqType, n.WorkspaceID, n.ID), large)
 		}
 		for _, key := range rebuildStoreScopeKeys(cohort, len(p.prefix), 'a', n) {
+			if large != nil {
+				if err := p.put(append(p.column('B'), key[len(p.prefix):]...), nil); err != nil {
+					return err
+				}
+			}
 			if err := p.addUnique(key, n.ID); err != nil {
 				return err
 			}
@@ -180,6 +188,9 @@ func (p *rebuildMediatRPass) handlers(ctx context.Context, prefix []byte, visit 
 		id, rest, err := readKeyString(r.key[len(prefix):])
 		if err != nil || id == "" || len(rest) != 0 {
 			return invalid("MediatR notification handler key")
+		}
+		if len(r.value) != 0 {
+			return fmt.Errorf("%w: MediatR node row", ErrRebuildLinkInputSize)
 		}
 		return visit(id)
 	})
@@ -304,6 +315,17 @@ func (p *rebuildMediatRPass) planNotification(ctx context.Context, r row, e *gra
 // Only moving requests with a nonempty global cohort can change their
 // election when receipts introduce an otherwise missing caller.
 func (p *rebuildMediatRPass) planRequest(old []byte, e *graph.Edge, call rebuildStoreDispatchCall, pick rebuildStoreFactoryElection) error {
+	if p.hasLargeHandlers {
+		for _, witness := range pick.buckets {
+			large, err := p.present(append(p.column('B'), witness.bucket[len(p.prefix):]...))
+			if err != nil {
+				return err
+			}
+			if large {
+				return fmt.Errorf("%w: MediatR node row", ErrRebuildLinkInputSize)
+			}
+		}
+	}
 	moves := p.stats.Moves
 	if err := p.planCall(old, e, call, pick); err != nil {
 		return err

@@ -47,9 +47,10 @@ type rebuildStoreDispatchRules struct {
 
 type rebuildStoreFactoryPass struct {
 	rebuildCallMoves
-	rules       rebuildStoreDispatchRules
-	needsAnchor bool
-	stats       RebuildStoreFactoryStats
+	rules            rebuildStoreDispatchRules
+	needsAnchor      bool
+	hasLargeHandlers bool // MediatR checks handler size at the deciding bucket.
+	stats            RebuildStoreFactoryStats
 }
 
 // RebuildStoreFactory runs on the quiet private graph after SQL callsites.
@@ -204,6 +205,21 @@ func (p *rebuildStoreFactoryPass) node(id string) (*graph.Node, error) {
 		}
 		return checkedRebuildLightNode(row{key, val}, p.label)
 	})
+}
+
+// Action proof reads only live ID, workspace and file. A caller or getter
+// with the same ID still goes through the normal capped node lookup.
+func (p *rebuildStoreFactoryPass) actionNode(id string) (*graph.Node, error) {
+	if p.hasLargeHandlers {
+		handler, err := p.present(p.key('c', id))
+		if err != nil {
+			return nil, err
+		}
+		if handler {
+			return p.storeReceiptNode(id)
+		}
+	}
+	return p.node(id)
 }
 
 type rebuildStoreFactoryElection struct {
@@ -479,7 +495,7 @@ func (p *rebuildStoreFactoryPass) recordCandidate(col byte, raw *graph.Node, fil
 				cohort = p.key('u', binding, member)
 			}
 		}
-		return p.recordStoreCandidate(key, cohort, len(p.prefix), 'a', p.needsAnchor, raw, file, lang, p.node)
+		return p.recordStoreCandidate(key, cohort, len(p.prefix), 'a', p.needsAnchor, raw, file, lang, p.actionNode)
 	}
 	var wanted, files []byte
 	if rebuildStoreFactoryGetterKind(raw.Kind) && p.rules.getter(raw, raw.Name) {
@@ -502,7 +518,7 @@ func (p *rebuildStoreFactoryPass) proveActions(ctx context.Context) (anchor bool
 		if err != nil || state == 0 {
 			return err // no deciding buckets in this cohort
 		}
-		return p.foldExactCandidate(r, prefix, len(p.prefix), 'a', p.node)
+		return p.foldExactCandidate(r, prefix, len(p.prefix), 'a', p.actionNode)
 	})
 	return anchor, err
 }

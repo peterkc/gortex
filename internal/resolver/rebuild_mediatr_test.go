@@ -15,7 +15,7 @@ import (
 func TestRebuildMediatRNodeInputCaps(t *testing.T) {
 	const file, otherFile, lang = "App.cs", "Other.cs", "csharp"
 	padding := strings.Repeat("x", 16<<20)
-	for _, role := range []string{"handler", "caller", "getter", "unrelated"} {
+	for _, role := range []string{"handler", "notification handler", "caller", "getter", "unrelated handler", "other file handler", "unrelated"} {
 		t.Run(role, func(t *testing.T) {
 			caller := &graph.Node{ID: otherFile + "::Publish", Name: "Publish", Kind: graph.KindMethod, FilePath: otherFile, Language: lang}
 			handler := &graph.Node{ID: file + "::Handle", Name: "Handle", Kind: graph.KindMethod, FilePath: file, Language: lang,
@@ -25,13 +25,29 @@ func TestRebuildMediatRNodeInputCaps(t *testing.T) {
 			otherHandler.Meta = map[string]any{"mediatr_kind": "request", "mediatr_request_type": "Notice"}
 			getter := &graph.Node{ID: file + "::Use", Name: "Use", Kind: graph.KindVariable, FilePath: file, Language: lang}
 			unrelated := &graph.Node{ID: otherFile + "::Other", Name: "Other", Kind: graph.KindMethod, FilePath: otherFile, Language: lang}
-			large := map[string]*graph.Node{"handler": handler, "caller": caller, "getter": getter, "unrelated": unrelated}[role]
+			large := unrelated
+			switch role {
+			case "handler", "notification handler":
+				large = handler
+			case "caller":
+				large = caller
+			case "getter":
+				large = getter
+			case "unrelated handler":
+				unrelated.Meta = map[string]any{"mediatr_kind": "request", "mediatr_request_type": "Other"}
+			case "other file handler":
+				large = &otherHandler // The getter elects the handler in App.cs.
+			}
 			if large.Meta == nil {
 				large.Meta = map[string]any{}
 			}
 			large.Meta["padding"] = padding
 			call := &graph.Edge{From: caller.ID, To: "unresolved::*.Handle", Kind: graph.EdgeCalls, FilePath: otherFile, Line: 4,
 				Meta: map[string]any{"via": mediatrVia, "mediatr_kind": "request", "mediatr_request_type": "Notice", "store_binding": getter.Name}}
+			if role == "notification handler" {
+				handler.Meta["mediatr_kind"] = "notification"
+				call.Meta["mediatr_kind"] = "notification"
+			}
 			facts := []store_pebble.ParseFacts{
 				rebuildEventFacts(file, lang, []*graph.Node{handler, getter}),
 				rebuildEventFacts(otherFile, lang, []*graph.Node{caller, &otherHandler, unrelated}, call),
@@ -44,7 +60,8 @@ func TestRebuildMediatRNodeInputCaps(t *testing.T) {
 			require.True(t, frozen.allows(SynthMediatR))
 			before := rebuildEventSavedRows(t, b)
 			stats, err := RunRebuildMediatR(t.Context(), b, rebuildGRPCReceipts(facts...), frozen)
-			if role != "unrelated" {
+			switch role {
+			case "handler", "notification handler", "caller", "getter":
 				require.ErrorIs(t, err, store_pebble.ErrRebuildMediatR)
 				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
 				require.ErrorContains(t, err, "MediatR node row")
