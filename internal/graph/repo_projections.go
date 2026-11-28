@@ -118,7 +118,8 @@ func projectionNodeMatches(node *Node, workspaceID string, languages, extensions
 	return ProjectionMatches(path, node.Language, languages, extensions)
 }
 
-// ProjectionMatches applies the native file language and extension union.
+// ProjectionMatches applies the in-memory file projection rule. The SQLite
+// RepoFilePaths projection evaluates the Spring language/extension union in SQL.
 func ProjectionMatches(path, language string, languages, extensions []string) bool {
 	if len(languages) == 0 && len(extensions) == 0 {
 		return true

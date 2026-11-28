@@ -100,8 +100,9 @@ func (r rebuildContractReceiptReader) rebuildCallReturnBody(ctx context.Context,
 			seen = true
 		}
 	}
-	// checkContractParseFacts (parse_contract_facts.go) requires Handlers
-	// for every checked function or method at both encode and decode.
+	// store_pebble.checkContractParseFacts requires a Handlers entry for
+	// every function or method; the kind check and forLinkedDeclaration
+	// above prove the saved node is one.
 	return facts.Handlers[symbol], nil
 }
 

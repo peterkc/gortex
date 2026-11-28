@@ -16,6 +16,7 @@ func rebuildSpringConfigKey(column byte, fields ...string) []byte {
 // VisitSpringConfig replays the cold native Spring config pass from checked,
 // value-redacted per-file facts and linked reader nodes. Each callback borrows
 // one proposed row; it must not write the working graph during the scan.
+// The isolated worker projects only linked-language files; today Spring files are held out.
 func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigScope,
 	keysAt func(string) (keys []*graph.Node, skipped bool, err error), yield func(RebuildContractBatch) error,
 ) (err error) {
