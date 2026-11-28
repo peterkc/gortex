@@ -152,7 +152,18 @@ func (r *RebuildContractRecords) UpdateByID(id string, update func(*RebuildContr
 // first member of each Registry.All key. Callbacks can update live buckets
 // without affecting this scan. Cross-ID delimiter collisions have no stable
 // native winner, so refuse them rather than invent one.
-func (r *RebuildContractRecords) VisitRepresentatives(yield func(RebuildContractRecord) error) (err error) {
+func (r *RebuildContractRecords) VisitRepresentatives(yield func(RebuildContractRecord) error) error {
+	return r.visitRepresentatives(false, yield)
+}
+
+// VisitCurrentRepresentatives freezes representative membership and reads each
+// member's current value when visited. The callback may change metadata, not
+// bucket identity or order. This models Registry.All snapshots of shared Meta.
+func (r *RebuildContractRecords) VisitCurrentRepresentatives(yield func(RebuildContractRecord) error) error {
+	return r.visitRepresentatives(true, yield)
+}
+
+func (r *RebuildContractRecords) visitRepresentatives(current bool, yield func(RebuildContractRecord) error) (err error) {
 	if err := r.ready(); err != nil {
 		return err
 	}
@@ -165,7 +176,7 @@ func (r *RebuildContractRecords) VisitRepresentatives(yield func(RebuildContract
 		r.representing = false
 		err = errors.Join(err, r.build.pending.DeleteRange(seen, prefixEnd(seen), pebble.NoSync))
 	}()
-	return r.visit(rebuildContractRecordKey('r'), func(_ []byte, item RebuildContractRecord) error {
+	return r.visit(rebuildContractRecordKey('r'), func(rowKey []byte, item RebuildContractRecord) error {
 		key := appendKeyString(rebuildContractRecordKey('s'), item.ID+"|"+item.FilePath+"|"+item.SymbolID+"|"+string(item.Role))
 		first, err := pendingGet(r.build.pending, key, func(raw []byte) (string, error) { return string(raw), nil })
 		if err != nil {
@@ -179,6 +190,16 @@ func (r *RebuildContractRecords) VisitRepresentatives(yield func(RebuildContract
 		}
 		if err := r.build.putRebuildScratch(key, []byte(item.ID), goldBufferBytes, "contract representative"); err != nil {
 			return err
+		}
+		if current {
+			live, err := pendingGet(r.build.pending, rowKey, decodeRebuildContractRecord)
+			if err != nil {
+				return err
+			}
+			if live.ID != item.ID || live.FilePath != item.FilePath || live.SymbolID != item.SymbolID || live.Role != item.Role {
+				return invalid("live contract representative changed identity")
+			}
+			item = live
 		}
 		return yield(item)
 	})
