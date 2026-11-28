@@ -105,8 +105,12 @@ func gdClassIndex(g gdKindNodes) map[string]*gdClass {
 	return out
 }
 
+func gdClassDeclCandidate(n *graph.Node) bool {
+	return n != nil && n.Kind == graph.KindType && n.Language == "gdscript"
+}
+
 func gdClassDecl(n *graph.Node) (gdClass, bool) {
-	if n == nil || n.Language != "gdscript" || n.Meta == nil {
+	if !gdClassDeclCandidate(n) || n.Meta == nil {
 		return gdClass{}, false
 	}
 	switch kind, _ := n.Meta["gd_kind"].(string); kind {
