@@ -188,7 +188,10 @@ func TestRebuildContractSourceRunFailures(t *testing.T) {
 						require.NoError(t, add(contracts.Contract{ID: "env::A", Line: i + 1}))
 					}
 					if mode == "final write" {
-						return os.Mkdir(contractSourceRunPath(dir, 1), 0o700)
+						path := contractSourceRunPath(dir, 1)
+						// Pebble Create removes an existing empty directory and retries.
+						require.NoError(t, os.Mkdir(path, 0o700))
+						require.NoError(t, os.WriteFile(filepath.Join(path, "blocker"), nil, 0o600))
 					}
 					return nil
 				},
@@ -217,6 +220,11 @@ func TestRebuildContractSourceRunFailures(t *testing.T) {
 				})
 			if mode == "final write" || mode == "replay" {
 				require.Error(t, err)
+				if mode == "final write" {
+					var pathErr *os.PathError
+					require.ErrorAs(t, err, &pathErr)
+					require.Equal(t, contractSourceRunPath(dir, 1), pathErr.Path)
+				}
 				require.Zero(t, stats)
 			} else {
 				require.NoError(t, err)
