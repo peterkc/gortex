@@ -13,7 +13,6 @@ import (
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 
-	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/pathkey"
@@ -38,13 +37,14 @@ const (
 // The root's direct dependencies are bridge trigger facts, not graph nodes.
 // Replace lists only root rules that can affect the native extern module tier.
 type rebuildGoManifest struct {
-	Path        string
-	Present     bool
-	Digest      rebuildDigest
-	RootClaim   string
-	OwnerModule string
-	DirectDeps  []string
-	Replace     []rebuildGoReplace
+	Path         string
+	Present      bool
+	Digest       rebuildDigest
+	RootClaim    string
+	OwnerModule  string
+	DirectDeps   []string
+	ContractDeps []rebuildGoContractDep
+	Replace      []rebuildGoReplace
 }
 
 type rebuildGoReplace struct {
@@ -106,13 +106,7 @@ func captureRebuildGoManifests(ctx context.Context, inputs []rebuildInput, rawRe
 		if err != nil {
 			return rebuildGoManifest{}, err
 		}
-		left -= len(name) + len(row.RootClaim) + len(row.OwnerModule)
-		for _, dep := range row.DirectDeps {
-			left -= len(dep) + 16
-		}
-		for _, rep := range row.Replace {
-			left -= len(rep.Module) + 16
-		}
+		left -= rebuildGoManifestCharge(row)
 		if left < 0 {
 			return rebuildGoManifest{}, errRebuildGoCaptureLimit
 		}
@@ -213,23 +207,10 @@ func captureRebuildGoManifest(ctx context.Context, name string, rawRemaining *in
 		return -1
 	})
 	row.Replace = slices.Compact(row.Replace)
-	row.DirectDeps, err = rebuildGoDirectDeps(data)
-	return row, err
-}
-
-// Minimal native dependency seeds need the module IDs only. The tracked
-// set is empty; version, line and full contract rows belong to the later pass.
-func rebuildGoDirectDeps(data []byte) ([]string, error) {
-	var deps []string
-	for _, dep := range (&contracts.GoModExtractor{}).Extract("go.mod", data, nil, nil) {
-		mp, ok := strings.CutPrefix(dep.ID, "dep::")
-		if !ok || !rebuildGoModulePath(mp) || strings.Contains(mp, "::") {
-			return nil, fmt.Errorf("%w: unsupported root dependency spelling", errRebuildGoEvidence)
-		}
-		deps = append(deps, mp)
+	if err := row.captureContractDeps(data); err != nil {
+		return rebuildGoManifest{}, err
 	}
-	slices.Sort(deps)
-	return slices.Compact(deps), nil
+	return row, nil
 }
 
 func rebuildGoLocalPath(name string) bool {

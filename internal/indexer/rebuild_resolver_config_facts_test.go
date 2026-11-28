@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/blake3"
+	"github.com/zzet/gortex/internal/contracts"
+	"github.com/zzet/gortex/internal/indexer/merkle"
 	"github.com/zzet/gortex/internal/parser/tsalias"
 )
 
@@ -249,4 +252,63 @@ func writeRebuildConfigFixture(t *testing.T, rows ...rebuildSidecarRow) (string,
 	require.NoError(t, err)
 	require.NotZero(t, digest)
 	return lease, digest
+}
+
+func TestRebuildGoContractDependenciesCheckedReplay(t *testing.T) {
+	const name = "go.mod"
+	ctx := t.Context()
+	data := []byte(`module example.com/root
+
+require (
+    example.com/z v1.2.3
+    example.com/indirect v1.1.0 // indirect
+    example.com/a v0.9.8
+)
+`)
+	digest := rebuildDigest(blake3.Sum256(data))
+	left := int64(len(data))
+	row, err := captureRebuildGoManifest(ctx, name, &left,
+		func(_ context.Context, path string) (*rebuildInput, error) {
+			require.Equal(t, name, path)
+			return &rebuildInput{Path: name, Size: int64(len(data)), Kind: merkle.RegularFile, Content: digest}, nil
+		},
+		func(_ context.Context, input rebuildInput) ([]byte, error) {
+			require.Equal(t, digest, input.Content)
+			return data, nil
+		})
+	require.NoError(t, err)
+	require.Zero(t, left)
+	require.Equal(t, []string{"example.com/a", "example.com/z"}, row.DirectDeps)
+	lease, proof := writeRebuildConfigFixture(t, rebuildGoManifestSidecarRow(row))
+	rows, _, err := openRebuildResolverConfigFacts(ctx, lease, proof)
+	require.NoError(t, err)
+	replayed, err := rows.lookup(name)
+	require.NoError(t, err)
+	want := (&contracts.GoModExtractor{}).Extract(name, data, nil, nil)
+	var got []contracts.Contract
+	require.NoError(t, replayed.visitContractDeps(func(c contracts.Contract) error {
+		got = append(got, c)
+		return nil
+	}))
+	require.Equal(t, want, got, "versions and exact source order come from the checked row")
+
+	legacy := row
+	legacy.ContractDeps = nil
+	require.NoError(t, rebuildGoManifestSidecarRow(legacy).check())
+	unexpected := func(contracts.Contract) error {
+		t.Fatal("unproved or checked-empty input yielded a record")
+		return nil
+	}
+	require.ErrorIs(t, legacy.visitContractDeps(unexpected), errRebuildGoEvidence)
+	require.NoError(t, (rebuildGoManifest{Path: name}).visitContractDeps(unexpected))
+
+	for _, invalid := range []rebuildGoContractDep{
+		{Module: "example.com/foreign", Version: "v1.2.3", Line: 4},
+		{Module: "example.com/z", Version: "", Line: 4},
+		{Module: "example.com/z", Version: "v1.2.3", Line: 0},
+	} {
+		bad := row
+		bad.ContractDeps = []rebuildGoContractDep{invalid, row.ContractDeps[1]}
+		require.ErrorIs(t, rebuildGoManifestSidecarRow(bad).check(), errRebuildInputSidecar)
+	}
 }

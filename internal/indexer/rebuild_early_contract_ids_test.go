@@ -67,9 +67,9 @@ app.include_router(router, prefix="/api")
 
 	gomod := []byte("module example.com/app\n\nrequire example.com/lib v1.0.0\n")
 	require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), gomod, 0o600))
-	deps, err := rebuildGoDirectDeps(gomod)
-	require.NoError(t, err)
-	f, err := idx.readRebuildEarlyContractFacts(ctx, build.RebuildView(), job, store, &census, deps)
+	var manifest rebuildGoManifest
+	require.NoError(t, manifest.captureContractDeps(gomod))
+	f, err := idx.readRebuildEarlyContractFacts(ctx, build.RebuildView(), job, store, &census, manifest.DirectDeps)
 	require.NoError(t, err)
 	_, byLang := idx.buildPerFileContractExtractors()
 	native := contracts.NewRegistry()

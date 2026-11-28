@@ -88,9 +88,11 @@ func captureRebuildCheckoutFacts(ctx context.Context, src *source.FilesystemSour
 		if rootMod != nil {
 			row.Present, row.Digest = true, rootMod.target.Content
 			*raw -= int64(len(rootMod.data))
-			row.DirectDeps, err = rebuildGoDirectDeps(rootMod.data)
-			if err != nil {
+			if err := row.captureContractDeps(rootMod.data); err != nil {
 				return "", err
+			}
+			if rebuildGoManifestCharge(row) > rebuildGoFactLimit {
+				return "", errRebuildGoCaptureLimit
 			}
 		}
 		if err := emit(rebuildGoManifestSidecarRow(row)); err != nil {
@@ -305,18 +307,20 @@ func captureRebuildResolverConfigRows(ctx context.Context, root *os.Root, litera
 // The payload strings have already been parsed as module paths or JSON strings.
 // The writer rejects invalid UTF-8 in them; the row key is always raw bytes.
 type rebuildResolverConfigPayload struct {
-	RootClaim   string                     `json:"root_claim,omitempty"`
-	OwnerModule string                     `json:"owner_module,omitempty"`
-	DirectDeps  []string                   `json:"direct_deps,omitempty"`
-	Replace     []rebuildGoReplace         `json:"replace,omitempty"`
-	Alias       *tsalias.FrozenAliasConfig `json:"alias,omitempty"`
+	RootClaim    string                     `json:"root_claim,omitempty"`
+	OwnerModule  string                     `json:"owner_module,omitempty"`
+	DirectDeps   []string                   `json:"direct_deps,omitempty"`
+	Replace      []rebuildGoReplace         `json:"replace,omitempty"`
+	Alias        *tsalias.FrozenAliasConfig `json:"alias,omitempty"`
+	ContractDeps []rebuildGoContractDep     `json:"contract_deps,omitempty"`
 }
 
 func rebuildGoManifestSidecarRow(f rebuildGoManifest) rebuildSidecarRow {
 	r := rebuildSidecarRow{Kind: rebuildGoManifestFact, Path: []byte(f.Path), Present: f.Present, Digest: f.Digest}
-	if f.RootClaim != "" || f.OwnerModule != "" || len(f.DirectDeps) != 0 || len(f.Replace) != 0 {
+	if f.RootClaim != "" || f.OwnerModule != "" || len(f.DirectDeps) != 0 || len(f.Replace) != 0 || len(f.ContractDeps) != 0 {
 		r.Config = &rebuildResolverConfigPayload{
 			RootClaim: f.RootClaim, OwnerModule: f.OwnerModule, DirectDeps: f.DirectDeps, Replace: f.Replace,
+			ContractDeps: f.ContractDeps,
 		}
 	}
 	return r
@@ -361,12 +365,12 @@ func (r rebuildSidecarRow) checkResolverConfig() error {
 }
 
 func (p *rebuildResolverConfigPayload) hasGoFields() bool {
-	return p.RootClaim != "" || p.OwnerModule != "" || len(p.DirectDeps) != 0 || len(p.Replace) != 0
+	return p.RootClaim != "" || p.OwnerModule != "" || len(p.DirectDeps) != 0 || len(p.Replace) != 0 || len(p.ContractDeps) != 0
 }
 
 func (p *rebuildResolverConfigPayload) validGo(root bool) bool {
 	if p.Alias != nil || !p.hasGoFields() ||
-		(!root && (p.RootClaim != "" || len(p.DirectDeps) != 0 || len(p.Replace) != 0)) ||
+		(!root && (p.RootClaim != "" || len(p.DirectDeps) != 0 || len(p.Replace) != 0 || len(p.ContractDeps) != 0)) ||
 		(p.RootClaim != "" && !rebuildGoModulePath(p.RootClaim)) ||
 		(p.OwnerModule != "" && (!rebuildGoModulePath(p.OwnerModule) || len(p.Replace) != 0)) {
 		return false
@@ -375,6 +379,9 @@ func (p *rebuildResolverConfigPayload) validGo(root bool) bool {
 		if !rebuildGoModulePath(dep) || i > 0 && dep <= p.DirectDeps[i-1] {
 			return false
 		}
+	}
+	if !validRebuildGoContractDeps(p.DirectDeps, p.ContractDeps) {
+		return false
 	}
 	for i, rep := range p.Replace {
 		if !rebuildGoModulePath(rep.Module) {
@@ -456,6 +463,7 @@ func openRebuildResolverConfigFacts(ctx context.Context, lease string, expected 
 			f := rebuildGoManifest{Path: string(r.Path), Present: r.Present, Digest: r.Digest}
 			if p := r.Config; p != nil {
 				f.RootClaim, f.OwnerModule, f.DirectDeps, f.Replace = p.RootClaim, p.OwnerModule, p.DirectDeps, p.Replace
+				f.ContractDeps = p.ContractDeps
 			}
 			goLeft -= rebuildGoManifestCharge(f)
 			if len(goRows) == rebuildGoKeyLimit || goLeft < 0 {
@@ -513,6 +521,9 @@ func rebuildGoManifestCharge(f rebuildGoManifest) int {
 	charge := len(f.Path) + len(f.RootClaim) + len(f.OwnerModule)
 	for _, dep := range f.DirectDeps {
 		charge += len(dep) + 16
+	}
+	for _, dep := range f.ContractDeps {
+		charge += len(dep.Module) + len(dep.Version) + 32
 	}
 	for _, rep := range f.Replace {
 		charge += len(rep.Module) + 16
