@@ -35,9 +35,23 @@ func RouterPrefixFactUse(c Contract, own *RouterFacts) (local, crossFile bool) {
 
 // JoinRebuildRouterPrefixFacts applies the native join only if its selected
 // facts are checked. A nonempty return names the first missing file and leaves
-// the registry unchanged. missingCensus is the first unchecked census path.
+// the registry unchanged. uncheckedCensus lists all scanned files without facts.
 // On success it returns the sorted files involved in native map-order overlap.
-func JoinRebuildRouterPrefixFacts(reg *Registry, facts map[string]RouterFacts, missingCensus string) (overlapFiles []string, missing string) {
+func JoinRebuildRouterPrefixFacts(reg *Registry, facts map[string]RouterFacts, uncheckedCensus []string) (overlapFiles []string, missing string) {
+	representatives := reg.All()
+	unchecked := make(map[string]bool)
+	var missingCensus string
+	for _, path := range uncheckedCensus {
+		unchecked[path] = true
+		if missingCensus == "" || path < missingCensus {
+			missingCensus = path
+		}
+	}
+	for _, c := range representatives {
+		if _, ok := facts[c.FilePath]; !ok && RouterContractSource(c) {
+			unchecked[c.FilePath] = true
+		}
+	}
 	noteMissing := func(path string) {
 		if path != "" && (missing == "" || path < missing) {
 			missing = path
@@ -48,6 +62,9 @@ func JoinRebuildRouterPrefixFacts(reg *Registry, facts map[string]RouterFacts, m
 		var own *RouterFacts
 		if ok {
 			own = &f
+		} else if !unchecked[c.FilePath] {
+			// Native never scans this hidden sibling's file. Its facts are empty.
+			return
 		}
 		local, cross := RouterPrefixFactUse(c, own)
 		if local && !ok {
@@ -57,7 +74,6 @@ func JoinRebuildRouterPrefixFacts(reg *Registry, facts map[string]RouterFacts, m
 			noteMissing(missingCensus)
 		}
 	}
-	representatives := reg.All()
 	for _, c := range representatives {
 		check(c)
 	}

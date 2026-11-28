@@ -1225,3 +1225,62 @@ func TestRunRebuildCheckout(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildBuildRouterOverlapLog(t *testing.T) {
+	ctx := t.Context()
+	root, src := rebuildInputFixture(t)
+	lease := t.TempDir()
+	cfg := config.Default().Index
+	off := false
+	cfg.Coverage.Modules.Enabled, cfg.Coverage.Clones.Enabled = &off, &off
+	req := rebuildBuildRequest{
+		Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
+		BaseRecipe: store_pebble.HeadDigest{1}, ProvidersOff: true, Recipes: map[string]rebuildDigest{"python": {1}},
+		Policy: freezeRebuildParsePolicy(root, cfg), Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
+		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile},
+	}
+	var inputs []rebuildInput
+	for _, file := range rebuildRouterOverlapSources() {
+		require.NoError(t, os.WriteFile(filepath.Join(root, file.path), []byte(file.source), 0o600))
+		input, _, err := readRebuildInput(ctx, src, file.path, "python", 1024)
+		require.NoError(t, err)
+		inputs = append(inputs, input)
+	}
+	inputRoot, err := rebuildInputRoot(inputs)
+	require.NoError(t, err)
+	raw, err := hex.DecodeString(inputRoot)
+	require.NoError(t, err)
+	req.Witness.Input = store_pebble.HeadDigest(raw)
+	digest, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
+		for _, in := range inputs {
+			if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceRegularFact, Path: []byte(in.Path)}); err != nil {
+				return err
+			}
+		}
+		if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")}); err != nil {
+			return err
+		}
+		return emit(rebuildGoManifestSidecarRow(rebuildGoManifest{Path: "go.mod"}))
+	})
+	require.NoError(t, err)
+	req.Witness.FrozenInputs = store_pebble.HeadDigest(digest)
+	req.Witness.PlatformCatalogRevision = graph.PlatformCatalogRevision
+	req.Witness.Recipe = req.projectRecipe(cfg.Coverage.ClonesThreshold())
+	require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, inputs))
+	core, logs := observer.New(zap.DebugLevel)
+	var sent []store_pebble.Stage
+	err = buildRebuildStages(ctx, lease, zap.New(core), store_pebble.OpenBuild, rebuildTestLinkOptions(t), func(tables store_pebble.StageTables) error {
+		sent = append(sent, tables.Witness.Stage)
+		return nil
+	})
+	require.ErrorIs(t, err, errRebuildBuildIncomplete)
+	require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
+	applied := logs.FilterMessage("rebuild router native map-order differences").All()
+	require.Len(t, applied, 1)
+	require.Equal(t, zap.InfoLevel, applied[0].Level)
+	require.EqualValues(t, 2, applied[0].ContextMap()["files"])
+	paths := logs.FilterMessage("rebuild router native map-order difference").All()
+	require.Len(t, paths, 2)
+	require.Equal(t, "a.py", paths[0].ContextMap()["path"])
+	require.Equal(t, "b.py", paths[1].ContextMap()["path"])
+}

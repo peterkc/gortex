@@ -45,8 +45,10 @@ func TestRebuildCheckedRouterMountsMatchNative(t *testing.T) {
 			for path := range facts {
 				b.AddNode(node(path))
 			}
+			var missingCensus []string
 			if missingFile != "" {
 				delete(facts, missingFile)
+				missingCensus = []string{missingFile}
 			}
 			foreign := node("foreign-mount.ts")
 			foreign.WorkspaceID = "other"
@@ -55,7 +57,7 @@ func TestRebuildCheckedRouterMountsMatchNative(t *testing.T) {
 			for _, c := range inputs {
 				reg.Add(c)
 			}
-			_, wantMissing := contracts.JoinRebuildRouterPrefixFacts(reg, facts, missingFile)
+			_, wantMissing := contracts.JoinRebuildRouterPrefixFacts(reg, facts, missingCensus)
 			require.Equal(t, missingFile, wantMissing)
 			require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(r *RebuildContractRecords) error {
 				for _, c := range inputs {

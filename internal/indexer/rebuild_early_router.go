@@ -29,7 +29,7 @@ func joinRebuildRouterPrefixes(ctx context.Context, view store_pebble.RebuildVie
 			}
 		}
 	}
-	var missingCensus string
+	var missingCensus []string
 	var scan bool
 	if err := view.VisitFileIdentities(ctx, func(path, language, nodeRepo, nodeWorkspace string) error {
 		if nodeRepo != repo || workspace != "" && nodeWorkspace != workspace ||
@@ -39,8 +39,8 @@ func joinRebuildRouterPrefixes(ctx context.Context, view store_pebble.RebuildVie
 		scan = true
 		if f, ok := available[path]; ok {
 			selected[path] = f
-		} else if missingCensus == "" || path < missingCensus {
-			missingCensus = path
+		} else {
+			missingCensus = append(missingCensus, path)
 		}
 		return nil
 	}); err != nil {

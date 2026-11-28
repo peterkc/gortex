@@ -38,7 +38,7 @@ func TestRebuildRouterRecordMovesMatchCheckedRegistry(t *testing.T) {
 		"other.py":  {LineCount: 1, Lines: []contracts.RouterLineFacts{receivers(1, "b")}},
 		"mount.py":  {MountPrefix: map[string]string{"a": "/api", "h": "/local", "b": "/v2"}},
 	}
-	want, missing := contracts.JoinRebuildRouterPrefixFacts(reg, files, "")
+	want, missing := contracts.JoinRebuildRouterPrefixFacts(reg, files, nil)
 	require.Empty(t, missing)
 	require.Equal(t, []string{"other.py", "routes.py"}, want)
 	prefix := func(c contracts.Contract) (string, error) {

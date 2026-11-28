@@ -100,6 +100,17 @@ func (r *RebuildContractRecords) JoinCheckedRouterPrefixes(repo, workspace strin
 		if err != nil {
 			return "", err
 		}
+		if facts == nil {
+			_, selected, err := m.read('p', c.FilePath)
+			if err != nil {
+				return "", err
+			}
+			if !selected {
+				// A hidden sibling outside the native census has empty facts,
+				// not an unchecked answer from a selected file.
+				facts = &contracts.RouterFacts{}
+			}
+		}
 		local, cross := contracts.RouterPrefixFactUse(c, facts)
 		if cross {
 			note(missingCensus)

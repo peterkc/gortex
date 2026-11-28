@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"cmp"
+	"maps"
 	"slices"
 	"testing"
 
@@ -9,22 +10,30 @@ import (
 )
 
 func TestRebuildRouterPrefixFactsOrdersOverlappingBuckets(t *testing.T) {
-	const path = "routes.py"
+	const aPath, bPath = "a.py", "b.py"
 	const first, second, last = "http::GET::/api/x", "http::GET::/x", "http::GET::/v2/api/x"
-	files := srcMap{path: `from fastapi import APIRouter
+	files := srcMap{
+		aPath: `from fastapi import APIRouter
 
 a = APIRouter(prefix="/api")
-b = APIRouter(prefix="/v2")
 
 @a.get("/x")
 def first():
     pass
+`,
+		bPath: `from fastapi import APIRouter
+
+b = APIRouter(prefix="/v2")
 
 @b.get("/api/x")
 def second():
     pass
-`}
-	facts := map[string]RouterFacts{path: RouterFileFacts(path, files.reader()(path))}
+`,
+	}
+	facts := map[string]RouterFacts{
+		aPath: RouterFileFacts(aPath, files.reader()(aPath)),
+		bPath: RouterFileFacts(bPath, files.reader()(bPath)),
+	}
 	// ReplaceByID leaves empty buckets in AllIDs. Compare live records,
 	// as the contract writer does, not all keys in the registry map.
 	liveIDs := func(reg *Registry) []string {
@@ -66,14 +75,69 @@ def second():
 		require.Empty(t, ordered.ByID(second))
 	}
 
-	for _, cut := range []string{"early", "late"} {
-		t.Run(cut, func(t *testing.T) {
-			reg := newRegistry(t)
-			overlap, missing := JoinRebuildRouterPrefixFacts(reg, facts, "")
-			require.Empty(t, missing)
-			require.Equal(t, []string{path}, overlap, "one file is a native map-order difference")
-			require.Equal(t, want, liveIDs(reg))
-			require.Empty(t, reg.ByID(second))
+	reg := newRegistry(t)
+	overlap, missing := JoinRebuildRouterPrefixFacts(reg, facts, nil)
+	require.Empty(t, missing)
+	require.Equal(t, []string{aPath, bPath}, overlap, "both files are native map-order differences")
+	require.Equal(t, want, liveIDs(reg))
+	require.Empty(t, reg.ByID(second))
+}
+
+func TestRouterPrefixFactUse(t *testing.T) {
+	shared := map[string]bool{
+		"actix":         true,
+		"axum":          true,
+		"express":       true,
+		"fastapi/flask": true,
+		"fiber":         true,
+		"flask":         true,
+		"gin/echo/chi":  true,
+		"laravel":       false,
+		"nestjs":        true,
+		"rails":         false,
+		"spring":        false,
+		"vapor":         true,
+	}
+	require.ElementsMatch(t, slices.Collect(maps.Keys(routePrefixFrameworks)), slices.Collect(maps.Keys(shared)))
+	for fw, canShare := range shared {
+		t.Run(fw, func(t *testing.T) {
+			c := Contract{Type: ContractHTTP, Line: 1, Meta: map[string]any{"framework": fw}}
+			withKey := &RouterFacts{
+				LineCount: 1,
+				Lines:     []RouterLineFacts{{Line: 1, Receivers: map[string]string{fw: "receiver"}}},
+			}
+			if fw == "nestjs" {
+				withKey.ControllerClass = "Controller"
+				withKey.Lines = nil
+			}
+			for _, tc := range []struct {
+				name  string
+				own   *RouterFacts
+				cross bool
+			}{
+				{name: "unknown own file", cross: canShare},
+				{name: "empty shared key", own: &RouterFacts{LineCount: 1}},
+				{name: "nonempty shared key", own: withKey, cross: canShare},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					local, cross := RouterPrefixFactUse(c, tc.own)
+					require.True(t, local)
+					require.Equal(t, tc.cross, cross)
+					joined := c
+					joined.Meta = map[string]any{"framework": fw, routePrefixJoinedMeta: true}
+					local, cross = RouterPrefixFactUse(joined, tc.own)
+					require.False(t, local)
+					require.False(t, cross)
+					nonHTTP := c
+					nonHTTP.Type = ContractDependency
+					local, cross = RouterPrefixFactUse(nonHTTP, tc.own)
+					require.False(t, local)
+					require.False(t, cross)
+				})
+			}
 		})
 	}
+	local, cross := RouterPrefixFactUse(Contract{Type: ContractHTTP, Meta: map[string]any{"framework": "unsupported"}}, nil)
+	require.False(t, local)
+	require.False(t, cross)
 }
