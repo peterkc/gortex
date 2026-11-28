@@ -480,7 +480,7 @@ app.include_router(router, prefix="`
 			})
 			require.Len(t, native.All(), 1)
 			require.Equal(t, tc.nativeID, native.All()[0].ID)
-			err = joinRebuildRouterPrefixes(ctx, build.RebuildView(), replay, "", "", map[string]contracts.RouterFacts{
+			_, err = joinRebuildRouterPrefixes(ctx, build.RebuildView(), replay, "", "", map[string]contracts.RouterFacts{
 				"users.py": *facts.Router,
 			})
 			if tc.refuse {
@@ -581,7 +581,7 @@ func TestRebuildEarlyRouterOwnFactsWireRefusal(t *testing.T) {
 		Line: 1, Meta: map[string]any{"framework": "fastapi/flask", "method": "GET", "path": "/items"}})
 	// The only census file has a checked-empty answer. Only the route's own
 	// source, selected outside that census by its record, is missing.
-	err = joinRebuildRouterPrefixes(ctx, build.RebuildView(), reg, "", "", map[string]contracts.RouterFacts{"entry.py": {}})
+	_, err = joinRebuildRouterPrefixes(ctx, build.RebuildView(), reg, "", "", map[string]contracts.RouterFacts{"entry.py": {}})
 	require.ErrorIs(t, err, errRebuildRouterFactsMissing)
 	require.ErrorContains(t, err, `"routes.py"`)
 	require.Equal(t, id, reg.All()[0].ID)

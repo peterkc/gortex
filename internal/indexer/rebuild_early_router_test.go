@@ -46,7 +46,8 @@ func TestRebuildEarlyRouterHiddenBucketSibling(t *testing.T) {
 			if tc.checkedMount {
 				facts[mount] = contracts.RouterFileFacts(mount, []byte("app.use('/api', router)"))
 			}
-			err = joinRebuildRouterPrefixes(ctx, build.RebuildView(), reg, "", "", facts)
+			overlaps, err := joinRebuildRouterPrefixes(ctx, build.RebuildView(), reg, "", "", facts)
+			require.Empty(t, overlaps)
 			if tc.want == nil {
 				require.ErrorIs(t, err, errRebuildRouterFactsMissing)
 				require.ErrorContains(t, err, `"mount.ts"`)

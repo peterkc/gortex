@@ -17,9 +17,9 @@ var errRebuildRouterFactsMissing = errors.New("rebuild router facts are missing"
 // answers. A selected file with no answer is not a proved-empty mount.
 func joinRebuildRouterPrefixes(ctx context.Context, view store_pebble.RebuildView, reg *contracts.Registry,
 	repo, workspace string, available map[string]contracts.RouterFacts,
-) error {
+) ([]string, error) {
 	if !routerPrefixScanEnabled(reg) {
-		return nil
+		return nil, nil
 	}
 	selected := make(map[string]contracts.RouterFacts)
 	for _, c := range reg.All() {
@@ -44,13 +44,14 @@ func joinRebuildRouterPrefixes(ctx context.Context, view store_pebble.RebuildVie
 		}
 		return nil
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	if !scan {
-		return nil
+		return nil, nil
 	}
-	if missing := contracts.JoinRebuildRouterPrefixFacts(reg, selected, missingCensus); missing != "" {
-		return fmt.Errorf("%w: %q", errRebuildRouterFactsMissing, missing)
+	overlapFiles, missing := contracts.JoinRebuildRouterPrefixFacts(reg, selected, missingCensus)
+	if missing != "" {
+		return nil, fmt.Errorf("%w: %q", errRebuildRouterFactsMissing, missing)
 	}
-	return ctx.Err()
+	return overlapFiles, ctx.Err()
 }

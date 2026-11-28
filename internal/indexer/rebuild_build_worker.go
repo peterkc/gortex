@@ -406,6 +406,12 @@ func buildRebuildStages(
 		if err != nil {
 			return err
 		}
+		if paths := earlyFacts.routerOverlapFiles; len(paths) != 0 {
+			logger.Info("rebuild router native map-order differences", zap.Int("files", len(paths)))
+			for _, path := range paths {
+				logger.Debug("rebuild router native map-order difference", zap.String("path", path))
+			}
+		}
 		earlyFacts = nil
 		// The Manifest and FileGraph offers are complete. Only private readers
 		// run until the overlay is removed below, before any later stage seal.

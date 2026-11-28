@@ -20,8 +20,9 @@ func (ids rebuildEarlyContractIDs) contains(id string) bool {
 }
 
 type rebuildEarlyContractFacts struct {
-	registry *contracts.Registry
-	routers  map[string]contracts.RouterFacts
+	registry           *contracts.Registry
+	routers            map[string]contracts.RouterFacts
+	routerOverlapFiles []string
 }
 
 // readRebuildEarlyContractFacts runs at the post-parse, pre-main cut. It
@@ -125,9 +126,11 @@ func (f *rebuildEarlyContractFacts) finish(ctx context.Context, view store_pebbl
 	}); err != nil {
 		return nil, err
 	}
-	if err := joinRebuildRouterPrefixes(ctx, view, f.registry, repo, workspace, f.routers); err != nil {
+	overlapFiles, err := joinRebuildRouterPrefixes(ctx, view, f.registry, repo, workspace, f.routers)
+	if err != nil {
 		return nil, err
 	}
+	f.routerOverlapFiles = overlapFiles
 	ids := make(rebuildEarlyContractIDs)
 	for _, c := range f.registry.All() {
 		// contractGraphRows sorts by file path first within each ID.
