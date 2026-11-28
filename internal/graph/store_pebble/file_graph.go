@@ -103,6 +103,17 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 			}
 		}
 		for _, e := range f.Edges {
+			// Multiple same-line DI providers can share a physical key.
+			// Match native parse insertion, not a later graph update.
+			if e != nil && e.Kind == graph.EdgeProvides {
+				old, err := b.pendingEdge(pendingEdgeKey(e))
+				if err != nil {
+					return err
+				}
+				if old != nil {
+					continue
+				}
+			}
 			if err := b.addEdge(e); err != nil {
 				return err
 			}
