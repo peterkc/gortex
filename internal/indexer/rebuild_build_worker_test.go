@@ -323,19 +323,28 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 }
 
 func TestRebuildBuildContractOverlayFrameworkRead(t *testing.T) {
-	const file, lang, dispatcher = "roles.swift", "swift", "env::DISPATCH"
+	const file, lang = "widget.go", "go"
+	const source = `package p
+
+type Widget struct{}
+func (w *Widget) render() {}
+func (w *Widget) setState() {}
+func (w *Widget) refresh() {
+	w.setState()
+}
+`
 	for _, tc := range []struct {
 		name, contractID string
-		closureRuns      int
+		setStateRuns     int
 	}{
-		{name: "unrelated contract", contractID: "env::OTHER", closureRuns: 1},
-		{name: "contract replaces dispatcher", contractID: dispatcher},
+		{name: "unrelated contract", contractID: "env::OTHER", setStateRuns: 1},
+		{name: "contract replaces render method", contractID: file + "::Widget.render"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			root, src := rebuildInputFixture(t)
 			lease := t.TempDir()
-			require.NoError(t, os.WriteFile(filepath.Join(root, file), []byte("// cached closure roles\n"), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(root, file), []byte(source), 0o600))
 			input, _, err := readRebuildInput(ctx, src, file, lang, 1024)
 			require.NoError(t, err)
 			inputs := []rebuildInput{input}
@@ -356,7 +365,7 @@ func TestRebuildBuildContractOverlayFrameworkRead(t *testing.T) {
 			cfg := config.Default().Index
 			off := false
 			cfg.Coverage.Modules.Enabled, cfg.Coverage.Clones.Enabled = &off, &off
-			cfg.FrameworkSynthesizers = &[]string{resolver.SynthClosureCollection}
+			cfg.FrameworkSynthesizers = &[]string{resolver.SynthReactSetState}
 			req := rebuildBuildRequest{
 				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
 				BaseRecipe: store_pebble.HeadDigest{1}, ProvidersOff: true, Recipes: map[string]rebuildDigest{lang: {1}},
@@ -367,39 +376,44 @@ func TestRebuildBuildContractOverlayFrameworkRead(t *testing.T) {
 				},
 			}
 			req.Witness.Recipe = req.projectRecipe(cfg.Coverage.ClonesThreshold())
-			registrar := file + "::register"
-			nodes := []*graph.Node{
-				{ID: dispatcher, Name: "dispatch", Kind: graph.KindMethod, FilePath: file, Language: lang,
-					Meta: map[string]any{"cc_dispatch_field": "handlers"}},
-				{ID: registrar, Name: "register", Kind: graph.KindMethod, FilePath: file, Language: lang,
-					Meta: map[string]any{"cc_append_field": "handlers"}},
-			}
-			base := store_pebble.ParseFacts{
-				Nodes: nodes, EffectiveLanguage: lang, File: graph.FileMetaRow{FilePath: file, NodeCount: len(nodes)},
-			}
-			handler := contracts.HandlerFacts{Regex: map[string]any{}, AST: map[string]any{}}
-			facts := &contracts.FileFacts{
-				Records: []contracts.Contract{{
-					ID: tc.contractID, Type: contracts.ContractEnv, Role: contracts.RoleConsumer, FilePath: file, Meta: map[string]any{},
-				}},
-				Shapes:   make(map[string]*contracts.Shape),
-				Handlers: map[string]contracts.HandlerFacts{dispatcher: handler, registrar: handler},
-			}
+			idx := New(graph.New(), parser.NewRegistry(), cfg, zap.NewNop())
+			t.Cleanup(idx.Close)
+			idx.SetRootPath(root)
+			idx.installRebuildParsePolicy(req.Policy)
+			base, facts, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, file, languages.NewGoExtractor(), []byte(source), []byte(source))
+			require.NoError(t, err)
+			// Keep the extracted method, membership and call facts. Only the contract
+			// record varies to exercise the worker's early overlay at the render ID.
+			facts.Records = append(facts.Records, contracts.Contract{
+				ID: tc.contractID, Type: contracts.ContractEnv, Role: contracts.RoleConsumer, FilePath: file, Meta: map[string]any{},
+			})
 			payload, err := store_pebble.EncodeContractParseFacts(base, facts)
 			require.NoError(t, err)
-			idx := &Indexer{config: cfg}
-			idx.installRebuildParsePolicy(req.Policy)
 			store := rebuildParseStore{dir: req.ParseDir, limit: req.ParseLimit}
 			require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(req.Recipes[lang], input)), payload))
 			require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, inputs))
 			core, logs := observer.New(zap.InfoLevel)
-			err = buildRebuildStages(ctx, lease, zap.New(core), store_pebble.OpenBuild, rebuildTestLinkOptions(t), func(store_pebble.StageTables) error {
+			var sent []store_pebble.Stage
+			err = buildRebuildStages(ctx, lease, zap.New(core), store_pebble.OpenBuild, rebuildTestLinkOptions(t), func(tables store_pebble.StageTables) error {
+				sent = append(sent, tables.Witness.Stage)
 				return nil
 			})
-			require.ErrorIs(t, err, errRebuildBuildIncomplete)
-			applied := logs.FilterMessage("rebuild closure collection applied to private build").All()
-			require.Len(t, applied, tc.closureRuns)
-			if tc.closureRuns != 0 {
+			order := store_pebble.CoreStages()
+			if tc.setStateRuns == 0 {
+				// The overlay masks render during linking, then restores it.
+				// The permanent contract may not overwrite the method.
+				require.ErrorIs(t, err, store_pebble.ErrContractsSeal)
+				var collision *store_pebble.ContractIDCollisionError
+				require.ErrorAs(t, err, &collision)
+				require.Equal(t, tc.contractID, collision.ID)
+				require.Equal(t, order[:3], sent)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, order[:], sent)
+			}
+			applied := logs.FilterMessage("rebuild React setState applied to private build").All()
+			require.Len(t, applied, tc.setStateRuns)
+			if tc.setStateRuns != 0 {
 				require.EqualValues(t, 1, applied[0].ContextMap()["edges"])
 			}
 		})
@@ -1392,6 +1406,32 @@ func TestRunRebuildCheckout(t *testing.T) {
 }
 
 func TestRebuildBuildRouterOverlapLog(t *testing.T) {
+	t.Run("supported router overlap", func(t *testing.T) {
+		// The first rewrite lands on the second route's original ID.
+		logs := rebuildRouterOverlapLog(t, "typescript", []struct{ path, source string }{
+			{"a.ts", "@Controller('api')\nexport class A {\n  @Get('/x')\n  first() {}\n}"},
+			{"b.ts", "@Controller('v2')\nexport class B {\n  @Get('/api/x')\n  second() {}\n}"},
+		}, nil)
+		applied := logs.FilterMessage("rebuild router native map-order differences").All()
+		require.Len(t, applied, 1)
+		require.Equal(t, zap.InfoLevel, applied[0].Level)
+		require.EqualValues(t, 2, applied[0].ContextMap()["files"])
+		paths := logs.FilterMessage("rebuild router native map-order difference").All()
+		require.Len(t, paths, 2)
+		require.Equal(t, zap.DebugLevel, paths[0].Level)
+		require.Equal(t, zap.DebugLevel, paths[1].Level)
+		require.Equal(t, "a.ts", paths[0].ContextMap()["path"])
+		require.Equal(t, "b.ts", paths[1].ContextMap()["path"])
+	})
+	t.Run("deferred routers held out", func(t *testing.T) {
+		logs := rebuildRouterOverlapLog(t, "python", rebuildRouterOverlapSources(), []string{"python"})
+		require.Empty(t, logs.FilterMessage("rebuild router native map-order differences").All())
+		require.Empty(t, logs.FilterMessage("rebuild router native map-order difference").All())
+	})
+}
+
+func rebuildRouterOverlapLog(t *testing.T, lang string, files []struct{ path, source string }, deferred []string) *observer.ObservedLogs {
+	t.Helper()
 	ctx := t.Context()
 	root, src := rebuildInputFixture(t)
 	lease := t.TempDir()
@@ -1400,14 +1440,14 @@ func TestRebuildBuildRouterOverlapLog(t *testing.T) {
 	cfg.Coverage.Modules.Enabled, cfg.Coverage.Clones.Enabled = &off, &off
 	req := rebuildBuildRequest{
 		Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
-		BaseRecipe: store_pebble.HeadDigest{1}, ProvidersOff: true, Recipes: map[string]rebuildDigest{"python": {1}},
+		BaseRecipe: store_pebble.HeadDigest{1}, ProvidersOff: true, Recipes: map[string]rebuildDigest{lang: {1}},
 		Policy: freezeRebuildParsePolicy(root, cfg), Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
 		Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile},
 	}
 	var inputs []rebuildInput
-	for _, file := range rebuildRouterOverlapSources() {
+	for _, file := range files {
 		require.NoError(t, os.WriteFile(filepath.Join(root, file.path), []byte(file.source), 0o600))
-		input, _, err := readRebuildInput(ctx, src, file.path, "python", 1024)
+		input, _, err := readRebuildInput(ctx, src, file.path, lang, 1024)
 		require.NoError(t, err)
 		inputs = append(inputs, input)
 	}
@@ -1436,16 +1476,14 @@ func TestRebuildBuildRouterOverlapLog(t *testing.T) {
 	var sent []store_pebble.Stage
 	err = buildRebuildStages(ctx, lease, zap.New(core), store_pebble.OpenBuild, rebuildTestLinkOptions(t), func(tables store_pebble.StageTables) error {
 		sent = append(sent, tables.Witness.Stage)
+		if tables.Witness.Stage == store_pebble.StageRelations {
+			require.NotNil(t, tables.Witness.Relations)
+			require.Equal(t, deferred, tables.Witness.Relations.DeferredLanguages)
+		}
 		return nil
 	})
-	require.ErrorIs(t, err, errRebuildBuildIncomplete)
-	require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
-	applied := logs.FilterMessage("rebuild router native map-order differences").All()
-	require.Len(t, applied, 1)
-	require.Equal(t, zap.InfoLevel, applied[0].Level)
-	require.EqualValues(t, 2, applied[0].ContextMap()["files"])
-	paths := logs.FilterMessage("rebuild router native map-order difference").All()
-	require.Len(t, paths, 2)
-	require.Equal(t, "a.py", paths[0].ContextMap()["path"])
-	require.Equal(t, "b.py", paths[1].ContextMap()["path"])
+	require.NoError(t, err)
+	require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph,
+		store_pebble.StageRelations, store_pebble.StageContracts, store_pebble.StageDerived, store_pebble.StageSearch}, sent)
+	return logs
 }

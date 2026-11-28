@@ -21,7 +21,8 @@ import (
 )
 
 func TestRebuildBuildFrameworkOrder(t *testing.T) {
-	// The private tail must follow native registry order and report each pass's work.
+	// Check the exact order and counters of the turns that produce rows after F.
+	// Keep the deferred receipts in the fixture so their old outputs cannot leak.
 	applied := []struct {
 		pass, counter string
 		count         int
@@ -31,46 +32,19 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"gRPC", "moves", 1},
 		{"Temporal", "wrapper_stubs", 1},
 		{"event channel", "pairs", 1},
-		{"Swift/ObjC", "edges", 2},
-		{"React Native bridge", "edges", 2},
-		{"React Native native pairing", "edges", 2},
 		{"Observer", "edges", 1},
-		{"closure collection", "edges", 1},
 		{"React setState", "edges", 1},
 		{"Flutter setState", "edges", 1},
-		{"KMP expect/actual", "edges", 2},
-		{"Expo module bridge", "edges", 1},
-		{"Fabric", "edges", 2},
-		{"MyBatis", "moves", 1},
-		{"SQL callsite", "moves", 1},
 		{"Store Factory", "moves", 1},
 		{"Redux Thunk", "moves", 1},
 		{"NgRx Effect", "moves", 1},
 		{"Object Registry", "moves", 1},
 		{"RTK Query", "moves", 1},
 		{"Vuex Dispatch", "moves", 1},
-		{"Celery", "moves", 1},
-		{"Spring events", "moves", 1},
-		{"MediatR", "moves", 1},
-		{"C# DI interfaces", "edges", 1},
-		{"C# interface dispatch", "edges", 1},
-		{"EF Core models", "models", 1},
-		{"Sidekiq", "moves", 1},
-		{"Laravel event", "moves", 1},
-		{"function pointer", "moves", 1},
-		{"macro expansion", "adds", 1},
 		{"Gin middleware", "offers", 1},
 		{"Express", "moves", 1},
 		{"React hooks and context", "moves", 1},
-		{"FastAPI", "moves", 1},
-		{"Rails", "moves", 1},
-		{"Godot autoload", "moves", 1},
-		{"Godot preload alias", "moves", 1},
-		{"SwiftUI", "moves", 1},
-		{"UIKit", "moves", 1},
-		{"Vapor", "moves", 1},
 		{"GoFrame", "moves", 1},
-		{"SvelteKit load", "adds", 2},
 		{"factory chain", "moves", 1},
 		{"function-value callbacks", "adds", 1},
 		{"value refs", "moves", 1},
@@ -80,12 +54,15 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		exact       bool
 		cancelAfter string
 		noGin       bool
+		laravel     bool
 	}{
 		{name: "exact_checkout", exact: true},
 		{name: "legacy_without_namespace"},
 		{name: "redux_thunk_refusal", exact: true, cancelAfter: "Store Factory"},
-		{name: "laravel_refusal", exact: true, cancelAfter: "Sidekiq"},
-		{name: "gin_refusal", exact: true, cancelAfter: "macro expansion"},
+		{name: "laravel_held_out", exact: true, laravel: true},
+		// The ten intervening turns from Celery through C macro expansion
+		// are disabled by the isolated census. Gin is the next active turn.
+		{name: "gin_refusal", exact: true, cancelAfter: "Vuex Dispatch"},
 		{name: "gin_no_offers", exact: true, noGin: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -176,21 +153,48 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				}
 				return nil
 			}))
+			var head *store_pebble.Head
+			if tc.laravel {
+				head, err = store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), req.Incarnation, req.Witness.Profile)
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, head.Close()) })
+			}
 			var sent []store_pebble.Stage
 			err = buildRebuildStages(ctx, lease, logger, store_pebble.OpenBuild, rebuildTestLinkOptions(t),
 				func(tables store_pebble.StageTables) error {
 					sent = append(sent, tables.Witness.Stage)
+					if head != nil {
+						if _, err := head.PublishStage(ctx, tables); err != nil {
+							return err
+						}
+						switch tables.Witness.Stage {
+						case store_pebble.StageFileGraph:
+							snap := head.OpenSnapshot()
+							defer func() { require.NoError(t, snap.Close()) }()
+							require.NotNil(t, snap.GetNode("event.php::publish"))
+							require.NotNil(t, snap.GetNode("event.php::handle"))
+							require.Zero(t, snap.EdgeCount())
+						case store_pebble.StageRelations, store_pebble.StageContracts, store_pebble.StageDerived, store_pebble.StageSearch:
+							var missing *store_pebble.ErrLinksNotAvailable
+							require.ErrorAs(t, tables.Witness.RequireRelationCoverage([]string{"php"}), &missing)
+							require.Equal(t, []string{"php"}, missing.Languages)
+						}
+					}
 					return nil
 				})
-			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
+			order := store_pebble.CoreStages()
+			if !tc.exact || tc.cancelAfter != "" {
+				require.Equal(t, order[:2], sent)
+			} else {
+				require.Equal(t, order[:], sent)
+			}
 			if tc.cancelAfter != "" {
 				wantErr, wire := store_pebble.ErrRebuildReduxThunk, uint8(61)
-				switch tc.cancelAfter {
-				case "Sidekiq":
-					wantErr, wire = store_pebble.ErrRebuildLaravelEvent, 72
-				case "macro expansion":
+				if tc.cancelAfter == "Vuex Dispatch" {
 					wantErr, wire = store_pebble.ErrRebuildGinMiddleware, 77
 				}
+				require.Equal(t, 1, logs.FilterMessage("rebuild "+tc.cancelAfter+" applied to private build").Len())
+				require.Zero(t, logs.FilterMessage("rebuild Gin middleware applied to private build").Len())
 				require.ErrorIs(t, err, wantErr)
 				require.ErrorIs(t, err, context.Canceled)
 				refusal := buildRefusal(err)
@@ -208,7 +212,20 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				require.Empty(t, acks.Bytes())
 				return
 			}
-			require.ErrorIs(t, err, errRebuildBuildIncomplete)
+			if tc.exact {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, errRebuildBuildIncomplete)
+			}
+			if head != nil {
+				snap := head.OpenSnapshot()
+				defer func() { require.NoError(t, snap.Close()) }()
+				require.NoError(t, snap.RequireStage(store_pebble.StageSearch))
+				require.NotNil(t, snap.GetNode("event.php::publish"))
+				require.NotNil(t, snap.GetNode("event.php::handle"))
+				require.Empty(t, snap.GetOutEdges("event.php::publish"), "neither the raw call nor a Laravel link may survive")
+				require.Empty(t, snap.GetInEdges("event.php::handle"))
+			}
 
 			const prefix, suffix = "rebuild ", " applied to private build"
 			var entries []observer.LoggedEntry
