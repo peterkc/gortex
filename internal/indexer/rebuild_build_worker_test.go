@@ -1145,6 +1145,10 @@ func TestRunRebuildCheckoutExternalCallSynthesis(t *testing.T) {
 }
 
 func TestRunRebuildCheckout(t *testing.T) {
+	const (
+		testMember    = "tests/pkg/package.json"
+		regularMember = "packages/pkg/package.json"
+	)
 	for _, tc := range []struct {
 		name                                                       string
 		mismatch, denied, omitJSONRecipe                           bool
@@ -1195,9 +1199,10 @@ func TestRunRebuildCheckout(t *testing.T) {
 				writeRebuildTSAliasFixtureFile(t, root, "keep/entry.ts", `export {}`)
 			}
 			if tc.manifests {
-				writeRebuildTSAliasFixtureFile(t, root, "package.json", `{"name":"root","workspaces":["tests/*"],"dependencies":{"left-pad":"1.3.0"}}`)
+				writeRebuildTSAliasFixtureFile(t, root, "package.json", `{"name":"root","workspaces":["tests/*","packages/*"],"dependencies":{"left-pad":"1.3.0"}}`)
 				writeRebuildTSAliasFixtureFile(t, root, "package-lock.json", `{"name":"root","lockfileVersion":2,"packages":{"":{"name":"root"},"node_modules/left-pad":{"version":"1.3.0"}}}`)
-				writeRebuildTSAliasFixtureFile(t, root, "tests/pkg/package.json", `{"name":"member"}`)
+				writeRebuildTSAliasFixtureFile(t, root, testMember, `{"name":"test-member"}`)
+				writeRebuildTSAliasFixtureFile(t, root, regularMember, `{"name":"member"}`)
 			}
 			if tc.denied {
 				writeRebuildTSAliasFixtureFile(t, root, "caller.ts", `import "@lib/x"`)
@@ -1425,12 +1430,16 @@ func TestRunRebuildCheckout(t *testing.T) {
 				slices.Sort(wantPaths)
 			}
 			if tc.manifests {
-				wantPaths = append(wantPaths, "package.json", "package-lock.json", "tests/pkg/package.json")
+				wantPaths = append(wantPaths, "package.json", "package-lock.json", testMember, regularMember)
 				slices.Sort(wantPaths)
-				for _, file := range []string{"package.json", "package-lock.json", "tests/pkg/package.json"} {
+				for _, file := range []string{"package.json", "package-lock.json", testMember, regularMember} {
 					n := s.GetNode(file)
 					require.NotNil(t, n)
-					require.NotContains(t, n.Meta, "is_test_file")
+					if tc.modulesOff || file != testMember {
+						require.NotContains(t, n.Meta, "is_test_file")
+					} else {
+						require.Equal(t, true, n.Meta["is_test_file"])
+					}
 					require.True(t, slices.ContainsFunc(s.GetOutEdges(file), func(e *graph.Edge) bool {
 						return e.Kind == graph.EdgeDefines && e.To == file+"::name"
 					}), "raw Defines survives native manifest supersession: %s", file)
@@ -1446,9 +1455,22 @@ func TestRunRebuildCheckout(t *testing.T) {
 				} else {
 					require.NotNil(t, s.GetNode("pkgws::npm:."))
 					require.NotNil(t, s.GetNode("module::npm:left-pad@1.3.0"))
-					require.True(t, slices.ContainsFunc(s.GetOutEdges("pkgws::npm:."), func(e *graph.Edge) bool {
-						return e.Kind == graph.EdgePackageWorkspaceMember && e.To == "tests/pkg/package.json"
-					}))
+					native := newFTSStore(t)
+					nativeIdx := New(native, parser.NewRegistry(), cfg, zap.NewNop())
+					t.Cleanup(nativeIdx.Close)
+					nativeIdx.SetRootPath(root)
+					nativeIdx.extractPackageWorkspace()
+					markTestSymbolsAndEmitEdges(native)
+					members := s.GetOutEdges("pkgws::npm:.")
+					for _, member := range []string{testMember, regularMember} {
+						require.True(t, slices.ContainsFunc(members, func(e *graph.Edge) bool {
+							return e.Kind == graph.EdgePackageWorkspaceMember && e.To == member
+						}))
+						want := native.GetNode(member)
+						require.NotNil(t, want)
+						require.Equal(t, want, pinnedRelations.GetNode(member))
+						require.Equal(t, want, s.GetNode(member))
+					}
 				}
 			}
 			var paths []string

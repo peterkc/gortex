@@ -148,20 +148,23 @@ func (b *BuildStore) RebuildTestFiles(ctx context.Context, receipts iter.Seq2[Pa
 		if !bytes.Equal(r.key, pendingNodeKey(light.ID)) {
 			return invalid("working test file identity does not match key")
 		}
-		// The checked workspace writer may replace a held member manifest.
-		// It is not a selected receipt and must not receive a deferred stamp.
+		// Native stamps test paths after the workspace writer runs. The
+		// exact replacement proves the file without the held raw receipt.
 		owned, err := b.rebuildManifestSupersession(light.ID)
-		if err != nil || owned {
+		if err != nil {
 			return err
 		}
-		proof, err := pendingGet(b.pending, key('n', light.ID), copyValue)
-		if err != nil || bytes.Equal(proof, []byte{deferred}) {
-			return err
-		}
-		deferredFile := bytes.Equal(proof, []byte{completeDeferred})
-		if !deferredFile && !bytes.Equal(proof, []byte{supported}) && !bytes.Equal(proof, []byte{skipped}) {
-			recordUnknown(light)
-			return nil
+		var deferredFile bool
+		if !owned {
+			proof, err := pendingGet(b.pending, key('n', light.ID), copyValue)
+			if err != nil || bytes.Equal(proof, []byte{deferred}) {
+				return err
+			}
+			deferredFile = bytes.Equal(proof, []byte{completeDeferred})
+			if !deferredFile && !bytes.Equal(proof, []byte{supported}) && !bytes.Equal(proof, []byte{skipped}) {
+				recordUnknown(light)
+				return nil
+			}
 		}
 		if deferredFile {
 			// Native runner detection can read outgoing imports before using its
@@ -259,7 +262,28 @@ func (b *BuildStore) RebuildTestFiles(ctx context.Context, receipts iter.Seq2[Pa
 			if err != nil {
 				return err
 			}
-			return b.writeNode(n)
+			owned, err := b.rebuildManifestSupersession(n.ID)
+			if err != nil {
+				return err
+			}
+			if err := b.writeNode(n); err != nil {
+				return err
+			}
+			if !owned {
+				return nil
+			}
+			// Restore must verify the stamped row, not the writer's
+			// earlier bytes or arbitrary later changes. Save the bytes
+			// writeNode stored, as AddRebuildManifestArtifacts does.
+			nodeKey := pendingNodeKey(n.ID)
+			raw, err := pendingGet(b.pending, nodeKey, copyValue)
+			if err != nil {
+				return err
+			}
+			if raw == nil {
+				return invalid("stamped manifest replacement was not saved")
+			}
+			return b.pending.Set(rebuildHoldoutKey('s', nodeKey), raw, pebble.NoSync)
 		})
 	})
 }
