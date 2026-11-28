@@ -16,7 +16,6 @@ import (
 	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/graph"
-	"golang.org/x/mod/module"
 )
 
 // FileGraphBase retains the worker's exact file-graph data SSTs. Its links
@@ -140,8 +139,8 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 			return StageTables{}, err
 		}
 	}
-	if endpoints.goArguments != 0 {
-		if err := gold.add(countKey("go dataflow source endpoints"), encodeCount(endpoints.goArguments)); err != nil {
+	if endpoints.goDataflowSources != 0 {
+		if err := gold.add(countKey("go dataflow source endpoints"), encodeCount(endpoints.goDataflowSources)); err != nil {
 			return StageTables{}, err
 		}
 	}
@@ -189,7 +188,7 @@ func RebuildExternalImportTarget(specifier string) (string, bool) {
 }
 
 type relationsEndpointCounts struct {
-	externalImports, goArguments int
+	externalImports, goDataflowSources int
 }
 
 // Ordinary Go argument sources can be unresolved identifiers or selectors.
@@ -199,9 +198,13 @@ func rebuildGoArgumentSource(e *graph.Edge, extractorOf func(string) string) boo
 		e.FilePath == "" || e.Line <= 0 || extractorOf(e.FilePath) != "go" {
 		return false
 	}
-	name := strings.TrimPrefix(graph.UnresolvedName(e.From), "*.")
+	return rebuildGoUnresolvedNameSource(e.From)
+}
+
+func rebuildGoUnresolvedNameSource(from string) bool {
+	name := strings.TrimPrefix(graph.UnresolvedName(from), "*.")
 	return token.IsIdentifier(name) && name != "_" &&
-		slices.Contains(graph.UnresolvedNameCandidateIDsForName(name, ""), e.From)
+		slices.Contains(graph.UnresolvedNameCandidateIDsForName(name, ""), from)
 }
 
 // rebuildGoDataflowReceiptSource is the additional native source vocabulary
@@ -225,13 +228,14 @@ func rebuildGoDataflowReceiptSource(e *graph.Edge) bool {
 	}
 	if spec, ok := strings.CutPrefix(e.From, "unresolved::extern::"); ok {
 		at := strings.LastIndex(spec, "::")
-		return at > 0 && module.CheckImportPath(spec[:at]) == nil && token.IsIdentifier(spec[at+2:]) && spec[at+2:] != "_"
+		// The checked extractor, not the module loader, owns the path
+		// spelling. Go source can carry a relative or non-module path.
+		return at > 0 && token.IsIdentifier(spec[at+2:])
 	}
 	if e.Kind != graph.EdgeValueFlow {
 		return false
 	}
-	name := strings.TrimPrefix(graph.UnresolvedName(e.From), "*.")
-	return token.IsIdentifier(name) && name != "_" && slices.Contains(graph.UnresolvedNameCandidateIDsForName(name, ""), e.From)
+	return rebuildGoUnresolvedNameSource(e.From)
 }
 
 func (b *BuildStore) rebuildGoDataflowSourceProved(r row, e *graph.Edge, extractorOf func(string) string) (bool, error) {
@@ -349,7 +353,7 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, revision uint3
 			}
 			if proved || rebuildGoArgumentSource(e, extractorOf) {
 				if kept {
-					counts.goArguments++
+					counts.goDataflowSources++
 				}
 				return nil
 			}

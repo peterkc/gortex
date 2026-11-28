@@ -12,11 +12,12 @@ func TestRelationsCheckedGoDataflowSources(t *testing.T) {
 	const file = "source.go"
 	const source = "unresolved::extern::net/http::StatusCreated"
 	parsed, err := languages.NewGoExtractor().Extract(file, []byte(`package p
-import "net/http"
+import ("net/http"; local "./util")
 func Arg() { Sink(http.StatusCreated) }
 func Value() int { return http.StatusCreated }
 func Bare() int { return UNKNOWN }
 func Member() int { return unknown.Field }
+func Local() int { return local.Constant }
 `))
 	require.NoError(t, err)
 	t.Cleanup(parsed.ReleaseTree)
@@ -31,10 +32,13 @@ func Member() int { return unknown.Field }
 		{"argument target move", source, graph.EdgeArgOf, 3, "target", true},
 		{"qualified value", source, graph.EdgeValueFlow, 4, "", true},
 		{"bare value", "unresolved::UNKNOWN", graph.EdgeValueFlow, 5, "", true},
+		{"relative import value", "unresolved::extern::./util::Constant", graph.EdgeValueFlow, 7, "", true},
 		{"selector value", "unresolved::*.Field", graph.EdgeValueFlow, 6, "", true},
 		{"wrong origin", source, graph.EdgeArgOf, 3, "origin", false},
 		{"wrong path", source, graph.EdgeArgOf, 3, "path", false},
 		{"foreign extractor", source, graph.EdgeArgOf, 3, "extractor", false},
+		{"wrong extractor at seal", source, graph.EdgeArgOf, 3, "seal extractor", false},
+		{"same chunk target chain", source, graph.EdgeArgOf, 3, "chain", true},
 		{"forged pair", source, graph.EdgeArgOf, 3, "pair", false},
 		{"forged source move", source, graph.EdgeArgOf, 3, "source", false},
 	} {
@@ -85,6 +89,11 @@ func Member() int { return unknown.Field }
 				move.To = file + "::Arg"
 				require.NoError(t, worker.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &move, OldTo: edge.To}}))
 				edge = move
+			case "chain":
+				middle, last := edge, edge
+				middle.To, last.To = file+"::Arg", file+"::Value"
+				worker.ReindexEdges([]graph.EdgeReindex{{Edge: &middle, OldTo: edge.To}, {Edge: &last, OldTo: middle.To}})
+				edge = last
 			case "pair":
 				forged := edge
 				forged.To = file + "::Arg"
@@ -95,7 +104,11 @@ func Member() int { return unknown.Field }
 				worker.ReindexEdges([]graph.EdgeReindex{{Edge: &forged, OldFrom: edge.From, OldTo: edge.To,
 					OldLine: edge.Line, OldFilePath: edge.FilePath, RefreshIdentity: true}})
 			}
-			tables, err := worker.PrepareRelations(ctx, t.TempDir(), base, func(string) string { return "go" })
+			sealedExtractor := "go"
+			if tc.change == "seal extractor" {
+				sealedExtractor = "typescript"
+			}
+			tables, err := worker.PrepareRelations(ctx, t.TempDir(), base, func(string) string { return sealedExtractor })
 			if !tc.keep {
 				require.ErrorIs(t, err, ErrRelationsSeal)
 				require.ErrorContains(t, err, "dangling relations endpoint")

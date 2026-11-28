@@ -24,11 +24,20 @@ func TestRunRebuildCheckoutGoDataflowSources(t *testing.T) {
 	root, src := rebuildInputFixture(t)
 	const file = "source.go"
 	const placeholder = "unresolved::extern::net/http::StatusCreated"
+	const packageConst = "unresolved::extern::example.org/widgets/sub::Const"
+	const packageConstNode = "sub/value.go::Const"
+	require.NoError(t, os.Mkdir(filepath.Join(root, "sub"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "sub/value.go"), []byte("package sub\nconst Const = 7\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.org/widgets\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(root, file), []byte(`package p
-import "net/http"
-func Arg() { Sink(http.StatusCreated) }
+import (
+    "net/http"
+    "example.org/widgets/sub"
+)
+func Arg() { Sink(http.StatusCreated, http.StatusCreated) }
 func Value() int { return http.StatusCreated }
+func ArgLocal() { Sink(sub.Const) }
+func ValueLocal() int { return sub.Const }
 `), 0o600))
 	cfg := config.Default().Index
 	cfg.Workers = 2
@@ -53,6 +62,10 @@ func Value() int { return http.StatusCreated }
 	want := rows(native.GetOutEdges(placeholder))
 	require.Len(t, want, 2, "native keeps both exact qualified dangling sources")
 	require.Nil(t, native.GetNode(placeholder))
+	require.NotNil(t, native.GetNode(packageConstNode))
+	wantModulePlaceholder := rows(native.GetOutEdges(packageConst))
+	wantModuleConcrete := rows(native.GetOutEdges(packageConstNode))
+	require.Equal(t, 2, len(wantModulePlaceholder)+len(wantModuleConcrete), "native module argument and return source rows")
 	req := rebuildBuildRequest{
 		Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
 		Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}},
@@ -78,4 +91,6 @@ func Value() int { return http.StatusCreated }
 	require.NoError(t, snap.RequireStage(store_pebble.StageSearch))
 	require.Nil(t, snap.GetNode(placeholder))
 	require.ElementsMatch(t, want, rows(snap.GetOutEdges(placeholder)))
+	require.ElementsMatch(t, wantModulePlaceholder, rows(snap.GetOutEdges(packageConst)))
+	require.ElementsMatch(t, wantModuleConcrete, rows(snap.GetOutEdges(packageConstNode)))
 }
