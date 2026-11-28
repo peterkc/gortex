@@ -140,3 +140,32 @@ func TestRebuildContractSourcesReplayBeyondMergeRunCap(t *testing.T) {
 	require.Equal(t, count-1, stats.SpillRuns)
 	require.Positive(t, stats.SpillBytes)
 }
+
+func TestRebuildContractSourcesLostRunRefuses(t *testing.T) {
+	ctx, lease := t.Context(), t.TempDir()
+	stats, err := WithRebuildContractSources(ctx, lease, 1,
+		func(add func(contracts.Contract) error) error {
+			if err := add(contracts.Contract{ID: "env::FIRST"}); err != nil {
+				return err
+			}
+			return add(contracts.Contract{ID: "env::SECOND"})
+		},
+		func(read func(func(contracts.Contract) error) error) error {
+			dirs, err := os.ReadDir(lease)
+			require.NoError(t, err)
+			require.Len(t, dirs, 1)
+			require.NoError(t, os.Remove(contractSourceRunPath(filepath.Join(lease, dirs[0].Name()), 0)))
+			var seen int
+			require.ErrorIs(t, read(func(contracts.Contract) error {
+				seen++
+				return nil
+			}), os.ErrNotExist)
+			require.Zero(t, seen)
+			return nil // even an unchecked result must not succeed
+		})
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.Zero(t, stats)
+	left, err := os.ReadDir(lease)
+	require.NoError(t, err)
+	require.Empty(t, left)
+}

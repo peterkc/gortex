@@ -71,9 +71,17 @@ func WithRebuildContractSources(ctx context.Context, scratchParent string, spill
 	runs.rows = nil
 	active := true
 	defer func() { active = false }()
-	err = use(func(yield func(contracts.Contract) error) error {
-		if !active || yield == nil {
-			return invalid("inactive contract source reader or missing visitor")
+	var readErr error
+	err = use(func(yield func(contracts.Contract) error) (err error) {
+		if !active {
+			return invalid("inactive contract source reader")
+		}
+		if readErr != nil {
+			return readErr
+		}
+		defer func() { readErr = err }()
+		if yield == nil {
+			return invalid("missing contract source visitor")
 		}
 		// Ordinals are monotone between runs as well as inside each run. Read
 		// one table at a time rather than opening all runs to merge them.
@@ -88,7 +96,7 @@ func WithRebuildContractSources(ctx context.Context, scratchParent string, spill
 		}
 		return ctx.Err()
 	})
-	return stats, errors.Join(err, ctx.Err())
+	return stats, errors.Join(err, readErr, ctx.Err())
 }
 
 func contractSourceRunPath(dir string, ordinal int) string {
