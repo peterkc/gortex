@@ -34,7 +34,8 @@ type BuildStore struct {
 	contractsStarted bool
 	contractsSealed  HeadDigest
 
-	rebuildLinksIsolated bool // protected by mu
+	rebuildLinksIsolated     bool              // protected by mu
+	rebuildIsolationCoverage *RelationCoverage // checked census; protected by mu
 }
 
 var _ graph.Store = (*BuildStore)(nil)
@@ -356,6 +357,13 @@ func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns, stage Stag
 		return addCounts(countKey("edges"), countKey("repo edges", repo), countKey("edge kind", kind))
 	}); err != nil {
 		return err
+	}
+	if stage == StageRelations || stage == StageContracts {
+		if err := pendingVisit(ctx, b.pending, []byte{familyIsolation}, func(r row) error {
+			return gold.add(bytes.Clone(r.key), bytes.Clone(r.value))
+		}); err != nil {
+			return err
+		}
 	}
 	if stage == StageContracts {
 		if err := b.writeContractShapes(ctx, gold); err != nil {

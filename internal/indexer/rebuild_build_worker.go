@@ -484,6 +484,9 @@ func buildRebuildStages(
 			if err := private.RestoreRebuildDeclarations(ctx); err != nil {
 				return err
 			}
+			if err := private.CheckRebuildIsolationCoverage(deferred); err != nil {
+				return err
+			}
 			relationsDir := filepath.Join(lease, store_pebble.StageRelations.String())
 			if err := os.Mkdir(relationsDir, 0o700); err != nil {
 				return err
@@ -492,7 +495,6 @@ func buildRebuildStages(
 			if err != nil {
 				return err
 			}
-			relations.Witness.Relations = &store_pebble.RelationCoverage{DeferredLanguages: deferred}
 			base, err := private.RetainRelations(ctx, counts.fileGraphBase, relations)
 			if err != nil {
 				return err
@@ -585,7 +587,7 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 			return err
 		}
 		predecessors := rebuildClonePredecessors{
-			namespace: namespace, fileClaims: &counts.claims, contracts: earlyIDs,
+			namespace: namespace, fileClaims: &counts.claims, contracts: earlyIDs, heldCloneByLanguage: counts.census.heldCloneByLanguage,
 		}
 		// Native cold detection still banks pre-signed callables when raw
 		// clone extraction is disabled.
@@ -1035,7 +1037,7 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 		if gdDemotions != 0 {
 			logger.Info("rebuild GDScript receiver gate applied to private build", zap.Uint64("demotions", gdDemotions))
 		}
-		rewriteNpm := rebuildExternalNpmRewrite(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), counts.census, classifications)
+		rewriteNpm := rebuildExternalNpmRewriteWithCoverage(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), counts.census, classifications, private)
 		externalCalls, err := resolver.RunRebuildExternalCallSynthesis(ctx, private, receipts, req.ExternalCallsEnabled, requestedSelection, selection, rewriteNpm)
 		if err != nil {
 			return err

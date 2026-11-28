@@ -1149,7 +1149,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 		name                                                       string
 		mismatch, denied, omitJSONRecipe                           bool
 		captureRefusal, sealRefusal, mixed, deferredOnly, skipOnly bool
-		manifests, modulesOff                                      bool
+		manifests, modulesOff, aliasAffected                       bool
 	}{
 		{name: "verified checkout builds all six stages"},
 		{name: "capture refusal keeps file graph", captureRefusal: true},
@@ -1157,6 +1157,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 		{name: "mixed checkout isolates links", mixed: true},
 		{name: "mixed manifests retain native writers", mixed: true, manifests: true},
 		{name: "mixed manifests modules disabled", mixed: true, manifests: true, modulesOff: true},
+		{name: "mixed alias affected scope", mixed: true, aliasAffected: true},
 		{name: "deferred-only checkout isolates links", deferredOnly: true},
 		{name: "deferred checked skip alone labels all later stages", skipOnly: true},
 		{name: "supplied input root differs", mismatch: true},
@@ -1186,6 +1187,12 @@ func TestRunRebuildCheckout(t *testing.T) {
 			}
 			if tc.skipOnly {
 				require.NoError(t, os.WriteFile(filepath.Join(root, "test_document.txt"), []byte(strings.Repeat("x", 96)), 0o600))
+			}
+			if tc.aliasAffected {
+				writeRebuildTSAliasFixtureFile(t, root, "caller.ts", `import "@source"`)
+				writeRebuildTSAliasFixtureFile(t, root, "tsconfig.json", `{"compilerOptions":{"paths":{"@source":["first/entry.json","keep/entry.ts"]}}}`)
+				writeRebuildTSAliasFixtureFile(t, root, "first/entry.json", `{}`)
+				writeRebuildTSAliasFixtureFile(t, root, "keep/entry.ts", `export {}`)
 			}
 			if tc.manifests {
 				writeRebuildTSAliasFixtureFile(t, root, "package.json", `{"name":"root","workspaces":["tests/*"],"dependencies":{"left-pad":"1.3.0"}}`)
@@ -1236,11 +1243,18 @@ func TestRunRebuildCheckout(t *testing.T) {
 			var stages []store_pebble.Stage
 			var pinnedRelations *store_pebble.Snapshot
 			wantDeferred := []string{"python"}
-			if tc.manifests {
+			if tc.manifests || tc.aliasAffected {
 				wantDeferred = []string{"json", "python"}
 			}
 			if tc.skipOnly {
 				wantDeferred = append(wantDeferred, "text")
+			}
+			wantCoverage := &store_pebble.RelationCoverage{IsolationChecked: true}
+			if partial {
+				wantCoverage.DeferredLanguages = wantDeferred
+			}
+			if tc.aliasAffected {
+				wantCoverage.IsolationDependencies = []store_pebble.RebuildIsolationDependency{{SupportedLanguage: "typescript", DeferredLanguage: "json"}}
 			}
 			err = idx.runRebuildCheckout(ctx, src, req, excludes.New([]string{"excluded/"}), false,
 				exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, leases, headDir,
@@ -1285,15 +1299,21 @@ func TestRunRebuildCheckout(t *testing.T) {
 						}
 					case store_pebble.StageRelations:
 						if partial {
-							require.Equal(t, &store_pebble.RelationCoverage{DeferredLanguages: wantDeferred}, offer.Witness.Relations)
+							require.Equal(t, wantCoverage, offer.Witness.Relations)
 							var missing *store_pebble.ErrLinksNotAvailable
 							require.ErrorAs(t, offer.Witness.RequireRelationCoverage([]string{"python"}), &missing)
 							require.Equal(t, []string{"python"}, missing.Languages)
 							require.NoError(t, offer.Witness.RequireRelationCoverage([]string{"go"}))
 						} else {
-							require.Equal(t, &store_pebble.RelationCoverage{}, offer.Witness.Relations)
+							require.Equal(t, wantCoverage, offer.Witness.Relations)
 						}
 						pinnedRelations = h.OpenSnapshot()
+						if tc.aliasAffected {
+							var incomplete *store_pebble.ErrLinksNotAvailable
+							require.ErrorAs(t, pinnedRelations.RequireRelationCoverageContext(ctx, []string{"typescript"}, []string{"caller.ts"}), &incomplete)
+							require.Equal(t, []store_pebble.RebuildIsolationAffectedScope{{FilePath: "caller.ts", SupportedLanguage: "typescript", DeferredLanguage: "json", Cause: "ts-alias", Count: 1}}, incomplete.Affected)
+							require.NoError(t, pinnedRelations.RequireRelationCoverageContext(ctx, []string{"typescript"}, []string{"keep/entry.ts"}))
+						}
 						t.Cleanup(func() { require.NoError(t, pinnedRelations.Close()) })
 						if tc.sealRefusal {
 							// Remove the private retained FileGraph link after Relations
@@ -1307,7 +1327,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 					case store_pebble.StageContracts, store_pebble.StageDerived, store_pebble.StageSearch:
 						require.Equal(t, &store_pebble.ContractCoverage{}, offer.Witness.Contracts)
 						if partial {
-							require.Equal(t, &store_pebble.RelationCoverage{DeferredLanguages: wantDeferred}, offer.Witness.Relations)
+							require.Equal(t, wantCoverage, offer.Witness.Relations)
 						}
 					}
 					return nil
@@ -1399,6 +1419,10 @@ func TestRunRebuildCheckout(t *testing.T) {
 				require.Equal(t, store_pebble.StageContracts, pending.Need)
 				require.Equal(t, store_pebble.StageRelations, pending.Published)
 				require.Nil(t, pinnedRelations.GetNode(contractID))
+			}
+			if tc.aliasAffected {
+				wantPaths = append(wantPaths, "caller.ts", "first/entry.json", "keep/entry.ts", "tsconfig.json")
+				slices.Sort(wantPaths)
 			}
 			if tc.manifests {
 				wantPaths = append(wantPaths, "package.json", "package-lock.json", "tests/pkg/package.json")

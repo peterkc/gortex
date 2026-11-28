@@ -7,6 +7,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
 var errRebuildNpmInput = errors.New("unproved frozen npm input")
@@ -64,6 +66,12 @@ func newRebuildNpmLookupFromNamespace(ctx context.Context, ns *rebuildResolverNa
 func rebuildExternalNpmRewrite(ctx context.Context, lease string, digest rebuildDigest, census *rebuildExtractorCensus,
 	classifications map[string]rebuildClassificationFact,
 ) func(string, string) (string, error) {
+	return rebuildExternalNpmRewriteWithCoverage(ctx, lease, digest, census, classifications, nil)
+}
+
+func rebuildExternalNpmRewriteWithCoverage(ctx context.Context, lease string, digest rebuildDigest, census *rebuildExtractorCensus,
+	classifications map[string]rebuildClassificationFact, build *store_pebble.BuildStore,
+) func(string, string) (string, error) {
 	var npm *rebuildNpmLookup
 	return func(file, spec string) (string, error) {
 		if npm == nil {
@@ -75,10 +83,24 @@ func rebuildExternalNpmRewrite(ctx context.Context, lease string, digest rebuild
 			if err != nil {
 				return "", err
 			}
-			npm = newRebuildNpmLookupFromNamespace(ctx, ns, manifests, followed, glob, rebuildLinkCandidateProbe(ns, census, classifications))
+			npm = newRebuildNpmLookupFromNamespace(ctx, ns, manifests, followed, glob, ns.probeFile)
 		}
-		return npm.rewrite(file, spec)
+		return npm.rewriteAffected(build, census, classifications, file, spec)
 	}
+}
+
+func (x *rebuildNpmLookup) rewriteAffected(build *store_pebble.BuildStore, census *rebuildExtractorCensus,
+	classifications map[string]rebuildClassificationFact, caller, spec string,
+) (string, error) {
+	return resolveRebuildAffectedCandidate(x.ctx, build, x.in.namespace, census, classifications, caller, spec, "npm-candidate",
+		func(probe func(string) (bool, error)) (string, error) {
+			// Only the serial checked candidate probe changes. The native
+			// manifest/workspace cache is independent and reused by both answers.
+			prior := x.in.isFile
+			x.in.isFile = func(_ context.Context, key string) (bool, error) { return probe(key) }
+			defer func() { x.in.isFile = prior }()
+			return x.rewrite(caller, spec)
+		})
 }
 
 func (x *rebuildNpmLookup) rewrite(caller, spec string) (string, error) {

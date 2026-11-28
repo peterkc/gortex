@@ -3,6 +3,7 @@ package indexer
 import (
 	"errors"
 	"maps"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -187,6 +188,97 @@ func TestRebuildCloneSignaturesRejectsIncompletePass(t *testing.T) {
 			}
 			require.Zero(t, counts, "callbacks before a later failure are tentative")
 			require.Equal(t, tc.calls, calls)
+		})
+	}
+}
+
+func TestRebuildCloneIsolationCohortCoverage(t *testing.T) {
+	const goPath, tsPath, emptyPath = "a.go", "b.ts", "empty.go"
+	shingles := []uint64{1, 2, 3, 4, 5, 6, 7, 8}
+	signed, ok := clones.SignatureFromShingles(shingles, 0)
+	require.True(t, ok)
+	previous := cmsMinCorpus
+	cmsMinCorpus = 3
+	t.Cleanup(func() { cmsMinCorpus = previous })
+	for _, mixed := range []bool{false, true} {
+		name := "supported_only"
+		if mixed {
+			name = "held_raw_and_signed"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			a := rebuildCloneInputFixture(rebuildCloneInput{ID: goPath + "::Raw", FilePath: goPath, Language: "go", Line: 3, Tokens: 80, Shingles: shingles}, "go")
+			a.Nodes = append(a.Nodes, &graph.Node{ID: goPath + "::Signed", Name: "Signed", Kind: graph.KindMethod, FilePath: goPath, Language: "go", StartLine: 7, EndLine: 10,
+				Meta: map[string]any{cloneSigMetaKey: clones.EncodeSignature(signed), cloneTokensMetaKey: 80}})
+			a.File.NodeCount++
+			b := rebuildCloneInputFixture(rebuildCloneInput{ID: tsPath + "::Raw", FilePath: tsPath, Language: "typescript", Line: 3, Tokens: 80, Shingles: shingles}, "javascript")
+			empty := store_pebble.ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: emptyPath}}
+			build, _ := openRebuildTestFileStore(t)
+			receipts := seedRebuildCloneInputReceipts(t, build, a, b, empty)
+			manifestFiles := []store_pebble.ManifestFile{{Path: goPath, Kind: 'f', Language: "go"}, {Path: tsPath, Kind: 'f', Language: "typescript"}, {Path: emptyPath, Kind: 'f', Language: "go"}}
+			var deferred []string
+			var held map[string]uint64
+			if mixed {
+				raw := rebuildCloneInputFixture(rebuildCloneInput{ID: "held.py::Raw", FilePath: "held.py", Language: "python", Line: 3, Tokens: 80, Shingles: shingles}, "python")
+				preSigned := rebuildSignedCloneFacts(clones.EncodeSignature(signed))
+				noBody := store_pebble.ParseFacts{EffectiveLanguage: "ruby", File: graph.FileMetaRow{FilePath: "held.rb"}}
+				for _, f := range []store_pebble.ParseFacts{raw, preSigned, noBody} {
+					require.NoError(t, build.AddRebuildDeferredFile("", f, func(string) (bool, error) { return true, nil }))
+					manifestFiles = append(manifestFiles, store_pebble.ManifestFile{Path: f.File.FilePath, Kind: 'f', Language: f.EffectiveLanguage})
+				}
+				deferred = []string{"python", "ruby", "rust"}
+				// FileGraph owns this exact inventory; only counts, not bodies,
+				// enter the link-facing clone pass. Ruby has no clone inputs.
+				held = map[string]uint64{"python": 1, "rust": 2, "ruby": 0}
+			}
+			head, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), rebuildTestIncarnation, store_pebble.FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, head.Close()) })
+			manifest, err := store_pebble.PrepareManifest(ctx, t.TempDir(), manifestFiles, store_pebble.Witness{
+				Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2}, Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile,
+			}, rebuildTestIncarnation)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, manifest)
+			require.NoError(t, err)
+			files, err := build.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, rebuildTestIncarnation)
+			require.NoError(t, err)
+			base, err := build.RetainFileGraph(ctx, files)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, files)
+			require.NoError(t, err)
+			require.NoError(t, build.IsolateRebuildLinks(ctx))
+			predecessors := rebuildClonePredecessors{fileClaims: &store_pebble.RebuildSharedClaimStats{}, heldCloneByLanguage: held}
+			stats, err := applyRebuildCloneRelations(ctx, build, receipts, predecessors, 0.82)
+			require.NoError(t, err)
+			require.Equal(t, 2, stats.Signatures.Corpus)
+			require.Equal(t, 2, stats.Signatures.Kept, "held raw bodies must not cross the CMS floor")
+			require.Equal(t, 1, stats.Signatures.Signed, "held signatures must not enter the selected pair corpus")
+			require.NoError(t, build.RestoreRebuildDeclarations(ctx))
+			require.NoError(t, build.CheckRebuildIsolationCoverage(deferred))
+			relations, err := build.PrepareRelations(ctx, t.TempDir(), base, nil)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, relations)
+			require.NoError(t, err)
+			snap := head.OpenSnapshot()
+			defer func() { require.NoError(t, snap.Close()) }()
+			require.NoError(t, snap.RequireRelationCoverageContext(ctx, []string{"go"}, []string{emptyPath}))
+			require.NoError(t, snap.RequireRelationCoverageContext(ctx, []string{"javascript"}, nil), "use effective extractor, not node language")
+			if !mixed {
+				require.NoError(t, snap.RequireRelationCoverageContext(ctx, nil, nil))
+				return
+			}
+			var refusal *store_pebble.ErrLinksNotAvailable
+			require.ErrorAs(t, snap.RequireRelationCoverageContext(ctx, []string{"go"}, []string{goPath}), &refusal)
+			require.Equal(t, []string{"python", "rust"}, refusal.Languages)
+			require.Equal(t, []store_pebble.RebuildIsolationAffectedScope{
+				{FilePath: goPath, SupportedLanguage: "go", DeferredLanguage: "python", Cause: "clone-corpus", Count: 2},
+				{FilePath: goPath, SupportedLanguage: "go", DeferredLanguage: "rust", Cause: "clone-corpus", Count: 2},
+			}, refusal.Affected)
+			require.ErrorAs(t, snap.RequireRelationCoverageContext(ctx, []string{"typescript"}, []string{tsPath}), &refusal)
+			require.Equal(t, []store_pebble.RebuildIsolationAffectedScope{
+				{FilePath: tsPath, SupportedLanguage: "typescript", DeferredLanguage: "python", Cause: "clone-corpus", Count: 1},
+				{FilePath: tsPath, SupportedLanguage: "typescript", DeferredLanguage: "rust", Cause: "clone-corpus", Count: 1},
+			}, refusal.Affected)
 		})
 	}
 }

@@ -412,3 +412,27 @@ func TestRebuildHeldManifestSupersession(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildHeldEndpointCoverageUsesFirstReceipt(t *testing.T) {
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	held := &graph.Node{ID: "a.py::A", FilePath: "a.py", Kind: graph.KindFunction, Language: "go"}
+	caller := &graph.Node{ID: "caller.go::Run", FilePath: "caller.go", Kind: graph.KindFunction, Language: "go"}
+	keep := func(string) (bool, error) { return true, nil }
+	require.NoError(t, b.AddRebuildDeferredFile("", ParseFacts{File: graph.FileMetaRow{FilePath: held.FilePath, NodeCount: 1}, EffectiveLanguage: "python", Nodes: []*graph.Node{held}}, keep))
+	edge := &graph.Edge{From: caller.ID, To: held.ID, FilePath: caller.FilePath, Kind: graph.EdgeCalls}
+	require.NoError(t, b.AddParsedFileSelected("", ParseFacts{File: graph.FileMetaRow{FilePath: caller.FilePath, NodeCount: 1}, EffectiveLanguage: "go", Nodes: []*graph.Node{caller}, Edges: []*graph.Edge{edge, edge}}, keep))
+	require.NoError(t, b.IsolateRebuildLinksForCoverage(ctx))
+	require.NoError(t, b.RestoreRebuildDeclarations(ctx))
+	require.NoError(t, b.CheckRebuildIsolationCoverage([]string{"python"}))
+	coverage, err := b.prepareIsolationScopes(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []RebuildIsolationDependency{{SupportedLanguage: "go", DeferredLanguage: "python"}}, coverage.IsolationDependencies)
+	var scopes []RebuildIsolationAffectedScope
+	require.NoError(t, pendingVisit(ctx, b.pending, []byte{familyIsolation}, func(r row) error {
+		scope, err := decodeIsolationScope(r.key, r.value)
+		scopes = append(scopes, scope)
+		return err
+	}))
+	require.Equal(t, []RebuildIsolationAffectedScope{{FilePath: "caller.go", SupportedLanguage: "go", DeferredLanguage: "python", Cause: "held-endpoint", Count: 1}}, scopes)
+}

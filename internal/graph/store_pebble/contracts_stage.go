@@ -286,6 +286,7 @@ func (b *BuildStore) PrepareContractsWithCheckedSizeSkips(ctx context.Context, d
 	}
 	stream.flush()
 	w := base.witness
+	w.Relations = cloneRelationCoverage(w.Relations)
 	w.Stage, w.Contracts = StageContracts, &coverage
 	w.Families = nil
 	for _, f := range base.witness.Families {
@@ -339,6 +340,8 @@ func (b *BuildStore) checkContractChange(r row) error {
 	var tag byte
 	var key []byte
 	switch r.key[0] {
+	case familyIsolation:
+		return invalid("contracts changed sealed isolation scope")
 	case familyNode:
 		tag, key = 'n', r.key
 	case familyEdge:

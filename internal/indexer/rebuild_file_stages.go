@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/zzet/gortex/internal/clones"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/source"
@@ -50,9 +51,10 @@ var (
 // retains one literal path key per admitted input and counts its effective
 // extractor ID, not the manifest language or any node language.
 type rebuildExtractorCensus struct {
-	admitted uint64
-	byPath   map[string]string
-	byID     map[string]uint64
+	admitted            uint64
+	byPath              map[string]string
+	byID                map[string]uint64
+	heldCloneByLanguage map[string]uint64
 
 	originByGraphPath map[string]string // exact graph key → literal path; stubs have no receipt in byPath
 	receipts          iter.Seq2[store_pebble.ParseFacts, error]
@@ -191,6 +193,7 @@ func (idx *Indexer) buildRebuildFileStages(
 		admitted:          manifest.Witness.Families[0].Count,
 		byPath:            make(map[string]string, len(job.inputs)),
 		byID:              make(map[string]uint64),
+		heldCloneByLanguage: make(map[string]uint64),
 		originByGraphPath: origins,
 	}
 	for _, input := range job.inputs {
@@ -239,13 +242,34 @@ func (idx *Indexer) buildRebuildFileStages(
 					}
 				}
 				add := private.AddParsedFileSelected
-				if job.retainFileGraph && !rebuildLinkedExtractor(facts.EffectiveLanguage) {
+				held := job.retainFileGraph && !rebuildLinkedExtractor(facts.EffectiveLanguage)
+				if held {
 					add = private.AddRebuildDeferredFile
 				}
 				if err := add("", facts, func(id string) (bool, error) {
 					return keep(id, ordinal)
 				}); err != nil {
 					return err
+				}
+				if held {
+					for _, n := range facts.Nodes {
+						if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
+							continue
+						}
+						_, raw := facts.Shingles[n.ID]
+						stamp, _ := n.Meta[cloneSigMetaKey].(string)
+						_, signed := clones.DecodeSignature(stamp)
+						if !raw && !signed {
+							continue
+						}
+						selected, err := keep(n.ID, ordinal)
+						if err != nil {
+							return err
+						}
+						if selected {
+							census.heldCloneByLanguage[facts.EffectiveLanguage]++
+						}
+					}
 				}
 			}
 			return ctx.Err()
@@ -293,7 +317,7 @@ func (idx *Indexer) buildRebuildFileStages(
 		return counts, err
 	}
 	if counts.publishRelations {
-		if err := private.IsolateRebuildLinks(ctx); err != nil {
+		if err := private.IsolateRebuildLinksForCoverage(ctx); err != nil {
 			return counts, err
 		}
 		census.receipts = idx.rebuildSelectedDataflowReceipts(ctx, job, store, &census, private)

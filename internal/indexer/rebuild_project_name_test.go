@@ -561,3 +561,14 @@ func TestRebuildCloneCutoffRecipe(t *testing.T) {
 	require.ErrorIs(t, err, errRebuildBuildWire)
 	require.Empty(t, inputs)
 }
+
+func TestRebuildProjectRecipeIsolationVersion(t *testing.T) {
+	req := rebuildBuildRequest{BaseRecipe: store_pebble.HeadDigest{1}, Witness: store_pebble.Witness{FrozenInputs: store_pebble.HeadDigest{2}}}
+	// Independent byte pin for the v10 recipe at threshold 0.5. The two
+	// preceding zero bytes are the default placeholder and external flags.
+	want := []byte("gortex/rebuild/project-name/v10\x00tracked-set:0\x00dependency-exports:ABSENT\x00\x00\x00\x3f\xe0\x00\x00\x00\x00\x00\x00")
+	frozen, base := [32]byte{2}, [32]byte{1}
+	want = append(want, frozen[:]...)
+	want = append(want, base[:]...)
+	require.Equal(t, store_pebble.HeadDigest(blake3.Sum256(want)), req.projectRecipe(0.5))
+}

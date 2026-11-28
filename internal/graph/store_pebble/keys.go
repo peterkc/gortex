@@ -8,18 +8,19 @@ import (
 )
 
 const (
-	familyNode     byte = 'N'
-	familyFile     byte = 'F'
-	familyName     byte = 'M'
-	familyRepo     byte = 'R'
-	familyNodeKind byte = 'K'
-	familyEdge     byte = 'E'
-	familyCount    byte = 'C'
-	familySymbol   byte = 'S'
-	familyShape    byte = 'T'
-	familyOmission byte = 'O'
-	familyFileMeta byte = 'A'
-	familyWitness  byte = 'W'
+	familyNode      byte = 'N'
+	familyFile      byte = 'F'
+	familyName      byte = 'M'
+	familyRepo      byte = 'R'
+	familyNodeKind  byte = 'K'
+	familyEdge      byte = 'E'
+	familyCount     byte = 'C'
+	familySymbol    byte = 'S'
+	familyShape     byte = 'T'
+	familyOmission  byte = 'O'
+	familyIsolation byte = 'L'
+	familyFileMeta  byte = 'A'
+	familyWitness   byte = 'W'
 )
 
 const (

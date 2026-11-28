@@ -74,6 +74,9 @@ func (s *goldSeal) visit(r row) error {
 		}
 	case familyFile, familyName, familyRepo, familyNodeKind:
 		return s.relation(r.key, r.value, true)
+	case familyIsolation:
+		_, err := decodeIsolationScope(r.key, r.value)
+		return err
 	case familyCount:
 		count, err := decodeCount(r.value)
 		if err != nil {

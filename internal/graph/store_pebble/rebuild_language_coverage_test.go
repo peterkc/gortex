@@ -98,9 +98,9 @@ func TestRebuildLanguageCoverageStages(t *testing.T) {
 			}
 			assertFileGraph()
 
+			require.NoError(t, worker.CheckRebuildIsolationCoverage(tc.deferred))
 			relations, err := worker.PrepareRelations(ctx, t.TempDir(), base, nil)
 			require.NoError(t, err)
-			relations.Witness.Relations = &RelationCoverage{DeferredLanguages: tc.deferred}
 			bad = relations
 			bad.Witness.Recipe = HeadDigest{99}
 			_, err = head.PublishStage(ctx, bad)

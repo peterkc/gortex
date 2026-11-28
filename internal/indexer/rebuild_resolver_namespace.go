@@ -187,6 +187,13 @@ func (n *rebuildResolverNamespace) probeFile(key string) (bool, error) {
 func rebuildLinkCandidateProbe(n *rebuildResolverNamespace, census *rebuildExtractorCensus,
 	classifications map[string]rebuildClassificationFact,
 ) func(string) (bool, error) {
+	return rebuildObservedCandidateProbe(n, census, classifications, nil)
+}
+
+// The observation is metadata only; held presence never votes in the selected answer.
+func rebuildObservedCandidateProbe(n *rebuildResolverNamespace, census *rebuildExtractorCensus,
+	classifications map[string]rebuildClassificationFact, held func(string),
+) func(string) (bool, error) {
 	return func(key string) (bool, error) {
 		present, err := n.probeFile(key)
 		if err != nil || !present {
@@ -195,13 +202,21 @@ func rebuildLinkCandidateProbe(n *rebuildResolverNamespace, census *rebuildExtra
 		if census == nil || uint64(len(census.byPath)) != census.admitted {
 			return false, fmt.Errorf("%w: incomplete extractor census", errRebuildCallerAttribution)
 		}
-		if _, admitted := census.byPath[key]; admitted {
+		if language, admitted := census.byPath[key]; admitted {
 			heldOut, err := census.holdsOutLinkInput(key)
+			if err == nil && heldOut && held != nil {
+				held(language)
+			}
 			return !heldOut && err == nil, err
 		}
 		// A nonparse key can still have independently checked regular-file
 		// evidence. A validated deferred skip, however, is a held-out input.
-		return !rebuildHoldsOutCheckedSkip(classifications[key]), nil
+		fact := classifications[key]
+		heldOut := rebuildHoldsOutCheckedSkip(fact)
+		if heldOut && held != nil {
+			held(fact.Language)
+		}
+		return !heldOut, nil
 	}
 }
 

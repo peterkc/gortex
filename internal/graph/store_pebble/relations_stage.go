@@ -126,6 +126,10 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 	if base.build != b || !filepath.IsAbs(dir) {
 		return StageTables{}, invalid("relations needs a retained file graph from this build and an absolute stage directory")
 	}
+	coverage, err := b.prepareIsolationScopes(ctx)
+	if err != nil {
+		return StageTables{}, err
+	}
 	endpoints, err := b.checkRelationsEndpoints(ctx, base.witness.PlatformCatalogRevision, extractorOf)
 	if err != nil {
 		return StageTables{}, err
@@ -149,6 +153,7 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 	}
 	w := base.witness
 	w.Stage = StageRelations
+	w.Relations = coverage
 	w.Families = nil
 	old := &fileGraphCursor{ctx: ctx, options: b.options, paths: base.paths, witness: goldWitness{digest: blake3.New()}}
 	for _, f := range base.witness.Families {
@@ -173,6 +178,9 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 	stream.flush()
 	w.Families = append(w.Families, stream.families...)
 	slices.SortFunc(w.Families, func(a, b FamilyWitness) int { return int(a.Family) - int(b.Family) })
+	if err := checkIsolationWitness(w); err != nil {
+		return StageTables{}, err
+	}
 	for i, path := range paths {
 		paths[i] = filepath.Base(path)
 	}

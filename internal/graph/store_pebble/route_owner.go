@@ -57,7 +57,8 @@ func (o *routeOwner) lookup() (routeCheckout, error) {
 }
 
 func completeRoute(w Witness) bool {
-	return w.Stage == StageSearch && w.Relations != nil && w.Contracts != nil
+	return w.Stage == StageSearch && w.Relations != nil && w.Contracts != nil &&
+		(w.Relations.IsolationChecked || len(w.Relations.DeferredLanguages) == 0)
 }
 
 // begin registers a fresh candidate before creating its directory. A nil
@@ -356,6 +357,9 @@ func (o *routeOwner) openChecked(ctx context.Context, loc routeLocator, saved Lo
 	w, record, err := snap.reconcilePublication(o.incarnation, &saved)
 	if err == nil && w.Profile != o.profile {
 		err = invalid("startup head profile")
+	}
+	if err == nil {
+		err = snap.verifyIsolationCoverage(ctx, w, nil)
 	}
 	if err == nil {
 		err = validate(ctx, snap, w)

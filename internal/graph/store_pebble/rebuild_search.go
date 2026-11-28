@@ -89,6 +89,7 @@ func (b *BuildStore) PrepareSearch(
 	}
 	stream.flush()
 	w := derived
+	w.Relations = cloneRelationCoverage(w.Relations)
 	w.Stage = StageSearch
 	w.Families = append(slices.Clone(derived.Families), stream.families...)
 	slices.SortFunc(w.Families, func(a, b FamilyWitness) int { return int(a.Family) - int(b.Family) })

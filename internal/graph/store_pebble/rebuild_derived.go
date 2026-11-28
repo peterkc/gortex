@@ -46,6 +46,7 @@ func PrepareDeferredDerived(dir string, prior StageTables) (StageTables, error) 
 	}
 	w.Stage = StageDerived
 	w.Families = slices.Clone(w.Families)
+	w.Relations = cloneRelationCoverage(w.Relations)
 	w.Unsupported = slices.Clone(deferredFamilies(w.Contracts != nil))
 	if w.Contracts != nil {
 		coverage := *w.Contracts

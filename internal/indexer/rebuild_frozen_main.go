@@ -43,7 +43,6 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 	var ns *rebuildResolverNamespace
 	var manifests map[string]rebuildNpmManifestFact
 	var followed rebuildDigest
-	var probeCandidate func(string) (bool, error)
 	loadNamespace := func() error {
 		if ns != nil {
 			return nil
@@ -53,7 +52,6 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 		if err != nil {
 			return err
 		}
-		probeCandidate = rebuildLinkCandidateProbe(ns, census, classifications)
 		return nil
 	}
 	rawPath := func(file string) (string, error) {
@@ -83,7 +81,7 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 		if err := loadGlob(); err != nil {
 			return err
 		}
-		npm = newRebuildNpmLookupFromNamespace(ctx, ns, manifests, followed, glob, probeCandidate)
+		npm = newRebuildNpmLookupFromNamespace(ctx, ns, manifests, followed, glob, ns.probeFile)
 		return nil
 	}
 	var workspaceMembers map[string]struct{} // nil until one checked lookup builds the membership index
@@ -105,11 +103,10 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 			if err := loadNamespace(); err != nil {
 				return "", err
 			}
-			stem, err := aliases.resolve(probeCandidate, caller, spec)
-			// The private checkout has no repo prefix. Keep native's
-			// returned stem as the graph probe; a first-target fallback
-			// need not have an admitted file to translate.
-			return string(stem), err
+			return resolveRebuildAffectedCandidate(ctx, build, ns, census, classifications, caller, spec, "ts-alias", func(probe func(string) (bool, error)) (string, error) {
+				stem, err := aliases.resolve(probe, caller, spec)
+				return string(stem), err
+			})
 		},
 		RewriteNpm: func(file, spec string) (string, error) {
 			caller, err := rawPath(file)
@@ -119,7 +116,7 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 			if err := loadNpm(); err != nil {
 				return "", err
 			}
-			return npm.rewrite(caller, spec)
+			return npm.rewriteAffected(build, census, classifications, caller, spec)
 		},
 		ExternalNpmDependency: func(file, spec string) (bool, error) {
 			caller, err := rawPath(file)

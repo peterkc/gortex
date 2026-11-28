@@ -64,10 +64,15 @@ func (b *BuildStore) RetainRelations(ctx context.Context, base FileGraphBase, re
 	if err != nil {
 		return RelationsBase{}, err
 	}
+	if w.Relations != nil && w.Relations.IsolationChecked {
+		if err := checkIsolationTables(ctx, b.options, paths, w, false); err != nil {
+			return RelationsBase{}, err
+		}
+	}
 	w.Families = slices.Clone(w.Families)
 	w.Dependencies = slices.Clone(w.Dependencies)
 	if w.Relations != nil {
-		w.Relations = &RelationCoverage{DeferredLanguages: slices.Clone(w.Relations.DeferredLanguages)}
+		w.Relations = cloneRelationCoverage(w.Relations)
 	}
 	return RelationsBase{files: base, paths: paths, witness: w, digest: blake3.Sum256(raw)}, nil
 }

@@ -140,11 +140,13 @@ func (h *Head) publish(ctx context.Context, tables StageTables, delta bool) (Hea
 			return zero, ErrCoverageRegression
 		}
 	} else if prior.Stage >= StageRelations {
-		next := tables.Witness.Relations
-		if (prior.Relations == nil) != (next == nil) ||
-			(next != nil && !slices.Equal(next.DeferredLanguages, prior.Relations.DeferredLanguages)) {
+		if !equalRelationCoverage(tables.Witness.Relations, prior.Relations) || isolationFamily(tables.Witness) != isolationFamily(prior) {
 			return zero, invalid("publication relation coverage changed after relations stage")
 		}
+	}
+	if delta && prior.Relations != nil && prior.Relations.IsolationChecked &&
+		(!equalRelationCoverage(tables.Witness.Relations, prior.Relations) || isolationFamily(tables.Witness) != isolationFamily(prior)) {
+		return zero, ErrCoverageRegression
 	}
 
 	nextContracts := tables.Witness.Contracts
@@ -191,6 +193,9 @@ func (h *Head) publish(ctx context.Context, tables StageTables, delta bool) (Hea
 		}
 		paths = append(paths, path)
 	}
+	if err := checkIsolationTables(ctx, h.options, paths, tables.Witness, delta); err != nil {
+		return zero, err
+	}
 	witnessPath, err := h.writeWitness(tables.Dir, raw)
 	if err != nil {
 		return zero, err
@@ -217,6 +222,20 @@ func (w Witness) CoversRelationsAtLeast(prior Witness) bool {
 	}
 	if w.Relations == nil {
 		return false
+	}
+	if prior.Relations.IsolationChecked && !w.Relations.IsolationChecked {
+		return false
+	}
+	if !prior.Relations.IsolationChecked && len(prior.Relations.DeferredLanguages) != 0 && w.Relations.IsolationChecked {
+		return true // the old mixed witness proved no supported language complete
+	}
+	for _, pair := range w.Relations.IsolationDependencies {
+		if !slices.Contains(prior.Relations.DeferredLanguages, pair.SupportedLanguage) &&
+			!slices.ContainsFunc(prior.Relations.IsolationDependencies, func(old RebuildIsolationDependency) bool {
+				return old.SupportedLanguage == pair.SupportedLanguage
+			}) {
+			return false
+		}
 	}
 	for _, id := range w.Relations.DeferredLanguages {
 		if _, found := slices.BinarySearch(prior.Relations.DeferredLanguages, id); !found {

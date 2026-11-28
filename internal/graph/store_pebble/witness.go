@@ -73,6 +73,7 @@ func (e *ErrStagePending) Error() string {
 // A nil Languages list means the witness has no coverage declaration.
 type ErrLinksNotAvailable struct {
 	Languages []string
+	Affected  []RebuildIsolationAffectedScope
 }
 
 func (e *ErrLinksNotAvailable) Error() string {
@@ -86,6 +87,10 @@ func (e *ErrLinksNotAvailable) Error() string {
 // IDs are ascending and unique. An empty set declares full relation coverage.
 type RelationCoverage struct {
 	DeferredLanguages []string
+	IsolationChecked  bool
+	// IsolationDependencies is the compact sorted set of supported/deferred
+	// extractor pairs represented by the sealed isolation family.
+	IsolationDependencies []RebuildIsolationDependency
 }
 
 // ContractCoverage declares the D83 omissions among logical contract records.
@@ -148,6 +153,7 @@ const (
 	witnessD64Format       byte = 5
 	witnessCatalogFormat   byte = 6
 	witnessContractsFormat byte = 7
+	witnessIsolationFormat byte = 8
 )
 
 func encodeWitness(w Witness) ([]byte, error) {
@@ -169,6 +175,9 @@ func encodeWitness(w Witness) ([]byte, error) {
 	}
 	if w.Contracts != nil && omitted != w.Contracts.OmittedRecords {
 		return nil, invalid("publication contract omission count differs from sealed rows")
+	}
+	if err := checkIsolationWitness(w); err != nil {
+		return nil, err
 	}
 	format := witnessFormat
 	if w.FrozenInputs != (HeadDigest{}) {
@@ -195,8 +204,15 @@ func encodeWitness(w Witness) ([]byte, error) {
 	// Format 6 prefixes the revision to the existing layout. This keeps each
 	// older layout's rules for optional fields intact.
 	var b []byte
+	if w.Relations != nil && w.Relations.IsolationChecked {
+		b = binary.AppendUvarint([]byte{witnessIsolationFormat}, uint64(len(w.Relations.IsolationDependencies)))
+		for _, pair := range w.Relations.IsolationDependencies {
+			b = appendMetaString(b, pair.SupportedLanguage)
+			b = appendMetaString(b, pair.DeferredLanguage)
+		}
+	}
 	if w.Contracts != nil {
-		b = binary.AppendUvarint([]byte{witnessContractsFormat}, w.Contracts.OmittedRecords)
+		b = binary.AppendUvarint(append(b, witnessContractsFormat), w.Contracts.OmittedRecords)
 	}
 	if w.PlatformCatalogRevision != 0 {
 		b = binary.BigEndian.AppendUint32(append(b, witnessCatalogFormat), w.PlatformCatalogRevision)
@@ -256,6 +272,23 @@ func encodeWitness(w Witness) ([]byte, error) {
 
 func decodeWitness(encodedWitness []byte) (Witness, error) {
 	raw := encodedWitness
+	checked := len(raw) != 0 && raw[0] == witnessIsolationFormat
+	var dependencies []RebuildIsolationDependency
+	if checked {
+		count, n := binary.Uvarint(raw[1:])
+		if n <= 0 || count > uint64((len(raw)-1-n)/4) {
+			return Witness{}, invalid("publication isolation dependency count")
+		}
+		d := recordCursor{buf: raw[1+n:]}
+		for range count {
+			pair := RebuildIsolationDependency{SupportedLanguage: d.str(), DeferredLanguage: d.str()}
+			if d.err != nil {
+				return Witness{}, d.err
+			}
+			dependencies = append(dependencies, pair)
+		}
+		raw = d.buf
+	}
 	var contracts *ContractCoverage
 	if len(raw) != 0 && raw[0] == witnessContractsFormat {
 		omitted, n := binary.Uvarint(raw[1:])
@@ -351,6 +384,13 @@ func decodeWitness(encodedWitness []byte) (Witness, error) {
 			w.Unsupported = append(w.Unsupported, f)
 		}
 	}
+	if checked {
+		if w.Relations == nil {
+			return Witness{}, invalid("isolation proof without relation coverage")
+		}
+		w.Relations.IsolationChecked = true
+		w.Relations.IsolationDependencies = dependencies
+	}
 	encoded, err := encodeWitness(w)
 	if err != nil {
 		return Witness{}, err
@@ -393,14 +433,19 @@ func (w Witness) RequireRelationCoverage(languages []string) error {
 	if w.Relations == nil {
 		return &ErrLinksNotAvailable{}
 	}
-	var missing []string
-	for _, id := range w.Relations.DeferredLanguages {
-		if len(languages) == 0 || slices.Contains(languages, id) {
-			missing = append(missing, id)
+	if !w.Relations.IsolationChecked && len(w.Relations.DeferredLanguages) != 0 {
+		// Mixed legacy heads do not prove isolation left supported answers intact.
+		return &ErrLinksNotAvailable{Languages: slices.Clone(w.Relations.DeferredLanguages)}
+	}
+	missing := w.Relations.deferredInScope(languages)
+	for _, pair := range w.Relations.IsolationDependencies {
+		if len(languages) == 0 || slices.Contains(languages, pair.SupportedLanguage) {
+			missing = append(missing, pair.DeferredLanguage)
 		}
 	}
 	if len(missing) != 0 {
-		return &ErrLinksNotAvailable{Languages: missing}
+		slices.Sort(missing)
+		return &ErrLinksNotAvailable{Languages: slices.Compact(missing)}
 	}
 	return nil
 }

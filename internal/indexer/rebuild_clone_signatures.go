@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/zzet/gortex/internal/clones"
@@ -18,6 +20,10 @@ type rebuildClonePredecessors struct {
 	// FileGraph proves raw claims over all receipts before D72 F selects
 	// the clone cohort. Standalone callers still need a raw claim census.
 	fileClaims *store_pebble.RebuildSharedClaimStats
+	// FileGraph counts raw and already-signed callable winners before the
+	// hold-out cut, by effective deferred extractor. No held body enters CMS
+	// or LSH, but its absence can change the selected clone corpus answers.
+	heldCloneByLanguage map[string]uint64
 }
 
 func (p rebuildClonePredecessors) mayReadRoot(path string) bool {
@@ -153,7 +159,22 @@ func visitRebuildCloneSignatures(ctx context.Context, build *store_pebble.BuildS
 	}
 	useFilter := corpus >= cmsMinCorpus
 	threshold := max(uint32(1), uint32(float64(corpus)*cmsBoilerplateRatio))
+	held := slices.Sorted(maps.Keys(predecessors.heldCloneByLanguage))
 	if err := visitRebuildCloneInputs(ctx, build.RebuildView(), receipts, func(row rebuildCloneInput) error {
+		// Mark the checked callable cohort, not just survivors. Raw signatures
+		// may change through the CMS and both raw and signed pair answers may
+		// change through LSH bucket admission. The receipt ID is the unique
+		// event within this file and deferred extractor scope.
+		for _, language := range held {
+			if predecessors.heldCloneByLanguage[language] == 0 {
+				continue
+			}
+			if err := build.MarkRebuildIsolationAffected(ctx, store_pebble.RebuildIsolationAffectedScope{
+				FilePath: row.FilePath, SupportedLanguage: row.Language, DeferredLanguage: language, Cause: "clone-corpus",
+			}, row.ID); err != nil {
+				return err
+			}
+		}
 		if row.Signed != nil {
 			counts.Signed++
 			return yield(row, *row.Signed, true)
