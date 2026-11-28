@@ -174,16 +174,21 @@ func stripChainArgs(expr string) string {
 // constructor named name (the chain seed). A receiver-less declaration wins
 // over a same-named method; ambiguity among free functions drops.
 func graphFactoryReturnType(g factoryChainLookup, name string) string {
-	fnRT, methodRT := "", ""
-	role := func(n *graph.Node) bool {
-		if n == nil || n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
-			return false
-		}
-		rt, _ := n.Meta["return_type"].(string)
-		return rt != ""
+	return factoryChainSeedType(g.nodes(name, factoryChainSeedRole))
+}
+
+func factoryChainSeedRole(n *graph.Node) bool {
+	if n == nil || n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
+		return false
 	}
-	for _, n := range g.nodes(name, role) {
-		if !role(n) {
+	rt, _ := n.Meta["return_type"].(string)
+	return rt != ""
+}
+
+func factoryChainSeedType(nodes []*graph.Node) string {
+	fnRT, methodRT := "", ""
+	for _, n := range nodes {
+		if !factoryChainSeedRole(n) {
 			continue
 		}
 		rt, _ := n.Meta["return_type"].(string)
