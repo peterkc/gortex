@@ -45,6 +45,9 @@ func (r rebuildContractReceiptReader) bindRebuildProviderHandlers(ctx context.Co
 			}
 			return true, nil
 		})
+	}, func(item store_pebble.RebuildContractRecord) bool {
+		trail, fallback, _ := contracts.ProviderHandlerHints(item.Contract)
+		return trail != "" || fallback != ""
 	}); err != nil {
 		return err
 	}
@@ -61,7 +64,7 @@ func (r rebuildContractReceiptReader) bindRebuildProviderHandlers(ctx context.Co
 			removeRebuildHandlerHints(&live.Contract)
 			return true, nil
 		})
-	})
+	}, func(item store_pebble.RebuildContractRecord) bool { return hasRebuildHandlerHints(item.Contract) })
 }
 
 func hasRebuildHandlerHints(c contracts.Contract) bool {

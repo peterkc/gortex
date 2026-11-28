@@ -173,9 +173,10 @@ func (r *RebuildContractRecords) UpdateByID(id string, update func(*RebuildContr
 // VisitRepresentatives freezes the current rows for this scan. It uses the
 // first member of each Registry.All key. Callbacks can update live buckets
 // without affecting this scan. Cross-ID delimiter collisions have no stable
-// native winner, so refuse them rather than invent one.
-func (r *RebuildContractRecords) VisitRepresentatives(yield func(RebuildContractRecord) error) error {
-	return r.visitRepresentatives(false, yield)
+// native winner. The optional relevance predicate can prove a collision
+// immaterial to this pass; without it, keep the conservative refusal.
+func (r *RebuildContractRecords) VisitRepresentatives(yield func(RebuildContractRecord) error, relevant ...func(RebuildContractRecord) bool) error {
+	return r.visitRepresentatives(false, yield, relevant...)
 }
 
 // VisitCurrentRepresentatives freezes representative membership and reads each
@@ -185,7 +186,7 @@ func (r *RebuildContractRecords) VisitCurrentRepresentatives(yield func(RebuildC
 	return r.visitRepresentatives(true, yield)
 }
 
-func (r *RebuildContractRecords) visitRepresentatives(current bool, yield func(RebuildContractRecord) error) (err error) {
+func (r *RebuildContractRecords) visitRepresentatives(current bool, yield func(RebuildContractRecord) error, relevant ...func(RebuildContractRecord) bool) (err error) {
 	if err := r.ready(); err != nil {
 		return err
 	}
@@ -200,17 +201,18 @@ func (r *RebuildContractRecords) visitRepresentatives(current bool, yield func(R
 	}()
 	return r.visit(rebuildContractRecordKey('r'), func(rowKey []byte, item RebuildContractRecord) error {
 		key := appendKeyString(rebuildContractRecordKey('s'), item.ID+"|"+item.FilePath+"|"+item.SymbolID+"|"+string(item.Role))
-		first, err := pendingGet(r.build.pending, key, func(raw []byte) (string, error) { return string(raw), nil })
+		first, err := pendingGet(r.build.pending, key, copyValue)
 		if err != nil {
 			return err
 		}
-		if first != "" {
-			if first != item.ID {
-				return graph.ErrContractProjectionStale
+		affects := len(relevant) == 0 || relevant[0](item)
+		if len(first) != 0 {
+			if string(first[1:]) != item.ID && (first[0] != 0 || affects) {
+				return invalid("ambiguous contract representative identity across IDs")
 			}
 			return nil
 		}
-		if err := r.build.putRebuildScratch(key, []byte(item.ID), goldBufferBytes, "contract representative"); err != nil {
+		if err := r.build.putRebuildScratch(key, append(appendBool(nil, affects), item.ID...), goldBufferBytes, "contract representative"); err != nil {
 			return err
 		}
 		if current {

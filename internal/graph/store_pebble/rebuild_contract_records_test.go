@@ -91,7 +91,20 @@ func TestRebuildContractRecordsKeepLiveAndRawBucketViews(t *testing.T) {
 		} {
 			require.NoError(t, r.Add(RebuildContractRecord{Contract: c}))
 		}
-		require.ErrorIs(t, r.VisitRepresentatives(func(RebuildContractRecord) error { return nil }), graph.ErrContractProjectionStale)
+		require.ErrorContains(t, r.VisitRepresentatives(func(RebuildContractRecord) error { return nil }), "ambiguous contract representative identity across IDs")
+		for _, relevantID := range []string{"", "a", "a|b"} {
+			var ids []string
+			err := r.VisitRepresentatives(func(item RebuildContractRecord) error {
+				ids = append(ids, item.ID)
+				return nil
+			}, func(item RebuildContractRecord) bool { return item.ID == relevantID })
+			if relevantID == "" {
+				require.NoError(t, err)
+				require.Equal(t, []string{"a"}, ids)
+			} else {
+				require.ErrorContains(t, err, "ambiguous contract representative identity across IDs")
+			}
+		}
 		return nil
 	}))
 }

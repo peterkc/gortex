@@ -36,6 +36,17 @@ func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 			opened = true
 		}
 		return nil
+	}, func(item RebuildContractRecord) bool {
+		if item.BodyUnproved {
+			return true
+		}
+		for _, field := range fields {
+			name, _ := item.Meta[field].(string)
+			if name != "" && !strings.Contains(name, "::") {
+				return true
+			}
+		}
+		return false
 	}); err != nil || (!opened && !uncertain) {
 		return err
 	}
