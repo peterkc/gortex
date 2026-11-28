@@ -222,7 +222,7 @@ func RunRebuildBuildWorker(ctx context.Context, lease string, in *os.File, outpu
 		var packet [1]byte
 		// After the last ACK, the owner waits for stdout EOF with stdin still
 		// open. Do not start another blocking read on inherited stdin.
-		for range len(store_pebble.CoreStages()) {
+		for range store_pebble.CoreStages() {
 			if _, err := io.ReadFull(in, packet[:]); err != nil {
 				cancel(fmt.Errorf("%w: owner pipe: %w", errRebuildBuildWire, err))
 				return

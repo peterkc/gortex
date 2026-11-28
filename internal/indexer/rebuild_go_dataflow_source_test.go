@@ -54,7 +54,7 @@ func Value() int { return http.StatusCreated }
 	req := rebuildBuildRequest{
 		Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
 		Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}},
-		Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
+		Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
 		Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{2}, Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
 	}
 	exe, err := os.Executable()

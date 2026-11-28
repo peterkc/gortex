@@ -51,11 +51,12 @@ func Member() int { return unknown.Field }
 			edge := *raw
 			facts := ParseFacts{EffectiveLanguage: "go", Nodes: parsed.Nodes, Edges: []*graph.Edge{&edge},
 				File: graph.FileMetaRow{FilePath: file, NodeCount: len(parsed.Nodes)}}
-			if tc.change == "origin" {
+			switch tc.change {
+			case "origin":
 				edge.Origin = graph.OriginASTResolved
-			} else if tc.change == "path" {
+			case "path":
 				edge.FilePath = "other.go"
-			} else if tc.change == "extractor" {
+			case "extractor":
 				facts.EffectiveLanguage = "typescript"
 			}
 			// Give the source receipt its own manifest and FileGraph, not a
