@@ -426,11 +426,12 @@ app = FastAPI()
 app.include_router(router, prefix="`
 	for _, tc := range []struct {
 		name, skipPath, skipLang, prefix, nativeID string
-		refuse                                     bool
+		refuse, lostReceipt                        bool
 	}{
 		{name: "selected api", skipPath: "main.py", skipLang: "python", prefix: "/api", nativeID: "http::GET::/api/users/{p1}", refuse: true},
 		{name: "selected alt", skipPath: "main.py", skipLang: "python", prefix: "/alt", nativeID: "http::GET::/alt/users/{p1}", refuse: true},
 		{name: "no skip", nativeID: "http::GET::/users/{p1}"},
+		{name: "lost admitted receipt", nativeID: "http::GET::/users/{p1}", lostReceipt: true},
 		{name: "unselected skip", skipPath: "big.go", skipLang: "go", prefix: "/api", nativeID: "http::GET::/users/{p1}"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -480,6 +481,55 @@ app.include_router(router, prefix="`
 			})
 			require.Len(t, native.All(), 1)
 			require.Equal(t, tc.nativeID, native.All()[0].ID)
+			input := rebuildInput{Path: "users.py", Language: "python", Size: int64(len(src))}
+			job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{"python": {1}}}
+			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			origins := map[string]string{input.Path: input.Path}
+			if tc.skipPath != "" {
+				// The production census knows a skip's graph key but has no receipt.
+				origins[tc.skipPath] = tc.skipPath
+			}
+			reader := rebuildContractReceiptReader{idx: idx, job: job, store: store,
+				census: &rebuildExtractorCensus{byPath: map[string]string{input.Path: input.Language}, originByGraphPath: origins}}
+			wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
+			require.NoError(t, err)
+			key := input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input))
+			require.NoError(t, store.write(key, wire))
+			if tc.lostReceipt {
+				require.NoError(t, os.Remove(store.entry(key)))
+			}
+			require.NoError(t, build.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+				for _, c := range facts.Records {
+					require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c}))
+				}
+				err := reader.joinLateRouterPrefixes(ctx, records, func(path string) error {
+					t.Fatalf("unexpected router overlap %q", path)
+					return nil
+				})
+				var want contracts.Contract
+				switch {
+				case tc.refuse:
+					require.ErrorIs(t, err, errRebuildRouterFactsMissing)
+					reply := buildRefusal(err)
+					require.Equal(t, uint8(100), reply.Refusal)
+					require.Contains(t, reply.Detail, `"main.py"`)
+					want = facts.Records[0]
+				case tc.lostReceipt:
+					require.ErrorIs(t, err, errParseEntryCorrupt)
+					require.NotErrorIs(t, err, errRebuildRouterFactsMissing)
+					want = facts.Records[0]
+				default:
+					require.NoError(t, err)
+					want = native.All()[0]
+				}
+				var actual []contracts.Contract
+				require.NoError(t, records.VisitRepresentatives(func(item store_pebble.RebuildContractRecord) error {
+					actual = append(actual, item.Contract)
+					return nil
+				}))
+				require.Equal(t, []contracts.Contract{want}, actual)
+				return nil
+			}))
 			_, err = joinRebuildRouterPrefixes(ctx, build.RebuildView(), replay, "", "", map[string]contracts.RouterFacts{
 				"users.py": *facts.Router,
 			})

@@ -18,6 +18,7 @@ func rebuildRouterMountKey(column byte, name string) []byte {
 // JoinCheckedRouterPrefixes merges the selected per-file facts from the
 // native census and representative route files. factsAt must distinguish an
 // absent proof (nil) from a captured empty fact. No source reads are allowed.
+// missing is set only when an absent proof causes the refusal.
 func (r *RebuildContractRecords) JoinCheckedRouterPrefixes(repo, workspace string,
 	factsAt func(string) (*contracts.RouterFacts, error), overlap func(string) error,
 ) (missing string, err error) {
@@ -84,9 +85,10 @@ func (r *RebuildContractRecords) JoinCheckedRouterPrefixes(repo, workspace strin
 	}); err != nil {
 		return "", err
 	}
+	var firstMissing string
 	note := func(path string) {
-		if path != "" && (missing == "" || path < missing) {
-			missing = path
+		if path != "" && (firstMissing == "" || path < firstMissing) {
+			firstMissing = path
 		}
 	}
 	err = r.RewriteRouterPrefixes(func(c contracts.Contract) (string, error) {
@@ -110,7 +112,8 @@ func (r *RebuildContractRecords) JoinCheckedRouterPrefixes(repo, workspace strin
 		}
 		return m.route(c, *facts)
 	}, func() error {
-		if missing != "" {
+		if firstMissing != "" {
+			missing = firstMissing
 			return fmt.Errorf("missing checked router proof for %q", missing)
 		}
 		return nil
