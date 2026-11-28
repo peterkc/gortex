@@ -164,45 +164,24 @@ func resolveFnValueCandidates(g graph.Store, candidates []*graph.Edge, prior *Fn
 		ungated, _ := edge.Meta["fn_value_ungated"].(bool)
 		skipGate, _ := edge.Meta["skip_gate"].(bool)
 		var targets []string
-		conf := 0.6
-		origin := graph.OriginASTInferred
-		switch {
-		case skipGate:
-			target := ""
-			if recvHint != "" {
-				target = resolveMemberByTypeMemo(g, recvHint, name, nameMemo)
-			}
-			if target == "" {
-				target = resolveUniqueFnValueMemo(g, name, nameMemo)
-			}
-			targets, conf = appendTarget(nil, target), 0.5
-		case recvHint == "<self>":
-			if targets = resolveFnValueSelfMembersMemo(g, edge.From, name, nameMemo); len(targets) > 0 {
-				conf, origin = 0.85, graph.OriginASTResolved
-			} else {
-				targets = appendTarget(nil, sameFileTarget(edge.FilePath, name))
-			}
-		case recvHint != "":
-			if targets = resolveMembersByTypeMemo(g, recvHint, name, nameMemo); len(targets) > 0 {
-				conf, origin = 0.85, graph.OriginASTResolved
-			} else if ungated {
-				targets = appendTarget(nil, resolveFnValueCrossModuleMemo(g, name, nameMemo))
-				conf = 0.45
-			}
-		default:
-			targets = appendTarget(nil, sameFileTarget(edge.FilePath, name))
-			if len(targets) == 0 && ungated {
-				targets = appendTarget(nil, resolveFnValueCrossModuleMemo(g, name, nameMemo))
-				conf = 0.45
-			}
+		one := func(id string) int {
+			targets = appendTarget(nil, id)
+			return len(targets)
 		}
-		// An overload set is a genuine ambiguity — exactly one member is the
-		// real target and the graph cannot say which — so each edge in the set
-		// rides the inferred tier at reduced confidence rather than claiming
-		// the resolved-match certainty a lone hit earns.
-		if len(targets) > 1 {
-			conf, origin = 0.6, graph.OriginASTInferred
-		}
+		conf, origin, _ := chooseFnValueTargets(recvHint, ungated, skipGate,
+			func(recv string) int { return one(resolveMemberByTypeMemo(g, recv, name, nameMemo)) },
+			func(recv string) int {
+				targets = resolveMembersByTypeMemo(g, recv, name, nameMemo)
+				return len(targets)
+			},
+			func() int {
+				targets = resolveFnValueSelfMembersMemo(g, edge.From, name, nameMemo)
+				return len(targets)
+			},
+			func() int { return one(sameFileTarget(edge.FilePath, name)) },
+			func() int { return one(resolveUniqueFnValueMemo(g, name, nameMemo)) },
+			func() int { return one(resolveFnValueCrossModuleMemo(g, name, nameMemo)) },
+		)
 		for _, target := range targets {
 			if target == "" || target == edge.From {
 				continue
@@ -222,6 +201,46 @@ func resolveFnValueCandidates(g graph.Store, candidates []*graph.Edge, prior *Fn
 		g.AddBatch(nil, landed[start:end])
 	}
 	return len(landed)
+}
+
+// chooseFnValueTargets owns the callback gate's lookup order and output tier.
+// Each lookup selects its own candidates and returns their count.
+func chooseFnValueTargets(recvHint string, ungated, skipGate bool, uniqueMember, members func(string) int,
+	selfMembers, sameFile, global, crossFile func() int,
+) (conf float64, origin string, count int) {
+	conf, origin = 0.6, graph.OriginASTInferred
+	switch {
+	case skipGate:
+		if recvHint != "" {
+			count = uniqueMember(recvHint)
+		}
+		if count == 0 {
+			count = global()
+		}
+		conf = 0.5
+	case recvHint == "<self>":
+		if count = selfMembers(); count > 0 {
+			conf, origin = 0.85, graph.OriginASTResolved
+		} else {
+			count = sameFile()
+		}
+	case recvHint != "":
+		if count = members(recvHint); count > 0 {
+			conf, origin = 0.85, graph.OriginASTResolved
+		} else if ungated {
+			count, conf = crossFile(), 0.45
+		}
+	default:
+		count = sameFile()
+		if count == 0 && ungated {
+			count, conf = crossFile(), 0.45
+		}
+	}
+	// An overload set is genuinely ambiguous and rides the inferred tier.
+	if count > 1 {
+		conf, origin = 0.6, graph.OriginASTInferred
+	}
+	return conf, origin, count
 }
 
 func fnValueRegistration(edge *graph.Edge, name, target string, conf float64, origin string, overloads int) *graph.Edge {
