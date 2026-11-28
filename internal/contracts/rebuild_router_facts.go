@@ -8,7 +8,7 @@ func RouterContractSource(c Contract) bool {
 }
 
 // RouterPrefixFactUse reports whether an unjoined route can use facts from its
-// own file or other files. A nil own-file answer leaves both uses possible.
+// own file or other files. A nil own-file answer leaves a supported use possible.
 // The test for other files follows prefixForRoute: only a receiver or Nest
 // controller that can consult a shared map can use a mount-only file.
 func RouterPrefixFactUse(c Contract, own *RouterFacts) (local, crossFile bool) {
@@ -19,12 +19,10 @@ func RouterPrefixFactUse(c Contract, own *RouterFacts) (local, crossFile bool) {
 		return false, false
 	}
 	fw, _ := c.Meta["framework"].(string)
-	switch fw {
-	case "spring", "rails", "laravel":
-		return true, false
-	case "nestjs":
-		return true, own == nil || own.ControllerClass != ""
-	default:
-		return true, own == nil || own.lineFacts(c.Line).Receivers[fw] != ""
+	var f RouterFacts
+	if own != nil {
+		f = *own
 	}
+	key, shared := routerSharedKey(fw, f, f.lineFacts(c.Line))
+	return true, shared && (own == nil || key != "")
 }
