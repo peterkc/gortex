@@ -142,18 +142,21 @@ func visitRebuildAliasedExternalCalls(ctx context.Context, view store_pebble.Reb
 // A configured extractor can give an ordinary declaration a terminal-shaped ID.
 // Collect only the facts that can select that declaration. The store owns the
 // disk-backed receipt projection and joins it to one node scan.
-func rebuildExternalIndexedEdge(raw *graph.Edge) *graph.Edge {
+func rebuildExternalIndexedEdge(raw *graph.Edge) (e *graph.Edge, names, quals []string, directory bool) {
 	if raw == nil || raw.Kind != graph.EdgeCalls && raw.Kind != graph.EdgeReferences && raw.Kind != graph.EdgeReads {
-		return nil
+		return nil, nil, nil, false
 	}
 	name := graph.UnresolvedName(raw.To)
 	// Main does not bind a resolved target. The gRPC and Python relative
 	// import branches leave the key for their dedicated passes, and the
-	// latter only changes Imports, not a Call or Reference.
+	// latter only changes Imports, not a Call or Reference. Native Vue
+	// template import binding normally targets file::symbol IDs (including
+	// basename-matched component declarations), not package terminals.
+	// Arbitrary configured-extractor IDs are not proved by that spelling.
 	if name == "" || strings.HasPrefix(name, "grpc::") || strings.HasPrefix(name, "pyrel::") {
-		return nil
+		return nil, nil, nil, false
 	}
-	e := &graph.Edge{From: raw.From, To: raw.To, Kind: raw.Kind, FilePath: raw.FilePath, Line: raw.Line}
+	e = &graph.Edge{From: raw.From, To: raw.To, Kind: raw.Kind, FilePath: raw.FilePath, Line: raw.Line}
 	for _, key := range [...]string{"eloquent_method", "fqn", "target_fqn", "rust_path"} {
 		if value, ok := raw.Meta[key].(string); ok {
 			if e.Meta == nil {
@@ -162,7 +165,51 @@ func rebuildExternalIndexedEdge(raw *graph.Edge) *graph.Edge {
 			e.Meta[key] = value
 		}
 	}
-	return e
+	// Keep the lookup keys a superset of every branch of
+	// rebuildExternalIndexedLookup, including empty name/qualname keys
+	// where a malformed terminal can match them. The join still runs
+	// that predicate on each candidate.
+	if method := phpEdgeMetaString(e, "eloquent_method"); method != "" {
+		names = append(names, method)
+	}
+	for _, key := range [...]string{"fqn", "target_fqn"} {
+		if leaf := rebuildExternalPHPName(e, key); leaf != "" {
+			names = append(names, leaf)
+		}
+	}
+	switch {
+	case strings.HasPrefix(name, "extern::"):
+		spec := strings.TrimPrefix(name, "extern::")
+		if path, leaf, ok := splitExternSpec(spec); ok {
+			names = append(names, leaf)
+			if imported := pythonImportedName(path); imported != "" && isPythonSourcePath(e.FilePath) && isDottedPythonModule(path) {
+				names = append(names, imported)
+			}
+		}
+	case strings.HasPrefix(name, "import::"):
+		if !isGodotResPlaceholder(e.To) && !isLuaRequireEdge(e) {
+			spec := strings.TrimPrefix(name, "import::")
+			path, leaf := splitImportSpecSymbol(spec)
+			quals = append(quals, spec, path)
+			if leaf != "" {
+				names = append(names, leaf)
+			}
+			directory = true
+		}
+	case strings.HasPrefix(name, "*."):
+		names = append(names, strings.TrimPrefix(name, "*."))
+	default:
+		names = append(names, name)
+	}
+	return e, names, quals, directory
+}
+
+func rebuildExternalPHPName(e *graph.Edge, key string) string {
+	fqn := phpEdgeMetaString(e, key)
+	if i := strings.LastIndex(fqn, `\`); i >= 0 {
+		return fqn[i+1:]
+	}
+	return fqn
 }
 
 func rebuildExternalIndexedCandidate(ctx context.Context, view store_pebble.RebuildView, raw *graph.Edge, n *graph.Node) (*graph.Edge, store_pebble.RebuildExternalCallCandidate, bool, error) {
@@ -215,11 +262,8 @@ func rebuildExternalIndexedLookup(e *graph.Edge, n *graph.Node) bool {
 			return true
 		}
 		for _, key := range [...]string{"fqn", "target_fqn"} {
-			fqn := phpEdgeMetaString(e, key)
-			if i := strings.LastIndex(fqn, `\`); i >= 0 {
-				fqn = fqn[i+1:]
-			}
-			if fqn != "" && fqn == n.Name && (n.Kind == graph.KindType || n.Kind == graph.KindInterface || n.Kind == graph.KindFunction) {
+			leaf := rebuildExternalPHPName(e, key)
+			if leaf != "" && leaf == n.Name && (n.Kind == graph.KindType || n.Kind == graph.KindInterface || n.Kind == graph.KindFunction) {
 				return true
 			}
 		}
@@ -232,9 +276,6 @@ func rebuildExternalIndexedLookup(e *graph.Edge, n *graph.Node) bool {
 		// Python also reads a module attribute named by the final segment
 		// of the path, not the alias spelling at the Call site.
 		if isPythonSourcePath(e.FilePath) && isDottedPythonModule(path) && (n.Kind == graph.KindFunction || n.Kind == graph.KindType) {
-			if n.Name == leaf && pythonModuleFileMatches(n.FilePath, path) {
-				return true
-			}
 			if imported := pythonImportedName(path); imported != "" && n.Name == imported &&
 				pythonModuleFileMatches(n.FilePath, path[:len(path)-len(imported)-1]) {
 				return true
@@ -349,13 +390,17 @@ func visitRebuildSkippedExternalCalls(ctx context.Context, view store_pebble.Reb
 	}
 	return view.VisitExternalCallEdges(ctx, func(id graph.EdgeIdentity) bool {
 		return godot && id.Kind == graph.EdgeReferences || rust && id.Kind == graph.EdgeCalls && graph.IsUnresolvedTarget(id.To)
-	}, func(e *graph.Edge, caller *graph.Node) bool {
+	}, func(e *graph.Edge, readCaller func() (*graph.Node, error)) (bool, error) {
 		if e.Kind == graph.EdgeReferences {
 			connection, _ := e.Meta["godot_connection"].(bool)
 			method, _ := e.Meta["godot_method"].(string)
-			return connection && method != ""
+			return connection && method != "", nil
 		}
-		return caller != nil && caller.Language == "rust" && rustScopeEdgeCandidate(e)
+		if !rustScopeEdgeCandidate(e) {
+			return false, nil
+		}
+		caller, err := readCaller()
+		return caller != nil && caller.Language == "rust", err
 	}, func(e *graph.Edge) error {
 		if e.Kind == graph.EdgeReferences {
 			to, err := rebuildExternalGodotTarget(ctx, view, e)

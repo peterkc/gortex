@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"strings"
 	"testing"
@@ -593,15 +594,194 @@ func TestRebuildExternalCallInputInvariants(t *testing.T) {
 	}
 }
 
+func TestRebuildExternalCallIndexedDispatch(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	const fileID = "dep::fixture::file"
+	const funcID = "dep::fixture::function"
+	const emptyID = "dep::fixture::zero"
+	goFacts := ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: "a.go"}}
+	foreign := ParseFacts{EffectiveLanguage: "python", File: graph.FileMetaRow{FilePath: "b.py"}}
+	goFacts.Nodes = []*graph.Node{
+		{ID: fileID, Kind: graph.KindFile, Name: "b.py", Language: "python"},
+		{ID: funcID, Kind: graph.KindFunction, Name: "hit", QualName: "p.hit", Language: "python"},
+		{ID: emptyID, Kind: graph.KindFunction, QualName: "p.zero", Language: "python"},
+	}
+	for i := range 2048 {
+		name := fmt.Sprintf("go-%d", i)
+		goFacts.Nodes = append(goFacts.Nodes, &graph.Node{ID: "dep::fixture::" + name, Kind: graph.KindFunction, Name: name, QualName: "p." + name, Language: "go"})
+		foreign.Edges = append(foreign.Edges, &graph.Edge{From: "foreign", To: fmt.Sprintf("unresolved::py-%d", i), Kind: graph.EdgeCalls, FilePath: "b.py"})
+	}
+	goFacts.Edges = []*graph.Edge{{From: "go", To: "unresolved::hit", Kind: graph.EdgeCalls, FilePath: "a.go"}}
+	for _, tc := range []struct {
+		label, to string
+		kind      graph.EdgeKind
+		meta      map[string]any
+	}{
+		{"qual", "unresolved::import::p.hit", graph.EdgeCalls, map[string]any{"qual": "p.hit"}},
+		{"dir", "unresolved::import::dir", graph.EdgeCalls, map[string]any{"directory": true}},
+		{"all buckets", "unresolved::import::all", graph.EdgeCalls, map[string]any{"directory": true, "name": "b.py", "qual": ""}},
+		{"read", "unresolved::hit", graph.EdgeReads, map[string]any{"name": "hit", "qual": "p.hit"}},
+		{"first", "unresolved::duplicate", graph.EdgeCalls, map[string]any{"name": "hit"}},
+		{"second", "unresolved::duplicate", graph.EdgeCalls, map[string]any{"name": "hit"}},
+		{"empty qual", "unresolved::import::", graph.EdgeCalls, map[string]any{"qual": ""}},
+		{"empty name", "unresolved::extern::p::", graph.EdgeCalls, map[string]any{"name": ""}},
+		{"skip", "unresolved::hit", graph.EdgeReferences, map[string]any{"name": "hit"}},
+		{"near miss", "unresolved::hits", graph.EdgeCalls, map[string]any{"name": "hits", "qual": "p.hits"}},
+	} {
+		tc.meta["label"] = tc.label
+		foreign.Edges = append(foreign.Edges, &graph.Edge{From: "foreign", To: tc.to, Kind: tc.kind, FilePath: "b.py", Meta: tc.meta})
+	}
+	b.AddBatch(goFacts.Nodes, nil)
+
+	var passes, projections int
+	var dispatched []string
+	receipts := func(yield func(ParseFacts, error) bool) {
+		passes++
+		if yield(goFacts, nil) {
+			yield(foreign, nil)
+		}
+	}
+	rules := testExternalCallRules()
+	rules.IndexedEdge = func(e *graph.Edge) (*graph.Edge, []string, []string, bool) {
+		require.Equal(t, "b.py", e.FilePath)
+		projections++
+		if e.Meta["label"] == "skip" {
+			return nil, []string{"hit"}, []string{"p.hit"}, true
+		}
+		var names, quals []string
+		if name, ok := e.Meta["name"].(string); ok {
+			names = []string{name, name} // Repeat the posting, not the receipt.
+		} else if e.Meta == nil {
+			names = []string{graph.UnresolvedName(e.To)}
+		}
+		if qual, ok := e.Meta["qual"].(string); ok {
+			quals = []string{qual}
+		}
+		directory, _ := e.Meta["directory"].(bool)
+		return e, names, quals, directory
+	}
+	rules.IndexedNode = func(n *graph.Node) bool { return strings.HasPrefix(n.ID, "dep::") }
+	rules.IndexedCandidate = func(_ context.Context, _ RebuildView, e *graph.Edge, n *graph.Node) (*graph.Edge, RebuildExternalCallCandidate, bool, error) {
+		label, _ := e.Meta["label"].(string)
+		dispatched = append(dispatched, n.ID+"/"+label+"/"+string(e.Kind))
+		return nil, RebuildExternalCallCandidate{}, false, nil
+	}
+	for range 2 {
+		passes, projections, dispatched = 0, 0, nil
+		count, err := b.RebuildExternalCallSynthesis(t.Context(), receipts, rules)
+		require.NoError(t, err)
+		require.Zero(t, count)
+		require.Equal(t, 1, passes)
+		require.Equal(t, len(foreign.Edges), projections)
+		require.Equal(t, []string{
+			fileID + "/dir/" + string(graph.EdgeCalls),
+			fileID + "/all buckets/" + string(graph.EdgeCalls),
+			fileID + "/empty qual/" + string(graph.EdgeCalls),
+			funcID + "/qual/" + string(graph.EdgeCalls),
+			funcID + "/read/" + string(graph.EdgeReads),
+			funcID + "/first/" + string(graph.EdgeCalls),
+			funcID + "/second/" + string(graph.EdgeCalls),
+			emptyID + "/empty name/" + string(graph.EdgeCalls),
+		}, dispatched)
+	}
+}
+
+func TestRebuildExternalCallIncompleteIndexedRules(t *testing.T) {
+	for _, missing := range []string{"node", "candidate"} {
+		t.Run(missing, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			rules := testExternalCallRules()
+			rules.IndexedEdge = func(*graph.Edge) (*graph.Edge, []string, []string, bool) { return nil, nil, nil, false }
+			if missing == "node" {
+				rules.IndexedCandidate = func(context.Context, RebuildView, *graph.Edge, *graph.Node) (*graph.Edge, RebuildExternalCallCandidate, bool, error) {
+					return nil, RebuildExternalCallCandidate{}, false, nil
+				}
+			} else {
+				rules.IndexedNode = func(*graph.Node) bool { return true }
+			}
+			count, err := b.RebuildExternalCallSynthesis(t.Context(), func(func(ParseFacts, error) bool) {
+				t.Fatal("incomplete rules replayed receipts")
+			}, rules)
+			require.Zero(t, count)
+			require.ErrorIs(t, err, ErrRebuildExternalCallSynthesis)
+			require.ErrorContains(t, err, "incomplete external-call indexed lookup rules")
+		})
+	}
+}
+
+func TestRebuildExternalCallLazyRoleCaller(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	e := &graph.Edge{From: "caller", To: "unresolved::target", Kind: graph.EdgeCalls}
+	b.AddBatch([]*graph.Node{{ID: e.From, Language: "rust"}}, []*graph.Edge{e})
+	view := b.RebuildView()
+	selectEdge := func(id graph.EdgeIdentity) bool { return id.Kind == graph.EdgeCalls }
+	selectRole := func(_ *graph.Edge, readCaller func() (*graph.Node, error)) (bool, error) {
+		caller, err := readCaller()
+		return caller != nil && caller.Language == "rust", err
+	}
+	var yielded []*graph.Edge
+	yield := func(e *graph.Edge) error {
+		yielded = append(yielded, e)
+		return nil
+	}
+	require.NoError(t, view.VisitExternalCallEdges(t.Context(), selectEdge, selectRole, yield))
+	require.Equal(t, []*graph.Edge{e}, yielded)
+	yielded = nil
+
+	miskeyed, err := encodeNode(&graph.Node{ID: "other", Language: "rust"})
+	require.NoError(t, err)
+	require.NoError(t, b.pending.Set(pendingNodeKey(e.From), miskeyed, pebble.NoSync))
+	rejected := false
+	require.NoError(t, view.VisitExternalCallEdges(t.Context(), selectEdge, func(e *graph.Edge, _ func() (*graph.Node, error)) (bool, error) {
+		require.Equal(t, "unresolved::target", e.To)
+		rejected = true
+		return false, nil
+	}, yield))
+	require.True(t, rejected)
+	require.Empty(t, yielded)
+	err = view.VisitExternalCallEdges(t.Context(), selectEdge, selectRole, yield)
+	require.ErrorIs(t, err, ErrRebuildView)
+	require.ErrorContains(t, err, "external-call caller does not match key")
+	require.Empty(t, yielded)
+}
+
+func TestRebuildExternalCallRoleMetadataFormat(t *testing.T) {
+	// One-byte length and count fields suffice for these flat metadata rows.
+	const header = "\x00\x01"
+	const a = "\x01a\x01" // key "a", nil value
+	const b = "\x01b\x01"
+	for _, tc := range []struct {
+		name, raw, want string
+	}{
+		{"revision", "\x00\x02\x00", "metadata revision"},
+		{"order", header + "\x02" + b + a, "metadata keys not unique and sorted"},
+		{"duplicate", header + "\x02" + a + a, "metadata keys not unique and sorted"},
+		{"trailing", header + "\x01" + a + b, "unbound metadata bytes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := rebuildRoleMetadata([]byte(tc.raw), func(string) bool { return false })
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
 func TestRebuildExternalCallExtraInputCaps(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	padding := strings.Repeat("x", rebuildExternalCallRowBytes)
 	n := &graph.Node{ID: "large", Kind: graph.KindFile, Meta: map[string]any{"padding": padding}}
-	e := &graph.Edge{From: "large", To: "target", Kind: graph.EdgeReferences, Meta: map[string]any{"padding": padding}}
+	type roleString string
+	type roleBool bool
+	e := &graph.Edge{From: "large", To: "target", Kind: graph.EdgeReferences, Meta: map[string]any{
+		"godot_connection": roleBool(true),
+		"godot_method":     roleString("handler"),
+		"padding":          padding,
+	}}
 	b.AddBatch([]*graph.Node{n}, []*graph.Edge{e})
 	view := b.RebuildView()
 	selectEdge := func(id graph.EdgeIdentity) bool { return id.Kind == graph.EdgeCalls }
-	selectRole := func(*graph.Edge, *graph.Node) bool { return true }
+	selectRole := func(e *graph.Edge, _ func() (*graph.Node, error)) (bool, error) {
+		return e.Meta["godot_connection"] == true && e.Meta["godot_method"] == "handler", nil
+	}
 	require.NoError(t, view.VisitExternalCallEdges(t.Context(), selectEdge, selectRole, func(*graph.Edge) error {
 		t.Fatal("unselected edge decoded")
 		return nil

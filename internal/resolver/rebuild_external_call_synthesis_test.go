@@ -459,7 +459,7 @@ func TestRebuildExternalCallIndexedReceiptReplay(t *testing.T) {
 			count, err := runRebuildExternalCallSynthesisTest(t.Context(), b, receipts, true, nil)
 			require.NoError(t, err)
 			require.Zero(t, count)
-			require.Equal(t, 2, passes, "receipt proof and deferred indexed lookup each replay once")
+			require.Equal(t, 1, passes, "indexed lookup shares the receipt proof traversal")
 		})
 	}
 }
@@ -524,6 +524,8 @@ func TestRebuildExternalCallReadPromotion(t *testing.T) {
 	}
 }
 
+type rebuildTestRoleString string
+
 func TestRebuildExternalCallSkippedInputCaps(t *testing.T) {
 	padding := strings.Repeat("x", 16<<20)
 	for _, tc := range []struct {
@@ -536,8 +538,10 @@ func TestRebuildExternalCallSkippedInputCaps(t *testing.T) {
 		{name: "non-Rust Call", lang: "go", kind: graph.EdgeCalls, role: map[string]any{"rust_path": "crate::fetch"}},
 		{name: "untagged Rust Call", lang: "rust", kind: graph.EdgeCalls},
 		{name: "Rust voter", lang: "rust", kind: graph.EdgeCalls, role: map[string]any{"rust_path": "crate::fetch"}, voter: true},
+		{name: "Rust JSON role", lang: "rust", kind: graph.EdgeCalls, role: map[string]any{"rust_path": rebuildTestRoleString("crate::fetch")}, voter: true},
 		{name: "ordinary Reference", lang: "custom", kind: graph.EdgeReferences},
 		{name: "Godot voter", lang: "custom", kind: graph.EdgeReferences, role: map[string]any{"godot_connection": true, "godot_method": "handle"}, voter: true},
+		{name: "Godot empty method", lang: "custom", kind: graph.EdgeReferences, role: map[string]any{"godot_connection": true, "godot_method": ""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			caller := rebuildEventNode("a.source", "run", tc.lang, "")
@@ -570,6 +574,120 @@ func TestRebuildExternalCallSkippedInputCaps(t *testing.T) {
 				require.NoError(t, err)
 			}
 			require.Zero(t, votes)
+		})
+	}
+}
+
+func TestRebuildExternalCallReadNonCallable(t *testing.T) {
+	for _, kind := range []graph.NodeKind{graph.KindVariable, graph.KindConstant} {
+		t.Run(string(kind), func(t *testing.T) {
+			const file = "external::acme.tools"
+			n := &graph.Node{ID: file + "::fetch", Kind: kind, Name: "fetch", FilePath: file}
+			e := &graph.Edge{From: "a.ts::run", Kind: graph.EdgeReads, To: "unresolved::fetch", FilePath: "a.ts"}
+			require.False(t, rebuildExternalIndexedLookup(e, n))
+			e.Kind = graph.EdgeCalls
+			require.True(t, rebuildExternalIndexedLookup(e, n), "the value-callee role is otherwise eligible")
+		})
+	}
+	t.Run("PHP type", func(t *testing.T) {
+		n := &graph.Node{ID: "external::acme.tools", Kind: graph.KindType, Language: "php", Name: "Model"}
+		e := &graph.Edge{From: "a.php::run", Kind: graph.EdgeReads, To: "unresolved::Alias", FilePath: "a.php",
+			Meta: map[string]any{"fqn": `App\Model`}}
+		require.False(t, rebuildExternalIndexedLookup(e, n))
+		e.Kind = graph.EdgeReferences
+		require.True(t, rebuildExternalIndexedLookup(e, n), "the PHP name role is otherwise eligible")
+	})
+}
+
+func TestRebuildExternalCallPHPIndexedMetadata(t *testing.T) {
+	for _, key := range []string{"fqn", "target_fqn", "eloquent_method"} {
+		for _, match := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/%v", key, match), func(t *testing.T) {
+				const terminal = "external::acme.tools"
+				goCaller := rebuildEventNode("z.go", "run", "go", "")
+				caller := rebuildEventNode("a.php", "run", "php", "")
+				decl := rebuildEventNode(caller.FilePath, "Model", "php", "")
+				decl.ID, decl.Kind = terminal, graph.KindType
+				decl.Meta = map[string]any{MetaScopeNamespace: "App"}
+				claim := &graph.Edge{From: caller.ID, Kind: graph.EdgeReferences, To: "unresolved::Alias", FilePath: caller.FilePath}
+				leaf := "Model"
+				if !match {
+					leaf = "Other"
+				}
+				claim.Meta = map[string]any{key: `App\` + leaf}
+				nodes := []*graph.Node{caller, decl}
+				edges := []*graph.Edge{claim}
+				switch key {
+				case "fqn":
+					claim.To = "unresolved::import::Alias"
+				case "eloquent_method":
+					owner := rebuildEventNode(caller.FilePath, "Owner", "php", "")
+					owner.Kind = graph.KindType
+					owner.Meta = map[string]any{MetaScopeNamespace: "App"}
+					decl.Kind = graph.KindMethod
+					decl.Meta = map[string]any{"receiver": "Owner"}
+					claim.Kind = graph.EdgeCalls
+					claim.Meta = map[string]any{"eloquent_method": leaf, "eloquent_model": `App\Owner`}
+					companion := &graph.Edge{From: caller.ID, To: owner.ID, Kind: graph.EdgeReferences, FilePath: caller.FilePath,
+						Meta: map[string]any{"ref_context": graph.RefContextStaticAccess, "target_fqn": `App\Owner`}}
+					nodes = append(nodes, owner)
+					edges = append(edges, companion)
+				}
+				retained := &graph.Edge{From: goCaller.ID, Kind: graph.EdgeCalls, To: terminal, FilePath: goCaller.FilePath}
+				facts := []store_pebble.ParseFacts{
+					rebuildEventFacts(goCaller.FilePath, goCaller.Language, []*graph.Node{goCaller}, retained),
+					rebuildEventFacts(caller.FilePath, caller.Language, nodes, edges...),
+				}
+				b, sqlite := openRebuildEventStores(t, facts...)
+				before := rebuildEventSavedRows(t, b)
+				count, err := runRebuildExternalCallSynthesisTest(t.Context(), b, rebuildGRPCReceipts(facts...), true, nil)
+				native := *claim
+				oldTo, changed := New(sqlite).resolveEdge(&native, &ResolveStats{})
+				if changed {
+					sqlite.ReindexEdges([]graph.EdgeReindex{{Edge: &native, OldTo: oldTo}})
+				}
+				require.Equal(t, match, native.To == terminal)
+				SynthesizeExternalCalls(sqlite, true)
+				want := rebuildRetainedExternalCallRows(t, rebuildEventSQLiteRows(sqlite), goCaller.ID)
+				if match {
+					require.Equal(t, "php", want.nodes[0].Language)
+					require.ErrorIs(t, err, store_pebble.ErrRebuildExternalCallSynthesis)
+					require.Zero(t, count)
+					require.Equal(t, before, rebuildEventSavedRows(t, b))
+					return
+				}
+				require.NoError(t, err)
+				require.EqualValues(t, 1, count)
+				require.Equal(t, want, rebuildRetainedExternalCallRows(t, rebuildEventSavedRows(t, b), goCaller.ID))
+			})
+		}
+	}
+}
+
+func TestRebuildExternalCallIndexedKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		file      string
+		target    string
+		names     []string
+		quals     []string
+		directory bool
+	}{
+		{name: "bare", target: "fetch", names: []string{"fetch"}},
+		{name: "selector", target: "*.fetch", names: []string{"fetch"}},
+		{name: "explicit symbol", target: "extern::acme.tools::fetch", names: []string{"fetch"}},
+		{name: "Python imported attribute", file: "a.py", target: "extern::acme.tools::fetch", names: []string{"fetch", "tools"}},
+		{name: "import declaration and directory", target: "import::acme.tools::fetch", names: []string{"fetch"},
+			quals: []string{"acme.tools::fetch", "acme.tools"}, directory: true},
+		{name: "Lua-owned import", file: "a.lua", target: "import::acme.tools::fetch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := &graph.Edge{From: "source", Kind: graph.EdgeCalls, To: "unresolved::" + tc.target, FilePath: tc.file}
+			edge, names, quals, directory := rebuildExternalIndexedEdge(raw)
+			require.Equal(t, raw, edge)
+			require.Equal(t, tc.names, names)
+			require.Equal(t, tc.quals, quals)
+			require.Equal(t, tc.directory, directory)
 		})
 	}
 }

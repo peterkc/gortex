@@ -30,13 +30,15 @@ type RebuildExternalCallCandidate struct {
 // effects of skipped producers. Candidate reads the edge identity and caller
 // language. Maybe's payload predicates may veto but not add a lexical result.
 // MayChangeLive distinguishes a terminal removal from an in-place refresh.
+// IndexedEdge returns the projected edge and its exact name, qualified-name,
+// and file-directory lookup buckets. An empty string is a key; a nil edge skips.
 // The callbacks do not mutate the working graph.
 type RebuildExternalCallRules struct {
 	Candidate        func(*graph.Edge, *graph.Node) (RebuildExternalCallCandidate, bool)
 	Maybe            func(e *graph.Edge, caller *graph.Node, receiptLanguage string) []RebuildExternalCallCandidate
 	MayChangeLive    func(context.Context, RebuildView, *graph.Edge, *graph.Node) (remove, refresh bool, err error)
 	Rebind           func(*graph.Edge, string, string) graph.EdgeReindex
-	IndexedEdge      func(*graph.Edge) *graph.Edge
+	IndexedEdge      func(*graph.Edge) (edge *graph.Edge, names, quals []string, directory bool)
 	IndexedNode      func(*graph.Node) bool
 	IndexedCandidate func(context.Context, RebuildView, *graph.Edge, *graph.Node) (*graph.Edge, RebuildExternalCallCandidate, bool, error)
 	Extra            func(context.Context, RebuildView, func(*graph.Edge, RebuildExternalCallCandidate) error) error
@@ -51,9 +53,10 @@ const (
 )
 
 type rebuildExternalCallPass struct {
-	b     *BuildStore
-	rules RebuildExternalCallRules
-	count uint64
+	b            *BuildStore
+	rules        RebuildExternalCallRules
+	count        uint64
+	indexedCount uint64
 }
 
 // RebuildExternalCallSynthesis runs under the worker's exclusive stage
@@ -69,6 +72,9 @@ func (b *BuildStore) RebuildExternalCallSynthesis(ctx context.Context, receipts 
 	}()
 	if receipts == nil || rules.Candidate == nil || rules.Maybe == nil || rules.Rebind == nil {
 		return 0, invalid("external-call synthesis requires receipts and rules")
+	}
+	if rules.IndexedEdge != nil && (rules.IndexedNode == nil || rules.IndexedCandidate == nil) {
+		return 0, invalid("incomplete external-call indexed lookup rules")
 	}
 	view := b.RebuildView()
 	if err := view.mutationError(); err != nil {
@@ -93,7 +99,7 @@ func (b *BuildStore) RebuildExternalCallSynthesis(ctx context.Context, receipts 
 	if err := p.receiptEntrants(ctx); err != nil {
 		return 0, err
 	}
-	if err := p.indexedEntrants(ctx, view, receipts); err != nil {
+	if err := p.indexedEntrants(ctx, view); err != nil {
 		return 0, err
 	}
 	if rules.Extra != nil {
@@ -115,7 +121,8 @@ func (b *BuildStore) RebuildExternalCallSynthesis(ctx context.Context, receipts 
 
 // Scratch columns: file authority f, first receipt digests r and raw inputs h,
 // caller languages a, incumbent node digests i, duplicate receipts j,
-// deferred indexed lookup projections k,
+// deferred indexed lookup projections k and postings B (name), Q (qualified
+// name), D (import directory),
 // consumed raw keys c, deferred receipt keys u, site votes g, package votes p,
 // missing synthetic callers w, retained packages t, payload refreshes y, and
 // the checked mutation
@@ -134,60 +141,125 @@ func (p *rebuildExternalCallPass) put(key, value []byte) error {
 	return p.b.putRebuildScratch(key, value, rebuildExternalCallRowBytes, "external-call synthesis")
 }
 
-// indexedEntrants captures the compact deferred edge facts once. A terminal
-// node scan revisits only disk scratch, never the parse receipt stream. Empty
-// scratch is common (including all-Go) and does not require a node scan.
-func (p *rebuildExternalCallPass) indexedEntrants(ctx context.Context, view RebuildView, receipts iter.Seq2[ParseFacts, error]) error {
-	if p.rules.IndexedEdge == nil {
+// Lookup buckets need only exact equality. Prefix the byte length to keep
+// adjacent names separate without expanding bytes inside the lookup key.
+func rebuildExternalCallLookupPrefix(column byte, name string) []byte {
+	return append(binary.AppendUvarint(rebuildExternalCallColumn(column), uint64(len(name))), name...)
+}
+
+func (p *rebuildExternalCallPass) captureIndexedEdge(raw *graph.Edge) error {
+	e, names, quals, directory := p.rules.IndexedEdge(raw)
+	if e == nil {
 		return nil
 	}
-	if p.rules.IndexedNode == nil || p.rules.IndexedCandidate == nil {
-		return invalid("incomplete external-call indexed lookup rules")
+	value, err := encodeEdge(e)
+	if err != nil {
+		return err
 	}
-	var count uint64
-	for f, err := range receipts {
-		if err != nil {
+	ordinal := p.indexedCount
+	if err := p.put(binary.BigEndian.AppendUint64(rebuildExternalCallColumn('k'), ordinal), value); err != nil {
+		return err
+	}
+	p.indexedCount++
+	for _, name := range names {
+		if err := p.put(binary.BigEndian.AppendUint64(rebuildExternalCallLookupPrefix('B', name), ordinal), nil); err != nil {
 			return err
 		}
-		if err := ctx.Err(); err != nil {
+	}
+	for _, qual := range quals {
+		if err := p.put(binary.BigEndian.AppendUint64(rebuildExternalCallLookupPrefix('Q', qual), ordinal), nil); err != nil {
 			return err
 		}
-		if f.EffectiveLanguage == "" || IsRebuildExternalCallRetained(f.EffectiveLanguage) {
-			continue
+	}
+	if directory {
+		return p.put(binary.BigEndian.AppendUint64(rebuildExternalCallColumn('D'), ordinal), nil)
+	}
+	return nil
+}
+
+func (p *rebuildExternalCallPass) indexedEntrants(ctx context.Context, view RebuildView) (err error) {
+	if p.indexedCount == 0 {
+		return nil
+	}
+	var iters [3]*pebble.Iterator
+	for i := range iters {
+		it, openErr := p.b.pending.NewIterWithContext(ctx, nil)
+		if openErr != nil {
+			return openErr
 		}
-		for _, raw := range f.Edges {
+		defer func() { err = errors.Join(err, it.Close()) }()
+		iters[i] = it
+	}
+	return view.VisitExternalCallNodes(ctx, p.rules.IndexedNode, func(n *graph.Node) error {
+		prefixes := [3][]byte{
+			rebuildExternalCallLookupPrefix('B', n.Name),
+			rebuildExternalCallLookupPrefix('Q', n.QualName),
+		}
+		if n.Kind == graph.KindFile {
+			prefixes[2] = rebuildExternalCallColumn('D')
+		}
+		var valid [3]bool
+		for i, prefix := range prefixes {
+			if prefix != nil {
+				iters[i].SetBounds(prefix, prefixEnd(prefix))
+				valid[i] = iters[i].First()
+			}
+		}
+		// Merge the matching buckets in receipt order. An edge in multiple
+		// buckets dispatches once; duplicate receipt rows have distinct ordinals.
+		for {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			e := p.rules.IndexedEdge(raw)
+			var ordinal uint64
+			var found bool
+			var advance [3]bool
+			for i, prefix := range prefixes {
+				if prefix == nil {
+					continue
+				}
+				it := iters[i]
+				if err := it.Error(); err != nil {
+					return err
+				}
+				if !valid[i] {
+					continue
+				}
+				tail := it.Key()[len(prefix):]
+				if len(tail) != 8 {
+					return invalid("external-call lookup posting ordinal")
+				}
+				next := binary.BigEndian.Uint64(tail)
+				if !found || next < ordinal {
+					ordinal, found, advance = next, true, [3]bool{}
+				}
+				advance[i] = next == ordinal
+			}
+			if !found {
+				return nil
+			}
+			e, err := pendingGet(p.b.pending, binary.BigEndian.AppendUint64(rebuildExternalCallColumn('k'), ordinal), decodeEdge)
+			if err != nil {
+				return err
+			}
 			if e == nil {
-				continue
-			}
-			value, err := encodeEdge(e)
-			if err != nil {
-				return err
-			}
-			if err := p.put(binary.BigEndian.AppendUint64(rebuildExternalCallColumn('k'), count), value); err != nil {
-				return err
-			}
-			count++
-		}
-	}
-	if count == 0 {
-		return nil
-	}
-	return view.VisitExternalCallNodes(ctx, p.rules.IndexedNode, func(n *graph.Node) error {
-		return p.visit(ctx, 'k', func(r row) error {
-			e, err := decodeEdge(r.value)
-			if err != nil {
-				return err
+				return invalid("external-call lookup projection missing")
 			}
 			site, candidate, ok, err := p.rules.IndexedCandidate(ctx, view, e, n)
-			if err != nil || !ok {
+			if err != nil {
 				return err
 			}
-			return p.possible(site, candidate)
-		})
+			if ok {
+				if err := p.possible(site, candidate); err != nil {
+					return err
+				}
+			}
+			for i, next := range advance {
+				if next {
+					valid[i] = iters[i].Next()
+				}
+			}
+		}
 	})
 }
 
@@ -237,6 +309,7 @@ func (p *rebuildExternalCallPass) receipts(ctx context.Context, receipts iter.Se
 			return err
 		}
 		lang := f.EffectiveLanguage
+		deferred := lang != "" && !IsRebuildExternalCallRetained(lang)
 		file := pathkey.Normalize(f.File.FilePath)
 		prev, seen, err := p.fileLanguage(file)
 		if err != nil {
@@ -273,6 +346,13 @@ func (p *rebuildExternalCallPass) receipts(ctx context.Context, receipts iter.Se
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			// The indexed lookup needs Reads and every receipt occurrence,
+			// including same-key duplicates.
+			if deferred && p.rules.IndexedEdge != nil {
+				if err := p.captureIndexedEdge(e); err != nil {
+					return err
+				}
+			}
 			if e == nil || !rebuildExternalCallKind(e.Kind) {
 				continue
 			}
@@ -299,7 +379,6 @@ func (p *rebuildExternalCallPass) receipts(ctx context.Context, receipts iter.Se
 			if err := p.put(receipt, digest[:]); err != nil {
 				return err
 			}
-			deferred := lang != "" && !IsRebuildExternalCallRetained(lang)
 			if deferred {
 				// This authority belongs to the extractor, not necessarily the
 				// file recorded by its edge or the caller node's language.
@@ -1230,23 +1309,14 @@ func (v RebuildView) externalCallNode(ctx context.Context, id string, decode dec
 // VisitExternalCallEdges filters by key and skipped-producer role before
 // charging the edge row bound. An oversized non-voter never needs a full
 // payload decode; the role probe reads only the metadata fields it uses.
+// selectRole may read the caller during the callback if the edge role needs it.
 func (v RebuildView) VisitExternalCallEdges(ctx context.Context, selectEdge func(graph.EdgeIdentity) bool,
-	selectRole func(*graph.Edge, *graph.Node) bool, yield func(*graph.Edge) error,
+	selectRole func(*graph.Edge, func() (*graph.Node, error)) (bool, error), yield func(*graph.Edge) error,
 ) error {
 	return v.visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
 		id, err := decodeLinkRecorder(r.key)
 		if err != nil || !selectEdge(id) {
 			return err
-		}
-		var caller *graph.Node
-		if id.Kind == graph.EdgeCalls {
-			caller, err = pendingGet(snap, pendingNodeKey(id.From), decodeNodeLight)
-			if err != nil {
-				return err
-			}
-			if caller != nil && caller.ID != id.From {
-				return invalid("external-call caller does not match key")
-			}
 		}
 		sizeErr := rebuildExternalCallInput(r.key, r.value)
 		decode := decodeEdge
@@ -1262,8 +1332,15 @@ func (v RebuildView) VisitExternalCallEdges(ctx context.Context, selectEdge func
 		if !bytes.Equal(r.key, pendingEdgeKey(e)) {
 			return invalid("external-call live edge does not match key")
 		}
-		if !selectRole(e, caller) {
-			return nil
+		selected, err := selectRole(e, func() (*graph.Node, error) {
+			caller, err := pendingGet(snap, pendingNodeKey(id.From), decodeNodeLight)
+			if err == nil && caller != nil && caller.ID != id.From {
+				return nil, invalid("external-call caller does not match key")
+			}
+			return caller, err
+		})
+		if err != nil || !selected {
+			return err
 		}
 		if sizeErr != nil {
 			return sizeErr
