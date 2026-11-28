@@ -26,11 +26,14 @@ func RunRebuildExternalCallSynthesis(ctx context.Context, b *store_pebble.BuildS
 		MayChangeLive: func(ctx context.Context, view store_pebble.RebuildView, e *graph.Edge, caller *graph.Node) (bool, bool, error) {
 			return mayChangeRebuildExternalCall(ctx, view, e, caller, requested, selection)
 		},
+		IndexedEdge: rebuildExternalIndexedEdge,
+		IndexedNode: func(n *graph.Node) bool {
+			_, _, ok := parseExternalCallTarget(n.ID)
+			return ok
+		},
+		IndexedCandidate: rebuildExternalIndexedCandidate,
 		Extra: func(ctx context.Context, view store_pebble.RebuildView, yield func(*graph.Edge, store_pebble.RebuildExternalCallCandidate) error) error {
 			if err := visitRebuildAliasedExternalCalls(ctx, view, receipts, rewriteNpm, yield); err != nil {
-				return err
-			}
-			if err := visitRebuildDeferredIndexedExternalCalls(ctx, view, receipts, yield); err != nil {
 				return err
 			}
 			return visitRebuildSkippedExternalCalls(ctx, view, selection, yield)
@@ -138,63 +141,57 @@ func visitRebuildAliasedExternalCalls(ctx context.Context, view store_pebble.Reb
 }
 
 // A configured extractor can give an ordinary declaration a terminal-shaped ID.
-// Match declaration facts, rather than requiring that ID to resemble the text.
-func visitRebuildDeferredIndexedExternalCalls(ctx context.Context, view store_pebble.RebuildView,
-	receipts iter.Seq2[store_pebble.ParseFacts, error],
-	yield func(*graph.Edge, store_pebble.RebuildExternalCallCandidate) error,
-) error {
-	return view.VisitExternalCallNodes(ctx, func(n *graph.Node) bool {
-		_, _, ok := parseExternalCallTarget(n.ID)
-		return ok
-	}, func(n *graph.Node) error {
-		for f, err := range receipts {
-			if err != nil {
-				return err
+// Collect only the facts that can select that declaration. The store owns the
+// disk-backed receipt projection and joins it to one node scan.
+func rebuildExternalIndexedEdge(raw *graph.Edge) *graph.Edge {
+	if raw == nil || raw.Kind != graph.EdgeCalls && raw.Kind != graph.EdgeReferences && raw.Kind != graph.EdgeReads {
+		return nil
+	}
+	name := graph.UnresolvedName(raw.To)
+	if name == "" || strings.HasPrefix(name, "grpc::") || strings.HasPrefix(name, "pyrel::") {
+		return nil
+	}
+	e := &graph.Edge{From: raw.From, To: raw.To, Kind: raw.Kind, FilePath: raw.FilePath, Line: raw.Line}
+	for _, key := range [...]string{"eloquent_method", "fqn", "target_fqn", "rust_path"} {
+		if value, ok := raw.Meta[key].(string); ok {
+			if e.Meta == nil {
+				e.Meta = make(map[string]any)
 			}
-			if !deferredExternalCallExtractor(f.EffectiveLanguage) {
-				continue
-			}
-			for _, raw := range f.Edges {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				if !rebuildExternalIndexedLookup(raw, n) {
-					continue
-				}
-				caller, err := view.ExternalCallNode(ctx, raw.From)
-				if err != nil {
-					return err
-				}
-				if caller != nil && n.RepoPrefix != caller.RepoPrefix {
-					continue
-				}
-				name := graph.UnresolvedName(raw.To)
-				if !strings.HasPrefix(name, "import::") {
-					// The main name readers discard stdlib/dep synthetic IDs;
-					// imports use qualified-name and file identity readers instead.
-					if !strings.HasPrefix(name, "extern::") && len(withoutAttributedTerminals([]*graph.Node{n})) == 0 {
-						continue
-					}
-					if caller != nil {
-						_, languages := resolverCompatibleLanguages(caller.Language)
-						if len(languages) != 0 && !slices.Contains(languages, n.Language) {
-							continue
-						}
-					}
-				}
-				e := *raw
-				if e.Kind == graph.EdgeReads {
-					e.Kind = graph.EdgeReferences
-				}
-				if c, ok := rebuildExternalCallCandidate(n.ID, externalCallCallerLanguage(caller, e.FilePath)); ok {
-					if err := yield(&e, c); err != nil {
-						return err
-					}
-				}
+			e.Meta[key] = value
+		}
+	}
+	return e
+}
+
+func rebuildExternalIndexedCandidate(ctx context.Context, view store_pebble.RebuildView, raw *graph.Edge, n *graph.Node) (*graph.Edge, store_pebble.RebuildExternalCallCandidate, bool, error) {
+	var none store_pebble.RebuildExternalCallCandidate
+	if !rebuildExternalIndexedLookup(raw, n) {
+		return nil, none, false, nil
+	}
+	caller, err := view.ExternalCallNode(ctx, raw.From)
+	if err != nil || caller != nil && n.RepoPrefix != caller.RepoPrefix {
+		return nil, none, false, err
+	}
+	name := graph.UnresolvedName(raw.To)
+	if !strings.HasPrefix(name, "import::") {
+		// The main name readers discard stdlib/dep synthetic IDs;
+		// imports use qualified-name and file identity readers instead.
+		if !strings.HasPrefix(name, "extern::") && len(withoutAttributedTerminals([]*graph.Node{n})) == 0 {
+			return nil, none, false, nil
+		}
+		if caller != nil {
+			_, languages := resolverCompatibleLanguages(caller.Language)
+			if len(languages) != 0 && !slices.Contains(languages, n.Language) {
+				return nil, none, false, nil
 			}
 		}
-		return nil
-	})
+	}
+	e := *raw
+	if e.Kind == graph.EdgeReads {
+		e.Kind = graph.EdgeReferences
+	}
+	c, ok := rebuildExternalCallCandidate(n.ID, externalCallCallerLanguage(caller, e.FilePath))
+	return &e, c, ok, nil
 }
 
 func rebuildExternalIndexedLookup(e *graph.Edge, n *graph.Node) bool {

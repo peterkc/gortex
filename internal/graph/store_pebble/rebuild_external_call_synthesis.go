@@ -32,11 +32,14 @@ type RebuildExternalCallCandidate struct {
 // MayChangeLive distinguishes a terminal removal from an in-place refresh.
 // The callbacks do not mutate the working graph.
 type RebuildExternalCallRules struct {
-	Candidate     func(*graph.Edge, *graph.Node) (RebuildExternalCallCandidate, bool)
-	Maybe         func(e *graph.Edge, caller *graph.Node, receiptLanguage string) []RebuildExternalCallCandidate
-	MayChangeLive func(context.Context, RebuildView, *graph.Edge, *graph.Node) (remove, refresh bool, err error)
-	Rebind        func(*graph.Edge, string, string) graph.EdgeReindex
-	Extra         func(context.Context, RebuildView, func(*graph.Edge, RebuildExternalCallCandidate) error) error
+	Candidate        func(*graph.Edge, *graph.Node) (RebuildExternalCallCandidate, bool)
+	Maybe            func(e *graph.Edge, caller *graph.Node, receiptLanguage string) []RebuildExternalCallCandidate
+	MayChangeLive    func(context.Context, RebuildView, *graph.Edge, *graph.Node) (remove, refresh bool, err error)
+	Rebind           func(*graph.Edge, string, string) graph.EdgeReindex
+	IndexedEdge      func(*graph.Edge) *graph.Edge
+	IndexedNode      func(*graph.Node) bool
+	IndexedCandidate func(context.Context, RebuildView, *graph.Edge, *graph.Node) (*graph.Edge, RebuildExternalCallCandidate, bool, error)
+	Extra            func(context.Context, RebuildView, func(*graph.Edge, RebuildExternalCallCandidate) error) error
 }
 
 const rebuildExternalCallRowBytes = 16 << 20
@@ -90,6 +93,9 @@ func (b *BuildStore) RebuildExternalCallSynthesis(ctx context.Context, receipts 
 	if err := p.receiptEntrants(ctx); err != nil {
 		return 0, err
 	}
+	if err := p.indexedEntrants(ctx, view, receipts); err != nil {
+		return 0, err
+	}
 	if rules.Extra != nil {
 		if err := rules.Extra(ctx, view, p.possible); err != nil {
 			return 0, err
@@ -109,6 +115,7 @@ func (b *BuildStore) RebuildExternalCallSynthesis(ctx context.Context, receipts 
 
 // Scratch columns: file authority f, first receipt digests r and raw inputs h,
 // caller languages a, incumbent node digests i, duplicate receipts j,
+// deferred indexed lookup projections k,
 // consumed raw keys c, deferred receipt keys u, site votes g, package votes p,
 // missing synthetic callers w, retained packages t, payload refreshes y, and
 // the checked mutation
@@ -125,6 +132,63 @@ func rebuildExternalCallPackageProofKey(id string) []byte {
 
 func (p *rebuildExternalCallPass) put(key, value []byte) error {
 	return p.b.putRebuildScratch(key, value, rebuildExternalCallRowBytes, "external-call synthesis")
+}
+
+// indexedEntrants captures the compact deferred edge facts once. A terminal
+// node scan revisits only disk scratch, never the parse receipt stream. Empty
+// scratch is common (including all-Go) and does not require a node scan.
+func (p *rebuildExternalCallPass) indexedEntrants(ctx context.Context, view RebuildView, receipts iter.Seq2[ParseFacts, error]) error {
+	if p.rules.IndexedEdge == nil {
+		return nil
+	}
+	if p.rules.IndexedNode == nil || p.rules.IndexedCandidate == nil {
+		return invalid("incomplete external-call indexed lookup rules")
+	}
+	var count uint64
+	for f, err := range receipts {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if f.EffectiveLanguage == "" || IsRebuildExternalCallRetained(f.EffectiveLanguage) {
+			continue
+		}
+		for _, raw := range f.Edges {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			e := p.rules.IndexedEdge(raw)
+			if e == nil {
+				continue
+			}
+			value, err := encodeEdge(e)
+			if err != nil {
+				return err
+			}
+			if err := p.put(binary.BigEndian.AppendUint64(rebuildExternalCallColumn('k'), count), value); err != nil {
+				return err
+			}
+			count++
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	return view.VisitExternalCallNodes(ctx, p.rules.IndexedNode, func(n *graph.Node) error {
+		return p.visit(ctx, 'k', func(r row) error {
+			e, err := decodeEdge(r.value)
+			if err != nil {
+				return err
+			}
+			site, candidate, ok, err := p.rules.IndexedCandidate(ctx, view, e, n)
+			if err != nil || !ok {
+				return err
+			}
+			return p.possible(site, candidate)
+		})
+	})
 }
 
 func (p *rebuildExternalCallPass) present(key []byte) (bool, error) {

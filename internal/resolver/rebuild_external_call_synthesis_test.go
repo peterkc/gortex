@@ -432,3 +432,33 @@ func TestRebuildExternalCallCSharpReceiverProof(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildExternalCallIndexedReceiptReplay(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		t.Run(fmt.Sprint(deferred), func(t *testing.T) {
+			caller := rebuildEventNode("z.go", "run", "go", "")
+			nodes := []*graph.Node{caller}
+			for i := 0; i < 8; i++ {
+				n := rebuildEventNode(caller.FilePath, fmt.Sprint(i), "go", "")
+				n.ID = fmt.Sprintf("dep::acme.tools::fn%d", i)
+				nodes = append(nodes, n)
+			}
+			facts := []store_pebble.ParseFacts{rebuildEventFacts(caller.FilePath, caller.Language, nodes)}
+			if deferred {
+				n := rebuildEventNode("a.custom", "run", "custom", "")
+				e := &graph.Edge{From: n.ID, To: "unresolved::none", Kind: graph.EdgeCalls, FilePath: n.FilePath}
+				facts = append(facts, rebuildEventFacts(n.FilePath, n.Language, []*graph.Node{n}, e))
+			}
+			b, _ := openRebuildEventStores(t, facts...)
+			passes := 0
+			receipts := func(yield func(store_pebble.ParseFacts, error) bool) {
+				passes++
+				rebuildGRPCReceipts(facts...)(yield)
+			}
+			count, err := runRebuildExternalCallSynthesisTest(t.Context(), b, receipts, true, nil)
+			require.NoError(t, err)
+			require.Zero(t, count)
+			require.Equal(t, 2, passes, "receipt proof and deferred indexed lookup each replay once")
+		})
+	}
+}
