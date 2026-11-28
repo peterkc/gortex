@@ -22,24 +22,14 @@ func joinRebuildRouterPrefixes(ctx context.Context, view store_pebble.RebuildVie
 		return nil
 	}
 	selected := make(map[string]contracts.RouterFacts)
-	var missing string
-	var crossFile bool
 	for _, c := range reg.All() {
-		if !contracts.RouterContractSource(c) {
-			continue
-		}
-		f, ok := available[c.FilePath]
-		var own *contracts.RouterFacts
-		if ok {
-			selected[c.FilePath] = f
-			own = &f
-		}
-		local, cross := contracts.RouterPrefixFactUse(c, own)
-		crossFile = crossFile || cross
-		if local && !ok && (missing == "" || c.FilePath < missing) {
-			missing = c.FilePath
+		if contracts.RouterContractSource(c) {
+			if f, ok := available[c.FilePath]; ok {
+				selected[c.FilePath] = f
+			}
 		}
 	}
+	var missingCensus string
 	var scan bool
 	if err := view.VisitFileIdentities(ctx, func(path, language, nodeRepo, nodeWorkspace string) error {
 		if nodeRepo != repo || workspace != "" && nodeWorkspace != workspace ||
@@ -47,13 +37,10 @@ func joinRebuildRouterPrefixes(ctx context.Context, view store_pebble.RebuildVie
 			return nil
 		}
 		scan = true
-		if !crossFile {
-			return nil
-		}
 		if f, ok := available[path]; ok {
 			selected[path] = f
-		} else if missing == "" || path < missing {
-			missing = path
+		} else if missingCensus == "" || path < missingCensus {
+			missingCensus = path
 		}
 		return nil
 	}); err != nil {
@@ -62,9 +49,8 @@ func joinRebuildRouterPrefixes(ctx context.Context, view store_pebble.RebuildVie
 	if !scan {
 		return nil
 	}
-	if missing != "" {
+	if missing := contracts.JoinRebuildRouterPrefixFacts(reg, selected, missingCensus); missing != "" {
 		return fmt.Errorf("%w: %q", errRebuildRouterFactsMissing, missing)
 	}
-	contracts.JoinRouterPrefixFacts(reg, selected)
 	return ctx.Err()
 }
