@@ -220,7 +220,9 @@ func RunRebuildBuildWorker(ctx context.Context, lease string, in *os.File, outpu
 	go func() {
 		defer close(done)
 		var packet [1]byte
-		for {
+		// After the last ACK, the owner waits for stdout EOF with stdin still
+		// open. Do not start another blocking read on inherited stdin.
+		for range len(store_pebble.CoreStages()) {
 			if _, err := io.ReadFull(in, packet[:]); err != nil {
 				cancel(fmt.Errorf("%w: owner pipe: %w", errRebuildBuildWire, err))
 				return
