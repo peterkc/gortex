@@ -129,6 +129,7 @@ func (f *rebuildEarlyContractFacts) finish(ctx context.Context, view store_pebbl
 // upgrades change schema metadata, not the router fields or registry keys.
 func (f *rebuildEarlyContractFacts) bindRouterHandlerIDs(ctx context.Context, view store_pebble.RebuildView) error {
 	// Freeze the representative tasks before changing any live bucket.
+	pass := f.receipts.handlerPass()
 	for _, task := range f.registry.All() {
 		trail, fallback, _ := contracts.ProviderHandlerHints(task)
 		if trail == "" && fallback == "" {
@@ -145,7 +146,7 @@ func (f *rebuildEarlyContractFacts) bindRouterHandlerIDs(ctx context.Context, vi
 		if !routerBucket {
 			continue
 		}
-		winner, err := f.receipts.providerHandler(ctx, view, task)
+		winner, err := pass.providerHandler(ctx, view, task)
 		if err != nil {
 			return err
 		}

@@ -12,61 +12,83 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
-// providerHandler selects a handler for one of the original Registry.All
-// representatives, before any handler updates change the representative keys.
-// A nil winner leaves registration ownership intact. The caller still applies
-// changes to matching live ByID siblings, not only to this representative.
+// rebuildHandlerPass caches only answers consulted at one frozen graph cut.
+type rebuildHandlerPass struct {
+	reader  rebuildContractReceiptReader
+	classes map[string]map[string]string
+	owners  map[string]string
+	winners map[[4]string]*graph.Node
+	bodies  map[string]rebuildHandlerBodyAnswer
+}
+
+type rebuildHandlerBodyAnswer struct {
+	facts    contracts.HandlerFacts
+	unproved bool
+}
+
+func (r rebuildContractReceiptReader) handlerPass() *rebuildHandlerPass {
+	return &rebuildHandlerPass{reader: r, classes: make(map[string]map[string]string), owners: make(map[string]string),
+		winners: make(map[[4]string]*graph.Node), bodies: make(map[string]rebuildHandlerBodyAnswer)}
+}
+
 func (r rebuildContractReceiptReader) providerHandler(ctx context.Context, view store_pebble.RebuildView, c contracts.Contract) (*graph.Node, error) {
+	return r.handlerPass().providerHandler(ctx, view, c)
+}
+
+// providerHandler selects a handler for a frozen Registry.All representative.
+// A nil winner leaves registration ownership intact.
+func (p *rebuildHandlerPass) providerHandler(ctx context.Context, view store_pebble.RebuildView, c contracts.Contract) (*graph.Node, error) {
+	r := p.reader
 	trail, fallback, class := contracts.ProviderHandlerHints(c)
 	if trail == "" && fallback == "" {
 		return nil, ctx.Err()
 	}
 	if class != "" {
 		key, _ := contracts.LaravelHandlerClassKey(c)
-		origin := r.census.originByGraphPath[c.FilePath]
-		i, ok := slices.BinarySearchFunc(r.job.inputs, origin, func(in rebuildInput, key string) int {
-			return strings.Compare(in.Path, key)
-		})
-		if !ok {
-			return nil, fmt.Errorf("%w: no admitted handler registration for %q", graph.ErrContractProjectionStale, c.FilePath)
+		classes, known := p.classes[c.FilePath]
+		if !known {
+			origin := r.census.originByGraphPath[c.FilePath]
+			i, ok := slices.BinarySearchFunc(r.job.inputs, origin, func(in rebuildInput, key string) int {
+				return strings.Compare(in.Path, key)
+			})
+			if !ok {
+				return nil, fmt.Errorf("%w: no admitted handler registration for %q", graph.ErrContractProjectionStale, c.FilePath)
+			}
+			_, facts, err := r.load(ctx, r.job.inputs[i])
+			if err != nil {
+				return nil, err
+			}
+			classes = facts.LaravelHandlerClasses
+			p.classes[c.FilePath] = classes
 		}
-		_, facts, err := r.load(ctx, r.job.inputs[i])
-		if err != nil {
-			return nil, err
-		}
-		class, ok = facts.LaravelHandlerClasses[key]
+		var ok bool
+		class, ok = classes[key]
 		if !ok {
 			return nil, fmt.Errorf("%w: no handler class answer for %q at %s:%d", graph.ErrContractProjectionStale, c.ID, c.FilePath, c.Line)
 		}
 	}
-	handler, err := selectRebuildProviderHandler(ctx, view, trail, fallback, c.RepoPrefix, path.Dir(c.FilePath), class)
+	handler, err := p.selectRebuildProviderHandler(ctx, view, trail, fallback, c.RepoPrefix, path.Dir(c.FilePath), class)
 	if err != nil || handler == nil || handler.FilePath == "" || handler.RepoPrefix != c.RepoPrefix {
 		return nil, err
 	}
 	return handler, nil
 }
 
-func selectRebuildProviderHandler(ctx context.Context, view store_pebble.RebuildView, trail, fallback, repo, dir, class string) (*graph.Node, error) {
+func (p *rebuildHandlerPass) selectRebuildProviderHandler(ctx context.Context, view store_pebble.RebuildView, trail, fallback, repo, dir, class string) (*graph.Node, error) {
 	var ownerID string
 	if class != "" {
-		short := class[strings.LastIndex(class, `\`)+1:]
-		var ambiguous bool
-		err := view.VisitNameCandidates(ctx, short, nil, func(n *graph.Node) error {
-			if n.Kind != graph.KindType {
-				return nil
+		var known bool
+		ownerID, known = p.owners[class]
+		if !known {
+			answer, err := rebuildHandlerClassOwner(ctx, view, class)
+			if err != nil {
+				return nil, err
 			}
-			if short != class {
-				ns, _ := n.Meta["scope_ns"].(string)
-				if strings.Trim(ns+`\`+n.Name, `\`) != strings.TrimPrefix(class, `\`) {
-					return nil
-				}
-			}
-			ambiguous = ownerID != ""
-			ownerID = n.ID
-			return nil
-		})
-		if err != nil || ownerID == "" || ambiguous {
-			return nil, err
+			ownerID = answer
+			p.owners[class] = answer
+		}
+		if ownerID == "" {
+			return nil, nil
 		}
 	}
 	trailNames := contracts.HandlerCandidatesInTrail(trail)
@@ -79,15 +101,45 @@ func selectRebuildProviderHandler(ctx context.Context, view store_pebble.Rebuild
 		if name == "" {
 			continue
 		}
-		winner, err := pickRebuildHandler(ctx, view, name, repo, dir, ownerID)
-		if err != nil {
-			return nil, err
+		key := [4]string{name, repo, dir, ownerID}
+		winner, known := p.winners[key]
+		if !known {
+			var err error
+			winner, err = pickRebuildHandler(ctx, view, name, repo, dir, ownerID)
+			if err != nil {
+				return nil, err
+			}
+			p.winners[key] = winner
 		}
 		if winner != nil {
 			best = winner
 		}
 	}
 	return best, ctx.Err()
+}
+
+func rebuildHandlerClassOwner(ctx context.Context, view store_pebble.RebuildView, class string) (string, error) {
+	var ownerID string
+	short := class[strings.LastIndex(class, `\`)+1:]
+	var ambiguous bool
+	err := view.VisitNameCandidates(ctx, short, nil, func(n *graph.Node) error {
+		if n.Kind != graph.KindType {
+			return nil
+		}
+		if short != class {
+			ns, _ := n.Meta["scope_ns"].(string)
+			if strings.Trim(ns+`\`+n.Name, `\`) != strings.TrimPrefix(class, `\`) {
+				return nil
+			}
+		}
+		ambiguous = ownerID != ""
+		ownerID = n.ID
+		return nil
+	})
+	if err != nil || ownerID == "" || ambiguous {
+		return "", err
+	}
+	return ownerID, nil
 }
 
 func pickRebuildHandler(ctx context.Context, view store_pebble.RebuildView, name, repo, dir, ownerID string) (*graph.Node, error) {

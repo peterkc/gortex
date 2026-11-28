@@ -109,10 +109,19 @@ func TestRebuildProviderHandlerCheckedLaravelClass(t *testing.T) {
 			Meta: map[string]any{"scope_ns": row.ns}})
 		b.AddNode(&graph.Node{ID: id + ".index", Name: "index", Kind: graph.KindMethod, FilePath: row.file, Language: "php"})
 	}
-	got, err := reader.providerHandler(ctx, b.RebuildView(), route)
+	pass := reader.handlerPass()
+	got, err := pass.providerHandler(ctx, b.RebuildView(), route)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, want, got.ID)
+	// No second receipt read for the same registration file on this pass.
+	pass.reader.store.dir = t.TempDir()
+	got, err = pass.providerHandler(ctx, b.RebuildView(), route)
+	require.NoError(t, err)
+	require.Equal(t, want, got.ID)
+	require.Len(t, pass.classes, 1)
+	require.Len(t, pass.owners, 1)
+	require.Len(t, pass.winners, 1)
 	b.AddNode(&graph.Node{ID: "other.php::OrderController", Name: "OrderController", Kind: graph.KindType, FilePath: "other.php",
 		Language: "php", Meta: map[string]any{"scope_ns": "Acme"}})
 	got, err = reader.providerHandler(ctx, b.RebuildView(), route)

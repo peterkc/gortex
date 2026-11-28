@@ -12,36 +12,36 @@ import (
 // tasks and edits only their live matching registrations. Unproved body
 // writes keep the exact logical symbol move, but cannot publish a payload.
 func (r rebuildContractReceiptReader) bindRebuildProviderHandlers(ctx context.Context, view store_pebble.RebuildView, records *store_pebble.RebuildContractRecords) error {
+	pass := r.handlerPass()
 	if err := records.VisitRepresentatives(func(task store_pebble.RebuildContractRecord) error {
-		winner, err := r.providerHandler(ctx, view, task.Contract)
+		winner, err := pass.providerHandler(ctx, view, task.Contract)
 		if err != nil || winner == nil {
 			return err
 		}
-		var body contracts.HandlerFacts
-		var bodyLoaded, unproved bool
 		return records.UpdateByID(task.ID, func(live *store_pebble.RebuildContractRecord) (bool, error) {
 			if live.Role != contracts.RoleProvider || live.RepoPrefix != task.RepoPrefix || live.FilePath != task.FilePath ||
 				live.SymbolID != task.SymbolID || live.Line != task.Line {
 				return false, nil
 			}
-			if !bodyLoaded {
-				unproved = r.sizeSkippedContractSource(winner.FilePath)
-				if !unproved {
+			body, known := pass.bodies[winner.ID]
+			if !known {
+				body.unproved = r.sizeSkippedContractSource(winner.FilePath)
+				if !body.unproved {
 					var err error
-					body, err = r.providerBody(ctx, view, winner)
-					unproved = errors.Is(err, errRebuildContractBodyUnproved)
-					if err != nil && !unproved {
+					body.facts, err = r.providerBody(ctx, view, winner)
+					body.unproved = errors.Is(err, errRebuildContractBodyUnproved)
+					if err != nil && !body.unproved {
 						return false, err
 					}
 				}
-				bodyLoaded = true
+				pass.bodies[winner.ID] = body
 			}
-			if unproved {
+			if body.unproved {
 				live.SymbolID = winner.ID
 				live.BodyUnproved = true
 				removeRebuildHandlerHints(&live.Contract)
 			} else {
-				bindRebuildProviderRecord(&live.Contract, winner.ID, body)
+				bindRebuildProviderRecord(&live.Contract, winner.ID, body.facts)
 			}
 			return true, nil
 		})

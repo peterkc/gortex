@@ -39,6 +39,7 @@ func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 	}); err != nil || (!opened && !uncertain) {
 		return err
 	}
+	answers := make(map[[2]string]string)
 	return r.VisitIDs(func(id string) error {
 		return r.UpdateByID(id, func(item *RebuildContractRecord) (bool, error) {
 			if item.BodyUnproved {
@@ -68,9 +69,15 @@ func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 							return true, nil
 						}
 					}
-					value, err := r.bareTypeID(name, item.RepoPrefix)
-					if err != nil {
-						return false, err
+					key := [2]string{name, item.RepoPrefix}
+					value, known := answers[key]
+					if !known {
+						var err error
+						value, err = r.bareTypeID(name, item.RepoPrefix)
+						if err != nil {
+							return false, err
+						}
+						answers[key] = value
 					}
 					if value == "" || value == name {
 						break
