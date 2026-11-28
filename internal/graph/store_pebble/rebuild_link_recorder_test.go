@@ -264,6 +264,27 @@ func TestRebuildGoBuiltinSourceCustodyFollowsOnlyItsSite(t *testing.T) {
 	require.ErrorContains(t, err, "unproved builtin source repoint")
 }
 
+func TestRebuildGoDataflowCustodyCheckedBuiltinRepoint(t *testing.T) {
+	old := graph.Edge{From: "unresolved::int", To: "f.go::convert", Kind: graph.EdgeValueFlow,
+		FilePath: "f.go", Line: 4, Origin: graph.OriginASTResolved}
+	require.True(t, rebuildGoDataflowReceiptSource(&old))
+	moved := old
+	moved.From = "builtin::go::type::int"
+	receipt := rebuildEdgeCustody{proof: rebuildProofGoDataflowSource}
+
+	// The Go producer proves the new source. The generic move only records
+	// a detour from the original source; it cannot prove a builtin by ID.
+	key := pendingEdgeKey(&old)
+	require.Equal(t, rebuildEdgeCustody{proof: rebuildProofGoBuiltinSource}, receipt.reindexed(key, &old, &moved, false, true))
+	detour := receipt.reindexed(key, &old, &moved, false, false)
+	require.Equal(t, rebuildEdgeCustody{proof: rebuildProofGoDataflowSource, source: old.From}, detour)
+	require.Equal(t, receipt, detour.reindexed(pendingEdgeKey(&moved), &moved, &old, false, false))
+
+	// Even the checked producer cannot certify a move to a different site.
+	moved.Line++
+	require.Equal(t, rebuildEdgeCustody{proof: rebuildProofUntrackedMove}, receipt.reindexed(key, &old, &moved, false, true))
+}
+
 func requireRebuildLinkCustody(t *testing.T, b *BuildStore, e *graph.Edge, want rebuildEdgeCustody) {
 	t.Helper()
 	got, err := readRebuildEdgeCustody(b.pending, pendingEdgeKey(e))

@@ -25,6 +25,15 @@ const (
 )
 
 func TestRebuildGoBuiltinSourcesPublished(t *testing.T) {
+	testRebuildGoBuiltinSourcesPublished(t, false)
+}
+
+func TestRebuildGoBuiltinSourcePublishedAfterDetour(t *testing.T) {
+	testRebuildGoBuiltinSourcesPublished(t, true)
+}
+
+func testRebuildGoBuiltinSourcesPublished(t *testing.T, detour bool) {
+	t.Helper()
 	ctx := t.Context()
 	t.Setenv("GORTEX_RESOLVE_FROM_RECONCILE", "1")
 	const file = "flow.go"
@@ -68,6 +77,33 @@ func convert(v byte) int { return int(v) }
 	require.NoError(t, err)
 	base, err := build.RetainFileGraph(ctx, fileGraph)
 	require.NoError(t, err)
+	if detour {
+		// Return the captured ValueFlow to its extracted source before main
+		// reconciles it with the selected Go conversion at the same site.
+		view := build.RebuildView()
+		rawID := graph.EdgeIdentity{From: "unresolved::int", To: file + "::convert",
+			Kind: graph.EdgeValueFlow, FilePath: file, Line: 13}
+		raw, err := view.Edge(ctx, rawID)
+		require.NoError(t, err)
+		require.NotNil(t, raw)
+		move := func(from, to graph.Edge) {
+			t.Helper()
+			build.ReindexEdges([]graph.EdgeReindex{{
+				Edge: &to, OldFrom: from.From, OldTo: from.To, OldKind: from.Kind,
+				OldFilePath: from.FilePath, OldLine: from.Line, RefreshIdentity: true,
+			}})
+			prior, err := view.Edge(ctx, graph.EdgeIdentityFor(&from))
+			require.NoError(t, err)
+			require.Nil(t, prior)
+			saved, err := view.Edge(ctx, graph.EdgeIdentityFor(&to))
+			require.NoError(t, err)
+			require.Equal(t, &to, saved)
+		}
+		middle := *raw
+		middle.From = file + "::use"
+		move(*raw, middle)
+		move(middle, *raw)
+	}
 
 	receipts := func(yield func(store_pebble.ParseFacts, error) bool) { yield(facts, nil) }
 	opts := store_pebble.RebuildLinkOptions{ScratchParent: dir, SpillBytes: 1 << 20}

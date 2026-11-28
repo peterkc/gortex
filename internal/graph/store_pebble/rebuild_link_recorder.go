@@ -182,6 +182,13 @@ func (c rebuildEdgeCustody) reindexed(key []byte, old, e *graph.Edge, capture, g
 		if old.From == e.From && c.proof == rebuildProofGoBuiltinSource {
 			return c
 		}
+		// A checked producer proves the new builtin source. The receipt's
+		// dataflow proof only certifies the original unresolved source.
+		if goBuiltinRepoint {
+			if _, ok := rebuildGoBuiltinSource(e); ok {
+				return rebuildEdgeCustody{proof: rebuildProofGoBuiltinSource}
+			}
+		}
 		if c.proof == rebuildProofGoDataflowSource {
 			original := c.source
 			if original == "" {
@@ -193,11 +200,6 @@ func (c rebuildEdgeCustody) reindexed(key []byte, old, e *graph.Edge, capture, g
 				c.source = original
 			}
 			return c
-		}
-		if goBuiltinRepoint {
-			if _, ok := rebuildGoBuiltinSource(e); ok {
-				return rebuildEdgeCustody{proof: rebuildProofGoBuiltinSource}
-			}
 		}
 	}
 	return c.moved(key, e.Kind, capture)
