@@ -547,20 +547,7 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 	exactCheckout bool, earlyIDs rebuildEarlyContractIDs, logger *zap.Logger,
 ) error {
 	receipts := counts.census.receipts
-	// Exact checkouts use selected receipts and checked skips. The deferred
-	// file/symbol stamp producers are reachable only on legacy/private fixtures.
-	var skips map[string]rebuildClassificationFact
-	for path, fact := range classifications {
-		if exactCheckout && rebuildHoldsOutCheckedSkip(fact) {
-			if skips == nil {
-				skips = maps.Clone(classifications)
-			}
-			delete(skips, path)
-		}
-	}
-	if skips == nil {
-		skips = classifications
-	}
+	skips := selectRebuildCheckedSkips(classifications, exactCheckout)
 	if err := runRebuildTestFiles(ctx, private, receipts, skips); err != nil {
 		return err
 	}
@@ -1052,4 +1039,22 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 		return fmt.Errorf("settle platform calls: %w", err)
 	}
 	return nil
+}
+
+// selectRebuildCheckedSkips keeps deferred skip evidence out of every
+// link-facing reader, including native filename-shaped framework roles.
+func selectRebuildCheckedSkips(classifications map[string]rebuildClassificationFact, exactCheckout bool) map[string]rebuildClassificationFact {
+	var skips map[string]rebuildClassificationFact
+	for path, fact := range classifications {
+		if exactCheckout && rebuildHoldsOutCheckedSkip(fact) {
+			if skips == nil {
+				skips = maps.Clone(classifications)
+			}
+			delete(skips, path)
+		}
+	}
+	if skips == nil {
+		return classifications
+	}
+	return skips
 }
