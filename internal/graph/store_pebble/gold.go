@@ -256,9 +256,22 @@ func writeCheckedGoldDiff(
 	}
 	defer func() { err = errors.Join(err, closeTable()) }()
 	live := false
+	checkOldPosition := func(ok bool) error {
+		for ok && bytes.Equal(old.Key(), publicationWitnessKey) {
+			ok = old.Next()
+		}
+		live = ok
+		if !live {
+			// A failed read is not EOF: the remaining rows are not additions.
+			return old.Error()
+		}
+		return nil
+	}
 	if old != nil {
 		defer func() { err = errors.Join(err, old.Close()) }()
-		live = old.First()
+		if err := checkOldPosition(old.First()); err != nil {
+			return nil, err
+		}
 	}
 	write := func(key, value []byte, remove bool) error {
 		if err := ctx.Err(); err != nil {
@@ -295,17 +308,6 @@ func writeCheckedGoldDiff(
 		}
 		return w.Set(key, value)
 	}
-	advance := func() bool {
-		for ok := old.Next(); ok; ok = old.Next() {
-			if !bytes.Equal(old.Key(), publicationWitnessKey) {
-				return true
-			}
-		}
-		return false
-	}
-	if live && bytes.Equal(old.Key(), publicationWitnessKey) {
-		live = advance()
-	}
 	if err := rows.merge(ctx, func(r row) error {
 		if err := visit(r); err != nil {
 			return err
@@ -314,7 +316,9 @@ func writeCheckedGoldDiff(
 			if err := write(old.Key(), nil, true); err != nil {
 				return err
 			}
-			live = advance()
+			if err := checkOldPosition(old.Next()); err != nil {
+				return err
+			}
 		}
 		if live && bytes.Equal(old.Key(), r.key) {
 			value, err := old.ValueAndErr()
@@ -326,8 +330,7 @@ func writeCheckedGoldDiff(
 					return err
 				}
 			}
-			live = advance()
-			return nil
+			return checkOldPosition(old.Next())
 		}
 		return write(r.key, r.value, false)
 	}); err != nil {
@@ -337,10 +340,7 @@ func writeCheckedGoldDiff(
 		if err := write(old.Key(), nil, true); err != nil {
 			return nil, err
 		}
-		live = advance()
-	}
-	if old != nil {
-		if err := old.Error(); err != nil {
+		if err := checkOldPosition(old.Next()); err != nil {
 			return nil, err
 		}
 	}
