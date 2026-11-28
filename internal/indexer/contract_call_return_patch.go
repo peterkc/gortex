@@ -6,8 +6,12 @@ import (
 	"github.com/zzet/gortex/internal/contracts"
 )
 
+// contractReturnLookup resolves a variable using the prepared binding facts.
+// Native lookup is in-memory and never returns an error; rebuild can fail a read.
 type contractReturnLookup func(name string) (typeID string, repeated bool, err error)
 
+// planContractResponse traces an unresolved response_expr. It accepts a bare
+// identifier or an older helper call with that identifier as the third argument.
 func planContractResponse(c contracts.Contract, lookup contractReturnLookup) (string, bool, error) {
 	if rt, _ := c.Meta["response_type"].(string); rt == "" {
 		if name := contractResponseVarName(c); name != "" {
@@ -17,6 +21,9 @@ func planContractResponse(c contracts.Contract, lookup contractReturnLookup) (st
 	return "", false, nil
 }
 
+// planContractEnvelope resolves individual fields independently of the top-level
+// response_type. It modifies the shared envelope rows in place, including any
+// rows resolved before an error from lookup.
 func planContractEnvelope(c contracts.Contract, lookup contractReturnLookup) ([]map[string]any, bool, error) {
 	env, _ := c.Meta["response_envelope"].([]map[string]any)
 	var changed bool
@@ -60,6 +67,8 @@ func applyContractResponse(item *contracts.Contract, typeID string, repeated boo
 	delete(item.Meta, "response_expr")
 }
 
+// applyContractEnvelope stores the updated rows and promotes schema_source to
+// extracted only if every row is typed. Otherwise the existing source stays.
 func applyContractEnvelope(item *contracts.Contract, env []map[string]any, fullyTyped bool) {
 	if item.Meta == nil {
 		item.Meta = map[string]any{}
