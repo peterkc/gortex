@@ -1121,8 +1121,8 @@ func TestRunRebuildCheckoutExternalCallSynthesis(t *testing.T) {
 
 func TestRunRebuildCheckout(t *testing.T) {
 	for _, tc := range []struct {
-		name                              string
-		mismatch, denied, omitJSONRecipe  bool
+		name                               string
+		mismatch, denied, omitJSONRecipe   bool
 		captureRefusal, sealRefusal, mixed bool
 	}{
 		{name: "verified checkout builds all six stages"},
