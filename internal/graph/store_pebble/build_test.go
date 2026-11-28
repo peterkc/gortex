@@ -438,3 +438,67 @@ func TestLayoutASymbolHits(t *testing.T) {
 		t.Fatalf("cached hit changed or was not retained: %v, %v", hits, err)
 	}
 }
+
+// goldFaultCursor returns valid rows, then fails instead of reaching clean EOF.
+type goldFaultCursor struct {
+	keys   []string
+	at     int
+	fault  error
+	closed bool
+}
+
+func (c *goldFaultCursor) First() bool { c.at = 0; return c.valid() }
+func (c *goldFaultCursor) Next() bool  { c.at++; return c.valid() }
+func (c *goldFaultCursor) valid() bool { return c.at < len(c.keys) }
+func (c *goldFaultCursor) Key() []byte { return []byte(c.keys[c.at]) }
+func (c *goldFaultCursor) ValueAndErr() ([]byte, error) {
+	return []byte("value"), nil
+}
+func (c *goldFaultCursor) Error() error {
+	if c.valid() {
+		return nil
+	}
+	return c.fault
+}
+func (c *goldFaultCursor) Close() error { c.closed = true; return nil }
+
+func TestWriteCheckedGoldDiffReturnsCursorFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		old     []string
+		fresh   []string
+		changes []string
+	}{
+		{name: "first", fresh: []string{"B"}},
+		{name: "merge deletion", old: []string{"A"}, fresh: []string{"B"}, changes: []string{"A"}},
+		{name: "equal row", old: []string{"A"}, fresh: []string{"A", "B"}},
+		{name: "trailing deletion", old: []string{"A"}, changes: []string{"A"}},
+		{name: "witness skip", old: []string{string(publicationWitnessKey)}, fresh: []string{"B"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			runs := sortedRuns{dir: t.TempDir(), options: b.options, format: b.db.FormatMajorVersion().MaxTableFormat(), limit: goldBufferBytes}
+			for _, key := range tc.fresh {
+				if err := runs.add([]byte(key), []byte("value")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fault := errors.New("predecessor read failed")
+			cursor := &goldFaultCursor{keys: tc.old, fault: fault}
+			var changes []string
+			paths, err := writeCheckedGoldDiff(t.Context(), cursor, &runs, 1,
+				func(row) error { return nil },
+				func(context.Context) error { t.Fatal("failed diff reached finish"); return nil },
+				func(r row) error {
+					if cursor.Error() != nil {
+						t.Fatalf("classified %q after cursor failure", r.key)
+					}
+					changes = append(changes, string(r.key))
+					return nil
+				})
+			if !errors.Is(err, fault) || len(paths) != 0 || !cursor.closed || !slices.Equal(changes, tc.changes) {
+				t.Fatalf("diff = %v, %v; closed = %t; changes = %v, want %v", paths, err, cursor.closed, changes, tc.changes)
+			}
+		})
+	}
+}
