@@ -56,19 +56,21 @@ func (idx *Indexer) readRebuildEarlyContractFacts(ctx context.Context, view stor
 }
 
 type rebuildEndpointConstants struct {
-	ctx  context.Context
-	view store_pebble.RebuildView
-	err  error
+	ctx             context.Context
+	view            store_pebble.RebuildView
+	err             error
+	sameFileDecided bool // result of the most recent lookup
 }
 
 // lookup streams the native name group without retaining its declarations.
 // Read errors and limit excess are sticky, not absent constant answers.
 func (s *rebuildEndpointConstants) lookup(name, file, repo string) string {
+	s.sameFileDecided = false
 	name = strings.TrimSpace(name)
 	if name == "" || s.err != nil {
 		return ""
 	}
-	var values contracts.EndpointConstantValues
+	var values, sameFileValues contracts.EndpointConstantValues
 	count := 0
 	prefix := repo + "/"
 	s.err = s.view.VisitNameCandidates(s.ctx, name, nil, func(n *graph.Node) error {
@@ -84,12 +86,17 @@ func (s *rebuildEndpointConstants) lookup(name, file, repo string) string {
 		if err != nil || row == nil {
 			return err
 		}
-		values.Add(row.Value, file != "" && n.FilePath == file)
+		sameFile := file != "" && n.FilePath == file
+		values.Add(row.Value, sameFile)
+		if sameFile {
+			sameFileValues.Add(row.Value, true)
+		}
 		return nil
 	})
 	if s.err != nil {
 		return ""
 	}
+	_, s.sameFileDecided = sameFileValues.Value()
 	value, _ := values.Value()
 	return value
 }

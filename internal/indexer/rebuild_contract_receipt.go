@@ -124,6 +124,9 @@ func (r rebuildContractReceiptReader) visitFilesAtParseCut(ctx context.Context, 
 				if constants.err != nil {
 					return ""
 				}
+				if constants.sameFileDecided {
+					return value // a held declaration cannot be in this selected file
+				}
 				name = strings.TrimSpace(name)
 				for _, kind := range kinds[name] {
 					if err := r.markHeldName(ctx, view, file, kind, name, graph.KindConstant); err != nil {

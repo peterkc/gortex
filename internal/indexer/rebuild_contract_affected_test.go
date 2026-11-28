@@ -22,11 +22,17 @@ func TestRebuildContractAffectedUsesHeldScopeNotCandidates(t *testing.T) {
 	typ := &graph.Node{ID: models + "::Payload", Name: "Payload", FilePath: models, Kind: graph.KindType, Language: "python", StartLine: 1}
 	handler := &graph.Node{ID: models + "::Serve", Name: "Serve", FilePath: models, Kind: graph.KindFunction, Language: "python", StartLine: 3}
 	constant := &graph.Node{ID: models + "::Route", Name: "Route", FilePath: models, Kind: graph.KindConstant, Language: "python", StartLine: 4}
-	held := store_pebble.ParseFacts{EffectiveLanguage: "python", File: graph.FileMetaRow{FilePath: models, NodeCount: 3},
-		Nodes: []*graph.Node{typ, handler, constant}, Constants: []graph.ConstantValueRow{{NodeID: constant.ID, FilePath: models, Value: "/held"}}}
+	heldSibling := &graph.Node{ID: models + "::LocalRoute", Name: "LocalRoute", FilePath: models, Kind: graph.KindConstant, Language: "python", StartLine: 5}
+	held := store_pebble.ParseFacts{EffectiveLanguage: "python", File: graph.FileMetaRow{FilePath: models, NodeCount: 4},
+		Nodes: []*graph.Node{typ, handler, constant, heldSibling}, Constants: []graph.ConstantValueRow{
+			{NodeID: constant.ID, FilePath: models, Value: "/held"},
+			{NodeID: heldSibling.ID, FilePath: models, Value: "/not-local"},
+		}}
 	require.NoError(t, b.AddRebuildDeferredFile("", held, func(string) (bool, error) { return true, nil }))
 	file := &graph.Node{ID: source, FilePath: source, Kind: graph.KindFile, Language: "go"}
-	retained := store_pebble.ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: source, NodeCount: 1}, Nodes: []*graph.Node{file}}
+	local := &graph.Node{ID: source + "::LocalRoute", Name: "LocalRoute", FilePath: source, Kind: graph.KindConstant, Language: "go", StartLine: 3}
+	retained := store_pebble.ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: source, NodeCount: 2},
+		Nodes: []*graph.Node{file, local}, Constants: []graph.ConstantValueRow{{NodeID: local.ID, FilePath: source, Value: "/local"}}}
 	require.NoError(t, b.AddParsedFile("", retained))
 	require.NoError(t, b.IsolateRebuildLinks(ctx))
 	view := b.RebuildView()
@@ -35,11 +41,14 @@ func TestRebuildContractAffectedUsesHeldScopeNotCandidates(t *testing.T) {
 	q := contracts.EndpointContractQuestion{Kind: contracts.EndpointGoRoute, Method: "GET", Record: contracts.Contract{
 		Type: contracts.ContractHTTP, Role: contracts.RoleProvider, FilePath: source, Line: 2, Meta: map[string]any{},
 	}, Expression: contracts.EndpointExpression{Terms: []contracts.EndpointTerm{{Name: "Route"}}}}
+	qLocal := q
+	qLocal.Record.Line = 4
+	qLocal.Expression.Terms = []contracts.EndpointTerm{{Name: local.Name}}
 	input := rebuildInput{Path: source, Language: "go"}
 	job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{"go": {1}}}
 	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 	wire, err := store_pebble.EncodeContractParseFacts(retained, &contracts.FileFacts{
-		Records: []contracts.Contract{c}, Questions: []contracts.EndpointContractQuestion{q},
+		Records: []contracts.Contract{c}, Questions: []contracts.EndpointContractQuestion{qLocal, q},
 		Router: &contracts.RouterFacts{}, // The Go route question requires a checked empty prefix answer.
 		Shapes: map[string]*contracts.Shape{}, Handlers: map[string]contracts.HandlerFacts{},
 	})
@@ -57,12 +66,11 @@ func TestRebuildContractAffectedUsesHeldScopeNotCandidates(t *testing.T) {
 		},
 	}
 	require.NoError(t, r.visitFilesAtParseCut(ctx, view, func(_ string, rows []contracts.Contract, _ *contracts.FileFacts) error {
-		require.Len(t, rows, 1, "held constant cannot answer the endpoint question")
-		require.Equal(t, supportedID, rows[0].ID)
-		require.NotEqual(t, heldID, rows[0].ID)
+		require.Len(t, rows, 2, "held constant cannot answer the endpoint question")
+		require.ElementsMatch(t, []string{supportedID, "http::GET::/local"}, []string{rows[0].ID, rows[1].ID})
 		return nil
 	}))
-	require.Equal(t, 1, marks)
+	require.Equal(t, 1, marks, "only the question without a decisive same-file answer is affected")
 	pass := r.handlerPass()
 	winner, err := pass.providerHandler(ctx, view, c)
 	require.NoError(t, err)
