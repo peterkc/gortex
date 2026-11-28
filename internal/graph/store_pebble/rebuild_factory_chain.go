@@ -35,7 +35,8 @@ type RebuildFactoryChainRules struct {
 
 type rebuildFactoryChain struct {
 	rebuildCallMoves
-	rules RebuildFactoryChainRules
+	rules    RebuildFactoryChainRules
+	survived bool
 }
 
 type rebuildFactoryChainQuery struct{ expr, method string }
@@ -50,6 +51,24 @@ func (p *rebuildFactoryChain) query(e *graph.Edge) rebuildFactoryChainQuery {
 
 func rebuildFactoryChainColumns(b *BuildStore) rebuildCallMoves {
 	return rebuildCallMoves{b: b, prefix: rebuildFactoryChainPrefix, rowBytes: 16 << 20, label: "factory chain", inputRow: "input row"}
+}
+
+const parsedFactoryChainRows byte = 5 // Private parse-receipt candidates; never sealed.
+
+func factoryChainReceiptKey(raw []byte) []byte {
+	return append([]byte{familyFileMeta, parsedFactoryChainRows}, raw...)
+}
+
+// A same-key write may erase receiver_expr before the census. Keep the raw
+// candidate identity, not its payload; recordCall reads the first receipt.
+func (b *BuildStore) recordFactoryChainReceipt(f ParseFacts, e *graph.Edge) error {
+	if e == nil || e.Kind != graph.EdgeCalls && e.Kind != graph.EdgeReferences || !graph.IsUnresolvedTarget(e.To) {
+		return nil
+	}
+	if expr, _ := e.Meta["receiver_expr"].(string); expr == "" || f.EffectiveLanguage == "" || e.FilePath != pathkey.Normalize(f.File.FilePath) {
+		return nil
+	}
+	return b.pending.Set(factoryChainReceiptKey(pendingEdgeKey(e)), nil, pebble.NoSync)
 }
 
 // FreezeFactoryChainInputs captures the native pre-loop Calls and References.
@@ -86,11 +105,14 @@ func (b *BuildStore) RebuildFactoryChain(ctx context.Context, receipts iter.Seq2
 	if err := p.capture(ctx); err != nil {
 		return 0, err
 	}
-	active, err = rebuildGuardHasPrefix(ctx, b.pending, p.column('h'))
-	if err != nil || !active {
-		return 0, err
+	if !p.survived {
+		return 0, nil
 	}
 	if err := p.record(ctx, receipts); err != nil {
+		return 0, err
+	}
+	active, err = rebuildGuardHasPrefix(ctx, b.pending, p.column('h'))
+	if err != nil || !active {
 		return 0, err
 	}
 	if err := p.captureNames(ctx); err != nil {
@@ -155,6 +177,7 @@ func (p *rebuildFactoryChain) capture(ctx context.Context) error {
 		if err != nil || !frozen || !graph.IsUnresolvedTarget(id.To) {
 			return err
 		}
+		p.survived = true
 		e, err := p.decodeKeyedEdge(r.key, r.value)
 		if err != nil || p.query(e).expr == "" {
 			return err
@@ -274,6 +297,11 @@ func (p *rebuildFactoryChain) recordArc(e *graph.Edge) error {
 			return err
 		}
 	}
+	// Probe the same arc against live implementors and methods too. Neither
+	// complete projection need contain both the arc and its matching method.
+	if err := p.put(append(p.key('a', e.To), raw...), nil); err != nil {
+		return err
+	}
 	return p.put(append(p.key('A', e.To), raw...), nil)
 }
 
@@ -288,8 +316,8 @@ func (p *rebuildFactoryChain) recordCall(e *graph.Edge, ordinal uint64) error {
 	if err != nil || id.Kind != e.Kind || id.From != e.From || id.FilePath != e.FilePath || id.Line != e.Line || !graph.IsUnresolvedTarget(id.To) {
 		return err
 	}
-	active, err := p.present(append(p.column('h'), old...))
-	if err != nil || !active {
+	frozen, err := p.present(append(p.column('i'), old...))
+	if err != nil || !frozen {
 		return err
 	}
 	key := append(p.column('H'), old...)
@@ -459,13 +487,12 @@ func (r *rebuildFactoryChainRead) Incoming(id string) []*graph.Edge {
 		if err != nil || arc.To != id {
 			return errors.Join(err, invalid("factory chain incoming arc"))
 		}
-		if r.proved {
-			if err := r.take(key, nil); err != nil {
-				return err
-			}
-		} else {
+		if err := r.take(key, nil); err != nil {
+			return err
+		}
+		if !r.proved {
 			if _, err := pendingGet(p.b.pending, key, func(value []byte) (bool, error) {
-				return true, r.take(key, value)
+				return true, r.take(nil, value)
 			}); err != nil {
 				return err
 			}
@@ -484,12 +511,12 @@ func (r *rebuildFactoryChainRead) Incoming(id string) []*graph.Edge {
 // An imported arc with no matching method cannot change the conformance pick.
 // The native walk calls this only after an arc reaches a candidate.
 func (r *rebuildFactoryChainRead) MatchedArc(e *graph.Edge) {
-	if !r.proved || r.err != nil || r.unknown {
+	if r.err != nil || r.unknown {
 		return
 	}
 	key := pendingEdgeKey(e)
 	var live bool
-	live, r.err = r.pass.present(append(r.pass.key('a', e.To), key...))
+	live, r.err = r.pass.present(key)
 	r.unknown = !live
 }
 

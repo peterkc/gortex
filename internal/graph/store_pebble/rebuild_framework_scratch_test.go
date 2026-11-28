@@ -93,7 +93,7 @@ func TestRebuildScratchRefusalsKeepLowestCompleteKey(t *testing.T) {
 
 func TestRebuildFactoryChainGuards(t *testing.T) {
 	const file = "worker.go"
-	for _, mode := range []string{"nil inputs", "occupied freeze", "no frozen candidates", "candidate edge cap"} {
+	for _, mode := range []string{"nil inputs", "occupied freeze", "missing freeze", "no frozen candidates", "frozen candidate removed", "candidate edge cap"} {
 		t.Run(mode, func(t *testing.T) {
 			b := newBuild(t, FullProfile)
 			ctx := t.Context()
@@ -126,19 +126,45 @@ func TestRebuildFactoryChainGuards(t *testing.T) {
 				b.AddEdge(call)
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
-			require.NoError(t, b.FreezeFactoryChainInputs(ctx, match))
+			if mode == "frozen candidate removed" {
+				b.AddEdge(call)
+			}
+			if mode != "missing freeze" {
+				require.NoError(t, b.FreezeFactoryChainInputs(ctx, match))
+			}
+			if mode == "frozen candidate removed" {
+				require.True(t, b.RemoveEdge(call.From, call.To, call.Kind))
+			}
 			receipts := func(func(ParseFacts, error) bool) { t.Error("guard opened receipts") }
 			count, err := b.RebuildFactoryChain(ctx, receipts, rules)
-			if mode == "candidate edge cap" {
+			switch mode {
+			case "candidate edge cap":
 				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
-				require.NotContains(t, err.Error(), "live edge missing")
-			} else {
+				require.ErrorContains(t, err, "factory chain input row")
+			case "missing freeze":
+				require.ErrorIs(t, err, ErrRebuildFactoryChain)
+				require.ErrorContains(t, err, "factory chain census missing")
+			default:
 				require.NoError(t, err)
 			}
 			require.Zero(t, count)
 			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})
 	}
+}
+
+func TestRebuildFactoryChainPlanReadError(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	call := &graph.Edge{From: "caller", To: "unresolved::*.Run", Kind: graph.EdgeCalls, FilePath: "worker.go", Line: 1}
+	b.AddEdge(call)
+	p := rebuildFactoryChain{rebuildCallMoves: rebuildFactoryChainColumns(b)}
+	key := pendingEdgeKey(call)
+	require.NoError(t, p.put(append(p.column('h'), key...), nil))
+	p.rowBytes = len(key) // The identity fits, but the stored payload does not.
+	count, err := p.plan(t.Context())
+	require.Zero(t, count)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.NotContains(t, err.Error(), "live edge missing")
 }
 
 func TestRebuildFactoryChainSwiftObjCArcProof(t *testing.T) {

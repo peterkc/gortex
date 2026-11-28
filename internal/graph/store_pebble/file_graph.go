@@ -106,6 +106,9 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 			if err := b.addEdge(e); err != nil {
 				return err
 			}
+			if err := b.recordFactoryChainReceipt(f, e); err != nil {
+				return err
+			}
 			if err := b.recordExternalReceipt(f, e); err != nil {
 				return err
 			}

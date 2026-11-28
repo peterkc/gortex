@@ -44,7 +44,14 @@ func (b *BuildStore) freezeConventionInputs(ctx context.Context, p rebuildCallMo
 	if busy || match == nil {
 		return invalid(p.label + " census inputs")
 	}
-	err = b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
+	var checkReceipts bool
+	if stageErr == ErrRebuildFactoryChain {
+		checkReceipts, err = rebuildGuardHasPrefix(ctx, b.pending, factoryChainReceiptKey(nil))
+		if err != nil {
+			return err
+		}
+	}
+	err = b.RebuildView().visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
 		id, err := decodeLinkRecorder(r.key)
 		if err != nil || id.Kind != graph.EdgeCalls && id.Kind != graph.EdgeReferences || id.From == "" || !graph.IsUnresolvedTarget(id.To) {
 			return err
@@ -57,7 +64,20 @@ func (b *BuildStore) freezeConventionInputs(ctx context.Context, p rebuildCallMo
 		recv, _ := e.Meta["recv_const"].(string)
 		expr, _ := e.Meta["receiver_expr"].(string)
 		if !match(graph.FrameworkCensusEdge{EdgeIdentity: id, Via: via, RecvConst: recv, ReceiverExpr: expr}) {
-			return nil
+			if !checkReceipts {
+				return nil
+			}
+			raw, err := rebuildReceiptKey(snap, r.key)
+			if errors.Is(err, ErrRebuildUnknownProvenance) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			claimed, err := p.present(factoryChainReceiptKey(raw))
+			if err != nil || !claimed {
+				return err
+			}
 		}
 		return p.put(append(p.column('i'), r.key...), nil)
 	})

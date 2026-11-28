@@ -16,7 +16,8 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 	for _, mode := range []string{
 		"conformance", "raw factory entrant", "shared raw claim", "joint omitted factories",
 		"unproved method seed", "unproved free seed", "irrelevant raw arc", "inert raw arc",
-		"joint raw arc entrants", "proved seed ambiguity", "unrelated large row", "related large row",
+		"joint raw arc entrants", "raw arc with live-only method", "proved seed ambiguity",
+		"unrelated large row", "related large row", "lost receiver before freeze", "lost receiver after freeze",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			caller := rebuildEventNode(source, "use", lang, "")
@@ -34,6 +35,9 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				Meta: map[string]any{"receiver_expr": "MakeWorker()"}}
 			ref := *call
 			ref.Kind, ref.Line = graph.EdgeReferences, 8
+			if mode == "lost receiver before freeze" || mode == "lost receiver after freeze" {
+				ref.Meta = nil // The Call is the only possible frozen candidate.
+			}
 			route := rebuildEventFacts(source, lang, []*graph.Node{caller}, call, &ref)
 			nodes := []*graph.Node{seed, contract, concrete, method}
 			extra := rebuildEventNode(decl, "AlternativeFactory", lang, "")
@@ -71,7 +75,7 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				nodes = append(nodes, extra)
 			}
 			live := rebuildEventFacts(decl, lang, nodes, arc)
-			if mode == "joint raw arc entrants" {
+			if mode == "joint raw arc entrants" || mode == "raw arc with live-only method" {
 				live.Edges = nil
 			}
 			raw := live
@@ -82,6 +86,9 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				raw.Nodes = append(nodes[:4:4], &changed)
 			case "joint omitted factories":
 				raw.Nodes = nodes[1:4]
+			case "raw arc with live-only method":
+				raw.Edges = []*graph.Edge{arc}
+				raw.Nodes = nodes[:3]
 			case "unproved free seed":
 				raw.Nodes = nodes[:3]
 			case "unproved method seed":
@@ -99,6 +106,12 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				raw.Edges = append(append([]*graph.Edge(nil), live.Edges...), altArc)
 			}
 			raw.File.NodeCount = len(raw.Nodes)
+			lost := *call
+			lost.Meta = nil
+			if mode == "lost receiver before freeze" {
+				// SQLite keeps the first payload; pending keeps the last.
+				route.Edges = append(route.Edges, &lost)
+			}
 			b, native := openRebuildEventStores(t, route, live)
 			if mode == "shared raw claim" {
 				mover := ref
@@ -112,6 +125,9 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, frozen.allows(SynthFactoryChain))
 			require.NoError(t, FreezeRebuildFactoryChainInputs(t.Context(), b, frozen))
+			if mode == "lost receiver after freeze" {
+				b.AddEdge(&lost)
+			}
 			before := rebuildEventSavedRows(t, b)
 			count, err := RunRebuildFactoryChain(t.Context(), b, rebuildGRPCReceipts(route, raw), frozen)
 			switch mode {
@@ -145,25 +161,26 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				}
 				require.Zero(t, count)
 				require.Equal(t, before, rebuildEventSavedRows(t, b))
-				if mode == "joint omitted factories" || mode == "unproved free seed" {
-					// Both projections miss. Keeping only the first factory
-					// and the live method resolves both uses.
+				switch mode {
+				case "joint omitted factories", "unproved free seed", "raw arc with live-only method":
+					// Both complete projections miss. Keeping only the first
+					// factory, its method and the arc resolves both uses.
 					require.Zero(t, ResolveFactoryChains(native))
 					_, absent := openRebuildEventStores(t, route, raw)
 					require.Zero(t, ResolveFactoryChains(absent))
 					one := rebuildEventFacts(decl, lang, nodes[:4], arc)
 					_, present := openRebuildEventStores(t, route, one)
 					require.Equal(t, 2, ResolveFactoryChains(present))
-				}
-				if mode == "joint raw arc entrants" {
+				case "joint raw arc entrants":
 					require.Zero(t, ResolveFactoryChains(native))
 					_, both := openRebuildEventStores(t, route, raw)
 					require.Zero(t, ResolveFactoryChains(both))
 					raw.Edges = []*graph.Edge{arc}
 					_, one := openRebuildEventStores(t, route, raw)
 					require.Equal(t, 2, ResolveFactoryChains(one))
-				}
-				if mode == "raw factory entrant" {
+				case "lost receiver before freeze", "lost receiver after freeze":
+					require.Equal(t, 1, ResolveFactoryChains(native))
+				case "raw factory entrant":
 					require.Equal(t, 2, ResolveFactoryChains(native))
 					_, receipt := openRebuildEventStores(t, route, raw)
 					require.Zero(t, ResolveFactoryChains(receipt))
