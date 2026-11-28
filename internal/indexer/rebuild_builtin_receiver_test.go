@@ -337,19 +337,19 @@ func TestRebuildGoBuiltinScopeFromExtraction(t *testing.T) {
 	}
 }
 
-func TestRebuildReceiverV2V3AndV4ReceiptsAreStale(t *testing.T) {
+func TestRebuildReceiverV2ThroughV5ReceiptsAreStale(t *testing.T) {
 	for _, tc := range []struct {
 		file, language, source string
 		extractor              parser.Extractor
 		versions               []uint64
 	}{
-		{"a.go", "go", "package p\nfunc use(xs []int) int { return len(xs) }\n", languages.NewGoExtractor(), []uint64{2, 3, 4}},
-		{"a.js", "javascript", "function use(xs) { xs.slice(0); }", languages.NewJavaScriptExtractor(), []uint64{3, 4}},
-		{"a.ts", "typescript", "function use(xs: number[]) { xs.slice(0); }", languages.NewTypeScriptExtractor(), []uint64{3, 4}},
-		{"A.vue", "vue", "<!-- host -->\n<script setup lang=\"ts\">\nfunction use() { [1].slice(0); }\n</script>", languages.NewVueExtractor(), []uint64{4}},
-		{"A.svelte", "svelte", "<!-- host -->\n<script>\nfunction use() { [1].slice(0); }\n</script>", languages.NewSvelteExtractor(), []uint64{4}},
-		{"A.astro", "astro", "<!-- host -->\n<script lang=\"ts\">\nfunction use() { [1].slice(0); }\n</script>", languages.NewAstroExtractor(), []uint64{4}},
-		{"a.html", "html", "<!-- host -->\n<script>\nfunction use() { [1].slice(0); }\n</script>", languages.NewHTMLExtractor(), []uint64{4}},
+		{"a.go", "go", "package p\nfunc use(xs []int) int { return len(xs) }\n", languages.NewGoExtractor(), []uint64{2, 3, 4, 5}},
+		{"a.js", "javascript", "function use(xs) { xs.slice(0); }", languages.NewJavaScriptExtractor(), []uint64{3, 4, 5}},
+		{"a.ts", "typescript", "function use(xs: number[]) { xs.slice(0); }", languages.NewTypeScriptExtractor(), []uint64{3, 4, 5}},
+		{"A.vue", "vue", "<!-- host -->\n<script setup lang=\"ts\">\nfunction use() { [1].slice(0); }\n</script>", languages.NewVueExtractor(), []uint64{4, 5}},
+		{"A.svelte", "svelte", "<!-- host -->\n<script>\nfunction use() { [1].slice(0); }\n</script>", languages.NewSvelteExtractor(), []uint64{4, 5}},
+		{"A.astro", "astro", "<!-- host -->\n<script lang=\"ts\">\nfunction use() { [1].slice(0); }\n</script>", languages.NewAstroExtractor(), []uint64{4, 5}},
+		{"a.html", "html", "<!-- host -->\n<script>\nfunction use() { [1].slice(0); }\n</script>", languages.NewHTMLExtractor(), []uint64{4, 5}},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			ctx := t.Context()

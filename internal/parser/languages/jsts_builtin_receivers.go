@@ -28,9 +28,10 @@ type jsReceiverWrite struct {
 }
 
 type jsReceiverBinding struct {
-	scope *sitter.Node
-	decl  *sitter.Node
-	known graph.BuiltinReceiverHint
+	scope     *sitter.Node
+	decl      *sitter.Node
+	aliasInit *sitter.Node // var initializers can prove a possible write, not a receiver.
+	known     graph.BuiltinReceiverHint
 }
 
 func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *jsBuiltinReceivers {
@@ -38,7 +39,7 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 	if r.unsafe {
 		return r
 	}
-	var writes, mutations []*sitter.Node
+	var writes, mutations, blockFunctions []*sitter.Node
 	r.bindings = make(map[string]map[uintptr]jsReceiverBinding)
 	r.types = make(map[string]map[uintptr]bool)
 	r.writes = make(map[jsReceiverWrite]bool)
@@ -52,7 +53,7 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 	sloppyScript := language == "javascript" && !module
 	bindType := func(n *sitter.Node, isInterface bool) {
 		name := n.Content(src)
-		scope := jsReceiverBindingScope(n, src, sloppyScript)
+		scope := jsReceiverBindingScope(n)
 		if r.types[name] == nil {
 			r.types[name] = make(map[uintptr]bool)
 		}
@@ -63,7 +64,7 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 		name := n.Content(src)
 		b := jsReceiverBindingAt(n, n.Parent(), src)
 		if b.scope == nil {
-			b.scope = jsReceiverBindingScope(n, src, sloppyScript)
+			b.scope = jsReceiverBindingScope(n)
 		}
 		// Every binder is below the program root, so the scope walk always
 		// finds an enclosing scope. Scope IDs are stable across AST wrappers.
@@ -89,8 +90,13 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 			if strings.ContainsRune(n.Content(src), '\\') {
 				r.unsafe = true
 			}
-		case "variable_declarator", "function_declaration", "function_expression", "generator_function", "generator_function_declaration",
-			"function_signature":
+		case "function_declaration":
+			name := n.ChildByFieldName("name")
+			jsReceiverTargets(name, bind)
+			if sloppyScript && name != nil && n.Child(0).Type() == "function" { // Not async.
+				blockFunctions = append(blockFunctions, name)
+			}
+		case "variable_declarator", "function_expression", "generator_function", "generator_function_declaration", "function_signature":
 			jsReceiverTargets(n.ChildByFieldName("name"), bind)
 		case "internal_module", "module":
 			name := n.ChildByFieldName("name")
@@ -146,6 +152,9 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 			}
 		}
 	})
+	for _, name := range blockFunctions {
+		r.bindSloppyBlockFunction(name)
+	}
 	// Only unbound constructor/global names denote the platform here. Collect
 	// their writes after declarations so a later shadow is respected too.
 	for _, write := range writes {
@@ -264,13 +273,15 @@ func jsReceiverWritePath(n *sitter.Node, src []byte) (string, []string) {
 	return "", nil
 }
 
-// A direct alias of a known platform constructor or its prototype can
-// mutate that object. Do not follow computed initializers or alias chains.
-func (r *jsBuiltinReceivers) platformAlias(binding jsReceiverBinding, site *sitter.Node) (string, []string) {
-	if binding.decl == nil || !binding.visibleAt(site) {
-		return "", nil
+// A direct declaration initializer can alias a platform object. A nested
+// function can write through the alias after initialization even if its body
+// appears earlier in source. Do not follow alias chains, later assignments,
+// or local __proto__ replacement.
+func (r *jsBuiltinReceivers) platformAlias(binding jsReceiverBinding, write []string) (string, []string) {
+	value := binding.aliasInit
+	if binding.decl != nil {
+		value = binding.decl.ChildByFieldName("value")
 	}
-	value := binding.decl.ChildByFieldName("value")
 	name, fields := jsReceiverWritePath(value, r.src)
 	if name == "" {
 		return "", nil
@@ -278,9 +289,15 @@ func (r *jsBuiltinReceivers) platformAlias(binding jsReceiverBinding, site *sitt
 	if _, bound := r.bindingAt(name, value); bound {
 		return "", nil
 	}
+	if len(fields) == 0 && (name == "globalThis" || jsGlobalAlias(name)) {
+		// An indirect global-object mutation is not a per-member proof.
+		name, _, unsafe := jsReceiverGlobalPath(name, write)
+		r.unsafe = r.unsafe || unsafe || jsStaticReceiverFamily(name) != ""
+		return "", nil
+	}
 	name, fields, _ = jsReceiverGlobalPath(name, fields)
 	if jsStaticReceiverFamily(name) != "" && (len(fields) == 0 || len(fields) == 1 && fields[0] == "prototype") {
-		return name, fields
+		return name, append(fields, write...)
 	}
 	return "", nil
 }
@@ -320,8 +337,8 @@ func (r *jsBuiltinReceivers) recordWrite(n *sitter.Node) {
 			r.unsafe = true // Cannot tell whether this write reaches the platform.
 		}
 		if len(fields) != 0 {
-			if alias, prefix := r.platformAlias(binding, n); alias != "" {
-				r.recordPlatformWrite(alias, append(prefix, fields...))
+			if alias, path := r.platformAlias(binding, fields); alias != "" {
+				r.recordPlatformWrite(alias, path)
 			}
 		}
 		return
@@ -366,11 +383,11 @@ func (r *jsBuiltinReceivers) recordMutation(target *sitter.Node) {
 		if len(fields) == 0 {
 			r.writes[jsReceiverWrite{owner: name, member: "*", scope: binding.scope.Id()}] = true
 		}
-		alias, prefix := r.platformAlias(binding, target)
+		alias, path := r.platformAlias(binding, fields)
 		if alias == "" {
 			return
 		}
-		name, fields = alias, append(prefix, fields...)
+		name, fields = alias, path
 	}
 	if name == "globalThis" || jsGlobalAlias(name) || jsStaticReceiverFamily(name) != "" && (len(fields) == 0 || fields[0] == "prototype" || fields[0] == "*") {
 		r.unsafe = true
@@ -416,7 +433,7 @@ func jsReceiverBindingAt(n, p *sitter.Node, src []byte) jsReceiverBinding {
 		}
 		declaration := p.Parent()
 		if declaration.Type() != "lexical_declaration" {
-			return jsReceiverBinding{known: graph.BuiltinReceiverHint{Form: "unknown"}} // No var hoisting proof.
+			return jsReceiverBinding{aliasInit: p.ChildByFieldName("value"), known: graph.BuiltinReceiverHint{Form: "unknown"}}
 		}
 		scope := declaration.Parent()
 		if scope.Type() == "export_statement" {
@@ -462,7 +479,7 @@ func jsReceiverValueFunction(n *sitter.Node) bool {
 
 // Unsupported binding shapes still shadow names in their lexical scope. var
 // is function-scoped; a named expression owns its name inside the expression.
-func jsReceiverBindingScope(n *sitter.Node, src []byte, sloppyScript bool) *sitter.Node {
+func jsReceiverBindingScope(n *sitter.Node) *sitter.Node {
 	functionScoped := false
 	for p := n.Parent(); p != nil; p = p.Parent() {
 		switch p.Type() {
@@ -485,11 +502,6 @@ func jsReceiverBindingScope(n *sitter.Node, src []byte, sloppyScript bool) *sitt
 			if name := p.ChildByFieldName("name"); name == nil || !name.Equal(n) {
 				return p
 			}
-			// A sloppy JS block function may also create a var binding in
-			// its enclosing function. Do not prove a platform name there.
-			if sloppyScript && jsStaticReceiverFamily(n.Content(src)) != "" {
-				functionScoped = true
-			}
 		case "class_declaration", "abstract_class_declaration":
 			if name := p.ChildByFieldName("name"); name == nil || !name.Equal(n) {
 				return p
@@ -497,6 +509,64 @@ func jsReceiverBindingScope(n *sitter.Node, src []byte, sloppyScript bool) *sitt
 		}
 	}
 	return nil
+}
+
+// Annex B may add a second binding for an ordinary sloppy block function.
+// Keep its block binding; add unknown evidence in the var body only where a
+// var declaration of the same name would not collide with a lexical binding.
+func (r *jsBuiltinReceivers) bindSloppyBlockFunction(name *sitter.Node) {
+	scope := jsReceiverBindingScope(name)
+	if scope.Type() == "program" || jsReceiverValueFunction(scope.Parent()) {
+		return // Already bound in the containing body.
+	}
+	entries := r.bindings[name.Content(r.src)]
+	var varBody *sitter.Node
+	for p := scope.Parent(); p != nil; p = p.Parent() {
+		if varBody == nil {
+			if _, bound := entries[p.Id()]; bound {
+				// A simple catch parameter may share its name with a var.
+				param := p.ChildByFieldName("parameter")
+				if p.Type() != "catch_clause" || param == nil || param.Type() != "identifier" {
+					return
+				}
+			}
+		}
+		switch {
+		case p.Type() == "class" || p.Type() == "class_declaration":
+			return
+		case jsReceiverValueFunction(p), p.Type() == "program":
+			body := p
+			if p.Type() != "program" {
+				body = p.ChildByFieldName("body")
+			}
+			if jsReceiverUseStrict(body, r.src) {
+				return
+			}
+			if varBody == nil {
+				varBody = body
+			}
+		}
+	}
+	entries[varBody.Id()] = jsReceiverBinding{scope: varBody}
+}
+
+func jsReceiverUseStrict(body *sitter.Node, src []byte) bool {
+	for stmt := range body.NamedChildren() {
+		switch stmt.Type() {
+		case "comment", "hash_bang_line":
+			continue
+		case "expression_statement":
+			value := stmt.NamedChild(0)
+			if value != nil && value.Type() == "string" {
+				if text := value.Content(src); text == `"use strict"` || text == `'use strict'` {
+					return true
+				}
+				continue
+			}
+		}
+		return false // End of directive prologue.
+	}
+	return false
 }
 
 // Every scope is an ancestor of its binding's use. Look up its stable node

@@ -101,13 +101,34 @@ func TestJSTS_BuiltinReceiverEvidence(t *testing.T) {
 		{"catch_var", "javascript", `try {} catch (e) { var Array = f(); } Array.from(xs);`, "shadowed", ""},
 		{"for_of_var", "javascript", `for (var Array of xs) {} Array.from(y);`, "shadowed", ""},
 		{"for_of_var_constructor", "javascript", `for (var Map of xs) {} new Map().get(k);`, "shadowed", ""},
+		{"for_of_let", "javascript", `for (let Array of xs) {} Array.from(y);`, "static", "array"},
 		{"sloppy_block_function", "javascript", `if (c) { function Array() {} } Array.from(y);`, "shadowed", ""},
 		{"sloppy_block_function_sibling", "javascript", `function f() { if (c) { function Array() {} } } Array.from(y);`, "static", "array"},
+		{"sloppy_block_function_receiver", "javascript", `const xs = []; function g() { if (c) { function xs() {} } xs.slice(); }`, "unknown", ""},
+		{"module_block_function_receiver", "javascript", `export {}; const xs = []; function g() { if (c) { function xs() {} } xs.slice(); }`, "instance", "array"},
+		{"module_block_function", "javascript", `export {}; if (c) { function Array() {} } Array.from(y);`, "static", "array"},
+		{"typescript_block_function", "typescript", `if (c) { function Array() {} } Array.from(y);`, "static", "array"},
+		{"strict_script_block_function", "javascript", `"use strict"; if (c) { function Array() {} } Array.from(y);`, "static", "array"},
+		{"not_a_strict_directive", "javascript", `0; "use strict"; if (c) { function Array() {} } Array.from(y);`, "shadowed", ""},
+		{"inherited_strict_block_function", "javascript", `function f() { 'use strict'; function g() { if (c) { function Array() {} } Array.from(y); } }`, "static", "array"},
+		{"async_block_function", "javascript", `if (c) { async function Array() {} } Array.from(y);`, "static", "array"},
+		{"block_function_after_parameter", "javascript", `function f(xs) { if (c) { function xs() {} } xs.slice(); }`, "unknown", ""},
+		{"block_function_not_in_parameter_scope", "javascript", `const xs = []; function g(y = xs.slice()) { if (c) { function xs() {} } }`, "instance", "array"},
+		{"block_function_before_body_lexical", "javascript", `function f() { if (c) { function xs() {} } const xs = []; xs.slice(); }`, "instance", "array"},
+		{"block_function_lexical_conflict", "javascript", `function f() { { const Array = []; { function Array() {} } } Array.from(y); }`, "static", "array"},
+		{"block_function_catch_parameter", "javascript", `function f() { try {} catch (Array) { { function Array() {} } } Array.from(y); }`, "shadowed", ""},
+		{"nested_script_interface", "typescript", `function f() { interface Box { slice(): void } let b: Box; b.slice(); }`, "user", ""},
 		{"bound_self_write", "javascript", `let self = []; self = load(); self.slice();`, "shadowed", ""},
 		{"bound_window_member_write", "javascript", `const window = []; window.slice = other; window.slice();`, "shadowed", ""},
 		{"bound_global_write_sibling", "javascript", `function f(global) { global = other; } function g() { const global = []; global.slice(); }`, "instance", "array"},
 		{"prototype_alias_write", "javascript", `const AP = Array.prototype; AP.slice = f; [].slice();`, "shadowed", ""},
+		{"var_prototype_alias_write", "javascript", `var AP = Array.prototype; AP.slice = f; [].slice();`, "shadowed", ""},
+		{"early_prototype_alias_write", "javascript", `function patch() { AP.slice = f; } const AP = Array.prototype; patch(); [].slice();`, "shadowed", ""},
+		{"var_array_receiver", "javascript", `var xs = []; xs.slice();`, "unknown", ""},
 		{"constructor_alias_write", "javascript", `const A = Array; A.from = f; Array.from(xs);`, "shadowed", ""},
+		{"global_object_alias_write", "javascript", `const g = globalThis; g.Array.prototype.slice = f; [].slice();`, "unknown", ""},
+		{"global_object_alias_unrelated_member", "javascript", `const g = globalThis; g.other = f; [].slice();`, "instance", "array"},
+		{"global_object_alias_local_source", "javascript", `function f(globalThis) { const g = globalThis; g.Array.prototype.slice = f; } [].slice();`, "instance", "array"},
 		{"global_prototype_alias_write", "javascript", `const AP = globalThis.Array.prototype; AP.slice = f; [].slice();`, "shadowed", ""},
 		{"prototype_alias_unrelated_member", "javascript", `const AP = Array.prototype; AP.other = f; [].slice();`, "instance", "array"},
 		{"prototype_alias_local_constructor", "javascript", `function f(Array) { const AP = Array.prototype; AP.slice = f; } [].slice();`, "instance", "array"},
@@ -134,7 +155,11 @@ func TestJSTS_BuiltinReceiverEvidence(t *testing.T) {
 					hints = append(hints, r.memberHint(fn, n))
 				}
 			})
-			require.Equal(t, []graph.BuiltinReceiverHint{{Form: tc.form, Family: tc.family}}, hints)
+			want := graph.BuiltinReceiverHint{Form: tc.form, Family: tc.family}
+			if tc.name == "nested_script_interface" {
+				want.Name = "Box"
+			}
+			require.Equal(t, []graph.BuiltinReceiverHint{want}, hints)
 		})
 	}
 }
@@ -294,6 +319,9 @@ func TestJSTS_BuiltinReceiverObjectMutation(t *testing.T) {
 		{"local receiver assign", `const xs = []; Object.assign(xs, {slice: f});`, `xs.slice();`, "unknown", ""},
 		{"local receiver defineProperty", `const xs = []; Object.defineProperty(xs, "slice", descriptor);`, `xs.slice();`, "unknown", ""},
 		{"prototype alias mutation", `const AP = Array.prototype; Object.assign(AP, {slice: f});`, `[].slice();`, "unknown", ""},
+		{"var prototype alias mutation", `var AP = Array.prototype; Object.assign(AP, {slice: f});`, `[].slice();`, "unknown", ""},
+		{"early prototype alias mutation", `function patch() { Object.assign(AP, {slice: f}); } const AP = Array.prototype; patch();`, `[].slice();`, "unknown", ""},
+		{"global object alias mutation", `const g = globalThis; Object.assign(g, {Array: f});`, `[].slice();`, "unknown", ""},
 		{"sibling local mutation", `function f(xs) { Object.assign(xs, {slice: f}); } const xs = [];`, `xs.slice();`, "instance", "array"},
 		{"nested global alias target", `Object.assign(globalThis.window.Array.prototype, value);`, `[].slice();`, "unknown", ""},
 	} {
