@@ -110,7 +110,7 @@ func TestRebuildSpringConfigLabelsSkippedConfigFile(t *testing.T) {
 }
 
 func TestRebuildSpringConfigCheckedSkipSeals(t *testing.T) {
-	for _, mode := range []string{"legacy", "isolated", "forged-path", "no-authority"} {
+	for _, mode := range []string{"legacy", "isolated", "forged-path", "forged-digest", "forged-repo", "no-authority"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := t.Context()
 			idx := newTestIndexer(graph.New())
@@ -122,7 +122,7 @@ func TestRebuildSpringConfigCheckedSkipSeals(t *testing.T) {
 			head, err := store_pebble.OpenHead(t.TempDir(), rebuildTestIncarnation, store_pebble.FullProfile)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, head.Close()) })
-			const config, goFile = "application.yml", "main.go"
+			const config, goFile, other = "application.yml", "main.go", "values.yml"
 			fact := rebuildClassificationFact{Language: "yaml", Size: 64, MaxFileSize: 32}
 			idx.registry.Register(languages.NewYAMLExtractor())
 			idx.config.MaxFileSize = fact.MaxFileSize
@@ -132,6 +132,8 @@ func TestRebuildSpringConfigCheckedSkipSeals(t *testing.T) {
 			require.NotNil(t, n)
 			if isolate {
 				require.NoError(t, b.AddRebuildHeldSkip(n))
+				require.NoError(t, idx.checkRebuildClassification(other, fact, idx.newContentAdmissionGate()))
+				require.NoError(t, b.AddRebuildHeldSkip(rebuildCheckedSkipNode(other, fact)))
 			} else {
 				b.AddNode(n)
 			}
@@ -155,7 +157,12 @@ func TestRebuildSpringConfigCheckedSkipSeals(t *testing.T) {
 			}
 			r := rebuildContractReceiptReader{idx: idx, linkView: b.RebuildView(), job: rebuildFileStages{classifications: map[string]rebuildClassificationFact{config: fact}},
 				census: &rebuildExtractorCensus{admitted: 1, byPath: map[string]string{goFile: "go"}, originByGraphPath: map[string]string{goFile: goFile, config: config}}}
+			if isolate {
+				r.job.classifications[other] = fact
+				r.census.originByGraphPath[other] = other
+			}
 			want := store_pebble.RebuildSpringConfigUnknownOmission("", config)
+			forged := mode == "forged-path" || mode == "forged-digest" || mode == "forged-repo"
 			var tables store_pebble.StageTables
 			err = r.withRebuildContractProducer(ctx, b, func(func(contracts.Contract) error) error { return nil }, make(rebuildEarlyContractIDs),
 				func(preflight iter.Seq2[store_pebble.RebuildContractBatch, error], seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
@@ -177,15 +184,20 @@ func TestRebuildSpringConfigCheckedSkipSeals(t *testing.T) {
 					require.NoError(t, err)
 					_, err = head.PublishStage(ctx, relations)
 					require.NoError(t, err)
-					if mode == "forged-path" || mode == "no-authority" {
+					if forged || mode == "no-authority" {
 						o := want
-						if mode == "forged-path" {
+						switch mode {
+						case "forged-path":
 							o = store_pebble.RebuildSpringConfigUnknownOmission("", "application-other.yml")
+						case "forged-digest":
+							o = store_pebble.RebuildSpringConfigHeldOutOmission("", config)
+						case "forged-repo":
+							o = store_pebble.RebuildSpringConfigUnknownOmission("other", config)
 						}
 						batches := func(yield func(store_pebble.RebuildContractBatch, error) bool) {
 							yield(store_pebble.RebuildContractBatch{Omitted: []store_pebble.RebuildContractOmission{o}}, nil)
 						}
-						if mode == "forged-path" {
+						if forged {
 							tables, err = b.PrepareContractsWithCheckedSizeSkips(ctx, t.TempDir(), base, batches, store_pebble.ContractCoverage{OmittedRecords: 1}, r.checkedSpringConfigSizeSkip)
 						} else {
 							tables, err = b.PrepareContracts(ctx, t.TempDir(), base, batches, store_pebble.ContractCoverage{OmittedRecords: 1})
@@ -195,7 +207,7 @@ func TestRebuildSpringConfigCheckedSkipSeals(t *testing.T) {
 					tables, err = seal(t.TempDir(), base)
 					return err
 				})
-			if mode == "forged-path" || mode == "no-authority" {
+			if forged || mode == "no-authority" {
 				require.ErrorContains(t, err, "contract omission lacks admitted file scope")
 				require.Zero(t, tables)
 				return

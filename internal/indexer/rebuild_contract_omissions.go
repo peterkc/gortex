@@ -19,11 +19,8 @@ func (r rebuildContractReceiptReader) checkedSpringConfigSizeSkip(repo, file str
 	if r.idx == nil || r.census == nil || repo != r.idx.repoPrefix || !r.sizeSkippedContractSource(file) {
 		return false
 	}
-	origin := r.census.originByGraphPath[file]
-	fact := r.job.classifications[origin]
-	languages, extensions := contracts.SpringConfigFileProjection()
 	_, profile := contracts.SpringConfigProfile(file)
-	return profile && graph.ProjectionMatches(file, fact.Language, languages, extensions)
+	return profile
 }
 
 // visitHeldOutContractOmissions inventories checked raw observations only.
