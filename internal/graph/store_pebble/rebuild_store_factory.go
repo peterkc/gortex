@@ -552,7 +552,10 @@ func (p *rebuildStoreFactoryPass) electionProved(call rebuildStoreDispatchCall, 
 	}
 	if pick.getter {
 		wanted := p.key('v', call.getter)
-		var ok bool
+		var (
+			ok  bool
+			err error
+		)
 		if pick.getterProof {
 			ok, err = p.getterFilesProved(p.key('t', call.getter), wanted, p.unique)
 		} else {

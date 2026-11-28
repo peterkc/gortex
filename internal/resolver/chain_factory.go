@@ -228,7 +228,9 @@ func isTypeNodeKind(k graph.NodeKind) bool {
 // return reports whether a conformance hop was needed.
 func resolveMemberByTypeConformant(g factoryChainLookup, typeName, member string) (string, bool) {
 	if typeName != "" && member != "" {
-		role := func(n *graph.Node) bool { return n != nil && n.Kind == graph.KindMethod && factoryChainMethodRole(n, typeName) }
+		role := func(n *graph.Node) bool {
+			return n != nil && n.Kind == graph.KindMethod && factoryChainMethodRole(n, typeName)
+		}
 		if direct := uniqueMemberByType(g.nodes(member, role), typeName); direct != "" {
 			return direct, false
 		}

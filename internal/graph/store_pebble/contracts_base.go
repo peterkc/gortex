@@ -141,10 +141,12 @@ func (c *relationBaseCursor) current() row {
 	return c.base.row
 }
 
-func (c *relationBaseCursor) Key() []byte                 { return c.current().key }
+func (c *relationBaseCursor) Key() []byte                  { return c.current().key }
 func (c *relationBaseCursor) ValueAndErr() ([]byte, error) { return c.current().value, nil }
-func (c *relationBaseCursor) Error() error                { return errors.Join(c.err, c.base.Error(), c.delta.Error()) }
-func (c *relationBaseCursor) Close() error                { return errors.Join(c.base.Close(), c.delta.Close()) }
+func (c *relationBaseCursor) Error() error {
+	return errors.Join(c.err, c.base.Error(), c.delta.Error())
+}
+func (c *relationBaseCursor) Close() error { return errors.Join(c.base.Close(), c.delta.Close()) }
 
 // Carry the Relations-only endpoint counters. Contracts adds no node-free
 // endpoints, so those two exact counts are unchanged. The full diff still

@@ -51,7 +51,7 @@ func TestRebuildExternalCallOptionalCreator(t *testing.T) {
 				Candidate: func(e *graph.Edge, n *graph.Node) (RebuildExternalCallCandidate, bool) {
 					return candidate(n), strings.HasPrefix(e.To, "dep::")
 				},
-				Maybe:         func(*graph.Edge, *graph.Node, string) []RebuildExternalCallCandidate { return nil },
+				Maybe: func(*graph.Edge, *graph.Node, string) []RebuildExternalCallCandidate { return nil },
 				MayChangeLive: func(_ context.Context, _ RebuildView, e *graph.Edge, _ *graph.Node) (bool, bool, error) {
 					return e.From == "a", false, nil
 				},

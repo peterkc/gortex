@@ -73,7 +73,9 @@ func (b *BuildStore) RebuildFactoryChain(ctx context.Context, receipts iter.Seq2
 	if !frozen {
 		return 0, invalid("factory chain census missing")
 	}
-	defer func() { err = errors.Join(err, b.pending.DeleteRange(cols.prefix, prefixEnd(cols.prefix), pebble.NoSync)) }()
+	defer func() {
+		err = errors.Join(err, b.pending.DeleteRange(cols.prefix, prefixEnd(cols.prefix), pebble.NoSync))
+	}()
 	active, err := rebuildGuardHasPrefix(ctx, b.pending, cols.column('i'))
 	if err != nil || !active {
 		return 0, err
