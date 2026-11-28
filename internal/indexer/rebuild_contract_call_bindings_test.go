@@ -119,3 +119,102 @@ func Other() {
 	require.NoError(t, replay(inputs, errParseEntryCorrupt))
 	require.Equal(t, parses, parser.ParseCount())
 }
+
+func TestRebuildCallReturnBindingsRefuseSemanticReaders(t *testing.T) {
+	prior := contracts.CurrentBindingResolver()
+	t.Cleanup(func() { contracts.SetBindingResolver(prior) })
+	contracts.SetBindingResolver(nil)
+	ctx := t.Context()
+	g := graph.New()
+	idx := newTestIndexer(g)
+	t.Cleanup(idx.Close)
+	r := rebuildContractReceiptReader{idx: idx}
+	idx.graph = &contractBatchStore{Store: g}
+	err := r.resolveLateCallReturnTypes(ctx, store_pebble.RebuildView{}, nil)
+	require.ErrorIs(t, err, errRebuildBuildWire)
+	require.ErrorContains(t, err, "semantic binding reader installed")
+	idx.graph = g
+	contracts.SetBindingResolver(&contractBatchResolver{})
+	err = r.resolveLateCallReturnTypes(ctx, store_pebble.RebuildView{}, nil)
+	require.ErrorIs(t, err, errRebuildBuildWire)
+	require.ErrorContains(t, err, "semantic binding provider installed")
+}
+
+func TestRebuildCallReturnBindingsDeclarationGuards(t *testing.T) {
+	ctx := t.Context()
+	const file = "handler.go"
+	src := []byte("package fixture\nfunc Serve() { x := 1; _ = x }\n")
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	ext, ok := idx.registry.GetByLanguage("go")
+	require.True(t, ok)
+	parsed, facts, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, file, ext, src, src)
+	require.NoError(t, err)
+	const symbol = file + "::Serve"
+	require.Contains(t, facts.Handlers, symbol)
+	var handler *graph.Node
+	for _, n := range parsed.Nodes {
+		if n.ID == symbol {
+			handler = n
+			break
+		}
+	}
+	require.NotNil(t, handler)
+	for _, mode := range []string{"non-Go", "size-skipped", "no-symbol", "variable", "wrong-path", "renamed", "duplicate"} {
+		t.Run(mode, func(t *testing.T) {
+			b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, b.Close()) })
+			input := rebuildInput{Path: file, Language: "go", Size: int64(len(src))}
+			job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{"go": {1}}}
+			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			census := &rebuildExtractorCensus{byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file}}
+			live, receipt := *handler, parsed
+			c := contracts.Contract{ID: "http::GET::/x", Type: contracts.ContractHTTP, Role: contracts.RoleProvider,
+				SymbolID: symbol, FilePath: file, Meta: map[string]any{"response_expr": "x"}}
+			var want string
+			switch mode {
+			case "non-Go":
+				live.Language = "python"
+			case "size-skipped":
+				delete(census.byPath, file)
+				job.classifications = map[string]rebuildClassificationFact{file: {Language: "go", Size: 64, MaxFileSize: 32}}
+			case "no-symbol":
+				c.SymbolID = ""
+			case "variable":
+				live.Kind = graph.KindVariable
+				want = "no checked Go binding source"
+			case "wrong-path":
+				live.FilePath = "handler.py"
+				want = "no checked Go binding source"
+			case "renamed":
+				live.Name = "Renamed"
+				want = "ambiguous or renamed binding declaration"
+			case "duplicate":
+				receipt.Nodes = append(append([]*graph.Node(nil), receipt.Nodes...), handler)
+				want = "ambiguous or renamed binding declaration"
+			}
+			wire, err := store_pebble.EncodeContractParseFacts(receipt, facts)
+			require.NoError(t, err)
+			key := input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input))
+			require.NoError(t, store.write(key, wire))
+			b.AddNode(&live)
+			r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
+			require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+				item := store_pebble.RebuildContractRecord{Contract: c, BodyUnproved: mode == "size-skipped"}
+				require.NoError(t, records.Add(item))
+				err := r.resolveLateCallReturnTypes(ctx, b.RebuildView(), records)
+				if want != "" {
+					require.ErrorIs(t, err, graph.ErrContractProjectionStale)
+					require.ErrorContains(t, err, want)
+				} else {
+					require.NoError(t, err)
+				}
+				return records.VisitByID(c.ID, func(actual store_pebble.RebuildContractRecord) error {
+					require.Equal(t, item, actual)
+					return nil
+				})
+			}))
+		})
+	}
+}

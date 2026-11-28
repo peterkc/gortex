@@ -3,7 +3,6 @@ package indexer
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
@@ -25,22 +24,22 @@ func (r rebuildContractReceiptReader) resolveLateCallReturnTypes(ctx context.Con
 	if _, ok := contracts.CurrentBindingResolver().(graph.SemanticBindingTypeReader); ok {
 		return fmt.Errorf("%w: semantic binding provider installed for rebuild", errRebuildBuildWire)
 	}
+	var lastSymbol string
+	var body contracts.HandlerFacts
 	if err := records.VisitRepresentatives(func(item store_pebble.RebuildContractRecord) error {
 		if item.Type != contracts.ContractHTTP || item.Role != contracts.RoleProvider || item.SymbolID == "" {
 			return nil
 		}
-		var body contracts.HandlerFacts
-		var loaded bool
 		for _, name := range unresolvedContractBindingNames(item.Contract) {
 			site := rebuildCallReturnSite(item.Contract, name)
 			if err := records.PrepareCallReturnBinding(site, func() (store_pebble.RebuildCallReturnBinding, error) {
-				if !loaded {
+				if item.SymbolID != lastSymbol {
 					var err error
 					body, err = r.rebuildCallReturnBody(ctx, view, item.SymbolID)
 					if err != nil {
 						return store_pebble.RebuildCallReturnBinding{}, err
 					}
-					loaded = true
+					lastSymbol = item.SymbolID
 				}
 				return rebuildResolveCallBinding(ctx, view, records, item.RepoPrefix, body.VarBinding(name))
 			}); err != nil {
@@ -82,6 +81,8 @@ func (r rebuildContractReceiptReader) rebuildCallReturnBody(ctx context.Context,
 	if lang != "go" {
 		return empty, nil
 	}
+	// C1 does not certify arbitrary Go body owners (including variable
+	// declarations with function literals). Refuse rather than infer from source.
 	if detectLangFromPath(handler.FilePath) != "go" || (handler.Kind != graph.KindFunction && handler.Kind != graph.KindMethod) {
 		return empty, fmt.Errorf("%w: no checked Go binding source for %q", graph.ErrContractProjectionStale, symbol)
 	}
@@ -109,8 +110,7 @@ func rebuildResolveCallBinding(ctx context.Context, view store_pebble.RebuildVie
 	repo string, binding contracts.Binding,
 ) (store_pebble.RebuildCallReturnBinding, error) {
 	name, repeated := binding.TypeID, binding.Repeated
-	switch binding.Kind {
-	case contracts.BindingMethodCall, contracts.BindingFuncCall:
+	if contractBindingIsCall(binding) {
 		call, err := rebuildCallReturnName(ctx, view, contractCallKey{callExpr: binding.CallExpr, repoPrefix: repo})
 		if err != nil {
 			return store_pebble.RebuildCallReturnBinding{}, err
@@ -125,62 +125,28 @@ func rebuildResolveCallBinding(ctx context.Context, view store_pebble.RebuildVie
 }
 
 func applyRebuildCallReturnBinding(records *store_pebble.RebuildContractRecords, c contracts.Contract) error {
-	var response store_pebble.RebuildCallReturnBinding
-	if rt, _ := c.Meta["response_type"].(string); rt == "" {
-		if name := contractResponseVarName(c); name != "" {
-			var err error
-			response, err = records.CallReturnBinding(rebuildCallReturnSite(c, name))
-			if err != nil {
-				return err
-			}
-		}
+	lookup := func(name string) (string, bool, error) {
+		binding, err := records.CallReturnBinding(rebuildCallReturnSite(c, name))
+		return binding.TypeID, binding.Repeated, err
 	}
-	env, _ := c.Meta["response_envelope"].([]map[string]any)
-	var envChanged bool
-	for _, row := range env {
-		if t, _ := row["type"].(string); t != "" {
-			continue
-		}
-		expr, _ := row["expr"].(string)
-		name := strings.TrimLeft(expr, "&*")
-		if !isLikelyIdentifier(name) {
-			continue
-		}
-		value, err := records.CallReturnBinding(rebuildCallReturnSite(c, name))
-		if err != nil {
-			return err
-		}
-		if value.TypeID != "" {
-			row["type"] = value.TypeID
-			if value.Repeated {
-				row["repeated"] = true
-			}
-			envChanged = true
-		}
+	typeID, repeated, err := planContractResponse(c, lookup)
+	if err != nil {
+		return err
 	}
-	if response.TypeID == "" && !envChanged {
-		return nil
+	env, changed, err := planContractEnvelope(c, lookup)
+	if err != nil || (typeID == "" && !changed) {
+		return err
 	}
-	fullyTyped := envChanged && envelopeFullyTyped(env)
+	fullyTyped := changed && envelopeFullyTyped(env)
 	return records.UpdateByID(c.ID, func(item *store_pebble.RebuildContractRecord) (bool, error) {
-		if item.Role != contracts.RoleProvider || item.SymbolID != c.SymbolID {
+		if !contractReturnPatchTarget(item.Contract, c) {
 			return false, nil
 		}
-		if item.Meta == nil {
-			item.Meta = map[string]any{}
+		if typeID != "" {
+			applyContractResponse(&item.Contract, typeID, repeated)
 		}
-		if response.TypeID != "" {
-			item.Meta["response_type"] = response.TypeID
-			if response.Repeated {
-				item.Meta["response_repeated"] = true
-			}
-			delete(item.Meta, "response_expr")
-		}
-		if envChanged {
-			item.Meta["response_envelope"] = env
-		}
-		if response.TypeID != "" || fullyTyped {
-			item.Meta["schema_source"] = "extracted"
+		if changed {
+			applyContractEnvelope(&item.Contract, env, fullyTyped)
 		}
 		return true, nil
 	})
