@@ -69,9 +69,11 @@ func resolveFactoryChains(g graph.Store, cands *frameworkPassCandidates) int {
 }
 
 type factoryChainLookup struct {
-	nodes    func(name string, role func(*graph.Node) bool) []*graph.Node
-	incoming func(string) []*graph.Edge
-	node     func(string) *graph.Node
+	nodes      func(name string, role func(*graph.Node) bool) []*graph.Node
+	incoming   func(string) []*graph.Edge
+	node       func(string) *graph.Node
+	seedNodes  func(name string, role func(*graph.Node) bool, stable func([]*graph.Node, []*graph.Node) bool) []*graph.Node
+	matchedArc func(*graph.Edge)
 }
 
 func factoryChainCall(e *graph.Edge) (expr, method string) {
@@ -174,7 +176,39 @@ func stripChainArgs(expr string) string {
 // constructor named name (the chain seed). A receiver-less declaration wins
 // over a same-named method; ambiguity among free functions drops.
 func graphFactoryReturnType(g factoryChainLookup, name string) string {
+	if g.seedNodes != nil {
+		return factoryChainSeedType(g.seedNodes(name, factoryChainSeedRole, factoryChainSeedStable))
+	}
 	return factoryChainSeedType(g.nodes(name, factoryChainSeedRole))
+}
+
+// A free seed takes precedence over every method seed, including when two
+// distinct free return types permanently rule out a factory return type.
+func factoryChainSeedStable(nodes, exact []*graph.Node) bool {
+	var free string
+	for _, n := range exact {
+		if _, method := n.Meta["receiver"]; method {
+			continue
+		}
+		rt, _ := n.Meta["return_type"].(string)
+		if free != "" && free != rt {
+			return true
+		}
+		free = rt
+	}
+	if free != "" {
+		for _, n := range nodes {
+			if _, method := n.Meta["receiver"]; method {
+				continue
+			}
+			rt, _ := n.Meta["return_type"].(string)
+			if free != rt {
+				return false
+			}
+		}
+		return true
+	}
+	return len(nodes) == len(exact)
 }
 
 func factoryChainSeedRole(n *graph.Node) bool {
@@ -264,6 +298,9 @@ func findMethodNodeConformant(g factoryChainLookup, typeName, member string) (*g
 				continue
 			}
 			if n := findMethodNodeByType(g, impl.Name, member); n != nil {
+				if g.matchedArc != nil {
+					g.matchedArc(ie)
+				}
 				if match != nil && match.ID != n.ID {
 					return nil, true // ambiguous across implementors — drop
 				}
