@@ -301,4 +301,38 @@ func TestRebuildContractSourceRecordSizeLimit(t *testing.T) {
 	require.ErrorIs(t, appendContractSource(t.Context(), &runs, &stats, c), ErrRebuildLinkInputSize)
 	require.Zero(t, stats)
 	require.Empty(t, runs.rows)
+
+	c.ID = c.ID[:len(c.ID)-1]
+	require.NoError(t, appendContractSource(t.Context(), &runs, &stats, c))
+	require.Equal(t, 1, stats.Records)
+	require.Equal(t, goldBufferBytes, stats.PeakBatchBytes)
+	require.Len(t, runs.rows, 1)
+}
+
+func TestRebuildContractSourceSpillWriteFailure(t *testing.T) {
+	ctx, lease := t.Context(), t.TempDir()
+	var path string
+	stats, err := WithRebuildContractSources(ctx, lease, 1, func(add func(contracts.Contract) error) error {
+		require.NoError(t, add(contracts.Contract{ID: "env::A"}))
+		entries, err := os.ReadDir(lease)
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		path = contractSourceRunPath(filepath.Join(lease, entries[0].Name()), 0)
+		require.NoError(t, os.Mkdir(path, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(path, "blocker"), nil, 0o600))
+		spillErr := add(contracts.Contract{ID: "env::B"})
+		require.Error(t, spillErr)
+		require.ErrorIs(t, add(contracts.Contract{ID: "env::C"}), spillErr)
+		return nil // an ignored collector error must still abort
+	}, func(func(func(contracts.Contract) error) error) error {
+		t.Fatal("spill failure reached replay")
+		return nil
+	})
+	var pathErr *os.PathError
+	require.ErrorAs(t, err, &pathErr)
+	require.Equal(t, path, pathErr.Path)
+	require.Zero(t, stats)
+	entries, err := os.ReadDir(lease)
+	require.NoError(t, err)
+	require.Empty(t, entries)
 }
