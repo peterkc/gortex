@@ -10,7 +10,7 @@ import (
 )
 
 func TestRebuildLinkIsolationCutGuards(t *testing.T) {
-	for _, mode := range []string{"parse after cut", "second cut", "cut during overlay", "restore before cut", "restore during overlay", "skip after cut", "nil skip", "nonfile skip", "empty skip ID"} {
+	for _, mode := range []string{"parse after cut", "second cut", "cut during overlay", "restore before cut", "restore during overlay", "skip after cut", "nil skip", "nonfile skip", "empty skip ID", "selected skip after cut", "nil selected skip", "nonfile selected skip", "empty selected skip ID", "deferred selected skip"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := t.Context()
 			b := newBuild(t, FullProfile)
@@ -43,6 +43,22 @@ func TestRebuildLinkIsolationCutGuards(t *testing.T) {
 			case "empty skip ID":
 				file.ID = ""
 				err = b.AddRebuildHeldSkip(file)
+			case "selected skip after cut":
+				require.NoError(t, b.IsolateRebuildLinks(ctx))
+				file.Language = "go"
+				err = b.AddRebuildSelectedSkip(file)
+			case "nil selected skip":
+				err = b.AddRebuildSelectedSkip(nil)
+			case "nonfile selected skip":
+				file.Kind = graph.KindType
+				file.Language = "go"
+				err = b.AddRebuildSelectedSkip(file)
+			case "empty selected skip ID":
+				file.ID = ""
+				file.Language = "go"
+				err = b.AddRebuildSelectedSkip(file)
+			case "deferred selected skip":
+				err = b.AddRebuildSelectedSkip(file)
 			}
 			require.ErrorIs(t, err, ErrRebuildLinkIsolation)
 		})
@@ -50,7 +66,7 @@ func TestRebuildLinkIsolationCutGuards(t *testing.T) {
 }
 
 func TestRebuildLinkIsolationRefusesInvalidHeldRows(t *testing.T) {
-	for _, mode := range []string{"key mismatch", "nonraw custody", "canceled selection entry"} {
+	for _, mode := range []string{"key mismatch", "nonraw custody", "canceled selection entry", "canceled selection lookup", "missing held receipt extractor"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := t.Context()
 			b := newBuild(t, FullProfile)
@@ -75,6 +91,19 @@ func TestRebuildLinkIsolationRefusesInvalidHeldRows(t *testing.T) {
 				cancel()
 				_, err := b.SelectRebuildLinkFacts(canceled, facts)
 				require.ErrorIs(t, err, context.Canceled)
+			case "canceled selection lookup":
+				require.NoError(t, b.IsolateRebuildLinks(ctx))
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+				// Enter the same per-ID loop used after a successful prefix check.
+				_, err := b.selectRebuildLinkFacts(canceled, facts)
+				require.ErrorIs(t, err, context.Canceled)
+				require.ErrorIs(t, err, ErrRebuildLinkIsolation)
+			case "missing held receipt extractor":
+				require.NoError(t, b.pending.Delete(rebuildHoldoutKey('a', keyStrings(nil, file)), pebble.NoSync))
+				err := b.IsolateRebuildLinks(ctx)
+				require.ErrorIs(t, err, ErrRebuildLinkIsolation)
+				require.ErrorContains(t, err, "held edge lacks deferred receipt attribution")
 			}
 		})
 	}

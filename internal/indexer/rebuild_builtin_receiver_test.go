@@ -263,7 +263,7 @@ func TestRebuildGoBuiltinScopeFromExtraction(t *testing.T) {
 					for i, facts := range []store_pebble.ParseFacts{sibling, caller} {
 						if err := build.AddParsedFileSelected("", facts, func(id string) (bool, error) {
 							return keep(id, uint64(i+1))
-						}); err != nil {
+						}, false); err != nil {
 							return err
 						}
 					}

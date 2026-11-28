@@ -224,6 +224,23 @@ func (idx *Indexer) buildRebuildFileStages(
 	// Qualify every raw claim before any graph row is materialized. The
 	// parse store refuses different bytes at an existing immutable key.
 	// Later passes also use these same checked receipt keys, not the source.
+	trackIsolation := false
+	if job.retainFileGraph {
+		for id := range census.byID {
+			if !rebuildLinkedExtractor(id) {
+				trackIsolation = true
+				break
+			}
+		}
+		if !trackIsolation {
+			for _, fact := range job.classifications {
+				if rebuildHoldsOutCheckedSkip(fact) {
+					trackIsolation = true
+					break
+				}
+			}
+		}
+	}
 	receipts := idx.rebuildDataflowReceipts(ctx, job, store, &census)
 	census.receipts = receipts
 	counts.claims, err = private.ReduceRebuildSharedClaims(ctx, rebuildCloneClaimBytes, receipts,
@@ -241,14 +258,13 @@ func (idx *Indexer) buildRebuildFileStages(
 						facts.Constants[i].FilePath = key
 					}
 				}
-				add := private.AddParsedFileSelected
 				held := job.retainFileGraph && !rebuildLinkedExtractor(facts.EffectiveLanguage)
+				selected := func(id string) (bool, error) { return keep(id, ordinal) }
 				if held {
-					add = private.AddRebuildDeferredFile
-				}
-				if err := add("", facts, func(id string) (bool, error) {
-					return keep(id, ordinal)
-				}); err != nil {
+					if err := private.AddRebuildDeferredFile("", facts, selected); err != nil {
+						return err
+					}
+				} else if err := private.AddParsedFileSelected("", facts, selected, trackIsolation); err != nil {
 					return err
 				}
 				if held {
@@ -292,6 +308,10 @@ func (idx *Indexer) buildRebuildFileStages(
 			if err := private.AddRebuildHeldSkip(n); err != nil {
 				return counts, err
 			}
+		} else if trackIsolation {
+			if err := private.AddRebuildSelectedSkip(n); err != nil {
+				return counts, err
+			}
 		} else {
 			private.AddNode(n)
 		}
@@ -317,7 +337,7 @@ func (idx *Indexer) buildRebuildFileStages(
 		return counts, err
 	}
 	if counts.publishRelations {
-		if err := private.IsolateRebuildLinksForCoverage(ctx); err != nil {
+		if err := private.IsolateRebuildLinks(ctx); err != nil {
 			return counts, err
 		}
 		census.receipts = idx.rebuildSelectedDataflowReceipts(ctx, job, store, &census, private)

@@ -50,11 +50,12 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 	}
 	claims, err := b.ReduceRebuildSharedClaims(ctx, 1<<20, seq, func(keep func(string, uint64) (bool, error)) error {
 		for i, f := range facts {
-			add := b.AddParsedFileSelected
+			selected := func(id string) (bool, error) { return keep(id, uint64(i+1)) }
 			if f.EffectiveLanguage != "go" {
-				add = b.AddRebuildDeferredFile
-			}
-			if err := add("", f, func(id string) (bool, error) { return keep(id, uint64(i+1)) }); err != nil {
+				if err := b.AddRebuildDeferredFile("", f, selected); err != nil {
+					return err
+				}
+			} else if err := b.AddParsedFileSelected("", f, selected, true); err != nil {
 				return err
 			}
 		}
@@ -133,9 +134,13 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 	require.Equal(t, 1, linkCopy.File.NodeCount)
 	require.Equal(t, []*graph.Edge{flow}, linkCopy.Edges)
 	for _, e := range []*graph.Edge{defines, contains, cross, call, ref, evidence, imports, arg} {
-		n, err := b.pendingEdge(pendingEdgeKey(e))
+		key := pendingEdgeKey(e)
+		n, err := b.pendingEdge(key)
 		require.NoError(t, err)
 		require.Nil(t, n)
+		reverse, err := pendingGet(b.pending, pendingReverseKey(e, key), copyValue)
+		require.NoError(t, err)
+		require.Nil(t, reverse, "held edge reverse row must not survive the cut")
 	}
 	require.Equal(t, []graph.ConstantValueRow{{NodeID: g.ID}}, linkCopy.Constants)
 	require.Equal(t, map[string][]uint64{g.ID: {22}}, linkCopy.Shingles)
@@ -181,6 +186,7 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, flowRaw, kept)
 	requireRebuildLinkCustody(t, b, flow, rebuildEdgeCustody{proof: rebuildProofGoDataflowSource})
+	require.NoError(t, b.CheckRebuildIsolationCoverage([]string{"python", "ruby"}))
 	relations, err := b.PrepareRelations(ctx, t.TempDir(), base, func(path string) string {
 		if path == goFile {
 			return "go"
@@ -188,7 +194,7 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 		return ""
 	})
 	require.NoError(t, err)
-	relations.Witness.Relations = &RelationCoverage{DeferredLanguages: []string{"python", "ruby"}}
+	require.True(t, relations.Witness.Relations.IsolationChecked)
 	_, err = h.PublishStage(ctx, relations)
 	require.NoError(t, err)
 	selected := stageRead(t, h)
@@ -202,7 +208,7 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 	require.Equal(t, facts[0].File, metadata)
 }
 
-func TestRebuildLinkIsolationRefusesChangedCustody(t *testing.T) {
+func TestRebuildLinkIsolationRefusesChangedRowsAndCollisions(t *testing.T) {
 	for _, name := range []string{"changed raw bytes", "node collision", "edge to held node"} {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
@@ -247,10 +253,13 @@ func TestRebuildLinkIsolationSupportedOnlyUnchanged(t *testing.T) {
 	ctx := t.Context()
 	b := newBuild(t, FullProfile)
 	a := &graph.Node{ID: "a.ts", Name: "A", Kind: graph.KindFile, FilePath: "a.ts"}
-	require.NoError(t, b.AddParsedFile("", ParseFacts{
+	require.NoError(t, b.AddParsedFileSelected("", ParseFacts{
 		Nodes: []*graph.Node{a}, File: graph.FileMetaRow{FilePath: "a.ts", NodeCount: 1}, EffectiveLanguage: "typescript",
 		Edges: []*graph.Edge{{From: a.ID, To: "unresolved::x", Kind: graph.EdgeCalls, FilePath: "a.ts"}},
-	}))
+	}, func(string) (bool, error) { return true, nil }, false))
+	have, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildHoldoutPrefix)
+	require.NoError(t, err)
+	require.False(t, have, "supported-only replay must not write attribution scratch")
 	all := func() []row {
 		var out []row
 		for _, family := range []byte{familyNode, familyEdge, familyFile, familyRepo, familyFileMeta} {
@@ -382,6 +391,37 @@ func TestRebuildHeldSkipRestoresNativeUpsert(t *testing.T) {
 	require.Equal(t, true, n.Meta["skipped_due_to_content"])
 }
 
+func TestRebuildHeldSkipSupersedesDeferredCrossFileWinner(t *testing.T) {
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	solution := &graph.Node{ID: "app.sln", FilePath: "app.sln", Kind: graph.KindFile, Language: "dotnet_project"}
+	project := &graph.Node{ID: "app.csproj", FilePath: "app.csproj", Kind: graph.KindFile, Name: "raw project", Language: "dotnet_project"}
+	defines := &graph.Edge{From: solution.ID, To: project.ID, Kind: graph.EdgeDefines, FilePath: solution.FilePath}
+	require.NoError(t, b.AddRebuildDeferredFile("", ParseFacts{
+		File: graph.FileMetaRow{FilePath: solution.FilePath, NodeCount: 2}, EffectiveLanguage: "dotnet_project",
+		Nodes: []*graph.Node{solution, project}, Edges: []*graph.Edge{defines},
+	}, func(string) (bool, error) { return true, nil }))
+	skip := *project
+	skip.Name = "app.csproj"
+	skip.Meta = map[string]any{"skipped_due_to_size": true}
+	require.NoError(t, b.AddRebuildHeldSkip(&skip))
+	want, err := pendingGet(b.pending, pendingNodeKey(skip.ID), copyValue)
+	require.NoError(t, err)
+	require.NotEmpty(t, want)
+	require.NoError(t, b.IsolateRebuildLinks(ctx))
+	require.NoError(t, b.RestoreRebuildDeclarations(ctx))
+	got, err := pendingGet(b.pending, pendingNodeKey(skip.ID), copyValue)
+	require.NoError(t, err)
+	require.Equal(t, want, got, "skip supersedes the held raw capture")
+	key := pendingEdgeKey(defines)
+	edge, err := b.pendingEdge(key)
+	require.NoError(t, err)
+	require.Nil(t, edge, "cross-receipt Defines is not restorable")
+	reverse, err := pendingGet(b.pending, pendingReverseKey(defines, key), copyValue)
+	require.NoError(t, err)
+	require.Nil(t, reverse)
+}
+
 func TestRebuildHeldManifestSupersession(t *testing.T) {
 	for _, mode := range []string{"native writer", "modules disabled", "unrelated edge", "changed node", "changed edge", "unrelated node"} {
 		t.Run(mode, func(t *testing.T) {
@@ -451,12 +491,26 @@ func TestRebuildHeldEndpointCoverageUsesFirstReceipt(t *testing.T) {
 	ctx := t.Context()
 	b := newBuild(t, FullProfile)
 	held := &graph.Node{ID: "a.py::A", FilePath: "a.py", Kind: graph.KindFunction, Language: "go"}
-	caller := &graph.Node{ID: "caller.go::Run", FilePath: "caller.go", Kind: graph.KindFunction, Language: "go"}
+	caller := &graph.Node{ID: "caller.go::Run", FilePath: "caller.go", Kind: graph.KindFunction, Language: "python"}
+	target := &graph.Node{ID: "target.go::Run", FilePath: "target.go", Kind: graph.KindFunction}
 	keep := func(string) (bool, error) { return true, nil }
-	require.NoError(t, b.AddRebuildDeferredFile("", ParseFacts{File: graph.FileMetaRow{FilePath: held.FilePath, NodeCount: 1}, EffectiveLanguage: "python", Nodes: []*graph.Node{held}}, keep))
-	edge := &graph.Edge{From: caller.ID, To: held.ID, FilePath: caller.FilePath, Kind: graph.EdgeCalls}
-	require.NoError(t, b.AddParsedFileSelected("", ParseFacts{File: graph.FileMetaRow{FilePath: caller.FilePath, NodeCount: 1}, EffectiveLanguage: "go", Nodes: []*graph.Node{caller}, Edges: []*graph.Edge{edge, edge}}, keep))
-	require.NoError(t, b.IsolateRebuildLinksForCoverage(ctx))
+	incoming := &graph.Edge{From: held.ID, To: target.ID, FilePath: held.FilePath, Kind: graph.EdgeReferences}
+	outgoing := &graph.Edge{From: caller.ID, To: held.ID, FilePath: "shared.go", Kind: graph.EdgeCalls}
+	duplicate := *outgoing
+	duplicate.Origin = graph.OriginASTInferred
+	require.NoError(t, b.AddRebuildDeferredFile("", ParseFacts{
+		File: graph.FileMetaRow{FilePath: held.FilePath, NodeCount: 1}, EffectiveLanguage: "python",
+		Nodes: []*graph.Node{held}, Edges: []*graph.Edge{incoming},
+	}, keep))
+	for _, f := range []ParseFacts{
+		{File: graph.FileMetaRow{FilePath: "first.go"}, EffectiveLanguage: "go", Edges: []*graph.Edge{outgoing}},
+		{File: graph.FileMetaRow{FilePath: "second.go"}, EffectiveLanguage: "go", Edges: []*graph.Edge{&duplicate}},
+		{File: graph.FileMetaRow{FilePath: caller.FilePath, NodeCount: 1}, EffectiveLanguage: "go", Nodes: []*graph.Node{caller}},
+		{File: graph.FileMetaRow{FilePath: target.FilePath, NodeCount: 1}, EffectiveLanguage: "go", Nodes: []*graph.Node{target}},
+	} {
+		require.NoError(t, b.AddParsedFileSelected("", f, keep, true))
+	}
+	require.NoError(t, b.IsolateRebuildLinks(ctx))
 	require.NoError(t, b.RestoreRebuildDeclarations(ctx))
 	require.NoError(t, b.CheckRebuildIsolationCoverage([]string{"python"}))
 	coverage, err := b.prepareIsolationScopes(ctx)
@@ -468,5 +522,47 @@ func TestRebuildHeldEndpointCoverageUsesFirstReceipt(t *testing.T) {
 		scopes = append(scopes, scope)
 		return err
 	}))
-	require.Equal(t, []RebuildIsolationAffectedScope{{FilePath: "caller.go", SupportedLanguage: "go", DeferredLanguage: "python", Cause: "held-endpoint", Count: 1}}, scopes)
+	require.Equal(t, []RebuildIsolationAffectedScope{
+		{FilePath: "caller.go", SupportedLanguage: "go", DeferredLanguage: "python", Cause: "held-endpoint", Count: 1},
+		{FilePath: "first.go", SupportedLanguage: "go", DeferredLanguage: "python", Cause: "held-endpoint", Count: 1},
+		{FilePath: "target.go", SupportedLanguage: "go", DeferredLanguage: "python", Cause: "held-endpoint", Count: 1},
+	}, scopes)
+}
+
+func TestRebuildHeldEndpointCoverageCheckedSkip(t *testing.T) {
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	held := &graph.Node{ID: "skip.py::A", FilePath: "skip.py", Kind: graph.KindFunction}
+	skip := &graph.Node{ID: "skip.go", FilePath: "skip.go", Kind: graph.KindFile, Language: "go"}
+	edge := &graph.Edge{From: held.ID, To: skip.ID, FilePath: held.FilePath, Kind: graph.EdgeReferences}
+	require.NoError(t, b.AddRebuildDeferredFile("", ParseFacts{
+		File: graph.FileMetaRow{FilePath: held.FilePath, NodeCount: 1}, EffectiveLanguage: "python",
+		Nodes: []*graph.Node{held}, Edges: []*graph.Edge{edge},
+	}, func(string) (bool, error) { return true, nil }))
+	require.NoError(t, b.AddRebuildSelectedSkip(skip))
+	require.NoError(t, b.IsolateRebuildLinks(ctx))
+	require.NoError(t, b.RestoreRebuildDeclarations(ctx))
+	require.NoError(t, b.CheckRebuildIsolationCoverage([]string{"python"}))
+	_, err := b.prepareIsolationScopes(ctx)
+	require.NoError(t, err)
+	var scopes []RebuildIsolationAffectedScope
+	require.NoError(t, pendingVisit(ctx, b.pending, []byte{familyIsolation}, func(r row) error {
+		scope, err := decodeIsolationScope(r.key, r.value)
+		scopes = append(scopes, scope)
+		return err
+	}))
+	require.Equal(t, []RebuildIsolationAffectedScope{{FilePath: skip.FilePath, SupportedLanguage: "go", DeferredLanguage: "python", Cause: "held-endpoint", Count: 1}}, scopes)
+}
+
+func TestRebuildHeldEndpointWithoutReceiptAttributionRefuses(t *testing.T) {
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	held := &graph.Node{ID: "held.py::A", FilePath: "held.py", Kind: graph.KindFunction}
+	require.NoError(t, b.AddRebuildDeferredFile("", ParseFacts{
+		File: graph.FileMetaRow{FilePath: held.FilePath, NodeCount: 1}, EffectiveLanguage: "python", Nodes: []*graph.Node{held},
+	}, func(string) (bool, error) { return true, nil }))
+	b.AddEdge(&graph.Edge{From: "a.go::Run", To: held.ID, FilePath: "a.go", Kind: graph.EdgeReferences})
+	err := b.IsolateRebuildLinks(ctx)
+	require.ErrorIs(t, err, ErrRebuildLinkIsolation)
+	require.ErrorContains(t, err, "supported held-endpoint edge lacks receipt attribution")
 }

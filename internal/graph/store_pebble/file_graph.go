@@ -59,23 +59,24 @@ func checkFileMetaRow(r row) error {
 // AddParsedFile takes one cached extraction. Raw edges enter private scratch,
 // not the file-graph stage. The caller supplies files in manifest order.
 func (b *BuildStore) AddParsedFile(repo string, f ParseFacts) error {
-	return b.addParsedFile(repo, f, nil, false)
+	return b.addParsedFile(repo, f, nil, false, false)
 }
 
 // AddParsedFileSelected replays a qualified receipt. Keep must be the node
 // selection from ReduceRebuildSharedClaims. Edges, sidecars and the original
-// per-file extraction count are not filtered.
-func (b *BuildStore) AddParsedFileSelected(repo string, f ParseFacts, keep func(string) (bool, error)) error {
-	return b.addParsedFile(repo, f, keep, false)
+// per-file extraction count are not filtered. Track isolation attribution
+// only for a checkout whose complete census includes held input.
+func (b *BuildStore) AddParsedFileSelected(repo string, f ParseFacts, keep func(string) (bool, error), trackIsolation bool) error {
+	return b.addParsedFile(repo, f, keep, false, trackIsolation)
 }
 
 // AddRebuildDeferredFile replays an elected receipt for complete FileGraph
 // while reserving its winning rows for the private link-input cut.
 func (b *BuildStore) AddRebuildDeferredFile(repo string, f ParseFacts, keep func(string) (bool, error)) error {
-	return b.addParsedFile(repo, f, keep, true)
+	return b.addParsedFile(repo, f, keep, true, true)
 }
 
-func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) (bool, error), deferred bool) error {
+func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) (bool, error), deferred, trackIsolation bool) error {
 	return b.withWrites(func() error {
 		if b.rebuildLinksIsolated {
 			return ErrRebuildLinkIsolation
@@ -94,6 +95,11 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 		raw, err = encodeFileMeta(f.File)
 		if err != nil {
 			return err
+		}
+		if trackIsolation {
+			if err := b.pending.Set(rebuildHoldoutKey('a', keyStrings(nil, f.File.FilePath)), []byte(f.EffectiveLanguage), pebble.NoSync); err != nil {
+				return err
+			}
 		}
 		if err := b.recordRebuildGoBuiltinScope(repo, f); err != nil {
 			return err
@@ -147,7 +153,7 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 				continue
 			}
 			// Bind only the first raw payload's supported receipt attribution.
-			if keep != nil && RebuildLinkedExtractor(f.EffectiveLanguage) {
+			if trackIsolation && keep != nil && RebuildLinkedExtractor(f.EffectiveLanguage) {
 				value := appendMetaString(nil, f.File.FilePath)
 				value = appendMetaString(value, f.EffectiveLanguage)
 				if err := b.pending.Set(rebuildHoldoutKey('p', edgeKey), value, pebble.NoSync); err != nil {

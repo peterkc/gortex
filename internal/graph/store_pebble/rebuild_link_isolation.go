@@ -20,6 +20,7 @@ var ErrRebuildLinkIsolation = errors.New("pebble rebuild link isolation failed")
 // l: effective extractor by held ID. m: exact name/kind/ID to effective extractor.
 // s/w: exact sanctioned native manifest replacement node/edge bytes.
 // o: contract isolation affected scope omissions. p: supported first edge receipt attribution.
+// a: checked receipt or selected skip path to effective extractor.
 var rebuildHoldoutPrefix = []byte{'g', '!'}
 
 func rebuildHoldoutKey(col byte, key []byte) []byte {
@@ -55,6 +56,20 @@ func (b *BuildStore) AddRebuildHeldSkip(n *graph.Node) error {
 	})
 }
 
+// AddRebuildSelectedSkip records the exact owner-checked file attribution
+// when a mixed checkout can lose edges to this supported skip.
+func (b *BuildStore) AddRebuildSelectedSkip(n *graph.Node) error {
+	return b.withWrites(func() error {
+		if b.rebuildLinksIsolated || n == nil || n.Kind != graph.KindFile || n.ID == "" || !RebuildLinkedExtractor(n.Language) {
+			return fmt.Errorf("%w: invalid selected skip", ErrRebuildLinkIsolation)
+		}
+		if err := b.writeNode(n); err != nil {
+			return err
+		}
+		return b.pending.Set(rebuildHoldoutKey('a', keyStrings(nil, n.FilePath)), []byte(n.Language), pebble.NoSync)
+	})
+}
+
 func (b *BuildStore) visitRebuildHeldNodes(ctx context.Context, visit func(*graph.Node, string, []byte) error) error {
 	prefix := rebuildHoldoutKey('n', nil)
 	return pendingVisit(ctx, b.pending, prefix, func(r row) error {
@@ -75,23 +90,14 @@ func (b *BuildStore) visitRebuildHeldNodes(ctx context.Context, visit func(*grap
 }
 
 // IsolateRebuildLinks opens the private cut after the all-language FileGraph
-// offer. Its callers must use selected receipts and skip facts as well.
+// offer, recording affected scopes for dropped raw edges. Its callers must
+// use selected receipts and skips as well.
 func (b *BuildStore) IsolateRebuildLinks(ctx context.Context) error {
-	return b.isolateRebuildLinksForCoverage(ctx, false)
-}
-
-// IsolateRebuildLinksForCoverage opens the worker cut and records affected
-// supported first-payload edges before deleting them.
-func (b *BuildStore) IsolateRebuildLinksForCoverage(ctx context.Context) error {
-	return b.isolateRebuildLinksForCoverage(ctx, true)
-}
-
-func (b *BuildStore) isolateRebuildLinksForCoverage(ctx context.Context, coverage bool) error {
 	return b.withWrites(func() error {
 		if b.rebuildLinksIsolated || b.contractOverlay {
 			return fmt.Errorf("%w: private graph already in use", ErrRebuildLinkIsolation)
 		}
-		if err := b.isolateRebuildLinks(ctx, coverage); err != nil {
+		if err := b.isolateRebuildLinks(ctx); err != nil {
 			return fmt.Errorf("%w: %w", ErrRebuildLinkIsolation, err)
 		}
 		proof := rebuildHoldoutKey('p', nil)
@@ -103,20 +109,20 @@ func (b *BuildStore) isolateRebuildLinksForCoverage(ctx context.Context, coverag
 	})
 }
 
-func (b *BuildStore) isolateRebuildLinks(ctx context.Context, coverage bool) error {
+func (b *BuildStore) isolateRebuildLinks(ctx context.Context) error {
 	for _, col := range []byte{'n', 'e'} {
 		held, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildHoldoutKey(col, nil))
 		if err != nil {
 			return err
 		}
 		if held {
-			return b.removeRebuildHeldLinks(ctx, coverage)
+			return b.removeRebuildHeldLinks(ctx)
 		}
 	}
 	return nil
 }
 
-func (b *BuildStore) removeRebuildHeldLinks(ctx context.Context, coverage bool) error {
+func (b *BuildStore) removeRebuildHeldLinks(ctx context.Context) error {
 	if err := b.visitRebuildHeldNodes(ctx, func(n *graph.Node, receipt string, raw []byte) error {
 		match, err := pendingGet(b.pending, pendingNodeKey(n.ID), func(value []byte) (bool, error) {
 			return bytes.Equal(value, raw), nil
@@ -139,7 +145,7 @@ func (b *BuildStore) removeRebuildHeldLinks(ctx context.Context, coverage bool) 
 	}); err != nil {
 		return err
 	}
-	if err := pendingVisit(ctx, b.pending, []byte{familyEdge, edgeOut}, func(r row) error { return b.holdRebuildEdge(ctx, r, coverage) }); err != nil {
+	if err := pendingVisit(ctx, b.pending, []byte{familyEdge, edgeOut}, func(r row) error { return b.holdRebuildEdge(ctx, r) }); err != nil {
 		return err
 	}
 	return b.visitRebuildHeldNodes(ctx, func(n *graph.Node, _ string, _ []byte) error {
@@ -153,7 +159,7 @@ func (b *BuildStore) removeRebuildHeldLinks(ctx context.Context, coverage bool) 
 	})
 }
 
-func (b *BuildStore) holdRebuildEdge(ctx context.Context, r row, coverage bool) error {
+func (b *BuildStore) holdRebuildEdge(ctx context.Context, r row) error {
 	e, err := decodeEdge(r.value)
 	if err != nil {
 		return err
@@ -195,7 +201,45 @@ func (b *BuildStore) holdRebuildEdge(ctx context.Context, r row, coverage bool) 
 			return err
 		}
 	}
-	if coverage && receipt == nil && (from != nil || to != nil) {
+	var deferred []string
+	addDeferred := func(language string) {
+		if !slices.Contains(deferred, language) {
+			deferred = append(deferred, language)
+		}
+	}
+	if receipt != nil {
+		language, err := b.rebuildIsolationFileLanguage(string(receipt))
+		if err != nil {
+			return err
+		}
+		if language == "" || RebuildLinkedExtractor(language) {
+			return invalid("held edge lacks deferred receipt attribution")
+		}
+		addDeferred(language)
+	}
+	endpoints := []struct {
+		id   string
+		held *string
+	}{{e.From, from}, {e.To, to}}
+	for _, endpoint := range endpoints {
+		if endpoint.held == nil {
+			continue
+		}
+		language, err := rebuildHeldLanguage(b.pending, endpoint.id)
+		if err != nil {
+			return err
+		}
+		addDeferred(language)
+	}
+	mark := func(file, language string) error {
+		for _, id := range deferred {
+			if err := b.markRebuildIsolationAffected(ctx, RebuildIsolationAffectedScope{FilePath: file, SupportedLanguage: language, DeferredLanguage: id, Cause: "held-endpoint"}, string(r.key)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if receipt == nil {
 		attribution, err := pendingGet(b.pending, rebuildHoldoutKey('p', r.key), copyValue)
 		if err != nil {
 			return err
@@ -208,18 +252,27 @@ func (b *BuildStore) holdRebuildEdge(ctx context.Context, r row, coverage bool) 
 		if err := d.finish(); err != nil {
 			return err
 		}
-		for _, endpoint := range []struct {
-			id   string
-			held *string
-		}{{e.From, from}, {e.To, to}} {
-			if endpoint.held == nil {
-				continue
-			}
-			deferred, err := rebuildHeldLanguage(b.pending, endpoint.id)
-			if err != nil {
-				return err
-			}
-			if err := b.markRebuildIsolationAffected(ctx, RebuildIsolationAffectedScope{FilePath: file, SupportedLanguage: language, DeferredLanguage: deferred, Cause: "held-endpoint"}, string(r.key)); err != nil {
+		if err := mark(file, language); err != nil {
+			return err
+		}
+	}
+	for _, endpoint := range endpoints {
+		if endpoint.held != nil {
+			continue
+		}
+		n, err := b.pendingNode(endpoint.id)
+		if err != nil {
+			return err
+		}
+		if n == nil {
+			continue
+		}
+		language, err := b.rebuildIsolationFileLanguage(n.FilePath)
+		if err != nil {
+			return err
+		}
+		if RebuildLinkedExtractor(language) {
+			if err := mark(n.FilePath, language); err != nil {
 				return err
 			}
 		}
@@ -237,6 +290,12 @@ func (b *BuildStore) holdRebuildEdge(ctx context.Context, r row, coverage bool) 
 	return nil
 }
 
+func (b *BuildStore) rebuildIsolationFileLanguage(file string) (string, error) {
+	return pendingGet(b.pending, rebuildHoldoutKey('a', keyStrings(nil, file)), func(raw []byte) (string, error) {
+		return string(raw), nil
+	})
+}
+
 // SelectRebuildLinkFacts removes claims on held-out winners from a fresh
 // supported receipt. The caller owns the decoded slices and uses this only
 // while the private cut is open. Holdout keys are immutable during the cut.
@@ -245,6 +304,11 @@ func (b *BuildStore) SelectRebuildLinkFacts(ctx context.Context, f ParseFacts) (
 	if err != nil || !anyHeld {
 		return f, err
 	}
+	return b.selectRebuildLinkFacts(ctx, f)
+}
+
+func (b *BuildStore) selectRebuildLinkFacts(ctx context.Context, f ParseFacts) (ParseFacts, error) {
+	var err error
 	seen := make(map[string]bool)
 	held := func(id string) bool {
 		if dropped, ok := seen[id]; ok {
