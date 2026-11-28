@@ -40,6 +40,7 @@ func TestRebuildContractAffectedUsesHeldScopeNotCandidates(t *testing.T) {
 	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 	wire, err := store_pebble.EncodeContractParseFacts(retained, &contracts.FileFacts{
 		Records: []contracts.Contract{c}, Questions: []contracts.EndpointContractQuestion{q},
+		Router: &contracts.RouterFacts{}, // The Go route question requires a checked empty prefix answer.
 		Shapes: map[string]*contracts.Shape{}, Handlers: map[string]contracts.HandlerFacts{},
 	})
 	require.NoError(t, err)
@@ -100,6 +101,7 @@ func TestRebuildContractAffectedUsesHeldScopeNotCandidates(t *testing.T) {
 	meta := graph.FileMetaRow{FilePath: heldSource}
 	wire, err = store_pebble.EncodeContractParseFacts(store_pebble.ParseFacts{EffectiveLanguage: "python", File: meta}, &contracts.FileFacts{
 		Records: []contracts.Contract{heldRecord}, Shapes: map[string]*contracts.Shape{}, Handlers: map[string]contracts.HandlerFacts{},
+		Router: &contracts.RouterFacts{}, // Python is in the native router census even without prefixes.
 	})
 	require.NoError(t, err)
 	require.NoError(t, store.write(heldInput.parseKey(idx.rebuildExtractorRecipe(r.job.recipes["python"], heldInput)), wire))
