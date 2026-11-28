@@ -126,20 +126,20 @@ class Bean {
 	require.NoError(t, worker.WithRebuildContractRecords(ctx, func(records *RebuildContractRecords) error {
 		empty := scope
 		empty.WorkspaceID = "other-workspace"
-		if err := records.VisitSpringConfig(empty, func(string) ([]*graph.Node, error) { return nil, stop }, func(RebuildContractBatch) error {
+		if err := records.VisitSpringConfig(empty, func(string) ([]*graph.Node, bool, error) { return nil, false, stop }, func(RebuildContractBatch) error {
 			t.Fatal("emitted without a scoped file projection")
 			return nil
 		}); err != nil {
 			return err
 		}
-		err := records.VisitSpringConfig(scope, func(string) ([]*graph.Node, error) { return nil, stop }, func(RebuildContractBatch) error {
+		err := records.VisitSpringConfig(scope, func(string) ([]*graph.Node, bool, error) { return nil, false, stop }, func(RebuildContractBatch) error {
 			t.Fatal("published from a failed config receipt")
 			return nil
 		})
 		require.ErrorIs(t, err, stop)
-		return records.VisitSpringConfig(scope, func(path string) ([]*graph.Node, error) {
+		return records.VisitSpringConfig(scope, func(path string) ([]*graph.Node, bool, error) {
 			paths = append(paths, path)
-			return captured[path], nil
+			return captured[path], false, nil
 		}, func(batch RebuildContractBatch) error {
 			require.Equal(t, 1, len(batch.Nodes)+len(batch.Edges)+len(batch.Omitted))
 			omitted = append(omitted, batch.Omitted...)
@@ -172,4 +172,34 @@ class Bean {
 	partial, err = snap.ContractCoverageContext(ctx, read, true)
 	require.NoError(t, err)
 	require.False(t, partial, "present target scope is not partial")
+}
+
+func TestRebuildSpringConfigSkippedWildcardKeepsExactOmissions(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	const skipped, checked, readerFile = "application-a.yml", "application-z.yml", "Reader.java"
+	const id = "cfg::spring::service.port"
+	reader := &graph.Node{ID: readerFile + "::Reader", FilePath: readerFile, Kind: graph.KindType, Language: "java", StartLine: 1,
+		Meta: map[string]any{"spring_config_keys": []string{"service.*"}}}
+	b.AddBatch([]*graph.Node{reader, {ID: skipped, FilePath: skipped, Kind: graph.KindFile, Language: "yaml"},
+		{ID: checked, FilePath: checked, Kind: graph.KindFile, Language: "yaml"}}, nil)
+	scope := contracts.SpringConfigScope{RepoRoot: t.TempDir()}
+	var actual []RebuildContractOmission
+	require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(records *RebuildContractRecords) error {
+		return records.VisitSpringConfig(scope, func(path string) ([]*graph.Node, bool, error) {
+			if path == skipped {
+				return nil, true, nil
+			}
+			return contracts.SpringFileFacts(path, []byte("service:\n  port: 8080\n")), false, nil
+		}, func(batch RebuildContractBatch) error {
+			require.Empty(t, batch.Edges)
+			actual = append(actual, batch.Omitted...)
+			return nil
+		})
+	}))
+	e := contracts.SpringConfigReadEdge(reader, id, "service.*")
+	require.ElementsMatch(t, []RebuildContractOmission{
+		RebuildSpringConfigUnknownOmission("", skipped),
+		RebuildSpringConfigUnknownOmission("", readerFile),
+		RebuildContractEdgeOmission("", contracts.ContractType(graph.EdgeReadsConfig), id, e),
+	}, actual)
 }

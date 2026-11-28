@@ -331,6 +331,10 @@ func TestContractsStageOmissionScope(t *testing.T) {
 }
 
 func TestContractOmissionNativeIDTypes(t *testing.T) {
+	unknown := RebuildSpringConfigUnknownOmission("repo", "application.yml")
+	require.True(t, contractOmissionIDMatchesType(unknown))
+	unknown.FilePath = "different.yml"
+	require.False(t, contractOmissionIDMatchesType(unknown))
 	for _, record := range []RebuildContractOmission{
 		{Type: contracts.ContractHTTP, ID: "http::GET::/users"},
 		{Type: contracts.ContractGRPC, ID: "grpc::UserService::GetUser"},

@@ -195,12 +195,15 @@ func (r rebuildContractReceiptReader) visitSpringConfig(ctx context.Context, vie
 	scope := contracts.SpringConfigScope{RepoRoot: r.idx.rootPath, RepoPrefix: r.idx.repoPrefix, WorkspaceID: r.idx.workspaceID}
 	var lastReader string
 	var readerProved bool
-	return records.VisitSpringConfig(scope, func(path string) ([]*graph.Node, error) {
+	return records.VisitSpringConfig(scope, func(path string) ([]*graph.Node, bool, error) {
+		if r.sizeSkippedContractSource(path) {
+			return nil, true, nil
+		}
 		_, facts, err := r.forGraphPath(ctx, path)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return facts.ConfigKeys, nil
+		return facts.ConfigKeys, false, nil
 	}, func(batch store_pebble.RebuildContractBatch) error {
 		// Key nodes are elected directly from checked, value-redacted file
 		// facts above. That pass has no link inputs. Existing targets, unlike

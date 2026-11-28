@@ -137,8 +137,11 @@ func contractOmissionIDMatchesType(o RebuildContractOmission) bool {
 	case contracts.ContractDependency:
 		prefix = "dep"
 	case contracts.ContractType(graph.EdgeReadsConfig):
-		// This omission represents a dangling native edge, not a
-		// contract identity. The exact Spring key is always known.
+		// A direct native ReadsConfig edge may be dangling or unproved.
+		// Only checked skipped-config coverage uses an unknown target.
+		if o.ID == "" {
+			return o.FilePath != "" && o.RecordKey == RebuildSpringConfigUnknownOmission(o.RepoPrefix, o.FilePath).RecordKey
+		}
 		return strings.HasPrefix(o.ID, "cfg::spring::") && len(o.ID) > len("cfg::spring::")
 	default:
 		return false

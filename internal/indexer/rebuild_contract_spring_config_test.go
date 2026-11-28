@@ -60,3 +60,50 @@ func TestRebuildSpringConfigUsesCheckedReceipt(t *testing.T) {
 	})
 	require.ErrorIs(t, err, graph.ErrContractProjectionStale)
 }
+
+func TestRebuildSpringConfigLabelsSkippedConfigFile(t *testing.T) {
+	for _, skipped := range []bool{false, true} {
+		name := "no skipped file"
+		if skipped {
+			name = "checked size skip"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			idx := newTestIndexer(graph.New())
+			idx.SetRootPath(t.TempDir())
+			t.Cleanup(idx.Close)
+			b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, b.Close()) })
+			const javaFile, configFile = "Bean.java", "application.yml"
+			b.AddBatch([]*graph.Node{
+				{ID: javaFile, FilePath: javaFile, Kind: graph.KindFile, Language: "java"},
+				{ID: javaFile + "::Bean", FilePath: javaFile, Kind: graph.KindType, Language: "java", StartLine: 1,
+					Meta: map[string]any{"spring_config_keys": []string{"service.*"}}},
+			}, nil)
+			reader := rebuildContractReceiptReader{idx: idx, census: &rebuildExtractorCensus{
+				byPath: map[string]string{javaFile: "java"}, originByGraphPath: map[string]string{javaFile: javaFile},
+			}}
+			var want []store_pebble.RebuildContractOmission
+			if skipped {
+				reader.census.originByGraphPath[configFile] = configFile
+				reader.job.classifications = map[string]rebuildClassificationFact{configFile: {Language: "yaml", Size: 64, MaxFileSize: 32}}
+				b.AddNode(&graph.Node{ID: configFile, FilePath: configFile, Kind: graph.KindFile, Language: "yaml"})
+				want = []store_pebble.RebuildContractOmission{
+					store_pebble.RebuildSpringConfigUnknownOmission("", configFile),
+					store_pebble.RebuildSpringConfigUnknownOmission("", javaFile),
+				}
+			}
+			var actual []store_pebble.RebuildContractOmission
+			require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+				return reader.visitSpringConfig(ctx, b.RebuildView(), records, func(batch store_pebble.RebuildContractBatch) error {
+					require.Empty(t, batch.Nodes)
+					require.Empty(t, batch.Edges)
+					actual = append(actual, batch.Omitted...)
+					return nil
+				})
+			}))
+			require.ElementsMatch(t, want, actual)
+		})
+	}
+}
