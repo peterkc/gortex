@@ -45,8 +45,8 @@ func (b *BuildStore) freezeConventionInputs(ctx context.Context, p rebuildCallMo
 		return invalid(p.label + " census inputs")
 	}
 	var checkReceipts bool
-	if stageErr == ErrRebuildFactoryChain {
-		checkReceipts, err = rebuildGuardHasPrefix(ctx, b.pending, factoryChainReceiptKey(nil))
+	if len(p.receiptMarkPrefix) != 0 {
+		checkReceipts, err = rebuildGuardHasPrefix(ctx, b.pending, p.receiptMarkPrefix)
 		if err != nil {
 			return err
 		}
@@ -74,7 +74,7 @@ func (b *BuildStore) freezeConventionInputs(ctx context.Context, p rebuildCallMo
 			if err != nil {
 				return err
 			}
-			claimed, err := p.present(factoryChainReceiptKey(raw))
+			claimed, err := p.present(slices.Concat(p.receiptMarkPrefix, raw))
 			if err != nil || !claimed {
 				return err
 			}

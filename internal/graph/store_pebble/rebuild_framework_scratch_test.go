@@ -153,6 +153,32 @@ func TestRebuildFactoryChainGuards(t *testing.T) {
 	}
 }
 
+func TestFreezeConventionInputsUsesConfiguredReceiptMarks(t *testing.T) {
+	const file = "worker.go"
+	b := newBuild(t, FullProfile)
+	ctx := t.Context()
+	call := &graph.Edge{From: "caller", To: "unresolved::*.Run", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
+		Meta: map[string]any{"receiver_expr": "New()"}}
+	facts := ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: file}}
+	require.NoError(t, b.recordFactoryChainReceipt(facts, call))
+	call.Meta = nil
+	b.AddEdge(call)
+	match := func(e graph.FrameworkCensusEdge) bool { return e.ReceiverExpr != "" }
+
+	// An error label must not opt a convention into factory receipt marks.
+	other := rebuildFastAPIColumns(b)
+	require.NoError(t, b.freezeConventionInputs(ctx, other, ErrRebuildFactoryChain, match))
+	require.NoError(t, b.FreezeFactoryChainInputs(ctx, match))
+	factory := rebuildFactoryChainColumns(b)
+	key := pendingEdgeKey(call)
+	present, err := other.present(append(other.column('i'), key...))
+	require.NoError(t, err)
+	require.False(t, present)
+	present, err = factory.present(append(factory.column('i'), key...))
+	require.NoError(t, err)
+	require.True(t, present)
+}
+
 func TestRebuildFactoryChainPlanReadError(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	call := &graph.Edge{From: "caller", To: "unresolved::*.Run", Kind: graph.EdgeCalls, FilePath: "worker.go", Line: 1}
@@ -164,7 +190,7 @@ func TestRebuildFactoryChainPlanReadError(t *testing.T) {
 	count, err := p.plan(t.Context())
 	require.Zero(t, count)
 	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
-	require.NotContains(t, err.Error(), "live edge missing")
+	require.ErrorContains(t, err, "factory chain input row")
 }
 
 func TestRebuildFactoryChainSwiftObjCArcProof(t *testing.T) {

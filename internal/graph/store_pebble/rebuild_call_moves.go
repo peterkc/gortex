@@ -20,6 +20,8 @@ type rebuildCallMoves struct {
 	label    string
 	inputRow string
 	ordered  uint64
+
+	receiptMarkPrefix []byte // Optional parse-receipt marks for the convention freeze.
 }
 
 func (p *rebuildCallMoves) column(col byte) []byte {

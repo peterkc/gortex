@@ -73,7 +73,9 @@ func (b *BuildStore) recordFactoryChainReceipt(f ParseFacts, e *graph.Edge) erro
 
 // FreezeFactoryChainInputs captures the native pre-loop Calls and References.
 func (b *BuildStore) FreezeFactoryChainInputs(ctx context.Context, match func(graph.FrameworkCensusEdge) bool) error {
-	return b.freezeConventionInputs(ctx, rebuildFactoryChainColumns(b), ErrRebuildFactoryChain, match)
+	cols := rebuildFactoryChainColumns(b)
+	cols.receiptMarkPrefix = factoryChainReceiptKey(nil)
+	return b.freezeConventionInputs(ctx, cols, ErrRebuildFactoryChain, match)
 }
 
 func (b *BuildStore) RebuildFactoryChain(ctx context.Context, receipts iter.Seq2[ParseFacts, error], rules RebuildFactoryChainRules) (moves uint64, err error) {
