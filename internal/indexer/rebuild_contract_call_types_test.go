@@ -27,10 +27,21 @@ func TestRebuildCallReturnNamesMatchNative(t *testing.T) {
 	add("r/a.go::ItemCache.Fetch", "Fetch", "r", graph.KindMethod, "func Fetch() ([]*api.Item, error)")
 	add("r/b.go::ItemDB.Fetch", "Fetch", "r", graph.KindMethod, "")
 	add("r/c.go::UserStore.Fetch", "Fetch", "r", graph.KindMethod, "func Fetch() User")
+	nilMeta := &graph.Node{
+		ID:         "r/m.go::ItemShelf.Fetch",
+		Name:       "Fetch",
+		Kind:       graph.KindMethod,
+		RepoPrefix: "r",
+		Language:   "go",
+	}
+	g.AddNode(nilMeta)
+	b.AddNode(nilMeta)
 	add("other/d.go::ItemStore.Fetch", "Fetch", "other", graph.KindMethod, "func Fetch() Foreign")
 	add("r/e.go::Fetch", "Fetch", "r", graph.KindType, "func Fetch() NotACallable")
 	add("r/a.go::ItemStore.Load", "Load", "r", graph.KindMethod, "func Load() api.Item")
 	add("r/z.go::ItemStore.Load", "Load", "r", graph.KindMethod, "func Load() other.Item")
+	// Rebuild visits this matching third vote after the conflict.
+	add("r/zz.go::ItemStore.Load", "Load", "r", graph.KindMethod, "func Load() other.Item")
 	add("r/a.go::Do", "Do", "r", graph.KindFunction, "func Do() error")
 	check := func(expr string, want rawContractCallType) {
 		t.Helper()
