@@ -19,6 +19,11 @@ func inlineRebuildContractShapes(records *store_pebble.RebuildContractRecords, s
 	}
 	return records.VisitCurrentRepresentatives(func(c store_pebble.RebuildContractRecord) error {
 		if c.BodyUnproved {
+			// An earlier proved representative can fill every shape on this
+			// provider. Native then skips every write, regardless of its body.
+			if c.Role == contracts.RoleProvider && rebuildInlineShapesComplete(c.Meta) {
+				return nil
+			}
 			// Do not open stale shape facts. Keep the native write targets'
 			// identities, but mark their payloads for D83 omission.
 			return records.UpdateByID(c.ID, func(item *store_pebble.RebuildContractRecord) (bool, error) {
@@ -89,4 +94,19 @@ func inlineRebuildContractShapes(records *store_pebble.RebuildContractRecords, s
 			return true, nil
 		})
 	})
+}
+
+func rebuildInlineShapesComplete(meta map[string]any) bool {
+	_, response := meta["response_shape"]
+	_, request := meta["request_shape"]
+	env, _ := meta["response_envelope"].([]map[string]any)
+	if !response || !request || len(env) == 0 {
+		return false
+	}
+	for _, row := range env {
+		if _, has := row["shape"]; !has {
+			return false
+		}
+	}
+	return true
 }

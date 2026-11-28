@@ -76,6 +76,59 @@ func TestRebuildInlineContractShapesUnprovedRepresentative(t *testing.T) {
 	}
 }
 
+func TestRebuildInlineContractShapesProvedRepresentativeFirst(t *testing.T) {
+	const id, typeID = "http::GET::/a", "types.go::Response"
+	shape := &contracts.Shape{Kind: "struct", Fields: []contracts.ShapeField{{Name: "Value", Type: "string"}}}
+	first := contracts.Contract{
+		ID: id, Type: contracts.ContractHTTP, Role: contracts.RoleProvider, FilePath: "a.go", SymbolID: "handler.go::Serve",
+		Meta: map[string]any{
+			"response_type": typeID, "request_type": typeID,
+			"response_envelope": []map[string]any{{"name": "value", "type": typeID}},
+		},
+	}
+	later := first
+	later.FilePath = "b.go"
+	later.Meta = map[string]any{"response_type": "types.go::Stale"}
+	inputs := []contracts.Contract{first, later}
+	native := contracts.NewRegistry()
+	for _, c := range cloneContractRecords(inputs) {
+		native.Add(c)
+	}
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: typeID, Kind: graph.KindType, Meta: map[string]any{"shape": shape}})
+	idx := newTestIndexer(g)
+	t.Cleanup(idx.Close)
+	idx.inlineEnvelopeShapes(native)
+	want := native.ByID(id)
+	require.Len(t, want, 2)
+	for _, row := range want {
+		require.Equal(t, shape, row.Meta["request_shape"])
+		require.Equal(t, shape, row.Meta["response_shape"])
+		require.Equal(t, shape, row.Meta["response_envelope"].([]map[string]any)[0]["shape"])
+	}
+
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(records *store_pebble.RebuildContractRecords) error {
+		for i, c := range inputs {
+			require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c, BodyUnproved: i == 1}))
+		}
+		require.NoError(t, inlineRebuildContractShapes(records, func(id string) (*contracts.Shape, error) {
+			require.Equal(t, typeID, id, "must not read the unproved body")
+			return shape, nil
+		}))
+		var got []contracts.Contract
+		require.NoError(t, records.VisitByID(id, func(item store_pebble.RebuildContractRecord) error {
+			require.Equal(t, item.FilePath == later.FilePath, item.BodyUnproved)
+			got = append(got, item.Contract)
+			return nil
+		}))
+		require.Equal(t, want, got)
+		return nil
+	}))
+}
+
 func TestRebuildInlineContractShapesEnvelopeTargets(t *testing.T) {
 	const id, typeID = "http::GET::/a", "types.go::Response"
 	shape := &contracts.Shape{Kind: "struct"}
