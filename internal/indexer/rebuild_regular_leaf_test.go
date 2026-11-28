@@ -297,7 +297,7 @@ func TestRebuildCheckoutJSConfigObservations(t *testing.T) {
 	require.NoError(t, err)
 	_, aliases, err := openRebuildResolverConfigFacts(ctx, lease, digest)
 	require.NoError(t, err)
-	alias, err := aliases.resolve(epoch.namespace, "main.ts", "@a/x")
+	alias, err := aliases.resolve(epoch.namespace.probeFile, "main.ts", "@a/x")
 	require.NoError(t, err)
 	require.EqualValues(t, "lib/x", alias)
 	_, npm, _, err := openRebuildNpmManifestFacts(ctx, lease, digest)

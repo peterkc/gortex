@@ -49,7 +49,7 @@ func TestRebuildFrozenLinkCandidatePresence(t *testing.T) {
 				"packages/lib/keep.ts":      "export {}",
 				"package.json":              `{"workspaces":["packages/*"],"dependencies":{"member":"npm:remote@1"}}`,
 				"packages/lib/package.json": `{"name":"member"}`,
-				"tsconfig.json":             `{"compilerOptions":{"paths":{
+				"tsconfig.json": `{"compilerOptions":{"paths":{
 					"@source":["first/entry.json","keep/entry.ts"],
 					"@skip":["first/big.json","keep/entry.ts"],
 					"@supportedSkip":["first/big.ts","keep/entry.ts"],
