@@ -432,7 +432,7 @@ func (c *fileGraphCursor) readRow(first bool) bool {
 		return false
 	}
 	c.deleted = kv.K.Kind() == sstable.InternalKeyKindDelete
-	if kv.K.Kind() != sstable.InternalKeyKindSet && !(c.delta && c.deleted) {
+	if kv.K.Kind() != sstable.InternalKeyKindSet && (!c.delta || !c.deleted) {
 		c.err = invalid("retained stage point kind")
 		return false
 	}

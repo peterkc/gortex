@@ -275,9 +275,10 @@ func TestRelationsStageExternalEndpointEvidence(t *testing.T) {
 					case "extern", "wrong extern spec", "extern symbol":
 						lang, spec = "go", "outside"
 						raw.To, raw.Kind = "unresolved::extern::outside", graph.EdgeCalls
-						if mode == "wrong extern spec" {
+						switch mode {
+						case "wrong extern spec":
 							spec = "other"
-						} else if mode == "extern symbol" {
+						case "extern symbol":
 							raw.To, spec = "unresolved::extern::outside::F", "outside::F"
 						}
 					case "go import", "wrong go import spec":

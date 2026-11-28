@@ -299,7 +299,7 @@ func (b *BuildStore) writeContractBatch(ctx context.Context, batch RebuildContra
 		if err != nil {
 			return err
 		}
-		if prev != nil && !(n.Kind == graph.KindContract && n.Meta["type"] == string(contracts.ContractDependency) && rebuildDependencySeed(prev)) {
+		if prev != nil && (n.Kind != graph.KindContract || n.Meta["type"] != string(contracts.ContractDependency) || !rebuildDependencySeed(prev)) {
 			return &ContractIDCollisionError{ID: n.ID, Count: 1}
 		}
 		value, err := encodeNodeRecord(n, appendContractRowMetadata)
