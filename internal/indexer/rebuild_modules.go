@@ -184,11 +184,6 @@ func runRebuildModules(ctx context.Context, lease string, digest rebuildDigest, 
 			return err
 		}
 		if len(p.Specs) == 0 {
-			// No import scan is needed. A view read still surfaces a sticky
-			// error from writing the synthetic manifest node.
-			if _, err := view.Node(ctx, key); err != nil {
-				return err
-			}
 			continue
 		}
 		importEdge := modules.ModuleImportMatcher(p.Specs, p.Own)
