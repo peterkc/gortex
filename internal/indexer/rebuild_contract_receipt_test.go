@@ -41,7 +41,7 @@ func TestRebuildContractReceiptForLinkedDeclaration(t *testing.T) {
 		matched++
 		linked := *n
 		linked.Meta = map[string]any{"linked": true}
-		got, err := reader.forLinkedNode(ctx, &linked)
+		_, got, err := reader.forLinkedDeclaration(ctx, &linked)
 		require.NoError(t, err)
 		switch n.Kind {
 		case graph.KindType:
@@ -52,11 +52,11 @@ func TestRebuildContractReceiptForLinkedDeclaration(t *testing.T) {
 			require.Equal(t, facts.Handlers[n.ID], got.Handlers[n.ID])
 		}
 		linked.EndLine++
-		_, err = reader.forLinkedNode(ctx, &linked)
+		_, _, err = reader.forLinkedDeclaration(ctx, &linked)
 		require.ErrorIs(t, err, graph.ErrContractProjectionStale)
 		linked.EndLine--
 		linked.FilePath = "unadmitted.go"
-		_, err = reader.forLinkedNode(ctx, &linked)
+		_, _, err = reader.forLinkedDeclaration(ctx, &linked)
 		require.ErrorIs(t, err, graph.ErrContractProjectionStale)
 	}
 	require.Equal(t, 2, matched)

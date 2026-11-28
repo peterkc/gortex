@@ -99,16 +99,36 @@ func (r rebuildContractReceiptReader) visitLateContractSourcesAtParseCut(ctx con
 	return root.visitContractDeps(scoped)
 }
 
-// forLinkedNode checks the source range before returning its captured body
-// or shape inputs. Link metadata may legitimately change without moving the
-// declaration; it is not an input identity. An absent shape for a proved
-// declaration is represented in FileFacts, never by an absent receipt.
-func (r rebuildContractReceiptReader) forLinkedNode(ctx context.Context, n *graph.Node) (*contracts.FileFacts, error) {
-	_, facts, err := r.forLinkedDeclaration(ctx, n)
-	return facts, err
+// forLinkedDeclaration checks the last upsert for this ID in its checked
+// receipt. Link metadata may change without moving the declaration.
+func (r rebuildContractReceiptReader) forLinkedDeclaration(ctx context.Context, n *graph.Node) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
+	base, facts, err := r.loadLinkedFile(ctx, n)
+	if err != nil {
+		return store_pebble.ParseFacts{}, nil, err
+	}
+	var saved *graph.Node
+	for i := len(base.Nodes) - 1; i >= 0; i-- {
+		if base.Nodes[i].ID == n.ID {
+			saved = base.Nodes[i]
+			break
+		}
+	}
+	if err := checkLinkedContractDeclaration(n, saved); err != nil {
+		return store_pebble.ParseFacts{}, nil, err
+	}
+	return base, facts, nil
 }
 
-func (r rebuildContractReceiptReader) forLinkedDeclaration(ctx context.Context, n *graph.Node) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
+func checkLinkedContractDeclaration(n, saved *graph.Node) error {
+	if saved == nil || saved.FilePath != n.FilePath || saved.Kind != n.Kind || saved.Language != n.Language ||
+		saved.StartLine != n.StartLine || saved.EndLine != n.EndLine ||
+		saved.StartColumn != n.StartColumn || saved.EndColumn != n.EndColumn {
+		return fmt.Errorf("%w: contract declaration %q does not match its receipt", graph.ErrContractProjectionStale, n.ID)
+	}
+	return nil
+}
+
+func (r rebuildContractReceiptReader) loadLinkedFile(ctx context.Context, n *graph.Node) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
 	if n.FilePath == "" || n.RepoPrefix != "" {
 		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: no admitted contract declaration for %q", graph.ErrContractProjectionStale, n.ID)
 	}
@@ -119,16 +139,5 @@ func (r rebuildContractReceiptReader) forLinkedDeclaration(ctx context.Context, 
 	if !ok {
 		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: no admitted contract receipt for %q", graph.ErrContractProjectionStale, n.FilePath)
 	}
-	base, facts, err := r.load(ctx, r.job.inputs[i])
-	if err != nil {
-		return store_pebble.ParseFacts{}, nil, err
-	}
-	for _, saved := range base.Nodes {
-		if saved.ID == n.ID && saved.FilePath == n.FilePath && saved.Kind == n.Kind && saved.Language == n.Language &&
-			saved.StartLine == n.StartLine && saved.EndLine == n.EndLine &&
-			saved.StartColumn == n.StartColumn && saved.EndColumn == n.EndColumn {
-			return base, facts, nil
-		}
-	}
-	return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: contract declaration %q does not match its receipt", graph.ErrContractProjectionStale, n.ID)
+	return r.load(ctx, r.job.inputs[i])
 }

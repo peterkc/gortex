@@ -21,7 +21,7 @@ func TestRebuildContractShapeBatchesFromCheckedReceipts(t *testing.T) {
 	idx := newTestIndexer(nativeGraph)
 	idx.SetRootPath(root)
 	t.Cleanup(idx.Close)
-	src := []byte("package p\ntype Payload struct {\n ID int `json:\"id\"`\n Label string `json:\"label,omitempty\"`\n internal bool\n}\nfunc Handler() {}\ntype Scalar string\n")
+	src := []byte("package p\ntype Payload struct {\n ID int `json:\"id\"`\n Label string `json:\"label,omitempty\"`\n internal bool\n}\nfunc Handler() {}\ntype Scalar string\ntype Sibling struct {\n Key string\n}\n")
 	name := filepath.Join(root, path)
 	require.NoError(t, os.WriteFile(name, src, 0o600))
 	ext, ok := idx.registry.GetByLanguage("go")
@@ -31,9 +31,20 @@ func TestRebuildContractShapeBatchesFromCheckedReceipts(t *testing.T) {
 	input := rebuildInput{Path: path, Language: "go", Size: int64(len(src))}
 	job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{"go": {1}}}
 	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+	// A repeated ID is legal in the receipt. Its last node is the live upsert.
+	for _, n := range parsed.Nodes {
+		if n.Kind == graph.KindType && n.Name == "Payload" {
+			old := *n
+			old.EndLine++
+			parsed.Nodes = append([]*graph.Node{&old}, parsed.Nodes...)
+			parsed.File.NodeCount++
+			break
+		}
+	}
 	wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
 	require.NoError(t, err)
-	require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
+	key := input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input))
+	require.NoError(t, store.write(key, wire))
 	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store,
 		census: &rebuildExtractorCensus{byPath: map[string]string{path: "go"}, originByGraphPath: map[string]string{path: path}}}
 
@@ -43,7 +54,7 @@ func TestRebuildContractShapeBatchesFromCheckedReceipts(t *testing.T) {
 	require.NoError(t, b.AddParsedFile("", parsed))
 	view := b.RebuildView()
 	nativeGraph.AddBatch(parsed.Nodes, parsed.Edges)
-	var payload, handler, scalar string
+	var payload, handler, scalar, sibling string
 	for _, n := range parsed.Nodes {
 		switch {
 		case n.Kind == graph.KindType && n.Name == "Payload":
@@ -52,11 +63,14 @@ func TestRebuildContractShapeBatchesFromCheckedReceipts(t *testing.T) {
 			handler = n.ID
 		case n.Kind == graph.KindType && n.Name == "Scalar":
 			scalar = n.ID
+		case n.Kind == graph.KindType && n.Name == "Sibling":
+			sibling = n.ID
 		}
 	}
 	require.NotEmpty(t, payload)
 	require.NotEmpty(t, handler)
 	require.NotEmpty(t, scalar)
+	require.NotEmpty(t, sibling)
 	require.Contains(t, facts.Shapes, scalar)
 	require.Nil(t, facts.Shapes[scalar], "accepted no-shape declaration")
 	c := contracts.Contract{
@@ -99,15 +113,16 @@ func TestRebuildContractShapeBatchesFromCheckedReceipts(t *testing.T) {
 	original, err := view.Node(ctx, payload)
 	require.NoError(t, err)
 	require.NotNil(t, original)
+	shapeAt := reader.shapeLookup(ctx, view)
 	moved := *original
-	moved.EndLine++
+	moved.EndLine++ // exact older upsert, not the checked last declaration
 	b.AddNode(&moved)
-	_, err = reader.shapeAt(ctx, view, payload)
+	_, err = shapeAt(payload)
 	require.ErrorIs(t, err, graph.ErrContractProjectionStale)
 	stamped := *original
 	stamped.Meta = map[string]any{"shape": nil}
 	b.AddNode(&stamped)
-	_, err = reader.shapeAt(ctx, view, payload)
+	_, err = shapeAt(payload)
 	require.ErrorIs(t, err, graph.ErrContractProjectionStale)
 	b.AddNode(original)
 
@@ -169,4 +184,35 @@ func TestRebuildContractShapeBatchesFromCheckedReceipts(t *testing.T) {
 	full, err := after.FullNodesByIDsContext(ctx, []string{payload})
 	require.NoError(t, err)
 	require.Equal(t, want, full[payload].Meta["shape"])
+
+	// Use the real receipt replay. After the first yielded shape the
+	// second type must reuse that already checked file receipt.
+	got := make(map[string]*contracts.Shape)
+	for batch, err := range reader.shapeBatches(ctx, view, references(payload, sibling)) {
+		require.NoError(t, err)
+		for id, shape := range batch.Shapes {
+			got[id] = shape
+			if id == payload {
+				require.NoError(t, os.Remove(store.entry(key)))
+			}
+		}
+	}
+	siblingNode := nativeGraph.GetNode(sibling)
+	require.Equal(t, map[string]*contracts.Shape{
+		payload: want,
+		sibling: contracts.ExtractShape(path, src, siblingNode.StartLine, siblingNode.EndLine),
+	}, got)
+	fresh := reader.shapeLookup(ctx, view)
+	_, err = fresh(payload)
+	require.ErrorIs(t, err, errParseEntryCorrupt)
+	for _, n := range []*graph.Node{
+		{ID: "absent.txt::Unsupported", FilePath: "absent.txt", Kind: graph.KindType, StartLine: 1},
+		{ID: "absent.go::ZeroStart", FilePath: "absent.go", Kind: graph.KindType, Language: "go"},
+	} {
+		b.AddNode(n)
+		require.Nil(t, contracts.ExtractShape(n.FilePath, src, n.StartLine, n.EndLine))
+		shape, err := fresh(n.ID)
+		require.NoError(t, err)
+		require.Nil(t, shape)
+	}
 }
