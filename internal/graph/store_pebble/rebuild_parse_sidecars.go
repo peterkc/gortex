@@ -16,11 +16,15 @@ func parsedConstantKey(id string) []byte {
 
 // writeParsedSidecars runs under AddParsedFile's write lock. The immutable
 // parse receipt keeps original per-file order, duplicate literals, and tokens.
-func (b *BuildStore) writeParsedSidecars(repo string, f ParseFacts) error {
+// Deferred receipts retain those facts for raw custody, not the link columns.
+func (b *BuildStore) writeParsedSidecars(repo string, f ParseFacts, link bool) error {
 	path := f.File.FilePath
 	for _, c := range f.Constants {
 		if c.FilePath != path || c.NodeID == "" || graph.IsProxyID(c.NodeID) {
 			return invalid("parse constant outside file or without a local node ID")
+		}
+		if !link {
+			continue
 		}
 		// Match SQLite's last write by node ID, including empty literals.
 		value := appendMetaString(appendMetaString(nil, repo), path)
@@ -39,6 +43,9 @@ func (b *BuildStore) writeParsedSidecars(repo string, f ParseFacts) error {
 		}
 		if n == nil || n.FilePath != path {
 			return invalid("parse shingle outside file")
+		}
+		if !link {
+			continue
 		}
 		raw := make([]byte, 0, len(values)*8)
 		for _, value := range values {

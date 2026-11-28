@@ -59,18 +59,27 @@ func checkFileMetaRow(r row) error {
 // AddParsedFile takes one cached extraction. Raw edges enter private scratch,
 // not the file-graph stage. The caller supplies files in manifest order.
 func (b *BuildStore) AddParsedFile(repo string, f ParseFacts) error {
-	return b.addParsedFile(repo, f, nil)
+	return b.addParsedFile(repo, f, nil, false)
 }
 
 // AddParsedFileSelected replays a qualified receipt. Keep must be the node
 // selection from ReduceRebuildSharedClaims. Edges, sidecars and the original
 // per-file extraction count are not filtered.
 func (b *BuildStore) AddParsedFileSelected(repo string, f ParseFacts, keep func(string) (bool, error)) error {
-	return b.addParsedFile(repo, f, keep)
+	return b.addParsedFile(repo, f, keep, false)
 }
 
-func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) (bool, error)) error {
+// AddRebuildDeferredFile replays an elected receipt for complete FileGraph
+// while reserving its winning rows for the private link-input cut.
+func (b *BuildStore) AddRebuildDeferredFile(repo string, f ParseFacts, keep func(string) (bool, error)) error {
+	return b.addParsedFile(repo, f, keep, true)
+}
+
+func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) (bool, error), deferred bool) error {
 	return b.withWrites(func() error {
+		if b.rebuildLinksIsolated {
+			return ErrRebuildLinkIsolation
+		}
 		if f.File.NodeCount != len(f.Nodes) {
 			return invalid("file metadata does not count its extracted nodes")
 		}
@@ -102,6 +111,11 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 			if err := b.writeNode(projectRebuildReceiptNode(n)); err != nil {
 				return err
 			}
+			if deferred {
+				if err := b.captureRebuildHeldNode(n.ID, f.File.FilePath); err != nil {
+					return err
+				}
+			}
 		}
 		for _, e := range f.Edges {
 			// Native parse insertion keeps the first payload for each edge key.
@@ -122,6 +136,15 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 			if err := b.addEdgeWithCustody(e, custody); err != nil {
 				return err
 			}
+			if deferred {
+				if e != nil && !graph.StructuralEdgeTargetInvalid(e.Kind, e.To) {
+					key := rebuildHoldoutKey('e', pendingEdgeKey(e))
+					if err := b.pending.Set(key, []byte(f.File.FilePath), pebble.NoSync); err != nil {
+						return err
+					}
+				}
+				continue
+			}
 			if err := b.recordFactoryChainReceipt(f, e); err != nil {
 				return err
 			}
@@ -129,7 +152,7 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 				return err
 			}
 		}
-		if err := b.writeParsedSidecars(repo, f); err != nil {
+		if err := b.writeParsedSidecars(repo, f, !deferred); err != nil {
 			return err
 		}
 		return b.pending.Set(key, raw, pebble.NoSync)

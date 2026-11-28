@@ -33,6 +33,8 @@ type BuildStore struct {
 	contractOverlay  bool   // protected by mu; never present at a stage offer
 	contractsStarted bool
 	contractsSealed  HeadDigest
+
+	rebuildLinksIsolated bool // protected by mu
 }
 
 var _ graph.Store = (*BuildStore)(nil)
