@@ -32,10 +32,21 @@ func (r routeLocator) valid() bool {
 		filepath.IsAbs(r.Directory) && filepath.Clean(r.Directory) == r.Directory
 }
 
+func (r routeLocator) conflicts(other routeLocator) bool {
+	return r.Lease == other.Lease || r.Directory == other.Directory
+}
+
 type routeCheckout struct {
 	Incarnation        string
 	Serving, Candidate routeLocator
 	Publication        LocalPublicationRecord
+	Retained           routeCheckpoint
+	LastGood           bool
+}
+
+type routeCheckpoint struct {
+	Locator     routeLocator
+	Publication LocalPublicationRecord
 }
 
 func openRouteCatalog(path string) (*routeCatalog, error) {
@@ -68,8 +79,12 @@ func (c *routeCatalog) lookup(checkout string) (routeCheckout, error) {
 		if ValidateIncarnation(row.Incarnation) != nil ||
 			(row.Candidate != zero && !row.Candidate.valid()) ||
 			(row.Serving != zero && (!row.Serving.valid() || row.Publication.Incarnation != row.Incarnation || row.Publication.WitnessDigest == (HeadDigest{}))) ||
-			(row.Serving == zero && row.Publication != (LocalPublicationRecord{})) ||
-			(row.Candidate != zero && (row.Candidate.Lease == row.Serving.Lease || row.Candidate.Directory == row.Serving.Directory)) {
+			(row.Serving == zero && (row.Publication != (LocalPublicationRecord{}) || row.LastGood)) ||
+			(row.Candidate != zero && row.Candidate.conflicts(row.Serving)) ||
+			(row.Retained.Locator == zero && row.Retained.Publication != (LocalPublicationRecord{})) ||
+			(row.Retained.Locator != zero && (!row.Retained.Locator.valid() || row.Serving == zero ||
+				row.Retained.Publication.Incarnation != row.Incarnation || row.Retained.Publication.WitnessDigest == (HeadDigest{}) ||
+				row.Retained.Locator.conflicts(row.Serving) || row.Retained.Locator.conflicts(row.Candidate))) {
 			return routeCheckout{}, invalid("catalog route row")
 		}
 		return row, nil
@@ -118,8 +133,7 @@ func (c *routeCatalog) registerCandidate(ctx context.Context, checkout, incarnat
 		return err
 	}
 	if row.Incarnation == "" || row.Incarnation != incarnation || row.Serving != expected ||
-		candidate.Lease == row.Serving.Lease || candidate.Directory == row.Serving.Directory ||
-		candidate.Lease == row.Candidate.Lease || candidate.Directory == row.Candidate.Directory {
+		candidate.conflicts(row.Serving) || candidate.conflicts(row.Candidate) || candidate.conflicts(row.Retained.Locator) {
 		return ErrStaleBase
 	}
 	row.Candidate = candidate
@@ -176,6 +190,7 @@ func (c *routeCatalog) switchHead(ctx context.Context, checkout, incarnation str
 		}
 	}
 	row.Serving, row.Candidate, row.Publication = candidate, routeLocator{}, publication
+	row.LastGood = false
 	return c.save(ctx, checkout, row)
 }
 

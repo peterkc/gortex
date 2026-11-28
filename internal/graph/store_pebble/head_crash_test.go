@@ -25,6 +25,9 @@ import (
 const headCrashPhaseEnv = "GORTEX_TEST_HEAD_INGEST_CRASH_PHASE"
 const headCrashDecl = "a.go::OnlyInFileGraph"
 const headCrashAfterSelectedIngest = "after-selected-ingest"
+const headCrashBeforeFirstRoute = "before-first-route"
+const headCrashEditDuring = "edit-during"
+const headCrashEditAfter = "edit-after"
 
 // Given a committed manifest and a sealed file graph, kill the head owner
 // before the second version edit reaches the MANIFEST, or immediately after
@@ -162,8 +165,8 @@ func TestRouteCatalogRecoversSelectedStage(t *testing.T) {
 
 func prepareRouteCrashFixture(t *testing.T, lease string) (routeCheckout, StageTables) {
 	t.Helper()
-	old := routeLocator{Lease: routeTestOldLease, Directory: filepath.Join(lease, "old")}
-	next := routeLocator{Lease: routeTestNewLease, Directory: filepath.Join(lease, "next")}
+	old := routeLocator{Lease: routeTestOldLease, Directory: filepath.Join(lease, routeTestOldLease)}
+	next := routeLocator{Lease: routeTestNewLease, Directory: filepath.Join(lease, routeTestNewLease)}
 	_, stage := prepareHeadCrashFixture(t, old.Directory, lease)
 	inc := stage.Incarnation
 	h, err := OpenHead(old.Directory, inc, FullProfile)
@@ -256,7 +259,7 @@ func TestHeadPublicationCrashChild(t *testing.T) {
 	phase := os.Getenv(headCrashPhaseEnv)
 	lease := os.Args[len(os.Args)-1]
 	switch phase {
-	case "during", "after", "before-switch", "after-switch", headCrashAfterSelectedIngest:
+	case "during", "after", "before-switch", "after-switch", headCrashAfterSelectedIngest, headCrashBeforeFirstRoute, headCrashEditDuring, headCrashEditAfter:
 	default:
 		t.Skip("isolated crash fixture child")
 	}
@@ -265,22 +268,31 @@ func TestHeadPublicationCrashChild(t *testing.T) {
 	var stage StageTables
 	require.NoError(t, json.Unmarshal(request, &stage))
 	switch phase {
-	case "before-switch", "after-switch", headCrashAfterSelectedIngest:
+	case "before-switch", "after-switch", headCrashAfterSelectedIngest, headCrashBeforeFirstRoute:
 		crashRouteCatalogChild(t, lease, phase, stage)
 		return
 	}
 	options := headOptions()
-	fs := &headCrashFS{FS: options.FS, beforeManifestWrite: func() { waitForHeadCrash(t, "during") }}
+	fs := &headCrashFS{FS: options.FS, beforeManifestWrite: func() { waitForHeadCrash(t, phase) }}
 	options.FS = fs
-	db, err := pebble.Open(filepath.Join(lease, "head"), options)
+	dir := filepath.Join(lease, "head")
+	edit := phase == headCrashEditDuring || phase == headCrashEditAfter
+	if edit {
+		dir = filepath.Join(lease, routeTestOldLease)
+	}
+	db, err := pebble.Open(dir, options)
 	require.NoError(t, err)
 	h := &Head{db: db, options: options, incarnation: stage.Incarnation, profile: stage.Witness.Profile}
 	defer func() { require.NoError(t, h.Close()) }()
-	fs.armed.Store(phase == "during")
-	_, err = h.PublishStage(t.Context(), stage)
+	fs.armed.Store(phase == "during" || phase == headCrashEditDuring)
+	if edit {
+		_, err = h.PublishDelta(t.Context(), stage)
+	} else {
+		_, err = h.PublishStage(t.Context(), stage)
+	}
 	require.NoError(t, err)
-	if phase == "after" {
-		waitForHeadCrash(t, "after")
+	if phase == "after" || phase == headCrashEditAfter {
+		waitForHeadCrash(t, phase)
 	}
 	t.Fatal("ingest returned without reaching the armed MANIFEST write")
 }
@@ -293,6 +305,14 @@ func crashRouteCatalogChild(t *testing.T, lease, phase string, stage StageTables
 	defer func() { require.NoError(t, catalog.Close()) }()
 	row, err := catalog.lookup(lease)
 	require.NoError(t, err)
+	if phase == headCrashBeforeFirstRoute {
+		next, err := OpenHead(row.Candidate.Directory, row.Incarnation, FullProfile)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, next.Close()) }()
+		publishRouteTestStage(t, next, stage)
+		waitForHeadCrash(t, phase)
+		return
+	}
 	old, err := OpenHead(row.Serving.Directory, row.Incarnation, FullProfile)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, old.Close()) }()
