@@ -104,9 +104,9 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 			}
 		}
 		for _, e := range f.Edges {
-			// Multiple same-line DI providers can share a physical key.
-			// Match native parse insertion, not a later graph update.
-			if e != nil && e.Kind == graph.EdgeProvides {
+			// Native parse insertion keeps the first payload for each edge key.
+			// Do not replace its custody or record evidence for a losing row.
+			if e != nil {
 				old, err := b.pendingEdge(pendingEdgeKey(e))
 				if err != nil {
 					return err

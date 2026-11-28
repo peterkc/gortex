@@ -1,11 +1,13 @@
 package store_pebble
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 func TestParsedFileGraphPublishesDeclarationsWithoutRelations(t *testing.T) {
@@ -66,4 +68,44 @@ func TestParsedFileGraphPublishesDeclarationsWithoutRelations(t *testing.T) {
 	require.ErrorAs(t, err, &stagePending)
 	require.Equal(t, StageManifest, stagePending.Published)
 	require.ErrorContains(t, worker.AddParsedFile("", facts), "repeated parse facts")
+}
+
+func TestParsedFileGraphKeepsFirstEdgePayload(t *testing.T) {
+	const file = "a.go"
+	// Sink(http.StatusCreated, http.StatusCreated) emits the same ArgOf
+	// identity for both arguments, with different positional metadata.
+	first := &graph.Edge{
+		From: "unresolved::extern::net/http::StatusCreated", To: "unresolved::Sink",
+		Kind: graph.EdgeArgOf, FilePath: file, Line: 3, Origin: graph.OriginASTInferred,
+		Meta: map[string]any{"arg_position": 0},
+	}
+	second := *first
+	second.Meta = map[string]any{"arg_position": 1}
+	edges := []*graph.Edge{first, &second}
+	native, err := store_sqlite.Open(filepath.Join(t.TempDir(), "oracle.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, native.Close()) })
+	native.AddBatch(nil, edges)
+	want := native.GetOutEdges(first.From)
+	require.Len(t, want, 1)
+
+	worker := newBuild(t, FullProfile)
+	require.NoError(t, worker.AddParsedFile("", ParseFacts{
+		EffectiveLanguage: "go", Edges: edges, File: graph.FileMetaRow{FilePath: file},
+	}))
+	var got []*graph.Edge
+	require.NoError(t, worker.RebuildView().VisitEdges(t.Context(), func(e *graph.Edge) error {
+		got = append(got, e)
+		return nil
+	}))
+	require.Len(t, got, 1)
+	position, err := json.Marshal(want[0].Meta["arg_position"])
+	require.NoError(t, err)
+	require.Equal(t, "0", string(position))
+	wantJSON, err := json.Marshal(want)
+	require.NoError(t, err)
+	gotJSON, err := json.Marshal(got)
+	require.NoError(t, err)
+	require.Equal(t, wantJSON, gotJSON)
+	requireRebuildLinkCustody(t, worker, first, rebuildEdgeCustody{proof: rebuildProofGoDataflowSource})
 }
