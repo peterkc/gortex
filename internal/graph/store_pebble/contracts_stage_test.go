@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
@@ -326,4 +327,132 @@ func TestContractsStageOmissionScope(t *testing.T) {
 			require.ErrorAs(t, stageRead(t, head).RequireStage(StageContracts), new(*ErrStagePending))
 		})
 	}
+}
+
+func TestContractOmissionNativeIDTypes(t *testing.T) {
+	for _, record := range []RebuildContractOmission{
+		{Type: contracts.ContractHTTP, ID: "http::GET::/users"},
+		{Type: contracts.ContractGRPC, ID: "grpc::UserService::GetUser"},
+		{Type: contracts.ContractThrift, ID: "thrift::Calculator::ping"},
+		{Type: contracts.ContractGraphQL, ID: "graphql::Query::user"},
+		{Type: contracts.ContractTopic, ID: "topic::kafka::orders"},
+		{Type: contracts.ContractWS, ID: "ws::message"},
+		{Type: contracts.ContractEnv, ID: "env::DATABASE_URL"},
+		{Type: contracts.ContractOpenAPI, ID: "http::GET::/pets"},
+		{Type: contracts.ContractDependency, ID: "dep::example.org/pkg"},
+		{Type: contracts.ContractDI, ID: "di::Notifier"},
+		{Type: contracts.ContractTRPC, ID: "trpc::userRouter.getUser"},
+	} {
+		require.True(t, contractOmissionIDMatchesType(record), "%s: %s", record.Type, record.ID)
+	}
+}
+
+func TestContractStageRejectsInvalidBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		batch RebuildContractBatch
+		want  string
+	}{
+		{"invalid node", RebuildContractBatch{Nodes: []*graph.Node{{ID: "ordinary", Kind: graph.KindType}}}, "invalid contract stage node"},
+		{"wrong registry language", RebuildContractBatch{Nodes: []*graph.Node{{ID: "http::GET::/a", Kind: graph.KindContract, Language: "go"}}}, "contract registry node language"},
+		{"unsplit shape", RebuildContractBatch{Nodes: []*graph.Node{{ID: "env::A", Kind: graph.KindContract, Language: "contract", Meta: map[string]any{"shape": nil}}}}, "contract batch must supply split shape rows"},
+		{"invalid edge", RebuildContractBatch{Edges: []*graph.Edge{{From: "", To: "env::A", Kind: graph.EdgeProvides}}}, "invalid contract stage edge"},
+		{"unproved Call", RebuildContractBatch{Edges: []*graph.Edge{{From: "a", To: "b", Kind: graph.EdgeCalls}}}, "unproved contract Call emitter"},
+		{"unexpected edge kind", RebuildContractBatch{Edges: []*graph.Edge{{From: "a", To: "b", Kind: graph.EdgeReferences}}}, "unexpected contract stage edge kind"},
+		{"empty type ID", RebuildContractBatch{Shapes: map[string]*contracts.Shape{"": {Kind: "struct"}}}, "empty contract shape ID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			err := b.writeContractBatch(t.Context(), tc.batch)
+			require.ErrorIs(t, err, errInvalidRecord)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+func TestContractStageAttemptAndIDVisit(t *testing.T) {
+	ctx := t.Context()
+	b, _, files, _, _, _, _ := relationsStageFixture(t, FullProfile)
+	relations, err := b.PrepareRelations(ctx, t.TempDir(), files, nil)
+	require.NoError(t, err)
+	base, err := b.RetainRelations(ctx, files, relations)
+	require.NoError(t, err)
+	unsealed := relations
+	unsealed.Witness.Stage = StageContracts
+	unsealed.Witness.Contracts = &ContractCoverage{}
+	visit := func(string) error {
+		t.Fatal("unsealed ID visit reached its callback")
+		return nil
+	}
+	require.ErrorContains(t, b.VisitPreparedContractIDs(ctx, unsealed, visit), "does not name the prepared stage")
+	_, err = b.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), ContractCoverage{})
+	require.NoError(t, err)
+	stage, err := b.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), ContractCoverage{})
+	require.ErrorContains(t, err, "contracts already attempted for this build")
+	require.Zero(t, stage)
+}
+
+func TestContractsStageRejectsUnclaimedPrivateRows(t *testing.T) {
+	for _, tag := range []byte{familyShape, familyOmission} {
+		t.Run(string(tag), func(t *testing.T) {
+			ctx := t.Context()
+			b, _, files, owner, _, _, _ := relationsStageFixture(t, FullProfile)
+			owner.Kind = graph.KindInterface
+			b.AddNode(owner)
+			relations, err := b.PrepareRelations(ctx, t.TempDir(), files, nil)
+			require.NoError(t, err)
+			base, err := b.RetainRelations(ctx, files, relations)
+			require.NoError(t, err)
+			var coverage ContractCoverage
+			if tag == familyShape {
+				raw, err := encodeContractShape(&contracts.Shape{Kind: "interface"})
+				require.NoError(t, err)
+				require.NoError(t, b.pending.Set(contractShapeKey(owner.ID), raw, pebble.NoSync))
+			} else {
+				key, err := contractOmissionKey(testContractOmission())
+				require.NoError(t, err)
+				require.NoError(t, b.pending.Set(key, []byte{contractOmissionFormat}, pebble.NoSync))
+				coverage.OmittedRecords = 1
+			}
+			stage, err := b.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), coverage)
+			require.ErrorContains(t, err, "unclaimed primary row changed after relations")
+			require.Zero(t, stage)
+		})
+	}
+}
+
+func TestContractsStageRetainsIncumbentEdge(t *testing.T) {
+	ctx := t.Context()
+	worker, head, files, source, _, _, _ := relationsStageFixture(t, FullProfile)
+	incumbent := &graph.Edge{From: source.ID, To: source.ID, Kind: graph.EdgeProvides, FilePath: source.FilePath, Line: 9,
+		Origin: graph.OriginASTInferred, Meta: map[string]any{"owner": "first"}}
+	worker.AddEdge(incumbent)
+	relations, err := worker.PrepareRelations(ctx, t.TempDir(), files, nil)
+	require.NoError(t, err)
+	base, err := worker.RetainRelations(ctx, files, relations)
+	require.NoError(t, err)
+	_, err = head.PublishStage(ctx, relations)
+	require.NoError(t, err)
+	pinned := stageRead(t, head)
+	loser := *incumbent
+	loser.Origin = "later"
+	loser.Meta = map[string]any{"owner": "second"}
+	inserted := *incumbent
+	inserted.Line++
+	stage, err := worker.PrepareContracts(ctx, t.TempDir(), base, contractBatches(RebuildContractBatch{
+		Edges: []*graph.Edge{&loser, &inserted},
+	}), ContractCoverage{})
+	require.NoError(t, err)
+	require.NotEmpty(t, stage.Files)
+	for edge, want := range map[*graph.Edge]bool{incumbent: false, &inserted: true} {
+		marked, err := pendingGet(worker.pending, contractBatchKey('e', pendingEdgeKey(edge)), func([]byte) (bool, error) { return true, nil })
+		require.NoError(t, err)
+		require.Equal(t, want, marked)
+	}
+	_, err = head.PublishStage(ctx, stage)
+	require.NoError(t, err)
+	current := stageRead(t, head)
+	require.Contains(t, current.GetOutEdges(source.ID), incumbent)
+	require.ElementsMatch(t, append(pinned.GetOutEdges(source.ID), &inserted), current.GetOutEdges(source.ID))
+	require.Equal(t, pinned.EdgeIdentityRevisions(), current.EdgeIdentityRevisions())
 }

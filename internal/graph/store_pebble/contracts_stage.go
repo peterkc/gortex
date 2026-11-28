@@ -529,9 +529,6 @@ func (b *BuildStore) writeContractShapes(ctx context.Context, gold *sortedRuns) 
 		if n == nil || n.ID != id || (n.Kind != graph.KindType && n.Kind != graph.KindInterface) || graph.IsProxyNode(n) {
 			return invalid("contract shape needs its declared type")
 		}
-		if !b.profile.keepsNode(n.Kind) {
-			return nil
-		}
 		if err := gold.add(bytes.Clone(r.key), bytes.Clone(r.value)); err != nil {
 			return err
 		}
