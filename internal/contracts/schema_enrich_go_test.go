@@ -7,6 +7,26 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+func TestResolveTypeInFileEmptyAndQualifiedNames(t *testing.T) {
+	nodes := []*graph.Node{
+		{ID: "types.go::Item", Name: "Item", Kind: graph.KindType},
+		{ID: "types.go::Empty", Kind: graph.KindType},
+	}
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{"*pkg.Item ", "types.go::Item"},
+		{"pkg.", "types.go::Empty"},
+		{"* ", ""},
+		{"pkg.Absent", "Absent"},
+	} {
+		if got := resolveTypeInFile(tc.name, nodes); got != tc.want {
+			t.Errorf("resolveTypeInFile(%q) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // Each test builds a minimal source file with a route and a handler,
 // asks the extractor for contracts, and asserts on the schema-shape
 // Meta keys. We only check the enriched fields — framework-routing
