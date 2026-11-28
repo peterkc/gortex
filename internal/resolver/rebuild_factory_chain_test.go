@@ -17,7 +17,7 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 		"conformance", "raw factory entrant", "shared raw claim", "joint omitted factories",
 		"unproved method seed", "unproved free seed", "irrelevant raw arc", "inert raw arc",
 		"joint raw arc entrants", "raw arc with live-only method", "proved-only arc match", "proved seed ambiguity",
-		"unrelated large row", "related large row", "duplicate parsed edge", "lost receiver after freeze",
+		"unrelated large row", "related large row", "duplicate parsed edge", "duplicate parsed receiver last", "lost receiver after freeze",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			caller := rebuildEventNode(source, "use", lang, "")
@@ -35,7 +35,7 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				Meta: map[string]any{"receiver_expr": "MakeWorker()"}}
 			ref := *call
 			ref.Kind, ref.Line = graph.EdgeReferences, 8
-			if mode == "duplicate parsed edge" || mode == "lost receiver after freeze" {
+			if mode == "duplicate parsed edge" || mode == "duplicate parsed receiver last" || mode == "lost receiver after freeze" {
 				ref.Meta = nil // The Call is the only possible frozen candidate.
 			}
 			route := rebuildEventFacts(source, lang, []*graph.Node{caller}, call, &ref)
@@ -117,9 +117,13 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 			raw.File.NodeCount = len(raw.Nodes)
 			lost := *call
 			lost.Meta = nil
-			if mode == "duplicate parsed edge" {
+			switch mode {
+			case "duplicate parsed edge":
 				// Both stores keep the first parsed payload for this key.
 				route.Edges = append(route.Edges, &lost)
+			case "duplicate parsed receiver last":
+				route.Edges[0] = &lost
+				route.Edges = append(route.Edges, call)
 			}
 			b, native := openRebuildEventStores(t, route, live)
 			if mode == "shared raw claim" {
@@ -138,13 +142,28 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				b.AddEdge(&lost)
 			}
 			before := rebuildEventSavedRows(t, b)
-			count, err := RunRebuildFactoryChain(t.Context(), b, rebuildGRPCReceipts(route, raw), frozen)
+			receipts := rebuildGRPCReceipts(route, raw)
+			var readReceipts bool
+			count, err := RunRebuildFactoryChain(t.Context(), b, func(yield func(store_pebble.ParseFacts, error) bool) {
+				readReceipts = true
+				receipts(yield)
+			}, frozen)
 			switch mode {
 			case "duplicate parsed edge":
 				require.Equal(t, rebuildEventSQLiteRows(native), before)
 				require.NoError(t, err)
+				require.True(t, readReceipts)
 				require.EqualValues(t, 1, count)
 				require.Equal(t, 1, ResolveFactoryChains(native))
+				require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
+			case "duplicate parsed receiver last":
+				require.Equal(t, rebuildEventSQLiteRows(native), before)
+				require.NoError(t, err)
+				// A mark from the losing row would freeze an inactive Call and
+				// trigger a receipt scan even if later guards prevented its move.
+				require.False(t, readReceipts)
+				require.Zero(t, count)
+				require.Zero(t, ResolveFactoryChains(native))
 				require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, b))
 			case "proved seed ambiguity":
 				require.NoError(t, err)

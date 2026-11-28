@@ -173,17 +173,28 @@ func TestRebuildExpressFirstCallReceipt(t *testing.T) {
 	untagged := *a
 	untagged.Meta = nil
 	for _, tc := range []struct {
-		name        string
-		first, last *graph.Edge
-		refuse      bool
+		name                   string
+		first, last            *graph.Edge
+		firstStubs, firstMoves uint64
+		refuse                 bool
 	}{
-		{"private move disagrees", a, b, true},
-		{"private miss disagrees", b, a, true},
-		{"identical duplicates", b, b, false},
-		{"first non-handler and last misses", &untagged, a, false},
-		{"first non-handler and last binds", &untagged, b, true},
+		{"private move disagrees", a, b, 1, 0, true},
+		{"private miss disagrees", b, a, 1, 1, true},
+		{"identical duplicates", b, b, 1, 1, false},
+		{"first non-handler and last misses", &untagged, a, 0, 0, false},
+		{"first non-handler and last binds", &untagged, b, 0, 0, true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name+"/first wins", func(t *testing.T) {
+			facts := rebuildEventFacts(file, lang, []*graph.Node{caller, method}, member, tc.first, tc.last)
+			build, native := openRebuildEventStores(t, facts)
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, build))
+			stats, err := RunRebuildExpress(t.Context(), build, rebuildGRPCReceipts(facts), rebuildExpressTestSelection(t))
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildExpressStats{Stubs: tc.firstStubs, Moves: tc.firstMoves}, stats)
+			require.EqualValues(t, tc.firstMoves, ResolveExpressHandlers(native))
+			require.Equal(t, rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, build))
+		})
+		t.Run(tc.name+"/overwrite", func(t *testing.T) {
 			facts := rebuildEventFacts(file, lang, []*graph.Node{caller, method}, member, tc.first, tc.last)
 			build, native := openRebuildEventStores(t, facts)
 			nativeBefore := rebuildEventSQLiteRows(native)
