@@ -180,7 +180,7 @@ func TestRebuildCallReturnBindingsDeclarationGuards(t *testing.T) {
 				delete(census.byPath, file)
 				job.classifications = map[string]rebuildClassificationFact{file: {Language: "go", Size: 64, MaxFileSize: 32}}
 			case "no-symbol":
-				c.SymbolID = ""
+				c.SymbolID = "" // Assert no record change, not that replay avoids the lookup.
 			case "variable":
 				live.Kind = graph.KindVariable
 				want = "no checked Go binding source"

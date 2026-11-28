@@ -73,11 +73,13 @@ func TestRebuildContractOutputRefusesFailedCollectionAndReplay(t *testing.T) {
 		}
 		require.Error(t, r.WithContractOutput(nil, unused))
 		require.Error(t, r.WithContractOutput(empty, nil))
+		valid := RebuildContractBatch{Nodes: []*graph.Node{{ID: "env::X", Kind: graph.KindContract, Language: "contract"}}}
 		for _, invalidBatch := range []RebuildContractBatch{{Nodes: []*graph.Node{nil}}, {Edges: []*graph.Edge{nil}}} {
 			var addErr error
 			collect := func(add func(RebuildContractBatch) error) error {
 				addErr = add(invalidBatch)
 				require.Error(t, addErr)
+				require.ErrorIs(t, add(valid), addErr)
 				return nil // a producer cannot suppress an encoding failure
 			}
 			err := r.WithContractOutput(collect, unused)
@@ -107,6 +109,20 @@ func TestRebuildContractOutputRefusesFailedCollectionAndReplay(t *testing.T) {
 			return nil
 		})
 		require.ErrorContains(t, err, "ordinal changed")
+		firstKey := append(binary.BigEndian.AppendUint64(rows, 0), 'n')
+		err = r.WithContractOutput(func(add func(RebuildContractBatch) error) error {
+			return add(valid)
+		}, func(read iter.Seq2[RebuildContractBatch, error], _ ContractCoverage) error {
+			require.NoError(t, b.pending.Delete(firstKey, pebble.NoSync))
+			var observed error
+			for batch, err := range read {
+				require.Zero(t, batch)
+				observed = err
+			}
+			require.ErrorContains(t, observed, "count changed")
+			return nil
+		})
+		require.ErrorContains(t, err, "count changed")
 		return r.WithContractOutput(empty, func(iter.Seq2[RebuildContractBatch, error], ContractCoverage) error { return nil })
 	}))
 }

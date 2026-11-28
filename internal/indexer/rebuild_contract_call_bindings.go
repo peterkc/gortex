@@ -99,11 +99,9 @@ func (r rebuildContractReceiptReader) rebuildCallReturnBody(ctx context.Context,
 			seen = true
 		}
 	}
-	body, ok := facts.Handlers[symbol]
-	if !ok {
-		return empty, fmt.Errorf("%w: missing checked Go binding facts for %q", graph.ErrContractProjectionStale, symbol)
-	}
-	return body, nil
+	// checkContractParseFacts (parse_contract_facts.go) requires Handlers
+	// for every checked function or method at both encode and decode.
+	return facts.Handlers[symbol], nil
 }
 
 func rebuildResolveCallBinding(ctx context.Context, view store_pebble.RebuildView, records *store_pebble.RebuildContractRecords,
