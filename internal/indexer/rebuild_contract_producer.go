@@ -197,15 +197,14 @@ func (r rebuildContractReceiptReader) captureRebuildContractRows(ctx context.Con
 }
 
 // Native snapshots referenced shapes before any inline writes. Elect the
-// canonical registry rows first, then keep independently raw-proved refs from
-// omitted records. A ref no selected or raw record proves gets type-file O.
+// canonical registry rows first, then use every proved record (even a sibling
+// of an omitted winner), plus independently raw-proved refs from omitted
+// records. A ref no proved record supports gets type-file O.
 func (r rebuildContractReceiptReader) selectRebuildShapeRefs(ctx context.Context, view store_pebble.RebuildView,
 	records *store_pebble.RebuildContractRecords, selection *store_pebble.RebuildContractSelection,
 	add func(store_pebble.RebuildContractBatch) error,
 ) error {
 	if err := records.WithOrderedRepresentatives(func(read func(func(store_pebble.RebuildContractRecord) error) error) error {
-		var previous string
-		var winnerKept bool
 		return read(func(item store_pebble.RebuildContractRecord) error {
 			c := item.Contract
 			owner, err := rebuildContractOwner(ctx, view, c)
@@ -216,14 +215,11 @@ func (r rebuildContractReceiptReader) selectRebuildShapeRefs(ctx context.Context
 			if err != nil {
 				return err
 			}
-			if c.ID != previous {
-				previous, winnerKept = c.ID, keep
-			}
 			refs := rebuildShapeRefs(c)
 			if len(refs) == 0 {
 				return nil
 			}
-			if !keep || !winnerKept {
+			if !keep {
 				raw, err := r.rawRebuildShapeRefs(ctx, c)
 				if err != nil {
 					return err

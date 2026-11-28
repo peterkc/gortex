@@ -284,7 +284,7 @@ func TestRebuildContractUnprovedShapeRefLabelsTypeFile(t *testing.T) {
 	idx := newTestIndexer(graph.New())
 	t.Cleanup(idx.Close)
 	const file, typeFile, typeID = "routes.go", "body.go", "body.go::Payload"
-	src := []byte("package p\nfunc Register() {}\n")
+	src := []byte("package p\nfunc Register() {}\nfunc ZRegister() {}\n")
 	ext, ok := idx.registry.GetByLanguage("go")
 	require.True(t, ok)
 	parsed, facts, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, file, ext, src, src)
@@ -301,10 +301,19 @@ func TestRebuildContractUnprovedShapeRefLabelsTypeFile(t *testing.T) {
 	require.NoError(t, b.AddParsedFile("", parsed))
 	n := &graph.Node{ID: typeID, Name: "Payload", Kind: graph.KindType, FilePath: typeFile, Language: "go", StartLine: 1}
 	b.AddNode(n)
+	const nonType, provedType = "body.go::Helper", "proved.go::Payload"
+	b.AddBatch([]*graph.Node{
+		{ID: nonType, Kind: graph.KindFunction, FilePath: typeFile, StartLine: 1},
+		{ID: provedType, Kind: graph.KindType, FilePath: "proved.go", StartLine: 1},
+	}, nil)
 	c := contracts.Contract{ID: "http::GET::/x", Type: contracts.ContractHTTP, Role: contracts.RoleProvider,
-		SymbolID: file + "::Register", FilePath: file, Meta: map[string]any{"response_type": typeID}}
+		SymbolID: file + "::Register", FilePath: file, Meta: map[string]any{"response_type": typeID, "request_type": nonType}}
+	proved := c
+	proved.SymbolID = file + "::ZRegister"
+	proved.Meta = map[string]any{"response_type": provedType}
 	require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
 		require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c, BodyUnproved: true}))
+		require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: proved}))
 		return records.WithContractSelection(func(s *store_pebble.RebuildContractSelection) error {
 			require.NoError(t, s.FreezeCompleteIDs())
 			var omitted []store_pebble.RebuildContractOmission
@@ -312,10 +321,12 @@ func TestRebuildContractUnprovedShapeRefLabelsTypeFile(t *testing.T) {
 				omitted = append(omitted, batch.Omitted...)
 				return nil
 			}))
+			var refs []string
 			for id, err := range s.ShapeRefs() {
 				require.NoError(t, err)
-				t.Fatalf("unproved reference selected: %q", id)
+				refs = append(refs, id)
 			}
+			require.Equal(t, []string{provedType}, refs, "proved sibling survives an omitted canonical winner")
 			require.Len(t, omitted, 1)
 			require.Equal(t, typeFile, omitted[0].FilePath)
 			require.Equal(t, c.ID, omitted[0].ID)
