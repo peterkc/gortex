@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"bytes"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -367,6 +368,52 @@ func TestRelationsStageExternalEndpointEvidence(t *testing.T) {
 	}
 }
 
+func TestRebuildExternalProvedPyrel(t *testing.T) {
+	for _, tc := range []struct {
+		name, spec string
+		kind       graph.EdgeKind
+		proved     bool
+	}{
+		{"import", "pkg.name", graph.EdgeImports, true},
+		{"wrong spec", "pkg.other", graph.EdgeImports, false},
+		{"wrong kind", "pkg.name", graph.EdgeCalls, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			worker := newBuild(t, FullProfile)
+			const file = "caller.py"
+			raw := &graph.Edge{From: file, To: "unresolved::pyrel::pkg.name", Kind: tc.kind, FilePath: file, Line: 2}
+			n := &graph.Node{ID: file, Name: file, Kind: graph.KindFile, FilePath: file, Language: "python"}
+			require.NoError(t, worker.AddParsedFile("", ParseFacts{EffectiveLanguage: "python", Nodes: []*graph.Node{n}, Edges: []*graph.Edge{raw},
+				File: graph.FileMetaRow{FilePath: file, NodeCount: 1}}))
+			rawKey := pendingEdgeKey(raw)
+			if tc.kind != graph.EdgeImports {
+				// Admission normally omits this mark. Inject it to
+				// isolate the final pyrel kind check.
+				require.NoError(t, worker.pending.Set(rebuildExternalEvidenceKey('r', rawKey), []byte("python"), pebble.NoSync))
+			}
+			linked := *raw
+			linked.To = "external::" + tc.spec
+			moves := []graph.EdgeReindex{{Edge: &linked, OldTo: raw.To}}
+			require.NoError(t, worker.ApplyLinkReindexes(ctx, moves))
+			require.NoError(t, worker.RecordRebuildExternalMoves(ctx, moves, map[*graph.Edge]string{&linked: tc.spec}))
+			live := pendingEdgeKey(&linked)
+			val, err := pendingGet(worker.pending, live, copyValue)
+			require.NoError(t, err)
+			require.NotEmpty(t, val)
+			custody, err := readRebuildEdgeCustody(worker.pending, live)
+			require.NoError(t, err)
+			require.Equal(t, rawKey, custody.raw)
+			evidence, err := pendingGet(worker.pending, rebuildExternalEvidenceKey('m', live), copyValue)
+			require.NoError(t, err)
+			require.NotEmpty(t, evidence)
+			proved, err := worker.rebuildExternalProved(row{live, val}, &linked)
+			require.NoError(t, err)
+			require.Equal(t, tc.proved, proved)
+		})
+	}
+}
+
 func TestRelationsStageGoArgumentSourceReceipt(t *testing.T) {
 	keys := graph.UnresolvedNameCandidateIDsForName("Field", "")
 	for _, tc := range []struct {
@@ -646,6 +693,52 @@ func relationsStageLevels(t *testing.T, head *Head, stage string) {
 		tables = append(tables, int64(level.TablesCount))
 	}
 	t.Logf("%s: Pebble tables by level: %v", stage, tables)
+}
+
+func TestRebuildCodegenExternalShape(t *testing.T) {
+	const file = "generated.java"
+	marker := graph.Edge{From: file, To: "external::generator-source:api/schema.proto", Kind: graph.EdgeGeneratedBy,
+		FilePath: file, Origin: graph.OriginASTResolved, Meta: map[string]any{"tool": "protoc", "source": "api/schema.proto"}}
+	annotation := graph.Edge{From: file + "::Host", To: "external::generator-tool:mapstruct", Kind: graph.EdgeGeneratedBy,
+		FilePath: file, Origin: graph.OriginASTResolved, Meta: map[string]any{"tool": "mapstruct"}}
+	member := graph.Edge{From: file + "::Host.getName", To: "external::generator-tool:lombok", Kind: graph.EdgeGeneratedBy,
+		FilePath: file, Origin: graph.OriginASTInferred, Meta: map[string]any{"tool": "lombok"}}
+	for _, tc := range []struct {
+		name   string
+		edge   graph.Edge
+		change func(*graph.Edge)
+		proved bool
+	}{
+		{"marker", marker, nil, true},
+		{"marker wrong kind", marker, func(e *graph.Edge) { e.Kind = graph.EdgeReferences }, false},
+		{"marker nonzero line", marker, func(e *graph.Edge) { e.Line = 1 }, false},
+		{"marker wrong target", marker, func(e *graph.Edge) { e.To = "external::generator-source:other.proto" }, false},
+		// A failed type assertion gives an empty string, so use the
+		// corresponding native target to isolate each string check.
+		{"marker non-string tool", marker, func(e *graph.Edge) { e.Meta["tool"] = true }, false},
+		{"marker non-string source", marker, func(e *graph.Edge) {
+			e.Meta["source"], e.To = true, "external::generator-tool:protoc"
+		}, false},
+		{"marker wrong source node", marker, func(e *graph.Edge) { e.From = file + "::Host" }, false},
+		{"marker inferred origin", marker, func(e *graph.Edge) { e.Origin = graph.OriginASTInferred }, false},
+		{"annotation", annotation, nil, true},
+		{"annotation empty tool", annotation, func(e *graph.Edge) {
+			e.Meta["tool"], e.To = "", "external::generator-unknown"
+		}, false},
+		{"annotation wrong target", annotation, func(e *graph.Edge) { e.To = "external::generator-tool:other" }, false},
+		{"annotation inferred origin", annotation, func(e *graph.Edge) { e.Origin = graph.OriginASTInferred }, false},
+		{"lombok member", member, nil, true},
+		{"lombok unsupported origin", member, func(e *graph.Edge) { e.Origin = "" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := tc.edge
+			e.Meta = maps.Clone(e.Meta)
+			if tc.change != nil {
+				tc.change(&e)
+			}
+			require.Equal(t, tc.proved, rebuildCodegenExternal(&e))
+		})
+	}
 }
 
 func TestRelationsStageCodegenEndpoints(t *testing.T) {

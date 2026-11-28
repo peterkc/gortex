@@ -162,7 +162,7 @@ func (c rebuildEdgeCustody) reindexed(key []byte, old, e *graph.Edge, capture, g
 		if old.From == e.From && c.proof == rebuildProofGoBuiltinSource {
 			return c
 		}
-		if goBuiltinRepoint && old.From != e.From && old.To == e.To {
+		if goBuiltinRepoint {
 			if _, ok := rebuildGoBuiltinSource(e); ok {
 				return rebuildEdgeCustody{proof: rebuildProofGoBuiltinSource}
 			}
@@ -254,7 +254,8 @@ func rebuildCodegenExternal(e *graph.Edge) bool {
 		marker := codegen.Marker{Generated: true, Tool: tool, Source: path}
 		return e.To == codegen.BuildGraphArtifacts(e.FilePath, marker)[0].To
 	}
-	return tool != "" && e.To == "external::generator-tool:"+tool &&
+	marker := codegen.Marker{Generated: true, Tool: tool}
+	return tool != "" && e.To == codegen.BuildGraphArtifacts(e.FilePath, marker)[0].To &&
 		(e.Origin == graph.OriginASTResolved || (e.Origin == graph.OriginASTInferred && tool == "lombok"))
 }
 
