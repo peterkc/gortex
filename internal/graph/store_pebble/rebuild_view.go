@@ -545,7 +545,7 @@ func readRebuildCandidateIndex(column byte, key, value []byte) (repo, lang, id s
 	return repo, lang, id, size, nil
 }
 
-func updateRebuildCandidates(batch *pebble.Batch, prev, next *graph.Node, size uint64) error {
+func updateRebuildCandidates(batch rebuildNodeBatch, prev, next *graph.Node, size uint64) error {
 	var value []byte
 	if next != nil {
 		value = []byte(next.ID)

@@ -120,9 +120,26 @@ func (b *BuildStore) writeNode(n *graph.Node) error {
 	return b.writeNodeRecord(n, prev, value)
 }
 
+type rebuildNodeBatch interface {
+	Set(key, value []byte, opts *pebble.WriteOptions) error
+	Delete(key []byte, opts *pebble.WriteOptions) error
+}
+
 func (b *BuildStore) writeNodeRecord(n, prev *graph.Node, value []byte) error {
 	batch := b.pending.NewBatch()
 	defer batch.Close()
+	if err := bufferNodeRecord(batch, n, prev, value); err != nil {
+		return err
+	}
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return err
+	}
+	b.v3NodeWrites++
+	return nil
+}
+
+// bufferNodeRecord is the common row inventory for node writes and overlay undo.
+func bufferNodeRecord(batch rebuildNodeBatch, n, prev *graph.Node, value []byte) error {
 	if prev != nil {
 		if prev.FilePath != n.FilePath {
 			if err := batch.Delete(keyStrings([]byte{familyFile}, prev.FilePath, n.ID), nil); err != nil {
@@ -148,14 +165,7 @@ func (b *BuildStore) writeNodeRecord(n, prev *graph.Node, value []byte) error {
 	if n.Name != "" || n.QualName != "" {
 		candidateSize = rebuildCandidateEncodedSize(value)
 	}
-	if err := updateRebuildCandidates(batch, prev, n, candidateSize); err != nil {
-		return err
-	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
-		return err
-	}
-	b.v3NodeWrites++
-	return nil
+	return updateRebuildCandidates(batch, prev, n, candidateSize)
 }
 
 func (b *BuildStore) putEdge(e *graph.Edge) error {
