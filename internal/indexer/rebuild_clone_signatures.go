@@ -15,6 +15,7 @@ import (
 type rebuildClonePredecessors struct {
 	namespace *rebuildResolverNamespace
 	modules   bool
+	isolated  bool // F excludes the six unreplayed root module writers, not workspace membership.
 	contracts rebuildEarlyContractIDs
 	// Set only from the file-graph writer for the same immutable receipts.
 	// Standalone clone callers still need the raw collision census.
@@ -22,7 +23,7 @@ type rebuildClonePredecessors struct {
 }
 
 func (p rebuildClonePredecessors) mayReplaceWithRootManifest(id string) bool {
-	if !p.modules {
+	if !p.modules || p.isolated {
 		return false
 	}
 	// These six roots from native rootManifests are not replayed. The
@@ -38,7 +39,7 @@ func (p rebuildClonePredecessors) mayReplaceWithRootManifest(id string) bool {
 // Omitted module specs are not frozen. A possible manifest read is enough
 // to keep its ecosystem's ID space in scope, even without an exact match.
 func (p rebuildClonePredecessors) mayReplaceWithRootModule(id string) bool {
-	if !p.modules {
+	if !p.modules || p.isolated {
 		return false
 	}
 	module, ok := strings.CutPrefix(id, "module::")

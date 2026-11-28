@@ -213,6 +213,42 @@ func TestRebuildCloneRootManifestPredecessors(t *testing.T) {
 	}
 }
 
+func TestRebuildCloneIsolatedNonparsePredecessors(t *testing.T) {
+	var ns rebuildResolverNamespace
+	require.NoError(t, ns.add(rebuildNamespaceRow{key: "requirements.txt", kind: rebuildNamespaceRegular}))
+	require.NoError(t, ns.add(rebuildNamespaceRow{key: ".", kind: rebuildNamespaceCloseExact}))
+	require.NoError(t, ns.freeze())
+
+	for _, conflict := range []bool{false, true} {
+		t.Run(fmt.Sprintf("go_dependency_conflict=%t", conflict), func(t *testing.T) {
+			// Only the Go and TS signed callables enter the isolated graph.
+			facts := rebuildCloneRelationFixture(t)[1:3]
+			facts[0].Nodes[0].ID = "requirements.txt"
+			facts[1].Nodes[0].ID = "module::pypi:example@1"
+			ids := rebuildEarlyContractIDs{"dep::example.com/lib": "go.mod"}
+			if conflict {
+				facts[1].Nodes[0].ID = "dep::example.com/lib"
+			}
+			build, _ := openRebuildTestFileStore(t)
+			receipts := seedRebuildCloneInputReceipts(t, build, facts...)
+			p := rebuildClonePredecessors{namespace: &ns, modules: true, isolated: true, contracts: ids}
+			stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, p, 0.82)
+			if conflict {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+				reply := buildRefusal(err)
+				require.EqualValues(t, 1, reply.UnknownProvenance)
+				require.Contains(t, reply.Detail, "root_manifest=0 root_module=0 contract=1")
+				require.Zero(t, stats)
+				requireRebuildTestFileRows(t, build, []*graph.Node{facts[0].Nodes[0], facts[1].Nodes[0]}, nil)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, 2, stats.Signatures.Signed)
+			require.EqualValues(t, 1, stats.Direct.Pairs)
+		})
+	}
+}
+
 func TestRebuildCloneModuleAndContractPredecessors(t *testing.T) {
 	for _, tc := range []struct {
 		name, root string
