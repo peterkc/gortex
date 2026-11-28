@@ -142,6 +142,25 @@ class Service {}
 	require.NoError(t, err)
 	require.False(t, keep)
 	b.AddNode(class)
+	wrongSpan := *class
+	wrongSpan.StartLine++
+	b.AddNode(&wrongSpan)
+	keep, err = r.proveSpringBeanConsumer(ctx, view, consumer.ID, call)
+	require.NoError(t, err)
+	require.False(t, keep, "class not proved by checked raw declaration")
+	b.AddNode(class)
+	wrongCall := *call
+	wrongCall.From = javaFile + "::Existing"
+	keep, err = r.proveSpringBeanConsumer(ctx, view, consumer.ID, &wrongCall)
+	require.NoError(t, err)
+	require.False(t, keep, "raw method's enclosing class is different")
+	withoutClass, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, withoutClass.Close()) })
+	withoutClass.AddNode(consumer)
+	keep, err = r.proveSpringBeanConsumer(ctx, withoutClass.RebuildView(), consumer.ID, call)
+	require.NoError(t, err)
+	require.False(t, keep, "class is missing")
 
 	// Model the quiet linked cut with a DI sibling not present in parse facts.
 	// The canonical native DI ID is still backed by Bean.make, so an ID-only

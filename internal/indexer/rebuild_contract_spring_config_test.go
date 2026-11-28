@@ -212,3 +212,60 @@ func TestRebuildSpringConfigCheckedSkipSeals(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildSpringConfigWrapperRefusesUnprovedEdges(t *testing.T) {
+	for _, mode := range []string{"non-java reader", "unproved target", "both proved"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			idx := newTestIndexer(graph.New())
+			idx.SetRootPath(t.TempDir())
+			idx.registry.Register(languages.NewJavaExtractor())
+			t.Cleanup(idx.Close)
+			b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, b.Close()) })
+			file, lang := "Reader.java", "java"
+			if mode == "non-java reader" {
+				file, lang = "reader.go", "go"
+				b.AddNode(&graph.Node{ID: "Marker.java", FilePath: "Marker.java", Kind: graph.KindFile, Language: "java"})
+			}
+			reader := &graph.Node{ID: file + "::Reader", Name: "Reader", FilePath: file, Kind: graph.KindType, Language: lang, StartLine: 1,
+				Meta: map[string]any{"spring_config_keys": []string{"service.port"}}}
+			target := &graph.Node{ID: "cfg::spring::service.port", Name: "service.port", FilePath: file, Kind: graph.KindConfigKey, StartLine: 1}
+			parsed := store_pebble.ParseFacts{EffectiveLanguage: lang, File: graph.FileMetaRow{FilePath: file}, Nodes: []*graph.Node{
+				{ID: file, FilePath: file, Language: lang, Kind: graph.KindFile}, reader,
+			}}
+			if mode != "unproved target" {
+				parsed.Nodes = append(parsed.Nodes, target)
+			}
+			parsed.File.NodeCount = len(parsed.Nodes)
+			facts := &contracts.FileFacts{Shapes: map[string]*contracts.Shape{reader.ID: nil}}
+			wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
+			require.NoError(t, err)
+			input := rebuildInput{Path: file, Language: lang}
+			job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{lang: {1}}}
+			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[lang], input)), wire))
+			r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: &rebuildExtractorCensus{byPath: map[string]string{file: lang}, originByGraphPath: map[string]string{file: file}}}
+			b.AddBatch(parsed.Nodes, nil)
+			b.AddNode(target)
+			var edges []*graph.Edge
+			var omissions []store_pebble.RebuildContractOmission
+			require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+				return r.visitSpringConfig(ctx, b.RebuildView(), records, func(batch store_pebble.RebuildContractBatch) error {
+					edges = append(edges, batch.Edges...)
+					omissions = append(omissions, batch.Omitted...)
+					return nil
+				})
+			}))
+			e := contracts.SpringConfigReadEdge(reader, target.ID, "service.port")
+			if mode == "both proved" {
+				require.Equal(t, []*graph.Edge{e}, edges)
+				require.Empty(t, omissions)
+			} else {
+				require.Empty(t, edges)
+				require.Equal(t, []store_pebble.RebuildContractOmission{store_pebble.RebuildContractEdgeOmission("", contracts.ContractType(graph.EdgeReadsConfig), target.ID, e)}, omissions)
+			}
+		})
+	}
+}
