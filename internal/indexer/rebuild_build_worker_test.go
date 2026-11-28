@@ -677,7 +677,7 @@ func TestRebuildBuildStageSequence(t *testing.T) {
 		return err
 	}
 	t.Run("complete", func(t *testing.T) {
-		check(t, frames, len(frames), len(frames), 0, nil)
+		_ = check(t, frames, len(frames), len(frames), 0, nil)
 	})
 	for i, next := range stages {
 		t.Run("EOF before "+next.String(), func(t *testing.T) {
@@ -690,23 +690,23 @@ func TestRebuildBuildStageSequence(t *testing.T) {
 		for i := 3; i < len(legacy); i++ {
 			legacy[i].Witness.Contracts = nil
 		}
-		check(t, legacy, 3, 3, 0, store_pebble.ErrStageOrder)
+		_ = check(t, legacy, 3, 3, 0, store_pebble.ErrStageOrder)
 	})
 	t.Run("repeat contracts", func(t *testing.T) {
 		repeat := append(slices.Clone(frames[:4]), frames[3])
-		check(t, repeat, 4, 4, 0, store_pebble.ErrStageOrder)
+		_ = check(t, repeat, 4, 4, 0, store_pebble.ErrStageOrder)
 	})
 	t.Run("extra search", func(t *testing.T) {
 		extra := append(slices.Clone(frames), frames[5])
-		check(t, extra, 6, 6, 0, store_pebble.ErrStageOrder)
+		_ = check(t, extra, 6, 6, 0, store_pebble.ErrStageOrder)
 	})
 	t.Run("contracts coverage missing", func(t *testing.T) {
 		bad := slices.Clone(frames[:4])
 		bad[3].Witness.Contracts = nil
-		check(t, bad, 3, 3, 0, errRebuildBuildWire)
+		_ = check(t, bad, 3, 3, 0, errRebuildBuildWire)
 	})
 	t.Run("publisher refuses contracts", func(t *testing.T) {
-		check(t, frames, 4, 3, store_pebble.StageContracts, store_pebble.ErrStaleBase)
+		_ = check(t, frames, 4, 3, store_pebble.StageContracts, store_pebble.ErrStaleBase)
 	})
 }
 
