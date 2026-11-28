@@ -1,0 +1,134 @@
+package store_pebble
+
+import (
+	"errors"
+	"iter"
+	"strings"
+
+	"github.com/cockroachdb/pebble/v2"
+)
+
+// RebuildContractSelection holds separately elected logical IDs, selected IDs,
+// and shape references. Its disk keys are independent of the output batches.
+// The selection is serial and valid only inside WithContractSelection.
+type RebuildContractSelection struct {
+	records *RebuildContractRecords
+}
+
+// WithContractSelection freezes the complete native representative ID set,
+// including omitted records but excluding empty registry buckets. It runs
+// before selecting any output. An empty complete set is still built.
+func (r *RebuildContractRecords) WithContractSelection(use func(*RebuildContractSelection) error) (err error) {
+	if err := r.ready(); err != nil {
+		return err
+	}
+	prefix := rebuildContractRecordKey('l')
+	occupied, err := rebuildGuardHasPrefix(r.ctx, r.build.pending, prefix)
+	if err != nil {
+		return err
+	}
+	if occupied || use == nil {
+		return invalid("contract selection scratch is occupied or missing owner")
+	}
+	if err := r.build.putRebuildScratch(append(prefix, 'a'), nil, goldBufferBytes, "contract selection"); err != nil {
+		return err
+	}
+	s := &RebuildContractSelection{records: r}
+	defer func() {
+		s.records = nil
+		err = errors.Join(err, r.build.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
+	}()
+	if err := r.VisitRepresentatives(func(c RebuildContractRecord) error {
+		return s.put('c', c.ID)
+	}); err != nil {
+		return err
+	}
+	return use(s)
+}
+
+func (s *RebuildContractSelection) ready() error {
+	if s == nil || s.records == nil {
+		return invalid("inactive contract selection")
+	}
+	return s.records.ready()
+}
+
+func rebuildContractSelectionKey(tag byte, id string) []byte {
+	return appendKeyString(append(rebuildContractRecordKey('l'), tag), id)
+}
+
+func (s *RebuildContractSelection) put(tag byte, id string) error {
+	if err := s.ready(); err != nil {
+		return err
+	}
+	if id == "" {
+		return invalid("empty contract selection key")
+	}
+	return s.records.build.putRebuildScratch(rebuildContractSelectionKey(tag, id), nil, goldBufferBytes, "contract selection key")
+}
+
+func (s *RebuildContractSelection) contains(tag byte, id string) (bool, error) {
+	if err := s.ready(); err != nil {
+		return false, err
+	}
+	return pendingGet(s.records.build.pending, rebuildContractSelectionKey(tag, id), func(raw []byte) (bool, error) {
+		if len(raw) != 0 {
+			return false, invalid("contract selection key value")
+		}
+		return true, nil
+	})
+}
+
+// SelectID records the positive D83 decision for the elected native winner,
+// before encoding any batch. Never use it for a later replacement winner.
+func (s *RebuildContractSelection) SelectID(id string) error {
+	known, err := s.contains('c', id)
+	if err != nil {
+		return err
+	}
+	if !known {
+		return invalid("contract selection contains an unknown logical ID")
+	}
+	return s.put('s', id)
+}
+
+func (s *RebuildContractSelection) Selected(id string) (bool, error) {
+	return s.contains('s', id)
+}
+
+// RememberShapeRef records one checked full type reference at the shape cut.
+// Duplicate references share a key; bare names cannot mint shape rows.
+func (s *RebuildContractSelection) RememberShapeRef(id string) error {
+	if !strings.Contains(id, "::") {
+		return invalid("contract shape reference is not a full ID")
+	}
+	return s.put('t', id)
+}
+
+func (s *RebuildContractSelection) CompleteIDs() iter.Seq2[string, error] { return s.stream('c') }
+func (s *RebuildContractSelection) SelectedIDs() iter.Seq2[string, error] { return s.stream('s') }
+func (s *RebuildContractSelection) ShapeRefs() iter.Seq2[string, error]   { return s.stream('t') }
+
+func (s *RebuildContractSelection) stream(tag byte) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
+		if err := s.ready(); err != nil {
+			yield("", err)
+			return
+		}
+		stop := errors.New("contract selection visitor stopped")
+		prefix := append(rebuildContractRecordKey('l'), tag)
+		err := pendingVisit(s.records.ctx, s.records.build.pending, prefix, func(entry row) error {
+			id, rest, err := readKeyString(entry.key[len(prefix):])
+			if err != nil || id == "" || len(rest) != 0 || len(entry.value) != 0 {
+				return invalid("malformed contract selection key")
+			}
+			if !yield(id, nil) {
+				return stop
+			}
+			return nil
+		})
+		if err != nil && !errors.Is(err, stop) {
+			yield("", err)
+		}
+	}
+}
