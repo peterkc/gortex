@@ -1,9 +1,11 @@
 package store_pebble
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
@@ -155,4 +157,67 @@ func TestRebuildContractOutputEdgesKeepFirstPhysicalKey(t *testing.T) {
 		require.False(t, first)
 		return nil
 	}))
+}
+
+func TestRebuildContractRecordsRejectCorruptRows(t *testing.T) {
+	for _, mode := range []string{"empty ID", "empty clear", "bucket key", "record key", "record identity", "changed ID", "nested representative", "live identity"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			b := newBuild(t, FullProfile)
+			item := RebuildContractRecord{Contract: contracts.Contract{ID: "a", FilePath: "route.go", SymbolID: "handler"}}
+			called := false
+			err := b.WithRebuildContractRecords(ctx, func(r *RebuildContractRecords) error {
+				visit := func(RebuildContractRecord) error {
+					called = true
+					return nil
+				}
+				switch mode {
+				case "empty ID":
+					return r.Add(RebuildContractRecord{})
+				case "empty clear":
+					return r.ClearID("")
+				case "bucket key":
+					require.NoError(t, b.pending.Set(rebuildContractRecordKey('i', ""), nil, pebble.NoSync))
+					return r.VisitIDs(func(string) error { return visit(item) })
+				case "record key":
+					require.NoError(t, r.write(rebuildContractRecordKey('r', "a"), item))
+					return r.VisitByID("a", visit)
+				case "record identity":
+					key := binary.BigEndian.AppendUint64(rebuildContractRecordKey('r', "a"), 0)
+					bad := item
+					bad.ID = "wrong"
+					require.NoError(t, r.write(key, bad))
+					return r.VisitByID("a", visit)
+				case "changed ID":
+					require.NoError(t, r.Add(item))
+					return r.UpdateByID("a", func(live *RebuildContractRecord) (bool, error) {
+						live.ID = "wrong"
+						return true, nil
+					})
+				case "nested representative":
+					require.NoError(t, r.Add(item))
+					return r.VisitRepresentatives(func(RebuildContractRecord) error { return r.VisitRepresentatives(visit) })
+				default:
+					require.NoError(t, r.Add(item))
+					second := item
+					second.ID = "b"
+					require.NoError(t, r.Add(second))
+					return r.VisitCurrentRepresentatives(func(c RebuildContractRecord) error {
+						if c.ID == "b" {
+							return visit(c)
+						}
+						return r.UpdateByID("b", func(live *RebuildContractRecord) (bool, error) {
+							live.SymbolID = "wrong"
+							return true, nil
+						})
+					})
+				}
+			})
+			require.ErrorIs(t, err, errInvalidRecord)
+			require.False(t, called)
+			has, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildContractRecordPrefix)
+			require.NoError(t, err)
+			require.False(t, has)
+		})
+	}
 }

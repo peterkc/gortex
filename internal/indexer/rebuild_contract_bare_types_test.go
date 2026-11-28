@@ -119,3 +119,38 @@ func TestRebuildContractBareTypeUnprovedRepresentatives(t *testing.T) {
 		return nil
 	}))
 }
+
+func TestRebuildContractBareTypeTurnCount(t *testing.T) {
+	ctx := t.Context()
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	native := graph.New()
+	for _, pair := range [][2]string{{"A", "B"}, {"B", "C"}, {"C", "D"}, {"D", "file.go::Final"}} {
+		n := &graph.Node{Name: pair[0], ID: pair[1], Kind: graph.KindType}
+		b.AddNode(n)
+		native.AddNode(n)
+	}
+	idx := &Indexer{graph: native}
+	reg := contracts.NewRegistry()
+	require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+		for i, row := range []struct{ id, symbol, name string }{
+			{"route", "handler", "A"}, {"route", "", "A"}, {"openB", "", "B"}, {"openC", "", "C"}, {"openD", "", "D"},
+		} {
+			c := contracts.Contract{ID: row.id, SymbolID: row.symbol, FilePath: "route.go", Line: i + 1, Meta: map[string]any{"request_type": row.name}}
+			reg.Add(cloneContractRecords([]contracts.Contract{c})[0])
+			require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c}))
+		}
+		idx.upgradeContractBareTypeRefs(reg)
+		require.NoError(t, records.UpgradeBareTypeRefs())
+		var got []contracts.Contract
+		require.NoError(t, records.VisitByID("route", func(item store_pebble.RebuildContractRecord) error {
+			got = append(got, item.Contract)
+			return nil
+		}))
+		require.Equal(t, reg.ByID("route"), got)
+		require.Equal(t, "file.go::Final", got[0].Meta["request_type"])
+		require.Equal(t, "D", got[1].Meta["request_type"])
+		return nil
+	}))
+}
