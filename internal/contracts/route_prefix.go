@@ -789,11 +789,6 @@ func joinPaths(parts ...string) string {
 	return b.String()
 }
 
-// PrependRouterMount joins one mount-chain frame in native return order.
-func PrependRouterMount(parentChain, parentSelf, mount string) string {
-	return joinPaths(parentChain, parentSelf, mount)
-}
-
 // RouterFactKind identifies a shared fact's merge policy across files.
 type RouterFactKind uint8
 
@@ -866,7 +861,7 @@ func RouterMountChain(name string, mount, self func(string) string, parent func(
 	}
 	for i := len(frames) - 1; i >= 0; i-- {
 		step := frames[i]
-		prefix = PrependRouterMount(prefix, self(step.parent), step.mount)
+		prefix = joinPaths(prefix, self(step.parent), step.mount)
 		if check != nil {
 			if err := check(prefix); err != nil {
 				return "", err
