@@ -13,7 +13,11 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 	const source, decl, lang = "app/main.go", "libs/worker.go", "go"
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthFactoryChain})
 	require.NoError(t, err)
-	for _, mode := range []string{"conformance", "raw factory entrant", "shared raw claim", "joint omitted factories", "unproved method seed", "irrelevant raw arc", "inert raw arc", "joint raw arc entrants", "proved seed ambiguity", "unrelated large row", "related large row"} {
+	for _, mode := range []string{
+		"conformance", "raw factory entrant", "shared raw claim", "joint omitted factories",
+		"unproved method seed", "unproved free seed", "irrelevant raw arc", "inert raw arc",
+		"joint raw arc entrants", "proved seed ambiguity", "unrelated large row", "related large row",
+	} {
 		t.Run(mode, func(t *testing.T) {
 			caller := rebuildEventNode(source, "use", lang, "")
 			seed := rebuildEventNode(decl, "MakeWorker", lang, "")
@@ -43,9 +47,9 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 			switch mode {
 			case "raw factory entrant":
 				nodes = append(nodes, extra)
-			case "joint omitted factories", "unproved method seed", "proved seed ambiguity":
+			case "joint omitted factories", "unproved free seed", "unproved method seed", "proved seed ambiguity":
 				extra.Name = seed.Name
-				if mode != "joint omitted factories" {
+				if mode == "unproved method seed" || mode == "proved seed ambiguity" {
 					extra.Kind = graph.KindMethod
 					extra.Meta["receiver"] = "Unrelated"
 				}
@@ -78,6 +82,8 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				raw.Nodes = append(nodes[:4:4], &changed)
 			case "joint omitted factories":
 				raw.Nodes = nodes[1:4]
+			case "unproved free seed":
+				raw.Nodes = nodes[:3]
 			case "unproved method seed":
 				raw.Nodes = nodes[:4]
 			case "proved seed ambiguity":
@@ -139,9 +145,9 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				}
 				require.Zero(t, count)
 				require.Equal(t, before, rebuildEventSavedRows(t, b))
-				if mode == "joint omitted factories" {
-					// Both endpoints agree on a miss, but one factory can
-					// be present while the other is absent.
+				if mode == "joint omitted factories" || mode == "unproved free seed" {
+					// Both projections miss. Keeping only the first factory
+					// and the live method resolves both uses.
 					require.Zero(t, ResolveFactoryChains(native))
 					_, absent := openRebuildEventStores(t, route, raw)
 					require.Zero(t, ResolveFactoryChains(absent))

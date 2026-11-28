@@ -182,8 +182,9 @@ func graphFactoryReturnType(g factoryChainLookup, name string) string {
 	return factoryChainSeedType(g.nodes(name, factoryChainSeedRole))
 }
 
-// A free seed takes precedence over every method seed, including when two
-// distinct free return types permanently rule out a factory return type.
+// factoryChainSeedStable reports whether the receipt-proved subset (exact)
+// fixes the free seed result despite the other live candidates in nodes.
+// The caller handles the all-exact case before calling this function.
 func factoryChainSeedStable(nodes, exact []*graph.Node) bool {
 	var free string
 	for _, n := range exact {
@@ -208,7 +209,7 @@ func factoryChainSeedStable(nodes, exact []*graph.Node) bool {
 		}
 		return true
 	}
-	return len(nodes) == len(exact)
+	return false
 }
 
 func factoryChainSeedRole(n *graph.Node) bool {
