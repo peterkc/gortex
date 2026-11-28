@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"maps"
 	"os"
@@ -495,4 +496,107 @@ app.include_router(router, prefix="`
 			require.Equal(t, tc.nativeID, replay.All()[0].ID)
 		})
 	}
+}
+
+func TestRebuildEarlyContractReceiptRefusals(t *testing.T) {
+	const path = "routes.go"
+	src := []byte("package p\nfunc Register(r Router) { r.GET(Route, Handle) }\n")
+	for _, mode := range []string{"reload", "decode", "old base only", "admitted language", "census language", "constant view"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			idx := newTestIndexer(graph.New())
+			t.Cleanup(idx.Close)
+			ext, ok := idx.registry.GetByLanguage("go")
+			require.True(t, ok)
+			parsed, facts, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, path, ext, src, src)
+			require.NoError(t, err)
+			require.Len(t, facts.Questions, 1)
+			input := rebuildInput{Path: path, Language: "go", Size: int64(len(src))}
+			if mode == "admitted language" {
+				input.Language = "python"
+			}
+			job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{input.Language: {1}}}
+			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			census := rebuildExtractorCensus{byPath: map[string]string{path: parsed.EffectiveLanguage}}
+			var payload []byte
+			switch mode {
+			case "reload":
+				// No entry under the checked key.
+			case "decode":
+				payload = []byte{store_pebble.ContractParseFactsFormat}
+			case "old base only":
+				payload, err = store_pebble.EncodeParseFacts(parsed)
+			default:
+				payload, err = store_pebble.EncodeContractParseFacts(parsed, facts)
+			}
+			require.NoError(t, err)
+			if payload != nil {
+				key := input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input))
+				require.NoError(t, store.write(key, payload))
+			}
+			if mode == "census language" {
+				census.byPath[path] = "python"
+			}
+			var view store_pebble.RebuildView
+			if mode == "constant view" {
+				build, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, build.Close()) })
+				// Preserve a real working-store failure rather than omit constants.
+				build.AddNode(&graph.Node{ID: "remote:repo~unpublishable"})
+				view = build.RebuildView()
+			}
+			got, err := idx.readRebuildEarlyContractFacts(ctx, view, job, store, &census, nil)
+			require.Nil(t, got)
+			if mode == "constant view" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildView)
+				require.ErrorContains(t, err, `resolve endpoint constants for "routes.go"`)
+				return
+			}
+			require.ErrorIs(t, err, errParseEntryCorrupt)
+			require.ErrorContains(t, err, path)
+			switch mode {
+			case "reload":
+				require.ErrorContains(t, err, "reload")
+			case "admitted language":
+				require.ErrorContains(t, err, "invalid effective parse language")
+			case "census language":
+				require.ErrorContains(t, err, "early contract receipt attribution")
+			default:
+				require.ErrorContains(t, err, "contract")
+			}
+		})
+	}
+}
+
+func TestRebuildEarlyRouterOwnFactsWireRefusal(t *testing.T) {
+	const own, id = "routes.py", "http::GET::/items"
+	ctx := t.Context()
+	build, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, build.Close()) })
+	build.AddNode(&graph.Node{ID: "entry.py", Kind: graph.KindFile, Name: "entry.py", FilePath: "entry.py", Language: "python"})
+	reg := contracts.NewRegistry()
+	reg.Add(contracts.Contract{ID: id, Type: contracts.ContractHTTP, Role: contracts.RoleProvider, FilePath: own,
+		Line: 1, Meta: map[string]any{"framework": "fastapi/flask", "method": "GET", "path": "/items"}})
+	// The only census file has a checked-empty answer. Only the route's own
+	// source, selected outside that census by its record, is missing.
+	err = joinRebuildRouterPrefixes(ctx, build.RebuildView(), reg, "", "", map[string]contracts.RouterFacts{"entry.py": {}})
+	require.ErrorIs(t, err, errRebuildRouterFactsMissing)
+	require.ErrorContains(t, err, `"routes.py"`)
+	require.Equal(t, id, reg.All()[0].ID)
+
+	r := buildRefusal(err)
+	require.Equal(t, uint8(100), r.Refusal)
+	var reply, acks bytes.Buffer
+	require.NoError(t, writeRebuildBuildReply(&reply, r))
+	err = receiveRebuildStages(ctx, t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
+		func(context.Context, store_pebble.StageTables) error {
+			t.Fatal("router refusal cannot publish")
+			return nil
+		})
+	require.ErrorIs(t, err, ErrRebuildWorker)
+	require.ErrorIs(t, err, errRebuildRouterFactsMissing)
+	require.ErrorContains(t, err, `"routes.py"`)
+	require.Empty(t, acks.Bytes())
 }

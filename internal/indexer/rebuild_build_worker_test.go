@@ -174,11 +174,14 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 		name            string
 		exact, shadowed bool
 		badCallStatus   bool
+		rootManifests   int
 	}{
-		{name: "signed_only_with_extraction_off", exact: true},
-		{name: "refuses_shadow_before_apply", exact: true, shadowed: true},
+		{name: "signed_only_with_extraction_off", exact: true, rootManifests: 1},
+		{name: "refuses_shadow_before_apply", exact: true, shadowed: true, rootManifests: 1},
 		{name: "legacy_capture_stops_before_clones", shadowed: true},
-		{name: "final_call_status_refuses_relations", exact: true, badCallStatus: true},
+		{name: "final_call_status_refuses_relations", exact: true, badCallStatus: true, rootManifests: 1},
+		{name: "missing_checked_root_manifest", exact: true},
+		{name: "duplicate_checked_root_manifest", exact: true, rootManifests: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -234,7 +237,12 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 					if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")}); err != nil {
 						return err
 					}
-					return emit(rebuildGoManifestSidecarRow(rebuildGoManifest{Path: "go.mod"}))
+					for range tc.rootManifests {
+						if err := emit(rebuildGoManifestSidecarRow(rebuildGoManifest{Path: "go.mod"})); err != nil {
+							return err
+						}
+					}
+					return nil
 				})
 				require.NoError(t, err)
 				req.Witness.FrozenInputs = store_pebble.HeadDigest(digest)
@@ -248,6 +256,17 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 				sent = append(sent, tables.Witness.Stage)
 				return nil
 			})
+			if tc.exact && tc.rootManifests != 1 {
+				require.ErrorIs(t, err, errRebuildGoEvidence)
+				if tc.rootManifests == 0 {
+					require.ErrorContains(t, err, `manifest row "go.mod" not covered`)
+					require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
+				} else {
+					require.ErrorContains(t, err, "duplicate root Go manifest")
+					require.Empty(t, sent)
+				}
+				return
+			}
 			const capabilityMessage = "rebuild capabilities applied to private build"
 			const cloneMessage = "rebuild clone relations applied to private build"
 			capabilities := logs.FilterMessage(capabilityMessage).All()

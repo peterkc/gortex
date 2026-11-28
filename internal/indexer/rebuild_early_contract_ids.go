@@ -46,9 +46,11 @@ func (idx *Indexer) readRebuildEarlyContractFacts(ctx context.Context, view stor
 		if err != nil {
 			return nil, err
 		}
-		if facts == nil || base.EffectiveLanguage != census.byPath[input.Path] {
+		if base.EffectiveLanguage != census.byPath[input.Path] {
 			return nil, fmt.Errorf("%w: early contract receipt attribution for %q", errParseEntryCorrupt, input.Path)
 		}
+		// The checked receipt already enforces question positions. Keep
+		// the resolver's defensive error rather than treating a failure as empty.
 		records, err := contracts.ResolveEndpointQuestions(facts.Records, facts.Questions, &constants)
 		if err != nil {
 			return nil, fmt.Errorf("%w: endpoint questions for %q: %w", errParseEntryCorrupt, input.Path, err)
