@@ -157,6 +157,52 @@ def ambiguous() -> Meta:
 	require.NoError(t, err)
 	bindRebuildProviderRecord(&route, handler.ID, body)
 	require.Equal(t, want[0], route)
+	// The live bucket still receives every hidden exact registration sibling.
+	// A different line under the same All key is not part of that match.
+	require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+		input := func(symbol, ident string, line int) store_pebble.RebuildContractRecord {
+			return store_pebble.RebuildContractRecord{Contract: contracts.Contract{
+				ID: route.ID, Type: route.Type, Role: route.Role, FilePath: route.FilePath,
+				SymbolID: symbol, Line: line, Meta: map[string]any{"handler_ident": ident},
+			}}
+		}
+		for _, item := range []store_pebble.RebuildContractRecord{
+			input("register", "view", 5),
+			input("register", "unused", 5),
+			input("register", "unused", 6),
+			input("register_unproved", "no_line", 7),
+			input("register_unresolved", "missing", 8),
+			input("register_unresolved", "missing_again", 8),
+		} {
+			require.NoError(t, records.Add(item))
+		}
+		require.NoError(t, records.ClearID("empty"))
+		require.NoError(t, reader.bindRebuildProviderHandlers(ctx, view, records))
+		var live []store_pebble.RebuildContractRecord
+		require.NoError(t, records.VisitByID(route.ID, func(item store_pebble.RebuildContractRecord) error {
+			live = append(live, item)
+			return nil
+		}))
+		require.Len(t, live, 6)
+		proved := store_pebble.RebuildContractRecord{Contract: want[0]}
+		require.Equal(t, proved, live[0])
+		require.Equal(t, proved, live[1])
+		var symbols []string
+		for i, item := range live {
+			symbols = append(symbols, item.SymbolID)
+			require.Equal(t, i == 3, item.BodyUnproved)
+			require.NotContains(t, item.Meta, "handler_ident")
+			require.Equal(t, route.ID, item.ID)
+		}
+		require.Equal(t, []string{file + "::view", file + "::view", "register", file + "::no_line", "register_unresolved", "register_unresolved"}, symbols)
+		var ids []string
+		require.NoError(t, records.VisitIDs(func(id string) error {
+			ids = append(ids, id)
+			return nil
+		}))
+		require.Equal(t, []string{"empty", route.ID}, ids)
+		return nil
+	}))
 	for _, name := range []string{"ambiguous", "no_line"} {
 		handler, err := view.Node(ctx, file+"::"+name)
 		require.NoError(t, err)
