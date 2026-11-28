@@ -8843,106 +8843,38 @@ func (idx *Indexer) resolveCallReturnTypes(reg *contracts.Registry) {
 			continue
 		}
 
-		// Path 1: bare-variable response (`return WriteJSON(w, code, resp)`).
-		// Trace the variable to its binding call's return type — and,
-		// failing that, the literal/builtin shape of its declaration —
-		// then stamp response_type / response_repeated. Accepts
-		// response_expr in two forms:
-		//   - Bare identifier ("result")             — emitted by the
-		//     AST overlay (or the post-fix Go enricher) when the value
-		//     is a plain var.
-		//   - Full helper call ("WriteJSON(w, …)")   — older
-		//     extraction output, kept compatible by extracting the
-		//     third arg via responseHelperCallRe.
-		if rt, _ := c.Meta["response_type"].(string); rt == "" {
-			varName := contractResponseVarName(c)
-			if varName != "" {
-				typeID, repeated := idx.lookupVarTypeForContract(c, varName, resolution)
-				if typeID != "" {
-					items := reg.ByID(c.ID)
-					changed := false
-					for i := range items {
-						if items[i].Role != contracts.RoleProvider || items[i].SymbolID != c.SymbolID {
-							continue
-						}
-						if items[i].Meta == nil {
-							items[i].Meta = map[string]any{}
-						}
-						items[i].Meta["response_type"] = typeID
-						if repeated {
-							items[i].Meta["response_repeated"] = true
-						}
-						items[i].Meta["schema_source"] = "extracted"
-						delete(items[i].Meta, "response_expr")
-						changed = true
-					}
-					if changed {
-						reg.ReplaceByID(c.ID, items)
-						resolved++
-					}
+		lookup := func(name string) (string, bool, error) {
+			typeID, repeated := idx.lookupVarTypeForContract(c, name, resolution)
+			return typeID, repeated, nil // the native lookup is in-memory
+		}
+		// Apply the top-level response before the envelope, preserving the
+		// separate live bucket reads, writes and resolved counter increments.
+		if typeID, repeated, _ := planContractResponse(c, lookup); typeID != "" {
+			items := reg.ByID(c.ID)
+			changed := false
+			for i := range items {
+				if contractReturnPatchTarget(items[i], c) {
+					applyContractResponse(&items[i], typeID, repeated)
+					changed = true
 				}
 			}
+			if changed {
+				reg.ReplaceByID(c.ID, items)
+				resolved++
+			}
 		}
-
-		// Path 2: envelope response (`map[string]any{"workspace": ws,
-		// "repos": repos}`). For each row that didn't resolve a type
-		// syntactically, trace its expression to a binding call's
-		// return type and patch the row in place. Pulled out as a
-		// separate pass so a contract whose top-level response_type
-		// stays unresolvable can still get per-field signal — which is
-		// the whole point of the envelope view.
-		envRaw, ok := c.Meta["response_envelope"].([]map[string]any)
-		if !ok {
+		env, changed, _ := planContractEnvelope(c, lookup)
+		if !changed {
 			continue
 		}
-		if !envelopeNeedsResolution(envRaw) {
-			continue
-		}
-		envChanged := false
-		for ri := range envRaw {
-			if t, _ := envRaw[ri]["type"].(string); t != "" {
-				continue
-			}
-			expr, _ := envRaw[ri]["expr"].(string)
-			if expr == "" {
-				continue
-			}
-			// Strip a leading `&` / `*` so the binding lookup sees
-			// the underlying identifier.
-			ident := strings.TrimLeft(expr, "&*")
-			if !isLikelyIdentifier(ident) {
-				continue
-			}
-			typeID, repeated := idx.lookupVarTypeForContract(c, ident, resolution)
-			if typeID != "" {
-				envRaw[ri]["type"] = typeID
-				if repeated {
-					envRaw[ri]["repeated"] = true
-				}
-				envChanged = true
-			}
-		}
-		if !envChanged {
-			continue
-		}
-		// Promote schema_source to "extracted" if every row now has a
-		// type (or this is a single-key envelope whose lone field
-		// resolved). Otherwise leave it as "partial" — we have more
-		// info than before but it's not exhaustive.
 		items := reg.ByID(c.ID)
 		patched := false
+		fullyTyped := envelopeFullyTyped(env)
 		for i := range items {
-			if items[i].Role != contracts.RoleProvider || items[i].SymbolID != c.SymbolID {
-				continue
+			if contractReturnPatchTarget(items[i], c) {
+				applyContractEnvelope(&items[i], env, fullyTyped)
+				patched = true
 			}
-			if items[i].Meta == nil {
-				items[i].Meta = map[string]any{}
-			}
-			items[i].Meta["response_envelope"] = envRaw
-			if envelopeFullyTyped(envRaw) {
-				items[i].Meta["schema_source"] = "extracted"
-			}
-			patched = true
 		}
 		if patched {
 			reg.ReplaceByID(c.ID, items)
@@ -8953,15 +8885,6 @@ func (idx *Indexer) resolveCallReturnTypes(reg *contracts.Registry) {
 		idx.logger.Info("resolved response types from call signatures",
 			zap.Int("count", resolved))
 	}
-}
-
-func envelopeNeedsResolution(env []map[string]any) bool {
-	for _, row := range env {
-		if t, _ := row["type"].(string); t == "" {
-			return true
-		}
-	}
-	return false
 }
 
 func envelopeFullyTyped(env []map[string]any) bool {
@@ -9521,21 +9444,18 @@ func (idx *Indexer) lookupVarTypeForContract(
 		return resolvedType, b.Repeated
 	}
 
-	switch b.Kind {
-	case contracts.BindingMethodCall, contracts.BindingFuncCall:
-		if resolved, ok := resolution.callTypes[contractCallKey{callExpr: b.CallExpr, repoPrefix: c.RepoPrefix}]; ok && resolved.typeID != "" {
-			return resolved.typeID, resolved.repeated
+	if contractBindingIsCall(b) {
+		resolved := resolution.callTypes[contractCallKey{callExpr: b.CallExpr, repoPrefix: c.RepoPrefix}]
+		return resolved.typeID, resolved.repeated && resolved.typeID != ""
+	}
+	// Composite / slice / map / literal / path-value / header-value /
+	// form-value / query-get already carry a type.
+	if b.TypeID != "" {
+		resolvedType := resolution.upgradedTypes[contractTypeNameKey{typeName: b.TypeID, repoPrefix: c.RepoPrefix}]
+		if resolvedType == "" {
+			resolvedType = b.TypeID
 		}
-	default:
-		// Composite / slice / map / literal / path-value /
-		// header-value / form-value / query-get — already typed.
-		if b.TypeID != "" {
-			resolvedType := resolution.upgradedTypes[contractTypeNameKey{typeName: b.TypeID, repoPrefix: c.RepoPrefix}]
-			if resolvedType == "" {
-				resolvedType = b.TypeID
-			}
-			return resolvedType, b.Repeated
-		}
+		return resolvedType, b.Repeated
 	}
 	return "", false
 }
