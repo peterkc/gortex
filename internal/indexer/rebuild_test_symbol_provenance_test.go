@@ -70,6 +70,86 @@ func TestRebuildTestSymbolsDeferredAnnotationMembership(t *testing.T) {
 	requireRebuildTestFileRows(t, build, wantNodes, wantEdges)
 }
 
+func TestRebuildTestSymbolsDeferredPythonStamp(t *testing.T) {
+	const path = "test_example.py"
+	for _, tc := range []struct {
+		name                                                                string
+		rawImport, liveImport, alias, duplicate, wrongLanguage, changedFile bool
+	}{
+		{name: "independent_with_call"},
+		{name: "raw_import", rawImport: true},
+		{name: "working_import", liveImport: true},
+		{name: "alias", alias: true},
+		{name: "duplicate_callable", duplicate: true},
+		{name: "wrong_language", wrongLanguage: true},
+		{name: "different_full_file", changedFile: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := &graph.Node{ID: path, Kind: graph.KindFile, Name: path, FilePath: path, Language: "python"}
+			fn := &graph.Node{ID: path + "::helper", Kind: graph.KindFunction, Name: "helper", FilePath: path, Language: "python",
+				Meta: map[string]any{"raw": "preserved"}}
+			call := &graph.Edge{From: fn.ID, To: "work.py::work", Kind: graph.EdgeCalls, FilePath: path, Line: 3, Origin: graph.OriginASTResolved}
+			importEdge := &graph.Edge{From: path, To: "unresolved::import::unittest", Kind: graph.EdgeImports, FilePath: path, Line: 1}
+			prod := &graph.Node{ID: call.To, Kind: graph.KindFunction, Name: "work", FilePath: "work.py", Language: "python"}
+			native := graph.New()
+			nativeFn := *fn
+			nativeFn.Meta = maps.Clone(fn.Meta)
+			nativeFile := *file
+			native.AddBatch([]*graph.Node{&nativeFile, &nativeFn, prod}, []*graph.Edge{call})
+			marked, emitted := markTestSymbolsAndEmitEdges(native)
+			require.Equal(t, 1, marked)
+			require.Equal(t, 1, emitted)
+			require.Equal(t, map[string]any{"raw": "preserved", "is_test": true, "test_role": "test", "test_runner": "pytest"}, native.GetNode(fn.ID).Meta)
+
+			build, _ := openRebuildTestFileStore(t)
+			facts := store_pebble.ParseFacts{EffectiveLanguage: "python", File: graph.FileMetaRow{FilePath: path}, Nodes: []*graph.Node{file, fn}, Edges: []*graph.Edge{call}}
+			if tc.rawImport {
+				facts.Edges = append(facts.Edges, importEdge)
+			}
+			if tc.duplicate {
+				facts.Nodes = append(facts.Nodes, fn)
+			}
+			if tc.wrongLanguage {
+				facts.EffectiveLanguage = "ruby"
+			}
+			facts.File.NodeCount = len(facts.Nodes)
+			receipts := seedRebuildTestSymbolReceipts(t, build, []store_pebble.ParseFacts{facts,
+				{EffectiveLanguage: "python", File: graph.FileMetaRow{FilePath: prod.FilePath, NodeCount: 1}, Nodes: []*graph.Node{prod}},
+			})
+			// Supply the preceding file stage's exact native result. Independently
+			// exercise raw and live import evidence even if that row looks stamped.
+			stampedFile := *native.GetNode(path)
+			stampedFile.Meta = maps.Clone(stampedFile.Meta)
+			if tc.changedFile {
+				stampedFile.Meta["changed"] = true
+			}
+			build.AddNode(&stampedFile)
+			wantNodes := []*graph.Node{&stampedFile, fn, prod}
+			wantEdges := []*graph.Edge{call}
+			if tc.rawImport {
+				require.Equal(t, 1, build.RemoveEdgesExact([]*graph.Edge{importEdge}))
+			}
+			if tc.liveImport {
+				build.AddBatch(nil, []*graph.Edge{importEdge})
+				wantEdges = append(wantEdges, importEdge)
+			}
+			if tc.alias {
+				alias := *file
+				alias.ID = "alias.py"
+				build.AddNode(&alias)
+				wantNodes = append(wantNodes, &alias)
+			}
+			if tc.name == "independent_with_call" {
+				wantNodes[1] = native.GetNode(fn.ID)
+			}
+			slices.SortFunc(wantEdges, compareRebuildTestFileEdgeKeys)
+			require.NoError(t, runRebuildTestSymbols(t.Context(), build, receipts))
+			requireRebuildTestFileRows(t, build, wantNodes, wantEdges)
+			require.Equal(t, map[string]any{"raw": "preserved"}, fn.Meta)
+		})
+	}
+}
+
 func TestRebuildTestSymbolsRejectsUnprovedProducer(t *testing.T) {
 	const testPath, prodPath, foreignPath = "a_test.go", "work.go", "src/foreign.rs"
 	for _, kind := range []graph.EdgeKind{graph.EdgeAnnotated, graph.EdgeCalls} {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
@@ -13,9 +14,11 @@ import (
 )
 
 // RebuildTestSymbols runs after RebuildTestFiles on the quiet private graph.
-// Deferred parse facts can veto a test-to-test edge but are not stamped here.
+// Deferred parse facts can veto a test-to-test edge. Only link-independent
+// metadata with exact receipt custody is stamped for deferred symbols.
 func (b *BuildStore) RebuildTestSymbols(ctx context.Context, receipts iter.Seq2[ParseFacts, error],
 	isTestFile func(string) bool, fileRole, annotationRole func(string, string) string, annotationRunner func(string) string,
+	defaultRunner func(*graph.Node) string,
 ) (err error) {
 	const rowLimit = 16 << 20
 	const supported, deferred, unproved = byte(1), byte(2), byte(4)
@@ -50,6 +53,18 @@ func (b *BuildStore) RebuildTestSymbols(ctx context.Context, receipts iter.Seq2[
 			return err
 		}
 		return put(k, []byte{prior | bit})
+	}
+	// Metadata admission needs a unique receipt claim, unlike the existing
+	// membership flags, for which repeated offers of one class are harmless.
+	claim := func(k []byte, bit byte) error {
+		prior, err := state(k)
+		if err != nil {
+			return err
+		}
+		if prior != 0 {
+			bit = unproved
+		}
+		return put(k, []byte{bit})
 	}
 	readNode := func(id string) (*graph.Node, error) {
 		return pendingGet(b.pending, pendingNodeKey(id), func(raw []byte) (*graph.Node, error) {
@@ -93,6 +108,44 @@ func (b *BuildStore) RebuildTestSymbols(ctx context.Context, receipts iter.Seq2[
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			if n.Kind == graph.KindFile && (isTestFile(n.ID) || isTestFile(n.FilePath)) {
+				bit := unproved
+				if facts.EffectiveLanguage == "python" && n.Language == "python" && n.ID == file && n.FilePath == file {
+					// Reconstruct the native import-free file stamp. The preceding
+					// file stage must already have produced these exact full bytes.
+					want := *n
+					want.Meta = maps.Clone(n.Meta)
+					setRebuildTestMetadata(&want, "is_test_file", true)
+					if runner := defaultRunner(n); runner != "" {
+						setRebuildTestMetadata(&want, "test_runner", runner)
+					}
+					value, err := encodeNode(&want)
+					if err != nil {
+						return err
+					}
+					match, err := pendingGet(b.pending, pendingNodeKey(n.ID), func(raw []byte) (bool, error) { return bytes.Equal(raw, value), nil })
+					if err != nil {
+						return err
+					}
+					if match {
+						imports, err := rebuildGuardHasPrefix(ctx, b.pending, guardOutgoing(n.ID, graph.EdgeImports))
+						if err != nil {
+							return err
+						}
+						if !imports {
+							bit = deferred
+						}
+					}
+				}
+				if err := claim(key('f', n.ID), bit); err != nil {
+					return err
+				}
+				if n.FilePath != n.ID {
+					if err := claim(key('f', n.FilePath), unproved); err != nil {
+						return err
+					}
+				}
+			}
 			if callable(n) {
 				want, err := encodeNode(n)
 				if err != nil {
@@ -108,6 +161,15 @@ func (b *BuildStore) RebuildTestSymbols(ctx context.Context, receipts iter.Seq2[
 				}
 				if err := mark(key('n', n.ID), bit); err != nil {
 					return err
+				}
+				if n.Language == "python" {
+					stamp := unproved
+					if bit == deferred && facts.EffectiveLanguage == "python" {
+						stamp = deferred
+					}
+					if err := claim(key('p', n.ID), stamp); err != nil {
+						return err
+					}
 				}
 			}
 			isTarget, err := state(key('a', n.ID))
@@ -133,6 +195,14 @@ func (b *BuildStore) RebuildTestSymbols(ctx context.Context, receipts iter.Seq2[
 				return err
 			}
 			switch e.Kind {
+			case graph.EdgeImports:
+				if isTestFile(e.From) {
+					// Even an import removed from the working graph may have
+					// supplied the native runner after deferred linking.
+					if err := mark(key('f', e.From), unproved); err != nil {
+						return err
+					}
+				}
 			case graph.EdgeAnnotated:
 				if err := mark(annotationEdge(e), proof(e.FilePath)); err != nil {
 					return err
@@ -148,6 +218,20 @@ func (b *BuildStore) RebuildTestSymbols(ctx context.Context, receipts iter.Seq2[
 	}
 
 	view := b.RebuildView()
+	// Native projection indexes test files by both ID and path. A working
+	// alias can change the runner even if the canonical file is proved.
+	if err := view.visit(ctx, []byte{familyNode}, func(_ *pebble.Snapshot, r row) error {
+		n, err := decodeNodeLight(r.value)
+		if err != nil || n.Kind != graph.KindFile || n.ID == n.FilePath || !isTestFile(n.FilePath) {
+			return err
+		}
+		if err := mark(key('f', n.ID), unproved); err != nil {
+			return err
+		}
+		return mark(key('f', n.FilePath), unproved)
+	}); err != nil {
+		return err
+	}
 	var unknown RebuildUnknownProvenanceError
 	refuse := func(id graph.EdgeIdentity) {
 		if unknown.Count == 0 {
@@ -226,8 +310,24 @@ func (b *BuildStore) RebuildTestSymbols(ctx context.Context, receipts iter.Seq2[
 			refuse(graph.EdgeIdentity{From: light.ID, FilePath: light.FilePath})
 			return nil
 		}
-		if err := mark(key('m', light.ID), producer); err != nil || producer == deferred {
+		if err := mark(key('m', light.ID), producer); err != nil {
 			return err
+		}
+		if producer == deferred {
+			// The file role takes precedence over annotations in native. Calls
+			// affect only Tests edges, whose producer remains deferred below.
+			if light.Language != "python" || file == nil || file.Kind != graph.KindFile || file.FilePath != light.FilePath ||
+				file.Language != light.Language || file.RepoPrefix != light.RepoPrefix || file.WorkspaceID != light.WorkspaceID {
+				return nil
+			}
+			p, err := state(key('p', light.ID))
+			if err != nil || p != deferred {
+				return err
+			}
+			f, err := state(key('f', file.ID))
+			if err != nil || f != deferred {
+				return err
+			}
 		}
 		if len(r.key)+len(r.value) > rowLimit {
 			return fmt.Errorf("%w: test symbol row", ErrRebuildLinkInputSize)
