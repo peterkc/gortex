@@ -500,20 +500,36 @@ func TestContractsStageRejectsForgedPredecessorRows(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
-			b, _, files, _, _, _, _ := relationsStageFixture(t, FullProfile)
+			b, _, files, _, raw, _, _ := relationsStageFixture(t, FullProfile)
+			// Keep the real Relations diff free of primary changes. Dropping
+			// the raw Call from the retained tables but not from the build
+			// would trip the unclaimed-edge check during the merge.
+			require.Equal(t, 1, b.RemoveEdgesExact([]*graph.Edge{raw}))
 			relations, err := b.PrepareRelations(ctx, t.TempDir(), files, nil)
 			require.NoError(t, err)
 			base, err := b.RetainRelations(ctx, files, relations)
 			require.NoError(t, err)
-			require.NotEmpty(t, base.paths, "raw relation edge creates a diff")
-			base.paths = nil
-			if tc.key != nil {
+			revision := countKey("revisions") // present from Relations onward
+			delta := fileGraphCursor{ctx: ctx, options: b.options, paths: base.paths, delta: true}
+			t.Cleanup(func() { require.NoError(t, delta.Close()) })
+			require.True(t, delta.First())
+			require.Equal(t, revision, delta.Key())
+			require.False(t, delta.deleted)
+			require.False(t, delta.Next())
+			require.NoError(t, delta.Error())
+			if tc.key == nil {
+				base.paths = nil // remove only the witnessed revision counter
+			} else {
 				path := filepath.Join(t.TempDir(), "forged.sst")
 				w, err := newTable(path, b.options.MakeWriterOptions(goldLevel, b.db.FormatMajorVersion().MaxTableFormat()))
 				require.NoError(t, err)
 				require.NoError(t, w.Delete(tc.key))
 				require.NoError(t, w.Close())
-				base.paths = []string{path}
+				if bytes.Compare(tc.key, revision) < 0 {
+					base.paths = append([]string{path}, base.paths...)
+				} else {
+					base.paths = append(base.paths, path)
+				}
 			}
 			stage, err := b.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), ContractCoverage{})
 			require.ErrorIs(t, err, ErrContractsSeal)
