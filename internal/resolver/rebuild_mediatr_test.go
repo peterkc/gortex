@@ -353,16 +353,25 @@ func TestRebuildMediatRReceiptOnlyRequestCaller(t *testing.T) {
 	entrant.Meta = handler.Meta
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMediatR})
 	require.NoError(t, err)
+	localNodes := []*graph.Node{handler, caller, spare}
+	localReceipt := rebuildEventFacts(file, lang, localNodes, call)
+	foreignReceipt := rebuildEventFacts(file, lang, []*graph.Node{&remoteCaller})
+	noLanguage := rebuildEventFacts(file, "", []*graph.Node{&remoteCaller})
+	wrongFile := rebuildEventFacts("Other.cs", lang, []*graph.Node{&remoteCaller})
 	for _, tc := range []struct {
-		name   string
-		nodes  []*graph.Node
-		refuse bool
+		name     string
+		nodes    []*graph.Node
+		refuse   bool
+		receipts []store_pebble.ParseFacts
 	}{
-		{"no caller on either side", []*graph.Node{handler, spare}, false},
-		{"same workspace", []*graph.Node{handler, caller, spare}, false},
-		{"receipt caller filters the global winner", []*graph.Node{handler, &remoteCaller, spare}, true},
-		{"receipt handler leaves the caller workspace", []*graph.Node{&remoteHandler, caller, spare}, true},
-		{"receipt caller excludes extra global handler", []*graph.Node{handler, caller, &entrant}, false},
+		{"no caller on either side", []*graph.Node{handler, spare}, false, nil},
+		{"same workspace", localNodes, false, nil},
+		{"receipt caller filters the global winner", []*graph.Node{handler, &remoteCaller, spare}, true, nil},
+		{"receipt handler leaves the caller workspace", []*graph.Node{&remoteHandler, caller, spare}, true, nil},
+		{"receipt caller excludes extra global handler", []*graph.Node{handler, caller, &entrant}, false, nil},
+		{"caller without effective language is ignored", localNodes, false, []store_pebble.ParseFacts{localReceipt, noLanguage}},
+		{"caller in a different receipt file is ignored", localNodes, false, []store_pebble.ParseFacts{localReceipt, wrongFile}},
+		{"last admitted caller supplies the workspace", localNodes, false, []store_pebble.ParseFacts{foreignReceipt, localReceipt}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := openRebuildGRPCBuild(t, input)
@@ -370,7 +379,11 @@ func TestRebuildMediatRReceiptOnlyRequestCaller(t *testing.T) {
 			receipt := rebuildEventFacts(file, lang, tc.nodes, call)
 			_, native := openRebuildEventStores(t, receipt)
 			resolved := ResolveMediatRCalls(native)
-			stats, err := RunRebuildMediatR(t.Context(), b, rebuildGRPCReceipts(receipt), selection)
+			receipts := tc.receipts
+			if receipts == nil {
+				receipts = []store_pebble.ParseFacts{receipt}
+			}
+			stats, err := RunRebuildMediatR(t.Context(), b, rebuildGRPCReceipts(receipts...), selection)
 			if tc.refuse {
 				require.Zero(t, resolved)
 				var refused *store_pebble.RebuildUnknownProvenanceError

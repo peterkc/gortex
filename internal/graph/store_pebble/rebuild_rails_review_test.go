@@ -377,22 +377,44 @@ func TestRebuildRailsFreezeIgnoresReferences(t *testing.T) {
 func TestRebuildRailsFirstReceiptQuery(t *testing.T) {
 	const file = "routes.rb"
 	caller := &graph.Node{ID: "caller", Kind: graph.KindFunction, FilePath: file, Language: "ruby"}
-	class := &graph.Node{ID: "foo", Name: "Foo", Kind: graph.KindType, FilePath: file, Language: "ruby"}
 	live := &graph.Edge{From: caller.ID, To: "unresolved::find", Kind: graph.EdgeCalls, FilePath: file, Line: 1,
 		Meta: map[string]any{"recv_const": "Bar"}}
-	for _, first := range []string{"Foo", "Bar", ""} {
-		t.Run(first, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, class, first string
+		refuse, move       bool
+	}{
+		{"different eligible query with no live winner", "Foo", "Foo", true, false},
+		{"exact query with no live winner", "Foo", "Bar", false, false},
+		{"no query with no live winner", "Foo", "", false, false},
+		{"no query cannot replace a proved move", "Bar", "", true, false},
+		{"exact query moves to the live winner", "Bar", "Bar", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			class := &graph.Node{ID: "class", Name: tc.class, Kind: graph.KindType, FilePath: file, Language: "ruby"}
 			facts := producerProofFacts(caller)
 			facts.Nodes = append(facts.Nodes, class)
 			facts.Edges = []*graph.Edge{live}
 			b, _ := seedSyntheticCustody(t, facts)
 			before := rebuildFrameworkCustodyRows(t, b)
 			raw := *live
-			raw.Meta = map[string]any{"recv_const": first}
+			raw.Meta = map[string]any{"recv_const": tc.first}
 			facts.Edges = []*graph.Edge{&raw, live}
 			require.NoError(t, b.FreezeRailsInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
 			stats, err := b.RebuildRails(t.Context(), sqlCallsiteTestReceipts(facts), rebuildRailsReviewRules())
-			if first == "Foo" {
+			if tc.move {
+				require.NoError(t, err)
+				require.Equal(t, RebuildRailsStats{Stubs: 1, Moves: 1}, stats)
+				moved := *live
+				moved.To = class.ID
+				stored, err := b.pendingEdge(pendingEdgeKey(&moved))
+				require.NoError(t, err)
+				require.Equal(t, &moved, stored)
+				old, err := b.pendingEdge(pendingEdgeKey(live))
+				require.NoError(t, err)
+				require.Nil(t, old)
+				return
+			}
+			if tc.refuse {
 				var refusal *RebuildUnknownProvenanceError
 				require.ErrorAs(t, err, &refusal)
 				require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(live)}, refusal)

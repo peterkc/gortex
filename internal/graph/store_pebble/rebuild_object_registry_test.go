@@ -238,3 +238,30 @@ func TestRebuildObjectRegistryCandidateNodeCap(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildObjectRegistryUnpositionedCandidateNodeCap(t *testing.T) {
+	const capBytes = 16 << 20
+	facts := objectRegistryTestFacts()
+	peer := *facts.Nodes[0]
+	peer.ID = "peer"
+	peer.Meta = map[string]any{"payload": strings.Repeat("x", capBytes)}
+	positioned := *facts.Edges[0]
+	positioned.From, positioned.To = peer.ID, "Other"
+	alternate := positioned
+	alternate.To = "Cmd"
+	facts.Nodes = append(facts.Nodes, &peer)
+	facts.Edges = append(facts.Edges, &positioned, &alternate)
+	b, _ := seedSyntheticCustody(t, facts)
+	before := rebuildFrameworkCustodyRows(t, b)
+	key := pendingNodeKey(peer.ID)
+	require.Greater(t, len(key)+len(before[string(key)]), capBytes)
+
+	// Cmd is a possible class for peer, but its only positioned class is Other.
+	facts.Edges = facts.Edges[:len(facts.Edges)-1]
+	stats, err := b.RebuildObjectRegistry(t.Context(), sqlCallsiteTestReceipts(facts), objectRegistryTestRules())
+	require.ErrorIs(t, err, ErrRebuildObjectRegistry)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.ErrorContains(t, err, "Object Registry node row")
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+}
