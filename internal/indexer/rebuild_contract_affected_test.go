@@ -7,11 +7,13 @@ import (
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 func TestRebuildContractAffectedUsesHeldScopeNotCandidates(t *testing.T) {
 	ctx := t.Context()
 	idx := newTestIndexer(graph.New())
+	idx.registry.Register(languages.NewPythonExtractor())
 	t.Cleanup(idx.Close)
 	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
 	require.NoError(t, err)
@@ -81,4 +83,32 @@ func TestRebuildContractAffectedUsesHeldScopeNotCandidates(t *testing.T) {
 	shape, err := r.shapeLookup(ctx, view)(typ.ID)
 	require.NoError(t, err)
 	require.Nil(t, shape, "held declaration is attribution, not a shape answer")
+
+	// Independent raw inventory has no live shape or handler candidates.
+	const heldSource = "api.py"
+	heldInput := rebuildInput{Path: heldSource, Language: "python"}
+	r.job.inputs = []rebuildInput{heldInput}
+	r.job.recipes["python"] = rebuildDigest{2}
+	r.census.byPath[heldSource] = "python"
+	r.census.originByGraphPath[heldSource] = heldSource
+	r.census.admitted++
+	heldRecord := contracts.Contract{ID: heldID, Type: contracts.ContractHTTP, Role: contracts.RoleProvider, FilePath: heldSource, Line: 1,
+		Meta: map[string]any{"response_type": typ.ID}}
+	meta := graph.FileMetaRow{FilePath: heldSource}
+	wire, err = store_pebble.EncodeContractParseFacts(store_pebble.ParseFacts{EffectiveLanguage: "python", File: meta}, &contracts.FileFacts{Records: []contracts.Contract{heldRecord}})
+	require.NoError(t, err)
+	require.NoError(t, store.write(heldInput.parseKey(idx.rebuildExtractorRecipe(r.job.recipes["python"], heldInput)), wire))
+	var rawO []store_pebble.RebuildContractOmission
+	require.NoError(t, r.visitHeldOutContractOmissions(ctx, func(batch store_pebble.RebuildContractBatch) error {
+		require.Empty(t, batch.Nodes)
+		require.Empty(t, batch.Edges)
+		require.Empty(t, batch.Shapes)
+		rawO = append(rawO, batch.Omitted...)
+		return nil
+	}))
+	require.Len(t, rawO, 2)
+	require.Equal(t, heldSource, rawO[0].FilePath)
+	require.Equal(t, models, rawO[1].FilePath)
+	require.Equal(t, heldID, rawO[1].ID)
+	require.NotEqual(t, rawO[0].RecordKey, rawO[1].RecordKey)
 }
