@@ -2,22 +2,23 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
-// providerBody checks the linked inputs to the saved native body writes.
+// errRebuildContractBodyUnproved is a D83 omission input, not an invalid
+// receipt. Keep the elected symbol and complete logical ID when this happens.
+var errRebuildContractBodyUnproved = errors.New("rebuild contract body is unproved")
+
+// providerBody checks only the linked type names used by the saved body writes.
 // Capture used the accepted file's declaration range and its first match for
 // each local type name. Refuse if the linked file cannot prove those inputs.
 func (r rebuildContractReceiptReader) providerBody(ctx context.Context, view store_pebble.RebuildView, handler *graph.Node) (contracts.HandlerFacts, error) {
-	if handler.StartLine <= 0 {
-		// Native uses the registration line in this case; the generic
-		// handler receipt does not record that site-specific answer.
-		return contracts.HandlerFacts{}, fmt.Errorf("%w: handler %q has no declaration start line", graph.ErrContractProjectionStale, handler.ID)
-	}
 	base, facts, err := r.forLinkedDeclaration(ctx, handler)
 	if err != nil {
 		return contracts.HandlerFacts{}, err
@@ -26,7 +27,20 @@ func (r rebuildContractReceiptReader) providerBody(ctx context.Context, view sto
 	if !ok {
 		return contracts.HandlerFacts{}, fmt.Errorf("%w: missing body facts for %q", graph.ErrContractProjectionStale, handler.ID)
 	}
+	if handler.StartLine <= 0 {
+		// Native uses the registration line; the generic receipt does not
+		// record that site-specific answer.
+		return contracts.HandlerFacts{}, fmt.Errorf("%w: handler %q has no declaration start line", errRebuildContractBodyUnproved, handler.ID)
+	}
+	refs := handlerBodyTypeValues(body)
 	local := make(map[string]string)
+	// A bare captured name with no matching parse declaration may turn
+	// into a symbol ID if a linked type appears under that name.
+	for ref := range refs {
+		if !strings.Contains(ref, "::") {
+			local[ref] = ""
+		}
+	}
 	var foundHandler bool
 	for _, n := range base.Nodes {
 		if n.ID == handler.ID {
@@ -38,24 +52,60 @@ func (r rebuildContractReceiptReader) providerBody(ctx context.Context, view sto
 		if n.Kind != graph.KindType && n.Kind != graph.KindInterface {
 			continue
 		}
-		if first, exists := local[n.Name]; exists && first != n.ID {
-			return contracts.HandlerFacts{}, fmt.Errorf("%w: unordered local contract type %q in %q", graph.ErrContractProjectionStale, n.Name, handler.FilePath)
+		if _, referenced := refs[n.ID]; referenced {
+			local[n.Name] = n.ID
+		} else if local[n.Name] == "" {
+			// A captured bare value did not come through local lookup
+			// when that lookup already had a physical declaration.
+			delete(local, n.Name)
 		}
-		local[n.Name] = n.ID
 	}
+	if len(local) == 0 {
+		return body, nil
+	}
+	seen := make(map[string]bool)
+	var changed string
 	if err := view.VisitContractFileTypes(ctx, handler.FilePath, func(n *graph.Node) error {
-		if local[n.Name] != n.ID {
-			return fmt.Errorf("%w: changed local contract type %q in %q", graph.ErrContractProjectionStale, n.Name, handler.FilePath)
+		id, used := local[n.Name]
+		if !used {
+			return nil
 		}
-		delete(local, n.Name)
+		if id != n.ID && changed == "" {
+			changed = n.Name
+		}
+		seen[n.Name] = true
 		return nil
 	}); err != nil {
 		return contracts.HandlerFacts{}, err
 	}
-	if len(local) != 0 {
-		return contracts.HandlerFacts{}, fmt.Errorf("%w: missing local contract types in %q", graph.ErrContractProjectionStale, handler.FilePath)
+	for name, id := range local {
+		if id != "" && !seen[name] && (changed == "" || name < changed) {
+			changed = name
+		}
+	}
+	if changed != "" {
+		return contracts.HandlerFacts{}, fmt.Errorf("%w: local type %q in %q", errRebuildContractBodyUnproved, changed, handler.FilePath)
 	}
 	return body, nil
+}
+
+func handlerBodyTypeValues(body contracts.HandlerFacts) map[string]struct{} {
+	refs := make(map[string]struct{})
+	add := func(v any) {
+		if ref, ok := v.(string); ok && ref != "" {
+			refs[ref] = struct{}{}
+		}
+	}
+	for _, meta := range [...]map[string]any{body.Regex, body.AST} {
+		add(meta["request_type"])
+		add(meta["response_type"])
+		if rows, ok := meta["response_envelope"].([]map[string]any); ok {
+			for _, row := range rows {
+				add(row["type"])
+			}
+		}
+	}
+	return refs
 }
 
 // bindRebuildProviderRecord patches a matching live registration. The linked
