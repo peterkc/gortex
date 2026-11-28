@@ -79,8 +79,9 @@ const (
 )
 
 type rebuildEdgeCustody struct {
-	raw   []byte
-	proof rebuildEdgeProof
+	raw    []byte
+	proof  rebuildEdgeProof
+	source string // original checked Go dataflow source during a detour
 }
 
 const rebuildEdgeProofFormat byte = 1
@@ -100,11 +101,23 @@ func (c rebuildEdgeCustody) encode(edge []byte) ([]byte, error) {
 	if c.proof == 0 {
 		return c.raw, nil
 	}
-	if c.proof >= rebuildProofLimit || len(c.raw) != 0 {
+	if c.proof >= rebuildProofLimit || len(c.raw) != 0 || (c.source != "" && c.proof != rebuildProofGoDataflowSource) {
 		return nil, invalid("edge custody proof")
 	}
-	digest := sha256.Sum256(edge)
-	return append([]byte{rebuildEdgeProofFormat, byte(c.proof)}, digest[:]...), nil
+	digest := rebuildEdgeProofDigest(edge, c.source)
+	return append(append([]byte{rebuildEdgeProofFormat, byte(c.proof)}, digest[:]...), c.source...), nil
+}
+
+func rebuildEdgeProofDigest(edge []byte, source string) [sha256.Size]byte {
+	if source == "" {
+		return sha256.Sum256(edge)
+	}
+	h := sha256.New()
+	_, _ = h.Write(edge)
+	_, _ = h.Write([]byte(source))
+	var digest [sha256.Size]byte
+	copy(digest[:], h.Sum(nil))
+	return digest
 }
 
 func readRebuildEdgeCustody(reader pebble.Reader, live []byte) (rebuildEdgeCustody, error) {
@@ -115,12 +128,16 @@ func readRebuildEdgeCustody(reader pebble.Reader, live []byte) (rebuildEdgeCusto
 			}
 			return rebuildEdgeCustody{raw: bytes.Clone(raw)}, nil
 		}
-		if len(raw) != 2+sha256.Size || raw[0] != rebuildEdgeProofFormat || raw[1] == 0 || rebuildEdgeProof(raw[1]) >= rebuildProofLimit {
+		if len(raw) < 2+sha256.Size || raw[0] != rebuildEdgeProofFormat || raw[1] == 0 || rebuildEdgeProof(raw[1]) >= rebuildProofLimit {
 			return rebuildEdgeCustody{}, invalid("edge custody format")
 		}
+		proof, source := rebuildEdgeProof(raw[1]), string(raw[2+sha256.Size:])
+		if source != "" && proof != rebuildProofGoDataflowSource {
+			return rebuildEdgeCustody{}, invalid("edge custody source")
+		}
 		match, err := pendingGet(reader, live, func(edge []byte) (bool, error) {
-			digest := sha256.Sum256(edge)
-			return bytes.Equal(digest[:], raw[2:]), nil
+			digest := rebuildEdgeProofDigest(edge, source)
+			return bytes.Equal(digest[:], raw[2:2+sha256.Size]), nil
 		})
 		if err != nil {
 			return rebuildEdgeCustody{}, err
@@ -132,7 +149,7 @@ func readRebuildEdgeCustody(reader pebble.Reader, live []byte) (rebuildEdgeCusto
 			}
 			return rebuildEdgeCustody{}, &RebuildUnknownProvenanceError{Count: 1, First: id}
 		}
-		return rebuildEdgeCustody{proof: rebuildEdgeProof(raw[1])}, nil
+		return rebuildEdgeCustody{proof: proof, source: source}, nil
 	})
 }
 
@@ -157,14 +174,24 @@ func rebuildReceiptKey(reader pebble.Reader, live []byte) ([]byte, error) {
 	return live, nil
 }
 
-// A builtin source proof certifies the source, kind and recording site, not
-// the target. The winning move binds the proof to the new saved bytes.
+// Go builtin and dataflow source proofs certify the source, kind and site,
+// not the target. Dataflow custody remembers the original source during a
+// reversible repoint. Each winning move binds custody to the new saved bytes.
 func (c rebuildEdgeCustody) reindexed(key []byte, old, e *graph.Edge, capture, goBuiltinRepoint bool) rebuildEdgeCustody {
 	if old.Kind == e.Kind && old.FilePath == e.FilePath && old.Line == e.Line {
 		if old.From == e.From && c.proof == rebuildProofGoBuiltinSource {
 			return c
 		}
-		if old.From == e.From && c.proof == rebuildProofGoDataflowSource && rebuildGoDataflowReceiptSource(e) {
+		if c.proof == rebuildProofGoDataflowSource {
+			original := c.source
+			if original == "" {
+				original = old.From
+			}
+			if e.From == original {
+				c.source = ""
+			} else {
+				c.source = original
+			}
 			return c
 		}
 		if goBuiltinRepoint {

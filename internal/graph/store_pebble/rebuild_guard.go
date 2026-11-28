@@ -329,7 +329,15 @@ func (b *BuildStore) rebuildGuardReindex(ctx context.Context, moves []graph.Edge
 			// A revert may keep raw lineage, but not a stage proof at a
 			// different identity. Same-key guard stamps preserve custody.
 			if origin != key || before == nil {
-				custody = custody.moved(nil, after.Kind, false)
+				if custody.proof == rebuildProofGoDataflowSource {
+					old, err := decodeLinkRecorder([]byte(origin))
+					if err != nil {
+						return err
+					}
+					custody = custody.reindexed(nil, &graph.Edge{From: old.From, Kind: old.Kind, FilePath: old.FilePath, Line: old.Line}, after, false, false)
+				} else {
+					custody = custody.moved(nil, after.Kind, false)
+				}
 			}
 			if err := b.writePendingEdge(after, custody, before != nil); err != nil {
 				return err

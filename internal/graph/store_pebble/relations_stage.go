@@ -243,7 +243,7 @@ func (b *BuildStore) rebuildGoDataflowSourceProved(r row, e *graph.Edge, extract
 		return false, nil
 	}
 	custody, err := readRebuildEdgeCustody(b.pending, r.key)
-	return custody.proof == rebuildProofGoDataflowSource, err
+	return custody.proof == rebuildProofGoDataflowSource && custody.source == "", err
 }
 
 // rebuildExternalProved checks the emitted target against its installed bytes

@@ -38,6 +38,8 @@ func Local() int { return local.Constant }
 		{"wrong path", source, graph.EdgeArgOf, 3, "path", false},
 		{"foreign extractor", source, graph.EdgeArgOf, 3, "extractor", false},
 		{"wrong extractor at seal", source, graph.EdgeArgOf, 3, "seal extractor", false},
+		{"source restore", source, graph.EdgeArgOf, 3, "restore", true},
+		{"source restore value", source, graph.EdgeValueFlow, 4, "restore", true},
 		{"same chunk target chain", source, graph.EdgeArgOf, 3, "chain", true},
 		{"forged pair", source, graph.EdgeArgOf, 3, "pair", false},
 		{"forged source move", source, graph.EdgeArgOf, 3, "source", false},
@@ -98,6 +100,18 @@ func Local() int { return local.Constant }
 				forged := edge
 				forged.To = file + "::Arg"
 				worker.AddEdge(&forged)
+			case "restore":
+				concrete := edge
+				concrete.From = file + "::Arg"
+				worker.ReindexEdges([]graph.EdgeReindex{{Edge: &concrete, OldFrom: edge.From, OldTo: edge.To,
+					OldLine: edge.Line, OldFilePath: edge.FilePath, RefreshIdentity: true}})
+				custody, err := readRebuildEdgeCustody(worker.pending, pendingEdgeKey(&concrete))
+				require.NoError(t, err)
+				require.Equal(t, rebuildEdgeCustody{proof: rebuildProofGoDataflowSource, source: edge.From}, custody)
+				count, err := worker.restoreGuardSources(ctx, []graph.PlaceholderRepoint{{OldFrom: concrete.From, NewFrom: edge.From,
+					FilePath: edge.FilePath, Line: edge.Line}})
+				require.NoError(t, err)
+				require.Equal(t, 1, count)
 			case "source":
 				forged := edge
 				forged.From = "unresolved::extern::net/http::StatusOK"
