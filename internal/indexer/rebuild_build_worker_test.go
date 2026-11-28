@@ -255,6 +255,9 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 			var sent []store_pebble.Stage
 			err = buildRebuildStages(ctx, lease, zap.New(core), store_pebble.OpenBuild, rebuildTestLinkOptions(t), func(tables store_pebble.StageTables) error {
 				sent = append(sent, tables.Witness.Stage)
+				if tables.Witness.Stage == store_pebble.StageContracts {
+					require.Equal(t, &store_pebble.ContractCoverage{}, tables.Witness.Contracts)
+				}
 				return nil
 			})
 			if tc.exact && tc.rootManifests != 1 {
@@ -284,18 +287,22 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 				require.Empty(t, applied)
 				return
 			}
-			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
 			if tc.badCallStatus {
+				require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
 				require.Len(t, applied, 1, "the private clone pass must finish before settlement")
 				require.ErrorContains(t, err, "settle platform calls:")
 				require.ErrorContains(t, err, "link_status outside a builtin Call")
 				return
 			}
-			require.ErrorIs(t, err, errRebuildBuildIncomplete)
 			if !tc.exact {
+				require.ErrorIs(t, err, errRebuildBuildIncomplete)
+				require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
 				require.Empty(t, applied)
 				return
 			}
+			require.NoError(t, err)
+			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph,
+				store_pebble.StageRelations, store_pebble.StageContracts, store_pebble.StageDerived, store_pebble.StageSearch}, sent)
 			require.Len(t, capabilities, 1)
 			require.Len(t, applied, 1)
 			entries := logs.All()
@@ -1114,10 +1121,14 @@ func TestRunRebuildCheckoutExternalCallSynthesis(t *testing.T) {
 
 func TestRunRebuildCheckout(t *testing.T) {
 	for _, tc := range []struct {
-		name                             string
-		mismatch, denied, omitJSONRecipe bool
+		name                              string
+		mismatch, denied, omitJSONRecipe  bool
+		captureRefusal, sealRefusal, mixed bool
 	}{
-		{name: "verified checkout builds exact prefix"},
+		{name: "verified checkout builds all six stages"},
+		{name: "capture refusal keeps file graph", captureRefusal: true},
+		{name: "seal refusal keeps relations", sealRefusal: true},
+		{name: "mixed checkout stays at file graph", mixed: true},
 		{name: "supplied input root differs", mismatch: true},
 		{name: "denied link input keeps file graph", denied: true},
 		{name: "missing JSON recipe refuses before manifest", denied: true, omitJSONRecipe: true},
@@ -1127,11 +1138,15 @@ func TestRunRebuildCheckout(t *testing.T) {
 			defer cancel()
 			root, src := rebuildInputFixture(t)
 			const mod = "module example.org/widgets\n"
+			const contractID = "env::REBUILDWIRETOKEN"
 			require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), []byte(mod), 0o600))
-			require.NoError(t, os.WriteFile(filepath.Join(root, "sample.go"), []byte("package p\nfunc Frozen() {}\n"), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(root, "sample.go"), []byte("package p\nimport \"os\"\nfunc Frozen() { _ = os.Getenv(\"REBUILDWIRETOKEN\") }\n"), 0o600))
 			require.NoError(t, os.WriteFile(filepath.Join(root, "large.go"), []byte(strings.Repeat("x", 129)), 0o600))
 			require.NoError(t, os.Mkdir(filepath.Join(root, "excluded"), 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(root, "excluded", "secret.go"), []byte("package hidden"), 0o600))
+			if tc.mixed {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "deferred.py"), []byte("def Deferred():\n    pass\n"), 0o600))
+			}
 			if tc.denied {
 				writeRebuildTSAliasFixtureFile(t, root, "caller.ts", `import "@lib/x"`)
 				writeRebuildTSAliasFixtureFile(t, root, "tsconfig.json", `{"compilerOptions":{"paths":{"@lib/*":["./excluded/*"]}}}`)
@@ -1142,7 +1157,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 			cfg.Coverage.Clones.Threshold = 0.95 // the owner must seal this before dispatch
 			req := rebuildBuildRequest{
 				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
-				Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}, "typescript": {2}, "json": {3}},
+				Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}, "typescript": {2}, "json": {3}, "python": {4}},
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
 				Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{2}, Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
 			}
@@ -1168,6 +1183,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 				exe = filepath.Join(root, "not-a-binary")
 			}
 			var stages []store_pebble.Stage
+			var pinnedRelations *store_pebble.Snapshot
 			err = idx.runRebuildCheckout(ctx, src, req, excludes.New([]string{"excluded/"}), false,
 				exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, leases, headDir,
 				func(ctx context.Context, offer store_pebble.StageTables) error {
@@ -1179,8 +1195,36 @@ func TestRunRebuildCheckout(t *testing.T) {
 						require.NotZero(t, ref)
 						require.NoError(t, streamRebuildInputSidecar(retainedRebuildInputPath(headDir, ref), io.Discard, ref))
 					}
-					_, err := h.PublishStage(ctx, offer)
-					return err
+					if _, err := h.PublishStage(ctx, offer); err != nil {
+						return err
+					}
+					// The child is blocked on this offer's ACK. Change only test-owned
+					// inputs to the next cut; the published predecessor stays intact.
+					switch offer.Witness.Stage {
+					case store_pebble.StageFileGraph:
+						if tc.captureRefusal {
+							saved, err := os.ReadDir(req.ParseDir)
+							require.NoError(t, err)
+							require.Len(t, saved, 1)
+							require.NoError(t, os.Remove(filepath.Join(req.ParseDir, saved[0].Name())))
+						}
+					case store_pebble.StageRelations:
+						require.Equal(t, &store_pebble.RelationCoverage{}, offer.Witness.Relations)
+						pinnedRelations = h.OpenSnapshot()
+						t.Cleanup(func() { require.NoError(t, pinnedRelations.Close()) })
+						if tc.sealRefusal {
+							// Remove the private retained FileGraph link after Relations
+							// has sealed and published. Contracts must read that predecessor
+							// and fail, not reconstruct it from the working graph.
+							files, err := filepath.Glob(filepath.Join(filepath.Dir(offer.Dir), "working", "pending", "file-graph-base-*", "*.sst"))
+							require.NoError(t, err)
+							require.NotEmpty(t, files)
+							require.NoError(t, os.Remove(files[0]))
+						}
+					case store_pebble.StageContracts, store_pebble.StageDerived, store_pebble.StageSearch:
+						require.Equal(t, &store_pebble.ContractCoverage{}, offer.Witness.Contracts)
+					}
+					return nil
 				})
 			entries, leaseErr := os.ReadDir(leases)
 			require.NoError(t, leaseErr)
@@ -1201,22 +1245,80 @@ func TestRunRebuildCheckout(t *testing.T) {
 				require.ErrorIs(t, s.RequireStage(store_pebble.StageManifest), store_pebble.ErrNotPublished)
 				return
 			}
-			wantRefusal := errRebuildBuildIncomplete
 			wantPaths := []string{"sample.go"}
-			if tc.denied {
+			wantStages := []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}
+			var wantRefusal error
+			switch {
+			case tc.denied:
 				wantRefusal = errRebuildResolverInputDenied
 				wantPaths = []string{"caller.ts", "sample.go", "tsconfig.json"}
+			case tc.captureRefusal:
+				wantRefusal = errParseEntryCorrupt
+				require.ErrorContains(t, err, `reload "sample.go" for contracts`)
+			case tc.sealRefusal:
+				wantRefusal = store_pebble.ErrContractsSeal
+				wantStages = append(wantStages, store_pebble.StageRelations)
+			case tc.mixed:
+				wantRefusal = errRebuildBuildIncomplete
+				wantPaths = []string{"deferred.py", "sample.go"}
+			default:
+				wantStages = append(wantStages, store_pebble.StageRelations, store_pebble.StageContracts,
+					store_pebble.StageDerived, store_pebble.StageSearch)
 			}
-			require.ErrorIs(t, err, wantRefusal)
-			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, stages)
+			if wantRefusal != nil {
+				require.ErrorIs(t, err, wantRefusal)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, wantStages, stages)
+			last := wantStages[len(wantStages)-1]
+			publication, err := s.Publication()
+			require.NoError(t, err)
+			require.Equal(t, last, publication.Stage)
+			require.NoError(t, s.RequireStage(last))
 			var pending *store_pebble.ErrStagePending
-			require.ErrorAs(t, s.RequireStage(store_pebble.StageRelations), &pending)
+			if last != store_pebble.StageSearch {
+				require.ErrorAs(t, s.RequireStage(store_pebble.StageContracts), &pending)
+				require.Equal(t, last, pending.Published)
+				require.Nil(t, s.GetNode(contractID))
+			} else {
+				n := s.GetNode(contractID)
+				require.NotNil(t, n)
+				require.Equal(t, graph.KindContract, n.Kind)
+				require.Equal(t, "sample.go", n.FilePath)
+				require.Equal(t, "sample.go::Frozen", n.Meta["symbol_id"])
+				owners := s.GetInEdges(contractID)
+				require.Len(t, owners, 1)
+				require.Equal(t, graph.EdgeConsumes, owners[0].Kind)
+				require.Equal(t, "sample.go::Frozen", owners[0].From)
+				// Two terms bypass exact-name lookup and exercise the final search corpus.
+				hits, err := s.SearchSymbols("rebuildwiretoken rebuildwiretoken", 10)
+				require.NoError(t, err)
+				require.True(t, slices.ContainsFunc(hits, func(hit graph.SymbolHit) bool {
+					return hit.NodeID == contractID && hit.Score > 0
+				}), "final search corpus must contain the contract document")
+			}
+			if last == store_pebble.StageFileGraph {
+				require.Nil(t, pinnedRelations)
+				require.ErrorAs(t, s.RequireStage(store_pebble.StageRelations), &pending)
+			} else {
+				require.NotNil(t, pinnedRelations)
+				require.NoError(t, pinnedRelations.RequireStage(store_pebble.StageRelations))
+				_, err := pinnedRelations.ContractShapesContext(ctx, nil)
+				require.ErrorAs(t, err, &pending)
+				require.Equal(t, store_pebble.StageContracts, pending.Need)
+				require.Equal(t, store_pebble.StageRelations, pending.Published)
+				require.Nil(t, pinnedRelations.GetNode(contractID))
+			}
 			var paths []string
 			require.NoError(t, s.ManifestFiles(ctx, func(f store_pebble.ManifestFile) error {
 				paths = append(paths, f.Path)
 				return nil
 			}))
 			require.Equal(t, wantPaths, paths)
+			if tc.mixed {
+				require.NotNil(t, s.GetNode("deferred.py::Deferred"))
+			}
 			require.NotNil(t, s.GetNode("sample.go::Frozen"))
 			stub := s.GetNode("large.go")
 			require.NotNil(t, stub)
