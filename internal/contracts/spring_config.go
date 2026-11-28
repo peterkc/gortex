@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -372,12 +373,17 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) (int, error) {
 	return len(pendingNodes) + len(pendingEdges), nil
 }
 
+var springReaderKinds = [...]graph.NodeKind{graph.KindField, graph.KindType, graph.KindInterface, graph.KindMethod}
+
+// SpringReaderKind reports whether native Spring config linking reads this kind.
+func SpringReaderKind(kind graph.NodeKind) bool {
+	return slices.Contains(springReaderKinds[:], kind)
+}
+
 // springReaderNodes returns the repository/workspace-scoped nodes carrying a
 // spring_config_keys hint through one backend projection.
 func springReaderNodes(g graph.Store, scope SpringConfigScope) []*graph.Node {
-	return graph.ReadRepoNodesByKindsWithMetaKey(g, scope.RepoPrefix, scope.WorkspaceID, []graph.NodeKind{
-		graph.KindField, graph.KindType, graph.KindInterface, graph.KindMethod,
-	}, "spring_config_keys")
+	return graph.ReadRepoNodesByKindsWithMetaKey(g, scope.RepoPrefix, scope.WorkspaceID, springReaderKinds[:], "spring_config_keys")
 }
 
 // SpringConfigReadEdge constructs the native edge for the elected key.

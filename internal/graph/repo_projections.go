@@ -111,18 +111,23 @@ func projectionNodeMatches(node *Node, workspaceID string, languages, extensions
 	if node == nil || (workspaceID != "" && node.WorkspaceID != workspaceID) {
 		return false
 	}
+	path := node.FilePath
+	if path == "" {
+		path = node.ID
+	}
+	return ProjectionMatches(path, node.Language, languages, extensions)
+}
+
+// ProjectionMatches applies the native file language and extension union.
+func ProjectionMatches(path, language string, languages, extensions []string) bool {
 	if len(languages) == 0 && len(extensions) == 0 {
 		return true
 	}
-	language := strings.ToLower(node.Language)
+	language = strings.ToLower(language)
 	for _, candidate := range languages {
 		if language == strings.ToLower(candidate) {
 			return true
 		}
-	}
-	path := node.FilePath
-	if path == "" {
-		path = node.ID
 	}
 	path = strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
 	for _, extension := range extensions {
