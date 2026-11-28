@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -134,6 +135,50 @@ func TestRebuildFactoryChainGuards(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+			require.Zero(t, count)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildFactoryChainSwiftObjCArcProof(t *testing.T) {
+	const file = "bridge.swift"
+	for _, proof := range []rebuildEdgeProof{rebuildProofSwiftObjC, rebuildProofUntrackedMove} {
+		t.Run(fmt.Sprint(proof), func(t *testing.T) {
+			arc := &graph.Edge{From: "concrete", To: "protocol", Kind: graph.EdgeImplements, FilePath: file, Line: 1}
+			call := &graph.Edge{From: "caller", To: "unresolved::*.Run", Kind: graph.EdgeCalls, FilePath: file, Line: 2}
+			facts := ParseFacts{EffectiveLanguage: "swift", File: graph.FileMetaRow{FilePath: file}, Edges: []*graph.Edge{call}}
+			b, receipts := seedSyntheticCustody(t, facts)
+			require.NoError(t, b.withWrites(func() error {
+				return b.addEdgeWithCustody(arc, rebuildEdgeCustody{proof: proof})
+			}))
+			before := rebuildFrameworkCustodyRows(t, b)
+			require.NoError(t, b.FreezeFactoryChainInputs(t.Context(), func(graph.FrameworkCensusEdge) bool { return true }))
+			count, err := b.RebuildFactoryChain(t.Context(), receipts, RebuildFactoryChainRules{
+				Call: func(*graph.Edge) (string, string) { return "factory()", "Run" },
+				Target: func(lookup RebuildFactoryChainLookup, _, _, _ string) (string, bool) {
+					if len(lookup.Incoming("protocol")) == 1 {
+						return "method", true
+					}
+					return "", false
+				},
+				Rebind: func(e *graph.Edge, target string, _ bool) graph.EdgeReindex {
+					old := e.To
+					e.To = target
+					return graph.EdgeReindex{Edge: e, OldTo: old}
+				},
+			})
+			if proof == rebuildProofSwiftObjC {
+				require.NoError(t, err)
+				require.EqualValues(t, 1, count)
+				want := *call
+				want.To = "method"
+				requireRebuildLinkCustody(t, b, &want, rebuildEdgeCustody{raw: pendingEdgeKey(call)})
+				return
+			}
+			var refusal *RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, &RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(call)}, refusal)
 			require.Zero(t, count)
 			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})

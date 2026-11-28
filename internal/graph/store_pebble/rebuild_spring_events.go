@@ -206,45 +206,8 @@ func (p *rebuildSpringEventPass) captureEdges(ctx context.Context) error {
 				return err
 			}
 		}
-		return p.captureArcProof(snap, r.key, arc, kind)
+		return p.captureArcProof(snap, r.key, arc, kind, 'e')
 	})
-}
-
-func (p *rebuildSpringEventPass) captureArcProof(snap *pebble.Snapshot, key, arc []byte, kind graph.EdgeKind) error {
-	if kind == graph.EdgeImplements {
-		proved, err := rebuildImplementsStamped(snap, key)
-		if err != nil {
-			return err
-		}
-		if proved {
-			if arc == nil {
-				return nil
-			}
-			return p.put(arc, nil)
-		}
-	}
-	custody, err := readRebuildEdgeCustody(snap, key)
-	if errors.Is(err, ErrRebuildUnknownProvenance) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if custody.proof != 0 {
-		if arc != nil && kind == graph.EdgeImplements && custody.proof == rebuildProofKMPExpectActual {
-			return p.put(arc, nil)
-		}
-		return nil
-	}
-	raw := custody.raw
-	if raw == nil {
-		raw = key
-	}
-	id, err := decodeLinkRecorder(raw)
-	if err != nil || id.Kind != kind {
-		return err
-	}
-	return p.claimKey(append(p.column('e'), raw...), key)
 }
 
 func (p *rebuildSpringEventPass) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {

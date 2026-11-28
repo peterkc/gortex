@@ -26,7 +26,9 @@ func RunRebuildFactoryChain(ctx context.Context, b *store_pebble.BuildStore, rec
 	return b.RebuildFactoryChain(ctx, receipts, store_pebble.RebuildFactoryChainRules{
 		Call: factoryChainCall,
 		Target: func(lookup store_pebble.RebuildFactoryChainLookup, from, expr, member string) (string, bool) {
-			return factoryChainTarget(factoryChainLookup{nodes: lookup.Nodes, incoming: lookup.Incoming, node: lookup.Node}, from, expr, member)
+			return factoryChainTarget(factoryChainLookup{
+				nodes: lookup.Nodes, incoming: lookup.Incoming, node: lookup.Node, seedNodes: lookup.SeedNodes, matchedArc: lookup.MatchedArc,
+			}, from, expr, member)
 		},
 		Rebind: rebindFactoryChain,
 	})

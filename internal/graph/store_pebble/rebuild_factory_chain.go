@@ -20,9 +20,11 @@ var rebuildFactoryChainPrefix = []byte{'g', 'q', 46}
 // RebuildFactoryChainLookup supplies the native walk with exact-name, point,
 // and one-hop conformance reads from one projection.
 type RebuildFactoryChainLookup struct {
-	Nodes    func(name string, role func(*graph.Node) bool) []*graph.Node
-	Incoming func(string) []*graph.Edge
-	Node     func(string) *graph.Node
+	Nodes      func(name string, role func(*graph.Node) bool) []*graph.Node
+	Incoming   func(string) []*graph.Edge
+	Node       func(string) *graph.Node
+	SeedNodes  func(name string, role func(*graph.Node) bool, stable func([]*graph.Node, []*graph.Node) bool) []*graph.Node
+	MatchedArc func(*graph.Edge)
 }
 
 type RebuildFactoryChainRules struct {
@@ -168,33 +170,7 @@ func (p *rebuildFactoryChain) captureArc(snap *pebble.Snapshot, id graph.EdgeIde
 	if err := p.put(append(p.key('a', id.To), key...), nil); err != nil {
 		return err
 	}
-	if id.Kind == graph.EdgeImplements {
-		stamped, err := rebuildImplementsStamped(snap, key)
-		if err != nil {
-			return err
-		}
-		if stamped {
-			return p.put(append(p.key('A', id.To), key...), nil)
-		}
-	}
-	custody, err := readRebuildEdgeCustody(snap, key)
-	if errors.Is(err, ErrRebuildUnknownProvenance) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if custody.proof != 0 {
-		if id.Kind == graph.EdgeImplements && custody.proof == rebuildProofKMPExpectActual {
-			return p.put(append(p.key('A', id.To), key...), nil)
-		}
-		return nil
-	}
-	raw := custody.raw
-	if raw == nil {
-		raw = key
-	}
-	return p.claimKey(append(p.column('u'), raw...), key)
+	return p.captureArcProof(snap, key, append(p.key('A', id.To), key...), id.Kind, 'u')
 }
 
 func (p *rebuildFactoryChain) record(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
@@ -394,18 +370,15 @@ func (r *rebuildFactoryChainRead) load(id string, role func(*graph.Node) bool) (
 		if err := r.take(key, value); err != nil {
 			return nil, err
 		}
-		if !r.proved {
-			known, err := p.present(p.key('P', id))
-			r.unknown = r.unknown || !known
-			if err != nil {
-				return nil, err
-			}
-		}
 		return n, nil
 	})
 }
 
 func (r *rebuildFactoryChainRead) Nodes(name string, role func(*graph.Node) bool) []*graph.Node {
+	return r.SeedNodes(name, role, nil)
+}
+
+func (r *rebuildFactoryChainRead) SeedNodes(name string, role func(*graph.Node) bool, stable func([]*graph.Node, []*graph.Node) bool) []*graph.Node {
 	if r.err != nil {
 		return nil
 	}
@@ -414,7 +387,7 @@ func (r *rebuildFactoryChainRead) Nodes(name string, role func(*graph.Node) bool
 		col = 'N'
 	}
 	prefix := r.pass.key(col, name)
-	var nodes []*graph.Node
+	var nodes, exact []*graph.Node
 	// Name-index keys use SQLite's ascending ID order within one name.
 	r.err = r.pass.visit(r.ctx, prefix, func(item row) error {
 		id, rest, err := readKeyString(item.key[len(prefix):])
@@ -425,12 +398,34 @@ func (r *rebuildFactoryChainRead) Nodes(name string, role func(*graph.Node) bool
 		if err != nil {
 			return err
 		}
-		if n != nil {
-			nodes = append(nodes, n)
+		if n == nil {
+			return nil
+		}
+		nodes = append(nodes, n)
+		if r.proved {
+			return nil
+		}
+		proof, err := pendingGet(r.pass.b.pending, r.pass.key('P', id), decodeNode)
+		if err != nil || proof == nil {
+			return err
+		}
+		if stable == nil || proof.Name == n.Name && role(proof) && sameFactorySeed(proof, n) {
+			exact = append(exact, n)
 		}
 		return nil
 	})
+	if !r.proved && len(nodes) != len(exact) && (stable == nil || !stable(nodes, exact)) {
+		r.unknown = true
+	}
 	return nodes
+}
+
+func sameFactorySeed(a, b *graph.Node) bool {
+	_, recvA := a.Meta["receiver"]
+	_, recvB := b.Meta["receiver"]
+	rtA, _ := a.Meta["return_type"].(string)
+	rtB, _ := b.Meta["return_type"].(string)
+	return recvA == recvB && rtA == rtB
 }
 
 func (r *rebuildFactoryChainRead) Node(id string) *graph.Node {
@@ -439,6 +434,11 @@ func (r *rebuildFactoryChainRead) Node(id string) *graph.Node {
 	}
 	var n *graph.Node
 	n, r.err = r.load(id, func(n *graph.Node) bool { return n.Name != "" })
+	if r.err == nil && !r.proved && n != nil {
+		var known bool
+		known, r.err = r.pass.present(r.pass.key('P', id))
+		r.unknown = r.unknown || !known
+	}
 	return n
 }
 
@@ -475,10 +475,22 @@ func (r *rebuildFactoryChainRead) Incoming(id string) []*graph.Edge {
 			}
 			r.unknown = r.unknown || !known
 		}
-		edges = append(edges, &graph.Edge{From: arc.From, To: arc.To, Kind: arc.Kind})
+		edges = append(edges, &graph.Edge{From: arc.From, To: arc.To, Kind: arc.Kind, FilePath: arc.FilePath, Line: arc.Line})
 		return nil
 	})
 	return edges
+}
+
+// An imported arc with no matching method cannot change the conformance pick.
+// The native walk calls this only after an arc reaches a candidate.
+func (r *rebuildFactoryChainRead) MatchedArc(e *graph.Edge) {
+	if !r.proved || r.err != nil || r.unknown {
+		return
+	}
+	key := pendingEdgeKey(e)
+	var live bool
+	live, r.err = r.pass.present(append(r.pass.key('a', e.To), key...))
+	r.unknown = !live
 }
 
 func (p *rebuildFactoryChain) elect(ctx context.Context, q rebuildFactoryChainQuery, from string, proved bool) (id string, walked, unknown bool, err error) {
@@ -486,7 +498,9 @@ func (p *rebuildFactoryChain) elect(ctx context.Context, q rebuildFactoryChainQu
 		return "", false, false, nil
 	}
 	r := rebuildFactoryChainRead{pass: p, ctx: ctx, proved: proved, budget: p.rowBytes}
-	lookup := RebuildFactoryChainLookup{Nodes: r.Nodes, Incoming: r.Incoming, Node: r.Node}
+	lookup := RebuildFactoryChainLookup{
+		Nodes: r.Nodes, Incoming: r.Incoming, Node: r.Node, SeedNodes: r.SeedNodes, MatchedArc: r.MatchedArc,
+	}
 	id, walked = p.rules.Target(lookup, from, q.expr, q.method)
 	return id, walked, r.unknown, r.err
 }
@@ -513,11 +527,11 @@ func (p *rebuildFactoryChain) plan(ctx context.Context) (uint64, error) {
 		if err != nil {
 			return err
 		}
-		proved, rawWalked, _, err := p.elect(ctx, qRaw, e.From, true)
+		proved, rawWalked, rawUnknown, err := p.elect(ctx, qRaw, e.From, true)
 		if err != nil {
 			return err
 		}
-		if unknown || live != proved || walked != rawWalked {
+		if unknown || rawUnknown || live != proved || walked != rawWalked {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil
 		}

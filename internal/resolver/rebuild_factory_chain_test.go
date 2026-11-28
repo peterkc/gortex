@@ -13,7 +13,7 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 	const source, decl, lang = "app/main.go", "libs/worker.go", "go"
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthFactoryChain})
 	require.NoError(t, err)
-	for _, mode := range []string{"conformance", "raw factory entrant", "shared raw claim", "joint omitted factories", "unrelated large row", "related large row"} {
+	for _, mode := range []string{"conformance", "raw factory entrant", "shared raw claim", "joint omitted factories", "unproved method seed", "irrelevant raw arc", "inert raw arc", "joint raw arc entrants", "proved seed ambiguity", "unrelated large row", "related large row"} {
 		t.Run(mode, func(t *testing.T) {
 			caller := rebuildEventNode(source, "use", lang, "")
 			seed := rebuildEventNode(decl, "MakeWorker", lang, "")
@@ -34,12 +34,30 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 			nodes := []*graph.Node{seed, contract, concrete, method}
 			extra := rebuildEventNode(decl, "AlternativeFactory", lang, "")
 			extra.Meta = map[string]any{"return_type": "Alternative"}
+			alt := rebuildEventNode(decl, "AltWorker", lang, "")
+			alt.Kind = graph.KindType
+			altMethod := rebuildEventNode(decl, "AltWorker.Execute", lang, "")
+			altMethod.Kind, altMethod.Name = graph.KindMethod, method.Name
+			altMethod.Meta = map[string]any{"receiver": alt.Name}
+			altArc := &graph.Edge{From: alt.ID, To: contract.ID, Kind: graph.EdgeImplements, FilePath: decl, Line: 4}
 			switch mode {
 			case "raw factory entrant":
 				nodes = append(nodes, extra)
-			case "joint omitted factories":
+			case "joint omitted factories", "unproved method seed", "proved seed ambiguity":
 				extra.Name = seed.Name
+				if mode != "joint omitted factories" {
+					extra.Kind = graph.KindMethod
+					extra.Meta["receiver"] = "Unrelated"
+				}
 				nodes = append(nodes, extra)
+				if mode == "proved seed ambiguity" {
+					ambiguous := rebuildEventNode(decl, "AmbiguousFactory", lang, "")
+					ambiguous.Name = seed.Name
+					ambiguous.Meta = map[string]any{"return_type": "Other"}
+					nodes = append(nodes, ambiguous)
+				}
+			case "irrelevant raw arc", "inert raw arc", "joint raw arc entrants":
+				nodes = append(nodes, alt, altMethod)
 			case "unrelated large row", "related large row":
 				extra.Name = seed.Name
 				extra.Meta["large"] = strings.Repeat("x", 16<<20)
@@ -49,6 +67,9 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				nodes = append(nodes, extra)
 			}
 			live := rebuildEventFacts(decl, lang, nodes, arc)
+			if mode == "joint raw arc entrants" {
+				live.Edges = nil
+			}
 			raw := live
 			switch mode {
 			case "raw factory entrant":
@@ -57,6 +78,19 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				raw.Nodes = append(nodes[:4:4], &changed)
 			case "joint omitted factories":
 				raw.Nodes = nodes[1:4]
+			case "unproved method seed":
+				raw.Nodes = nodes[:4]
+			case "proved seed ambiguity":
+				raw.Nodes = append(append([]*graph.Node(nil), nodes[:4]...), nodes[5])
+			case "joint raw arc entrants":
+				raw.Edges = []*graph.Edge{arc, altArc}
+			case "irrelevant raw arc", "inert raw arc":
+				if mode == "irrelevant raw arc" {
+					altArc.To = concrete.ID
+				} else {
+					altMethod.Name = "Unrelated"
+				}
+				raw.Edges = append(append([]*graph.Edge(nil), live.Edges...), altArc)
 			}
 			raw.File.NodeCount = len(raw.Nodes)
 			b, native := openRebuildEventStores(t, route, live)
@@ -75,7 +109,12 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 			before := rebuildEventSavedRows(t, b)
 			count, err := RunRebuildFactoryChain(t.Context(), b, rebuildGRPCReceipts(route, raw), frozen)
 			switch mode {
-			case "conformance", "unrelated large row":
+			case "proved seed ambiguity":
+				require.NoError(t, err)
+				require.Zero(t, count)
+				require.Zero(t, ResolveFactoryChains(native))
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+			case "conformance", "unrelated large row", "unproved method seed", "irrelevant raw arc", "inert raw arc":
 				require.NoError(t, err)
 				require.EqualValues(t, 2, count)
 				require.Equal(t, 2, ResolveFactoryChains(native))
@@ -109,6 +148,14 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 					one := rebuildEventFacts(decl, lang, nodes[:4], arc)
 					_, present := openRebuildEventStores(t, route, one)
 					require.Equal(t, 2, ResolveFactoryChains(present))
+				}
+				if mode == "joint raw arc entrants" {
+					require.Zero(t, ResolveFactoryChains(native))
+					_, both := openRebuildEventStores(t, route, raw)
+					require.Zero(t, ResolveFactoryChains(both))
+					raw.Edges = []*graph.Edge{arc}
+					_, one := openRebuildEventStores(t, route, raw)
+					require.Equal(t, 2, ResolveFactoryChains(one))
 				}
 				if mode == "raw factory entrant" {
 					require.Equal(t, 2, ResolveFactoryChains(native))

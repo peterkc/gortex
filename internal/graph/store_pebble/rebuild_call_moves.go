@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -229,4 +231,43 @@ func (p *rebuildCallMoves) addFanoutIfAbsent(e *graph.Edge, proof rebuildEdgePro
 		return err
 	}
 	return p.b.addEdgeWithCustody(e, rebuildEdgeCustody{proof: proof})
+}
+
+// captureArcProof accepts settled producer arcs, otherwise uniquely claims
+// the parser receipt. A nil proved-arc key denotes a degenerate hierarchy.
+func (p *rebuildCallMoves) captureArcProof(snap *pebble.Snapshot, key, arc []byte, kind graph.EdgeKind, claims byte) error {
+	if kind == graph.EdgeImplements {
+		proved, err := rebuildImplementsStamped(snap, key)
+		if err != nil {
+			return err
+		}
+		if proved {
+			if arc == nil {
+				return nil
+			}
+			return p.put(arc, nil)
+		}
+	}
+	custody, err := readRebuildEdgeCustody(snap, key)
+	if errors.Is(err, ErrRebuildUnknownProvenance) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if custody.proof != 0 {
+		if arc != nil && kind == graph.EdgeImplements && (custody.proof == rebuildProofKMPExpectActual || custody.proof == rebuildProofSwiftObjC) {
+			return p.put(arc, nil)
+		}
+		return nil
+	}
+	raw := custody.raw
+	if raw == nil {
+		raw = key
+	}
+	id, err := decodeLinkRecorder(raw)
+	if err != nil || id.Kind != kind {
+		return err
+	}
+	return p.claimKey(append(p.column(claims), raw...), key)
 }
