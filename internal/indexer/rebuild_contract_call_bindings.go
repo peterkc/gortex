@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
@@ -41,7 +42,7 @@ func (r rebuildContractReceiptReader) resolveLateCallReturnTypes(ctx context.Con
 					}
 					lastSymbol = item.SymbolID
 				}
-				return rebuildResolveCallBinding(ctx, view, records, item.RepoPrefix, body.VarBinding(name))
+				return r.rebuildResolveCallBinding(ctx, view, records, item.Contract, body.VarBinding(name))
 			}); err != nil {
 				return err
 			}
@@ -105,12 +106,16 @@ func (r rebuildContractReceiptReader) rebuildCallReturnBody(ctx context.Context,
 	return facts.Handlers[symbol], nil
 }
 
-func rebuildResolveCallBinding(ctx context.Context, view store_pebble.RebuildView, records *store_pebble.RebuildContractRecords,
-	repo string, binding contracts.Binding,
+func (r rebuildContractReceiptReader) rebuildResolveCallBinding(ctx context.Context, view store_pebble.RebuildView, records *store_pebble.RebuildContractRecords,
+	c contracts.Contract, binding contracts.Binding,
 ) (store_pebble.RebuildCallReturnBinding, error) {
 	name, repeated := binding.TypeID, binding.Repeated
 	if contractBindingIsCall(binding) {
-		call, err := rebuildCallReturnName(ctx, view, contractCallKey{callExpr: binding.CallExpr, repoPrefix: repo})
+		callName, _ := contractCallName(binding.CallExpr)
+		if err := r.markHeldName(ctx, view, c.FilePath, c.Type, callName, graph.KindFunction, graph.KindMethod); err != nil {
+			return store_pebble.RebuildCallReturnBinding{}, err
+		}
+		call, err := rebuildCallReturnName(ctx, view, contractCallKey{callExpr: binding.CallExpr, repoPrefix: c.RepoPrefix})
 		if err != nil {
 			return store_pebble.RebuildCallReturnBinding{}, err
 		}
@@ -119,7 +124,12 @@ func rebuildResolveCallBinding(ctx context.Context, view store_pebble.RebuildVie
 	if name == "" {
 		return store_pebble.RebuildCallReturnBinding{}, nil
 	}
-	id, err := records.ResolveCallReturnTypeName(repo, name)
+	if !strings.Contains(name, "::") {
+		if err := r.markHeldName(ctx, view, c.FilePath, c.Type, name, graph.KindType); err != nil {
+			return store_pebble.RebuildCallReturnBinding{}, err
+		}
+	}
+	id, err := records.ResolveCallReturnTypeName(c.RepoPrefix, name)
 	return store_pebble.RebuildCallReturnBinding{TypeID: id, Repeated: repeated}, err
 }
 

@@ -174,7 +174,7 @@ func Read() { _ = os.Getenv("SHARED") }
 			break
 		}
 	}
-	require.ErrorIs(t, r.visitHeldOutContractOmissions(ctx, func(store_pebble.RebuildContractBatch) error { return nil }), errParseEntryCorrupt)
+	require.ErrorIs(t, r.visitHeldOutContractOmissions(ctx, func(string) (bool, error) { return false, nil }, func(store_pebble.RebuildContractBatch) error { return nil }), errParseEntryCorrupt)
 	require.NoError(t, store.write(heldKey, heldBytes))
 	var omissions []store_pebble.RebuildContractOmission
 	var tables store_pebble.StageTables

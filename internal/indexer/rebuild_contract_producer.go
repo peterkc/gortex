@@ -52,16 +52,15 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 		}
 		return records.WithContractSelection(func(s *store_pebble.RebuildContractSelection) error {
 			return records.WithContractOutput(func(add func(store_pebble.RebuildContractBatch) error) error {
-				if err := r.visitHeldOutContractOmissions(ctx, add); err != nil {
-					return err
-				}
 				if err := r.idx.appendRebuildDIContracts(records); err != nil {
 					return err
 				}
 				if err := r.bindRebuildProviderHandlers(ctx, view, records); err != nil {
 					return err
 				}
-				if err := records.UpgradeBareTypeRefs(); err != nil {
+				if err := records.UpgradeBareTypeRefs(func(c contracts.Contract, name string) error {
+					return r.markHeldName(ctx, view, c.FilePath, c.Type, name, graph.KindType)
+				}); err != nil {
 					return err
 				}
 				if err := r.joinLateRouterPrefixes(ctx, records, func(file string) error {
@@ -80,6 +79,9 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 					return fmt.Errorf("compare complete private contract IDs: %w", err)
 				}
 				if err := r.selectRebuildShapeRefs(ctx, view, records, s, add); err != nil {
+					return err
+				}
+				if err := r.visitHeldOutContractOmissions(ctx, s.HasShapeRef, add); err != nil {
 					return err
 				}
 				for batch, err := range r.shapeBatches(ctx, view, s.ShapeRefs()) {

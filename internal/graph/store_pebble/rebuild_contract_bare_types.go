@@ -5,13 +5,15 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 )
 
 // UpgradeBareTypeRefs opens type lookups from proved frozen representatives,
 // then applies those answers to proved live records, including hidden siblings.
 // Mark a row unproved if an unproved representative could open a real upgrade.
-func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
+// markHeldName can label a lookup's record scope; it does not supply an answer.
+func (r *RebuildContractRecords) UpgradeBareTypeRefs(markHeldName func(contracts.Contract, string) error) (err error) {
 	if err := r.ready(); err != nil {
 		return err
 	}
@@ -77,6 +79,11 @@ func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 					}
 					if state == 0 && !uncertain {
 						break
+					}
+					if markHeldName != nil {
+						if err := markHeldName(item.Contract, name); err != nil {
+							return false, err
+						}
 					}
 					key := [2]string{name, item.RepoPrefix}
 					value, known := answers[key]

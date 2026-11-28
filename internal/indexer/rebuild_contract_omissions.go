@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
@@ -26,7 +27,9 @@ func (r rebuildContractReceiptReader) checkedSpringConfigSizeSkip(repo, file str
 // visitHeldOutContractOmissions inventories checked raw observations only.
 // It must not resolve endpoint questions, elect registry/DI/config winners,
 // run native late transforms or expose these receipts to any link reader.
-func (r rebuildContractReceiptReader) visitHeldOutContractOmissions(ctx context.Context, yield func(store_pebble.RebuildContractBatch) error) error {
+func (r rebuildContractReceiptReader) visitHeldOutContractOmissions(ctx context.Context,
+	hasSelectedShapeRef func(string) (bool, error), yield func(store_pebble.RebuildContractBatch) error,
+) error {
 	isolated, err := r.linkView.RebuildLinksIsolated()
 	if err != nil || !isolated {
 		return err
@@ -67,8 +70,22 @@ func (r rebuildContractReceiptReader) visitHeldOutContractOmissions(ctx context.
 			if err := add(o); err != nil {
 				return err
 			}
-			for _, id := range slices.Sorted(maps.Keys(rebuildShapeRefs(c))) {
-				file, _, err := heldShapeFile(r.linkView, id)
+			refs := rebuildShapeRefs(c)
+			for _, key := range [...]string{"request_type", "response_type"} {
+				name, _ := c.Meta[key].(string)
+				if name == "" || strings.Contains(name, "::") {
+					continue
+				}
+				id, err := r.heldRecordBareShapeID(ctx, scope.RepoPrefix, name)
+				if err != nil {
+					return err
+				}
+				if strings.Contains(id, "::") {
+					refs[id] = struct{}{}
+				}
+			}
+			for _, id := range slices.Sorted(maps.Keys(refs)) {
+				file, err := r.heldRecordShapeFile(ctx, id, hasSelectedShapeRef)
 				if err != nil {
 					return err
 				}
@@ -131,4 +148,56 @@ func (r rebuildContractReceiptReader) visitHeldOutContractOmissions(ctx context.
 		}
 	}
 	return ctx.Err()
+}
+
+// heldRecordBareShapeID attributes a possible omitted shape without upgrading
+// a record or handing a held candidate to the linking pass. An ambiguous
+// deciding tier cannot name a shape. Count non-shape-capable KindTypes too.
+func (r rebuildContractReceiptReader) heldRecordBareShapeID(ctx context.Context, repo, name string) (string, error) {
+	type tier struct {
+		id    string
+		count int
+	}
+	var same, fallback tier
+	observe := func(id string) error {
+		vote := &fallback
+		if repo != "" && strings.HasPrefix(id, repo+"/") {
+			vote = &same
+		}
+		vote.id, vote.count = id, min(vote.count+1, 2)
+		return nil
+	}
+	if err := r.linkView.VisitNameCandidates(ctx, name, nil, func(n *graph.Node) error {
+		if n.Kind == graph.KindType {
+			return observe(n.ID)
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	if err := r.linkView.VisitRebuildHeldNameIDs(ctx, name, graph.KindType, observe); err != nil {
+		return "", err
+	}
+	if same.count == 0 {
+		same = fallback
+	}
+	if same.count != 1 {
+		return "", nil
+	}
+	return same.id, nil
+}
+
+func (r rebuildContractReceiptReader) heldRecordShapeFile(ctx context.Context, id string, hasSelectedShapeRef func(string) (bool, error)) (string, error) {
+	if file, _, err := heldShapeFile(r.linkView, id); err != nil || file != "" {
+		return file, err
+	}
+	selected, err := hasSelectedShapeRef(id)
+	if err != nil || selected {
+		return "", err // a selected record already supplies this shape lookup
+	}
+	n, err := r.linkView.Node(ctx, id)
+	if err != nil || n == nil || !rebuildShapeCandidate(n.FilePath, n.Kind, n.StartLine) {
+		return "", err
+	}
+	return n.FilePath, nil
 }

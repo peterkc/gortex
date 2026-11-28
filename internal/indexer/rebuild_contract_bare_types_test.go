@@ -53,7 +53,7 @@ func TestRebuildContractBareTypeRefsMatchNativeBuckets(t *testing.T) {
 		reg.ReplaceByID("empty", nil)
 		require.NoError(t, records.ClearID("empty"))
 		idx.upgradeContractBareTypeRefs(reg)
-		require.NoError(t, records.UpgradeBareTypeRefs())
+		require.NoError(t, records.UpgradeBareTypeRefs(nil))
 		var actual []contracts.Contract
 		require.NoError(t, records.VisitByID(id, func(item store_pebble.RebuildContractRecord) error {
 			actual = append(actual, item.Contract)
@@ -101,7 +101,7 @@ func TestRebuildContractBareTypeUnprovedRepresentatives(t *testing.T) {
 				Meta: map[string]any{"request_type": item.name}}
 			require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c, BodyUnproved: item.unproved}))
 		}
-		require.NoError(t, records.UpgradeBareTypeRefs())
+		require.NoError(t, records.UpgradeBareTypeRefs(nil))
 		var got []store_pebble.RebuildContractRecord
 		require.NoError(t, records.VisitByID("http::GET::/route", func(item store_pebble.RebuildContractRecord) error {
 			got = append(got, item)
@@ -142,7 +142,7 @@ func TestRebuildContractBareTypeTurnCount(t *testing.T) {
 			require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c}))
 		}
 		idx.upgradeContractBareTypeRefs(reg)
-		require.NoError(t, records.UpgradeBareTypeRefs())
+		require.NoError(t, records.UpgradeBareTypeRefs(nil))
 		var got []contracts.Contract
 		require.NoError(t, records.VisitByID("route", func(item store_pebble.RebuildContractRecord) error {
 			got = append(got, item.Contract)
@@ -175,7 +175,7 @@ func TestRebuildContractBareTypeOnlyUnprovedRepresentative(t *testing.T) {
 				Meta: map[string]any{"request_type": name}}
 			require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c, BodyUnproved: i == 0}))
 		}
-		require.NoError(t, records.UpgradeBareTypeRefs())
+		require.NoError(t, records.UpgradeBareTypeRefs(nil))
 		var got []store_pebble.RebuildContractRecord
 		require.NoError(t, records.VisitByID(id, func(item store_pebble.RebuildContractRecord) error {
 			got = append(got, item)

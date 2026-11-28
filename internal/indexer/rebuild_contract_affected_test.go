@@ -114,7 +114,7 @@ func TestRebuildContractAffectedUsesHeldScopeNotCandidates(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.write(heldInput.parseKey(idx.rebuildExtractorRecipe(r.job.recipes["python"], heldInput)), wire))
 	var rawO []store_pebble.RebuildContractOmission
-	require.NoError(t, r.visitHeldOutContractOmissions(ctx, func(batch store_pebble.RebuildContractBatch) error {
+	require.NoError(t, r.visitHeldOutContractOmissions(ctx, func(string) (bool, error) { return false, nil }, func(batch store_pebble.RebuildContractBatch) error {
 		require.Empty(t, batch.Nodes)
 		require.Empty(t, batch.Edges)
 		require.Empty(t, batch.Shapes)
