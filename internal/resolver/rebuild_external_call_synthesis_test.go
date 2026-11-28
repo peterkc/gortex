@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -519,6 +520,56 @@ func TestRebuildExternalCallReadPromotion(t *testing.T) {
 			n := &graph.Node{ID: "external::acme.tools", Kind: tc.kind, Name: "fetch", QualName: "acme.tools"}
 			e := &graph.Edge{From: "a.custom::run", Kind: graph.EdgeReads, To: tc.to, FilePath: "a.custom"}
 			require.Equal(t, tc.want, rebuildExternalIndexedLookup(e, n))
+		})
+	}
+}
+
+func TestRebuildExternalCallSkippedInputCaps(t *testing.T) {
+	padding := strings.Repeat("x", 16<<20)
+	for _, tc := range []struct {
+		name  string
+		lang  string
+		kind  graph.EdgeKind
+		role  map[string]any
+		voter bool
+	}{
+		{name: "non-Rust Call", lang: "go", kind: graph.EdgeCalls, role: map[string]any{"rust_path": "crate::fetch"}},
+		{name: "untagged Rust Call", lang: "rust", kind: graph.EdgeCalls},
+		{name: "Rust voter", lang: "rust", kind: graph.EdgeCalls, role: map[string]any{"rust_path": "crate::fetch"}, voter: true},
+		{name: "ordinary Reference", lang: "custom", kind: graph.EdgeReferences},
+		{name: "Godot voter", lang: "custom", kind: graph.EdgeReferences, role: map[string]any{"godot_connection": true, "godot_method": "handle"}, voter: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := rebuildEventNode("a.source", "run", tc.lang, "")
+			rust := rebuildEventNode("a.rs", "fetch", "rust", "")
+			rust.ID = "external::rust.tools"
+			godot := rebuildEventNode("script.gd", "handle", "gdscript", "")
+			godot.ID = "external::godot.tools"
+			facts := []store_pebble.ParseFacts{
+				rebuildEventFacts(caller.FilePath, caller.Language, []*graph.Node{caller}),
+				rebuildEventFacts(rust.FilePath, rust.Language, []*graph.Node{rust}),
+				rebuildEventFacts(godot.FilePath, godot.Language, []*graph.Node{godot}),
+			}
+			b := openRebuildGRPCBuild(t, facts...)
+			meta := map[string]any{"padding": padding}
+			for k, v := range tc.role {
+				meta[k] = v
+			}
+			b.AddEdge(&graph.Edge{From: caller.ID, To: "unresolved::fetch", Kind: tc.kind, FilePath: caller.FilePath, Meta: meta})
+			selection, err := NewFrameworkSynthesizerSelection([]string{SynthGodotConnection, SynthRustScope})
+			require.NoError(t, err)
+			votes := 0
+			err = visitRebuildSkippedExternalCalls(t.Context(), b.RebuildView(), selection,
+				func(*graph.Edge, store_pebble.RebuildExternalCallCandidate) error {
+					votes++
+					return nil
+				})
+			if tc.voter {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, votes)
 		})
 	}
 }

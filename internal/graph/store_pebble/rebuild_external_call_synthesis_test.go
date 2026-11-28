@@ -601,11 +601,12 @@ func TestRebuildExternalCallExtraInputCaps(t *testing.T) {
 	b.AddBatch([]*graph.Node{n}, []*graph.Edge{e})
 	view := b.RebuildView()
 	selectEdge := func(id graph.EdgeIdentity) bool { return id.Kind == graph.EdgeCalls }
-	require.NoError(t, view.VisitExternalCallEdges(t.Context(), selectEdge, func(*graph.Edge) error {
+	selectRole := func(*graph.Edge, *graph.Node) bool { return true }
+	require.NoError(t, view.VisitExternalCallEdges(t.Context(), selectEdge, selectRole, func(*graph.Edge) error {
 		t.Fatal("unselected edge decoded")
 		return nil
 	}))
-	require.ErrorIs(t, view.VisitExternalCallEdges(t.Context(), func(graph.EdgeIdentity) bool { return true }, func(*graph.Edge) error {
+	require.ErrorIs(t, view.VisitExternalCallEdges(t.Context(), func(graph.EdgeIdentity) bool { return true }, selectRole, func(*graph.Edge) error {
 		t.Fatal("oversized edge yielded")
 		return nil
 	}), ErrRebuildLinkInputSize)

@@ -349,6 +349,13 @@ func visitRebuildSkippedExternalCalls(ctx context.Context, view store_pebble.Reb
 	}
 	return view.VisitExternalCallEdges(ctx, func(id graph.EdgeIdentity) bool {
 		return godot && id.Kind == graph.EdgeReferences || rust && id.Kind == graph.EdgeCalls && graph.IsUnresolvedTarget(id.To)
+	}, func(e *graph.Edge, caller *graph.Node) bool {
+		if e.Kind == graph.EdgeReferences {
+			connection, _ := e.Meta["godot_connection"].(bool)
+			method, _ := e.Meta["godot_method"].(string)
+			return connection && method != ""
+		}
+		return caller != nil && caller.Language == "rust" && rustScopeEdgeCandidate(e)
 	}, func(e *graph.Edge) error {
 		if e.Kind == graph.EdgeReferences {
 			to, err := rebuildExternalGodotTarget(ctx, view, e)
@@ -364,11 +371,8 @@ func visitRebuildSkippedExternalCalls(ctx context.Context, view store_pebble.Reb
 			}
 			return nil
 		}
-		if !rustScopeEdgeCandidate(e) {
-			return nil
-		}
 		caller, err := view.ExternalCallNode(ctx, e.From)
-		if err != nil || caller == nil || caller.Language != "rust" {
+		if err != nil || caller == nil {
 			return err
 		}
 		path, _ := e.Meta["rust_path"].(string)

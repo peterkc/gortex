@@ -1227,26 +1227,128 @@ func (v RebuildView) externalCallNode(ctx context.Context, id string, decode dec
 	return n, err
 }
 
-// VisitExternalCallEdges filters by key identity before bounding and decoding
-// a potentially relevant skipped-producer edge.
-func (v RebuildView) VisitExternalCallEdges(ctx context.Context, selectEdge func(graph.EdgeIdentity) bool, yield func(*graph.Edge) error) error {
-	return v.visit(ctx, []byte{familyEdge, edgeOut}, func(_ *pebble.Snapshot, r row) error {
+// VisitExternalCallEdges filters by key and skipped-producer role before
+// charging the edge row bound. An oversized non-voter never needs a full
+// payload decode; the role probe reads only the metadata fields it uses.
+func (v RebuildView) VisitExternalCallEdges(ctx context.Context, selectEdge func(graph.EdgeIdentity) bool,
+	selectRole func(*graph.Edge, *graph.Node) bool, yield func(*graph.Edge) error,
+) error {
+	return v.visit(ctx, []byte{familyEdge, edgeOut}, func(snap *pebble.Snapshot, r row) error {
 		id, err := decodeLinkRecorder(r.key)
 		if err != nil || !selectEdge(id) {
 			return err
 		}
-		if err := rebuildExternalCallInput(r.key, r.value); err != nil {
-			return err
+		var caller *graph.Node
+		if id.Kind == graph.EdgeCalls {
+			caller, err = pendingGet(snap, pendingNodeKey(id.From), decodeNodeLight)
+			if err != nil {
+				return err
+			}
+			if caller != nil && caller.ID != id.From {
+				return invalid("external-call caller does not match key")
+			}
 		}
-		e, err := decodeEdge(r.value)
+		sizeErr := rebuildExternalCallInput(r.key, r.value)
+		decode := decodeEdge
+		if sizeErr != nil {
+			decode = func(raw []byte) (*graph.Edge, error) {
+				return readEdgeMetadata(raw, readExternalCallRoleMetadata)
+			}
+		}
+		e, err := decode(r.value)
 		if err != nil {
 			return err
 		}
 		if !bytes.Equal(r.key, pendingEdgeKey(e)) {
 			return invalid("external-call live edge does not match key")
 		}
+		if !selectRole(e, caller) {
+			return nil
+		}
+		if sizeErr != nil {
+			return sizeErr
+		}
 		return yield(e)
 	})
+}
+
+func readExternalCallRoleMetadata(c *recordCursor) map[string]any {
+	if !c.boolean() {
+		return nil
+	}
+	raw := c.bytes()
+	if c.err != nil {
+		return nil
+	}
+	meta, err := externalCallRoleMetadata(raw)
+	c.err = err
+	return meta
+}
+
+func externalCallRoleMetadata(raw []byte) (map[string]any, error) {
+	if !isFlatMeta(raw) {
+		return nil, invalid("metadata revision")
+	}
+	d := v3MetaScan{metaDecoder: metaDecoder{buf: raw[2:]}}
+	n, err := d.readCount()
+	if err != nil {
+		return nil, err
+	}
+	var meta map[string]any
+	var previous []byte
+	for i := 0; i < n; i++ {
+		key, err := d.rawString()
+		if err != nil {
+			return nil, err
+		}
+		if i > 0 && bytes.Compare(key, previous) <= 0 {
+			return nil, invalid("metadata keys not unique and sorted")
+		}
+		previous = key
+		start := d.pos
+		if err := d.scanValue(1); err != nil {
+			return nil, err
+		}
+		switch string(key) {
+		case "godot_connection", "godot_method", "rust_path", "rust_recv", "receiver_type", "rust_recv_expr":
+		default:
+			continue
+		}
+		scalar := raw[2+start : 2+d.pos]
+		switch scalar[0] {
+		case metaTagBool, metaTagString:
+		case metaTagJSON:
+			// Named strings and bools can use a JSON leaf. A JSON object
+			// or array cannot supply one of these role fields.
+			leaf := v3MetaScan{metaDecoder: metaDecoder{buf: scalar[1:]}}
+			text, err := leaf.rawString()
+			if err != nil {
+				return nil, err
+			}
+			text = bytes.TrimSpace(text)
+			if len(text) == 0 || text[0] != '"' && text[0] != 't' && text[0] != 'f' {
+				continue
+			}
+		default:
+			continue
+		}
+		value := metaDecoder{buf: scalar}
+		x, err := value.readValue(string(key), 1)
+		if err != nil {
+			return nil, err
+		}
+		switch x.(type) {
+		case bool, string:
+			if meta == nil {
+				meta = make(map[string]any)
+			}
+			meta[string(key)] = x
+		}
+	}
+	if d.pos != len(d.buf) {
+		return nil, invalid("unbound metadata bytes")
+	}
+	return meta, nil
 }
 
 // VisitExternalCallNodes filters a light node before charging the row bound.
