@@ -76,7 +76,7 @@ func TestRebuildInlineContractShapesUnprovedRepresentative(t *testing.T) {
 	}
 }
 
-func TestRebuildInlineContractShapesProvedRepresentativeFirst(t *testing.T) {
+func TestRebuildInlineContractShapesCompletenessGuard(t *testing.T) {
 	const id, typeID = "http::GET::/a", "types.go::Response"
 	const stale, missing = "types.go::Stale", "types.go::Missing"
 	shape := &contracts.Shape{Kind: "struct", Fields: []contracts.ShapeField{{Name: "Value", Type: "string"}}}
