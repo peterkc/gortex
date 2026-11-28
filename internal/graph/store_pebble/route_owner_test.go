@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"syscall"
 	"testing"
@@ -624,6 +625,7 @@ func TestRouteOwnerStartupRestoresOnlyCheckedCheckpoint(t *testing.T) {
 func TestRouteOwnerRecoveryKeepsSelectionOnTransientFailure(t *testing.T) {
 	ctx := t.Context()
 	o := ownerTestInit(t)
+	o.root = t.TempDir() // Keep catalog reads available while the head root is blocked.
 	stages := ownerTestStages(t, routeTestSource, StageSearch, nil)
 	validate := ownerTestValidator(t)
 	b, err := o.begin(ctx, routeTestOldLease, nil, stages[0].Witness)
@@ -665,12 +667,58 @@ func TestRouteOwnerRecoveryKeepsSelectionOnTransientFailure(t *testing.T) {
 			require.Equal(t, before, ownerTestRow(t, o))
 		})
 	}
+	t.Run("serving lstat permission failure", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("requires POSIX directory search permissions and an unprivileged user")
+		}
+		require.NoError(t, os.Chmod(o.root, 0))
+		t.Cleanup(func() { require.NoError(t, os.Chmod(o.root, 0o700)) })
+
+		r, err := o.recover(t.Context(), validate)
+		if r.Head != nil {
+			t.Cleanup(func() { require.NoError(t, r.Head.Close()) })
+		}
+		// Both heads share this root. An attempted fallback would return
+		// a joined error, not the serving head's Lstat error alone.
+		require.Equal(t, &os.PathError{Op: "lstat", Path: before.Serving.Directory, Err: syscall.EACCES}, err)
+		require.Nil(t, r.Head)
+		require.Equal(t, before, ownerTestRow(t, o))
+	})
+	t.Run("bad record with snapshot close failure", func(t *testing.T) {
+		badRecord := invalid("serving snapshot record")
+		closeFailure := errors.New("injected snapshot close failure")
+		checkedServing := false
+		r, err := o.recover(t.Context(), func(ctx context.Context, snap *Snapshot, w Witness) error {
+			if checkedServing {
+				return validate(ctx, snap, w)
+			}
+			checkedServing = true
+			snap.snap = ownerTestCloseErrorSnapshot{snapshotReader: snap.snap, err: closeFailure}
+			return badRecord
+		})
+		if r.Head != nil {
+			t.Cleanup(func() { require.NoError(t, r.Head.Close()) })
+		}
+		require.ErrorIs(t, err, badRecord)
+		require.ErrorIs(t, err, closeFailure)
+		require.Nil(t, r.Head)
+		require.Equal(t, before, ownerTestRow(t, o))
+	})
 	r, err := o.recover(ctx, validate)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, r.Head.Close()) })
 	require.Equal(t, before.Publication, r.Publication)
 	require.False(t, r.LastGood)
 	require.Equal(t, before, ownerTestRow(t, o))
+}
+
+type ownerTestCloseErrorSnapshot struct {
+	snapshotReader
+	err error
+}
+
+func (s ownerTestCloseErrorSnapshot) Close() error {
+	return errors.Join(s.snapshotReader.Close(), s.err)
 }
 
 func writeOwnerCrashRequest(t *testing.T, lease string, stage StageTables) {
