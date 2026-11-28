@@ -256,7 +256,7 @@ func (f HandlerFacts) VarBinding(name string) Binding {
 // SpringFileFacts uses the native value-redacted config-key extractor. It
 // does not retain config values or read any other file.
 func SpringFileFacts(filePath string, raw []byte) []*graph.Node {
-	profile, ok := springConfigFile(filePath)
+	profile, ok := SpringConfigProfile(filePath)
 	if !ok {
 		return nil
 	}

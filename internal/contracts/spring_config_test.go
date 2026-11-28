@@ -108,9 +108,9 @@ func TestSpringConfigFileDetection(t *testing.T) {
 		{"app/application.go", false, ""},
 	}
 	for _, c := range cases {
-		profile, ok := springConfigFile(c.path)
+		profile, ok := SpringConfigProfile(c.path)
 		if ok != c.wantOK || profile != c.wantProfile {
-			t.Errorf("springConfigFile(%q) = (%q,%v), want (%q,%v)", c.path, profile, ok, c.wantProfile, c.wantOK)
+			t.Errorf("SpringConfigProfile(%q) = (%q,%v), want (%q,%v)", c.path, profile, ok, c.wantProfile, c.wantOK)
 		}
 	}
 

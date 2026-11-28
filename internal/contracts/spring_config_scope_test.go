@@ -37,8 +37,8 @@ func TestBindSpringConfigIsolatesRepositoriesRootsAndIDs(t *testing.T) {
 		t.Fatalf("repo-b binding added nothing (err=%v)", err)
 	}
 
-	sharedA := scopedSpringConfigKeyID(scopeA, "shared.value")
-	sharedB := scopedSpringConfigKeyID(scopeB, "shared.value")
+	sharedA := scopeA.KeyID("shared.value")
+	sharedB := scopeB.KeyID("shared.value")
 	if sharedA == sharedB {
 		t.Fatalf("multi-repo config IDs collided: %q", sharedA)
 	}
@@ -48,13 +48,13 @@ func TestBindSpringConfigIsolatesRepositoriesRootsAndIDs(t *testing.T) {
 			t.Fatalf("node %q = %#v, want repo=%q workspace=ws", id, node, repo)
 		}
 	}
-	if g.GetNode(scopedSpringConfigKeyID(scopeA, "alpha.only")) == nil {
+	if g.GetNode(scopeA.KeyID("alpha.only")) == nil {
 		t.Fatal("repo-a root was not used to read alpha.only")
 	}
-	if g.GetNode(scopedSpringConfigKeyID(scopeA, "beta.only")) != nil {
+	if g.GetNode(scopeA.KeyID("beta.only")) != nil {
 		t.Fatal("repo-a pass read repo-b root")
 	}
-	if g.GetNode(scopedSpringConfigKeyID(scopeB, "beta.only")) == nil {
+	if g.GetNode(scopeB.KeyID("beta.only")) == nil {
 		t.Fatal("repo-b root was not used to read beta.only")
 	}
 	if !hasReadsConfigEdge(g, readerA, sharedA) || hasReadsConfigEdge(g, readerA, sharedB) {
@@ -90,7 +90,7 @@ func TestBindSpringConfigMigratesScopedLegacyID(t *testing.T) {
 	if got, err := BindSpringConfig(g, scope); err != nil || got == 0 {
 		t.Fatalf("migration added no qualified rows (err=%v)", err)
 	}
-	desiredID := scopedSpringConfigKeyID(scope, "app.value")
+	desiredID := scope.KeyID("app.value")
 	if g.GetNode(legacyID) != nil {
 		t.Fatalf("legacy unqualified node %q survived migration", legacyID)
 	}
@@ -281,7 +281,7 @@ func TestBindSpringConfigRefusesIncompleteLegacyMigration(t *testing.T) {
 				t.Fatalf("partial migration: adds=%d removals=%d evictions=%d", counting.addBatches, exact.removals, evicter.evictions)
 			}
 			if base.GetNode(legacyID) == nil || !hasReadsConfigEdge(base, "repo::Reader", legacyID) ||
-				base.GetNode(scopedSpringConfigKeyID(scope, "app.value")) != nil {
+				base.GetNode(scope.KeyID("app.value")) != nil {
 				t.Fatal("refused migration changed the legacy graph")
 			}
 		})

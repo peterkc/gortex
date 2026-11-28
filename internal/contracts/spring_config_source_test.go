@@ -21,7 +21,7 @@ func TestSpringConfigAcceptedSourceDoesNotReadCurrentFilesystem(t *testing.T) {
 	if _, err := BindSpringConfig(g, scope); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || g.GetNode(scopedSpringConfigKeyID(scope, "server.port")) == nil {
+	if calls != 1 || g.GetNode(scope.KeyID("server.port")) == nil {
 		t.Fatal("accepted config source was not materialized")
 	}
 	failed := graph.New()
@@ -30,7 +30,7 @@ func TestSpringConfigAcceptedSourceDoesNotReadCurrentFilesystem(t *testing.T) {
 	if _, err := BindSpringConfig(failed, scope); err != nil {
 		t.Fatal(err)
 	}
-	if failed.GetNode(scopedSpringConfigKeyID(scope, "server.port")) != nil {
+	if failed.GetNode(scope.KeyID("server.port")) != nil {
 		t.Fatal("failed accepted source invented config key")
 	}
 }

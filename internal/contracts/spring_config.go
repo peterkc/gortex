@@ -55,7 +55,8 @@ type SpringConfigScope struct {
 	ReadSource func(string) ([]byte, error)
 }
 
-func scopedSpringConfigKeyID(scope SpringConfigScope, key string) string {
+// KeyID returns the canonical scoped or standalone key ID.
+func (scope SpringConfigScope) KeyID(key string) string {
 	canonical := canonicalizeSpringKey(key)
 	if scope.RepoPrefix == "" {
 		return "cfg::spring::" + canonical
@@ -90,9 +91,9 @@ func springConfigSource(scope SpringConfigScope, graphPath string) []byte {
 	return data
 }
 
-// springConfigFile reports whether path is a Spring application config file and
+// SpringConfigProfile reports whether path is a Spring application config file and
 // returns its profile (the `-prod` in application-prod.yml; "" for the base).
-func springConfigFile(path string) (profile string, ok bool) {
+func SpringConfigProfile(path string) (profile string, ok bool) {
 	path = strings.ReplaceAll(path, "\\", "/")
 	base := path
 	if i := strings.LastIndexByte(path, '/'); i >= 0 {
@@ -175,7 +176,7 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) (int, error) {
 	legacyIDs := make(map[string]struct{})
 	byPrefix := make(map[string][]target)
 	for _, filePath := range projectedFiles {
-		profile, ok := springConfigFile(filePath)
+		profile, ok := SpringConfigProfile(filePath)
 		if !ok {
 			continue
 		}
@@ -186,7 +187,7 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) (int, error) {
 		}
 		for _, node := range ExtractSpringConfigKeys(filePath, src, profile) {
 			legacyID := node.ID
-			node.ID = scopedSpringConfigKeyID(scope, node.Name)
+			node.ID = scope.KeyID(node.Name)
 			node.RepoPrefix = scope.RepoPrefix
 			node.WorkspaceID = scope.WorkspaceID
 			if _, duplicate := desiredNodes[node.ID]; !duplicate {
@@ -245,11 +246,7 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) (int, error) {
 			return
 		}
 		seenDesired[identity] = struct{}{}
-		desiredEdges = append(desiredEdges, &graph.Edge{
-			From: reader.ID, To: candidate.desired, Kind: graph.EdgeReadsConfig,
-			FilePath: reader.FilePath, Line: reader.StartLine,
-			Meta: map[string]any{"via": "spring_value", "raw_key": raw},
-		})
+		desiredEdges = append(desiredEdges, SpringConfigReadEdge(reader, candidate.desired, raw))
 		if candidate.legacy != candidate.desired {
 			targets := legacyTargets[reader.ID]
 			if targets == nil {
@@ -261,7 +258,7 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) (int, error) {
 	}
 	for _, reader := range readers {
 		readerIDs = append(readerIDs, reader.ID)
-		for _, key := range springConfigKeysOf(reader) {
+		for _, key := range SpringConfigKeysOf(reader) {
 			if strings.HasSuffix(key, "*") {
 				prefix := canonicalizeSpringKey(strings.TrimSuffix(strings.TrimSuffix(key, "*"), "."))
 				for _, candidate := range byPrefix[prefix] {
@@ -270,7 +267,7 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) (int, error) {
 				continue
 			}
 			emit(reader, target{
-				desired: scopedSpringConfigKeyID(scope, key),
+				desired: scope.KeyID(key),
 				legacy:  springConfigKeyID(key),
 			}, key)
 		}
@@ -358,8 +355,17 @@ func springReaderNodes(g graph.Store, scope SpringConfigScope) []*graph.Node {
 	}, "spring_config_keys")
 }
 
-// springConfigKeysOf coerces the spring_config_keys Meta value into a slice.
-func springConfigKeysOf(n *graph.Node) []string {
+// SpringConfigReadEdge constructs the native edge for the elected key.
+func SpringConfigReadEdge(reader *graph.Node, target, raw string) *graph.Edge {
+	return &graph.Edge{
+		From: reader.ID, To: target, Kind: graph.EdgeReadsConfig,
+		FilePath: reader.FilePath, Line: reader.StartLine,
+		Meta: map[string]any{"via": "spring_value", "raw_key": raw},
+	}
+}
+
+// SpringConfigKeysOf coerces the spring_config_keys Meta value into a slice.
+func SpringConfigKeysOf(n *graph.Node) []string {
 	switch t := n.Meta["spring_config_keys"].(type) {
 	case []string:
 		return t
