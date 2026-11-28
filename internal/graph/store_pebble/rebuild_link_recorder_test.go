@@ -498,3 +498,28 @@ func TestRebuildValueRefsSelectedFileIndexGuards(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildBuiltinCustodyRejectsDataflowSource(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	e := &graph.Edge{From: "builtin::go::len", To: "f.go::F", Kind: graph.EdgeArgOf, FilePath: "f.go", Line: 1}
+	require.NoError(t, b.writePendingEdge(e, rebuildEdgeCustody{proof: rebuildProofGoBuiltinSource}, false))
+	key := pendingEdgeKey(e)
+	before, err := readRebuildEdgeCustody(b.pending, key)
+	require.NoError(t, err)
+	require.Equal(t, rebuildEdgeCustody{proof: rebuildProofGoBuiltinSource}, before)
+	value, err := encodeEdge(e)
+	require.NoError(t, err)
+
+	const source = "unresolved::x"
+	_, err = (rebuildEdgeCustody{proof: rebuildProofGoBuiltinSource, source: source}).encode(value)
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "edge custody proof")
+
+	// Supply a matching digest so the reader cannot refuse for a different reason.
+	digest := rebuildEdgeProofDigest(value, source)
+	data := append(append([]byte{rebuildEdgeProofFormat, byte(rebuildProofGoBuiltinSource)}, digest[:]...), source...)
+	require.NoError(t, b.pending.Set(rebuildLinkRecorderKey(key), data, pebble.NoSync))
+	_, err = readRebuildEdgeCustody(b.pending, key)
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "edge custody source")
+}

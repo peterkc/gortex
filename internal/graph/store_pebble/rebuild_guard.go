@@ -326,8 +326,9 @@ func (b *BuildStore) rebuildGuardReindex(ctx context.Context, moves []graph.Edge
 			if err != nil {
 				return err
 			}
-			// A revert may keep raw lineage, but not a stage proof at a
-			// different identity. Same-key guard stamps preserve custody.
+			// Same-key stamps preserve custody. On an identity change, raw
+			// lineage can follow the row. Stage proofs do not, except that
+			// Go dataflow custody tracks same-site source detours until they return.
 			if origin != key || before == nil {
 				if custody.proof == rebuildProofGoDataflowSource {
 					old, err := decodeLinkRecorder([]byte(origin))

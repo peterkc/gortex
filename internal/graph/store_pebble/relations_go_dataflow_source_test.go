@@ -41,6 +41,8 @@ func Local() int { return local.Constant }
 		{"source restore", source, graph.EdgeArgOf, 3, "restore", true},
 		{"source restore value", source, graph.EdgeValueFlow, 4, "restore", true},
 		{"same chunk target chain", source, graph.EdgeArgOf, 3, "chain", true},
+		{"same chunk source detour", source, graph.EdgeArgOf, 3, "chain source", false},
+		{"same chunk line change", source, graph.EdgeArgOf, 3, "chain line", false},
 		{"forged pair", source, graph.EdgeArgOf, 3, "pair", false},
 		{"forged source move", source, graph.EdgeArgOf, 3, "source", false},
 	} {
@@ -91,10 +93,23 @@ func Local() int { return local.Constant }
 				move.To = file + "::Arg"
 				require.NoError(t, worker.ApplyLinkReindexes(ctx, []graph.EdgeReindex{{Edge: &move, OldTo: edge.To}}))
 				edge = move
-			case "chain":
+			case "chain", "chain source", "chain line":
 				middle, last := edge, edge
 				middle.To, last.To = file+"::Arg", file+"::Value"
-				worker.ReindexEdges([]graph.EdgeReindex{{Edge: &middle, OldTo: edge.To}, {Edge: &last, OldTo: middle.To}})
+				second := graph.EdgeReindex{Edge: &last, OldTo: middle.To}
+				if tc.change != "chain" {
+					second.OldFrom, second.OldFilePath, second.OldLine = middle.From, middle.FilePath, middle.Line
+					second.RefreshIdentity = true
+					if tc.change == "chain source" {
+						last.From = "unresolved::extern::net/http::StatusOK"
+					} else {
+						last.Line++
+					}
+				}
+				worker.ReindexEdges([]graph.EdgeReindex{{Edge: &middle, OldTo: edge.To}, second})
+				saved, err := worker.pendingEdge(pendingEdgeKey(&last))
+				require.NoError(t, err)
+				require.Equal(t, &last, saved)
 				edge = last
 			case "pair":
 				forged := edge

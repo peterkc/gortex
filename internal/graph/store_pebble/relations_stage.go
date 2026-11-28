@@ -206,7 +206,8 @@ func rebuildGoArgumentSource(e *graph.Edge, extractorOf func(string) string) boo
 
 func rebuildGoUnresolvedNameSource(from string) bool {
 	name := strings.TrimPrefix(graph.UnresolvedName(from), "*.")
-	return token.IsIdentifier(name) && name != "_" &&
+	// The Go extractor skips a bare blank identifier, but emits blank selectors.
+	return token.IsIdentifier(name) && from != "unresolved::_" &&
 		slices.Contains(graph.UnresolvedNameCandidateIDsForName(name, ""), from)
 }
 

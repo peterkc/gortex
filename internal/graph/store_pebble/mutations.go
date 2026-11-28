@@ -219,7 +219,9 @@ func (b *BuildStore) reindexChunk(batch []graph.EdgeReindex) error {
 // Generic reindexes, including placeholder source moves and function-pointer
 // moves, do not capture an old key. They keep inherited raw lineage or mark
 // a receipt-input move as untracked. Go builtin and Go dataflow source proofs
-// can survive target-only moves. A missing old row cannot establish raw lineage.
+// can survive target-only moves. Go dataflow custody tracks a same-site source
+// detour, but the seal accepts the proof only after the source returns.
+// A missing old row cannot establish raw lineage.
 func (b *BuildStore) reindexChunkWithRecorders(batch []graph.EdgeReindex, capture bool) error {
 	return b.reindexChunkWithProof(batch, capture, false)
 }
