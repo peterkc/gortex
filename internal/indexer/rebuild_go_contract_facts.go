@@ -37,8 +37,8 @@ func (f *rebuildGoManifest) captureContractDeps(data []byte) error {
 // They still serve the linker. Late contract replay distinguishes a checked
 // empty set from missing payload for a nonempty projection.
 func (f rebuildGoManifest) visitContractDeps(visit func(contracts.Contract) error) error {
-	if f.Path != "go.mod" || len(f.DirectDeps) != 0 && len(f.ContractDeps) == 0 {
-		return fmt.Errorf("%w: full dependency records for %q not covered", errRebuildGoEvidence, f.Path)
+	if err := f.checkContractDeps(); err != nil {
+		return err
 	}
 	for _, dep := range f.ContractDeps {
 		if err := visit(contracts.Contract{
@@ -48,6 +48,13 @@ func (f rebuildGoManifest) visitContractDeps(visit func(contracts.Contract) erro
 		}); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (f rebuildGoManifest) checkContractDeps() error {
+	if f.Path != "go.mod" || len(f.DirectDeps) != 0 && len(f.ContractDeps) == 0 {
+		return fmt.Errorf("%w: full dependency records for %q not covered", errRebuildGoEvidence, f.Path)
 	}
 	return nil
 }

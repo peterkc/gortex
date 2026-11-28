@@ -40,6 +40,65 @@ func (r rebuildContractReceiptReader) load(ctx context.Context, input rebuildInp
 	return base, facts, ctx.Err()
 }
 
+// visitFilesAtParseCut answers endpoint questions before main can change the
+// graph's candidates. Each call borrows one file's records and checked facts.
+// The caller must not retain a whole receipt census for the late pass.
+func (r rebuildContractReceiptReader) visitFilesAtParseCut(ctx context.Context, view store_pebble.RebuildView,
+	visit func(path string, records []contracts.Contract, facts *contracts.FileFacts) error,
+) error {
+	constants := rebuildEndpointConstants{ctx: ctx, view: view}
+	for _, input := range r.job.inputs {
+		_, facts, err := r.load(ctx, input)
+		if err != nil {
+			return err
+		}
+		records, err := contracts.ResolveEndpointQuestionsWithLookup(facts.Records, facts.Questions, constants.lookup)
+		if err != nil {
+			return fmt.Errorf("%w: endpoint questions for %q: %w", errParseEntryCorrupt, input.Path, err)
+		}
+		if constants.err != nil {
+			return fmt.Errorf("resolve endpoint constants for %q: %w", input.Path, constants.err)
+		}
+		if err := visit(input.Path, records, facts); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+// visitLateContractSourcesAtParseCut emits the original records needed by the
+// late pass. Capture this stream before main; do not replay the questions over
+// final Relations. The checked root fact contributes full dependency records,
+// not the minimal identities seeded for import resolution.
+func (r rebuildContractReceiptReader) visitLateContractSourcesAtParseCut(ctx context.Context, view store_pebble.RebuildView,
+	root rebuildGoManifest, visit func(contracts.Contract) error,
+) error {
+	if err := root.checkContractDeps(); err != nil {
+		return err
+	}
+	scoped := func(c contracts.Contract) error {
+		c.RepoPrefix = r.idx.repoPrefix
+		if c.WorkspaceID == "" {
+			c.WorkspaceID = r.idx.workspaceID
+		}
+		if c.ProjectID == "" {
+			c.ProjectID = r.idx.projectID
+		}
+		return visit(c)
+	}
+	if err := r.visitFilesAtParseCut(ctx, view, func(_ string, records []contracts.Contract, _ *contracts.FileFacts) error {
+		for _, c := range records {
+			if err := scoped(c); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return root.visitContractDeps(scoped)
+}
+
 // forLinkedNode checks the source range before returning its captured body
 // or shape inputs. Link metadata may legitimately change without moving the
 // declaration; it is not an input identity. An absent shape for a proved

@@ -2,7 +2,7 @@ package indexer
 
 import (
 	"context"
-	"fmt"
+	"strings"
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
@@ -33,26 +33,15 @@ func (idx *Indexer) readRebuildEarlyContractFacts(ctx context.Context, view stor
 	rootDeps []string,
 ) (*rebuildEarlyContractFacts, error) {
 	out := &rebuildEarlyContractFacts{registry: contracts.NewRegistry(), routers: make(map[string]contracts.RouterFacts)}
-	constants := rebuildEndpointConstants{ctx: ctx, view: view}
 	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
-	for _, input := range job.inputs {
-		_, facts, err := reader.load(ctx, input)
-		if err != nil {
-			return nil, err
-		}
-		// The checked receipt already enforces question positions. Keep
-		// the resolver's defensive error rather than treating a failure as empty.
-		records, err := contracts.ResolveEndpointQuestions(facts.Records, facts.Questions, &constants)
-		if err != nil {
-			return nil, fmt.Errorf("%w: endpoint questions for %q: %w", errParseEntryCorrupt, input.Path, err)
-		}
-		if constants.err != nil {
-			return nil, fmt.Errorf("resolve endpoint constants for %q: %w", input.Path, constants.err)
-		}
+	if err := reader.visitFilesAtParseCut(ctx, view, func(path string, records []contracts.Contract, facts *contracts.FileFacts) error {
 		out.registry.AddAllScoped(records, idx.repoPrefix, idx.workspaceID, idx.projectID)
 		if facts.Router != nil {
-			out.routers[pathkey.Normalize(input.Path)] = *facts.Router
+			out.routers[pathkey.Normalize(path)] = *facts.Router
 		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	// The checked root fact contains precisely GoModExtractor's IDs for the
 	// admitted empty tracked-repo set, regardless of which IDs seed a row.
@@ -70,38 +59,56 @@ type rebuildEndpointConstants struct {
 	err  error
 }
 
-func (s *rebuildEndpointConstants) FindNodesByNames(names []string) map[string][]*graph.Node {
-	out := make(map[string][]*graph.Node)
-	for _, name := range names {
-		if s.err != nil {
-			return nil
-		}
-		s.err = s.view.VisitNameCandidates(s.ctx, name, nil, func(n *graph.Node) error {
-			if n.Kind == graph.KindConstant {
-				out[name] = append(out[name], n)
-			}
-			return nil
-		})
-	}
-	return out
+type rebuildEndpointValue struct {
+	value     string
+	ambiguous bool
 }
 
-func (s *rebuildEndpointConstants) ConstantValuesByNodeIDs(ids []string) (map[string]string, error) {
-	if s.err != nil {
-		return nil, s.err
+func (v *rebuildEndpointValue) add(s string) {
+	if s == "" {
+		return
 	}
-	out := make(map[string]string, len(ids))
-	for _, id := range ids {
-		row, err := s.view.ConstantValue(s.ctx, id)
-		if err != nil {
-			s.err = err
-			return nil, err
-		}
-		if row != nil {
-			out[id] = row.Value
-		}
+	if v.value == "" {
+		v.value = s
+	} else if v.value != s {
+		v.ambiguous = true
 	}
-	return out, nil
+}
+
+// lookup reduces identical values without retaining a name group, even for a
+// name declared in many files. Preserve same-file preference and repo-wide
+// fallback in resolveConstIdentifier. Errors are sticky, not native misses.
+func (s *rebuildEndpointConstants) lookup(name, file, repo string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || s.err != nil {
+		return ""
+	}
+	var sameFile, anywhere rebuildEndpointValue
+	prefix := repo + "/"
+	s.err = s.view.VisitNameCandidates(s.ctx, name, nil, func(n *graph.Node) error {
+		if n.Kind != graph.KindConstant || repo != "" && !strings.HasPrefix(n.ID, prefix) && !strings.HasPrefix(n.FilePath, prefix) {
+			return nil
+		}
+		row, err := s.view.ConstantValue(s.ctx, n.ID)
+		if err != nil || row == nil {
+			return err
+		}
+		anywhere.add(row.Value)
+		if file != "" && n.FilePath == file {
+			sameFile.add(row.Value)
+		}
+		return nil
+	})
+	switch {
+	case s.err != nil:
+		return ""
+	case !sameFile.ambiguous && sameFile.value != "":
+		return sameFile.value
+	case !anywhere.ambiguous:
+		return anywhere.value
+	default:
+		return ""
+	}
 }
 
 // finish runs after main. Collect only native DI records, without running

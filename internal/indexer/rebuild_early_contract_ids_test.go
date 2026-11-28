@@ -67,12 +67,13 @@ app.include_router(router, prefix="/api")
 
 	gomod := []byte("module example.com/app\n\nrequire example.com/lib v1.0.0\n")
 	require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), gomod, 0o600))
-	var manifest rebuildGoManifest
+	manifest := rebuildGoManifest{Path: "go.mod"}
 	require.NoError(t, manifest.captureContractDeps(gomod))
 	f, err := idx.readRebuildEarlyContractFacts(ctx, build.RebuildView(), job, store, &census, manifest.DirectDeps)
 	require.NoError(t, err)
 	_, byLang := idx.buildPerFileContractExtractors()
 	native := contracts.NewRegistry()
+	var nativeRecords []contracts.Contract
 	for _, file := range files {
 		src := []byte(file.body)
 		tree := contracts.ParseTreeForLang(file.language, src)
@@ -80,8 +81,25 @@ app.include_router(router, prefix="/api")
 		records := idx.runContractExtractorsForFile(file.path, src, nodes[file.path], edges[file.path], byLang[file.language], tree)
 		tree.Release()
 		native.AddAllScoped(records, "", "", "")
+		nativeRecords = append(nativeRecords, records...)
 	}
 	idx.extractGoModContracts(native)
+	nativeRecords = append(nativeRecords, native.ByFile("go.mod")...)
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: &census}
+	var replayed []contracts.Contract
+	require.NoError(t, os.Remove(filepath.Join(root, "go.mod")))
+	require.NoError(t, reader.visitLateContractSourcesAtParseCut(ctx, build.RebuildView(), manifest, func(c contracts.Contract) error {
+		replayed = append(replayed, c)
+		return nil
+	}))
+	require.Equal(t, nativeRecords, replayed)
+	for _, root := range []rebuildGoManifest{{}, {Path: "go.mod", DirectDeps: manifest.DirectDeps}} {
+		err := reader.visitLateContractSourcesAtParseCut(ctx, build.RebuildView(), root, func(contracts.Contract) error {
+			t.Fatal("unproved root returned source records")
+			return nil
+		})
+		require.ErrorIs(t, err, errRebuildGoEvidence)
+	}
 
 	// The DI marker is present at the post-link cut, not in the parse facts.
 	di := &graph.Edge{From: "routes.go", To: "Token", Kind: graph.EdgeConsumes, FilePath: "routes.go",
