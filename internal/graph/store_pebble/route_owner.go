@@ -181,7 +181,8 @@ func (o *routeOwner) recordServing(ctx context.Context, loc routeLocator, receip
 }
 
 // failBuild runs after the worker has exited and been reaped. It preserves
-// the error for the scheduler/status adapter and never deletes a serving head.
+// the error for the scheduler/status adapter and leaves the serving head open.
+// The caller must drain readers before failing a detached former serving head.
 // Any worker spill directory is owned separately by the worker lease caller.
 func (b *routeBuild) failBuild(ctx context.Context, failure error) error {
 	o := b.owner
@@ -194,13 +195,19 @@ func (b *routeBuild) failBuild(ctx context.Context, failure error) error {
 	if row.Serving == b.locator {
 		return failure
 	}
+	var closeErr error
+	if b.head != nil {
+		closeErr = b.head.Close()
+		b.head = nil
+	}
 	if row.Candidate != b.locator {
-		return errors.Join(failure, ErrStaleBase)
+		return errors.Join(failure, ErrStaleBase, closeErr)
 	}
-	if err := b.head.Close(); err != nil {
-		return errors.Join(failure, err)
+	if closeErr != nil {
+		return errors.Join(failure, closeErr)
 	}
-	return errors.Join(failure, o.discardCandidate(ctx, row))
+	// Reaping the worker ends its work, not the owner's cleanup obligation.
+	return errors.Join(failure, o.discardCandidate(context.WithoutCancel(ctx), row))
 }
 
 // discardCandidate removes only the reserved, unserved directory, then clears
@@ -285,12 +292,12 @@ func (o *routeOwner) recover(ctx context.Context, validate func(context.Context,
 	if row.Serving == (routeLocator{}) {
 		return routeRecovery{Requeue: true}, nil
 	}
-	r, err := o.openChecked(ctx, row.Serving, row.Publication, validate)
+	r, badHead, err := o.openChecked(ctx, row.Serving, row.Publication, validate)
 	if err != nil {
-		if row.Retained.Locator == (routeLocator{}) || ctx.Err() != nil {
+		if !badHead || row.Retained.Locator == (routeLocator{}) || ctx.Err() != nil {
 			return routeRecovery{}, err
 		}
-		fallback, fallbackErr := o.openChecked(ctx, row.Retained.Locator, row.Retained.Publication, validate)
+		fallback, _, fallbackErr := o.openChecked(ctx, row.Retained.Locator, row.Retained.Publication, validate)
 		if fallbackErr != nil {
 			return routeRecovery{}, errors.Join(err, fallbackErr)
 		}
@@ -324,22 +331,23 @@ func (o *routeOwner) recover(ctx context.Context, validate func(context.Context,
 	return r, nil
 }
 
-func (o *routeOwner) openChecked(ctx context.Context, loc routeLocator, saved LocalPublicationRecord, validate func(context.Context, *Snapshot, Witness) error) (routeRecovery, error) {
+// openChecked reports whether a failed check proves the selected head is bad.
+func (o *routeOwner) openChecked(ctx context.Context, loc routeLocator, saved LocalPublicationRecord, validate func(context.Context, *Snapshot, Witness) error) (routeRecovery, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return routeRecovery{}, err
+		return routeRecovery{}, false, err
 	}
 	info, err := os.Lstat(loc.Directory)
 	if err != nil {
-		return routeRecovery{}, err
+		return routeRecovery{}, errors.Is(err, os.ErrNotExist), err
 	}
 	if !info.IsDir() {
-		return routeRecovery{}, invalid("route head directory")
+		return routeRecovery{}, true, invalid("route head directory")
 	}
 	options := headOptions()
 	options.ErrorIfNotExists = true
 	db, err := pebble.Open(loc.Directory, options)
 	if err != nil {
-		return routeRecovery{}, err
+		return routeRecovery{}, errors.Is(err, pebble.ErrDBDoesNotExist) || pebble.IsCorruptionError(err), err
 	}
 	h := &Head{db: db, options: options, incarnation: o.incarnation, profile: o.profile, directory: loc.Directory}
 	snap := h.OpenSnapshot()
@@ -350,8 +358,17 @@ func (o *routeOwner) openChecked(ctx context.Context, loc routeLocator, saved Lo
 	if err == nil {
 		err = validate(ctx, snap, w)
 	}
-	if err = errors.Join(err, snap.ReadError(), snap.Close()); err != nil {
-		return routeRecovery{}, fmt.Errorf("check route head %q: %w", loc.Lease, errors.Join(err, h.Close()))
+	readErr, closeErr := snap.ReadError(), snap.Close()
+	if err != nil || readErr != nil || closeErr != nil {
+		// A validator can report an apparent mismatch after a failed read.
+		// An unclassified read or close failure cannot authorize a switch.
+		badHead := (err == nil || badRouteRecord(err)) && (readErr == nil || badRouteRecord(readErr))
+		closeErr = errors.Join(closeErr, h.Close())
+		return routeRecovery{}, badHead && closeErr == nil, fmt.Errorf("check route head %q: %w", loc.Lease, errors.Join(err, readErr, closeErr))
 	}
-	return routeRecovery{Head: h, Witness: w, Publication: record}, nil
+	return routeRecovery{Head: h, Witness: w, Publication: record}, false, nil
+}
+
+func badRouteRecord(err error) bool {
+	return errors.Is(err, errInvalidRecord) || errors.Is(err, ErrNotPublished) || pebble.IsCorruptionError(err)
 }

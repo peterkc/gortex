@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -203,6 +204,7 @@ func TestRouteOwnerPartialCoverageAndFailure(t *testing.T) {
 	require.ErrorIs(t, old.failBuild(ctx, failed), failed)
 	require.Equal(t, oldRow, ownerTestRow(t, o))
 	require.DirExists(t, old.locator.Directory)
+	require.Equal(t, oldRow.Publication, ownerTestWitness(t, old.head, stages[len(stages)-1].Witness))
 
 	regressedStages := ownerTestStages(t, routeTestSource+"// edit\n", StageRelations, []string{"go"})
 	regressed, err := o.begin(ctx, routeTestNewLease, old.head, regressedStages[0].Witness)
@@ -236,6 +238,64 @@ func TestRouteOwnerPartialCoverageAndFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, stages[2].Witness, w)
 	require.NoError(t, pinned.ReadError())
+}
+
+func TestRouteOwnerCancelledFailureClearsCandidate(t *testing.T) {
+	ctx := t.Context()
+	o := ownerTestInit(t)
+	manifest := ownerTestManifest(t, routeTestSource)
+	b, err := o.begin(ctx, routeTestOldLease, nil, manifest.Witness)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if b.head != nil {
+			require.NoError(t, b.head.Close())
+		}
+	})
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	require.ErrorIs(t, b.failBuild(cancelled, cancelled.Err()), context.Canceled)
+	require.NoDirExists(t, b.locator.Directory)
+	require.Equal(t, routeCheckout{Incarnation: o.incarnation}, ownerTestRow(t, o))
+
+	// A later build can reserve the same directory, including its LOCK path.
+	next, err := o.begin(ctx, routeTestOldLease, nil, manifest.Witness)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, next.head.Close()) })
+	require.Equal(t, next.locator, ownerTestRow(t, o).Candidate)
+}
+
+func TestRouteOwnerStaleFailureClosesOnlyDetachedHead(t *testing.T) {
+	ctx := t.Context()
+	o := ownerTestInit(t)
+	manifest := ownerTestManifest(t, routeTestSource)
+	b, err := o.begin(ctx, routeTestOldLease, nil, manifest.Witness)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if b.head != nil {
+			require.NoError(t, b.head.Close())
+		}
+	})
+	next := o.locator(routeTestNewLease)
+	require.NoError(t, o.catalog.registerCandidate(ctx, o.checkout, o.incarnation, routeLocator{}, next))
+	nextHead, err := OpenHead(next.Directory, o.incarnation, o.profile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, nextHead.Close()) })
+	before := ownerTestRow(t, o)
+	failure := errors.New("worker failed after losing its reservation")
+	for range 2 {
+		err = b.failBuild(ctx, failure)
+		require.ErrorIs(t, err, failure)
+		require.ErrorIs(t, err, ErrStaleBase)
+		require.Equal(t, before, ownerTestRow(t, o))
+		require.DirExists(t, b.locator.Directory)
+	}
+	// Opening the detached DB needs its original LOCK to be released. The
+	// new candidate still owns its own handle and can ingest normally.
+	detached, err := OpenHead(b.locator.Directory, o.incarnation, o.profile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, detached.Close()) })
+	_, err = nextHead.PublishStage(ctx, manifest)
+	require.NoError(t, err)
 }
 
 // The full logical row check here is the existing independent test oracle.
@@ -318,8 +378,8 @@ func TestRouteOwnerDiscardsUnexposedManifest(t *testing.T) {
 }
 
 func TestRouteOwnerStartupRestoresOnlyCheckedCheckpoint(t *testing.T) {
-	for _, corruptCheckpoint := range []bool{false, true} {
-		t.Run(fmt.Sprint(corruptCheckpoint), func(t *testing.T) {
+	for _, mode := range []string{"invalid rows", "invalid checkpoint", "missing witness", "missing DB", "missing directory", "not a directory", "corrupt manifest marker"} {
+		t.Run(mode, func(t *testing.T) {
 			ctx := t.Context()
 			lease := t.TempDir()
 			oldStages := ownerTestStages(t, routeTestSource, StageSearch, nil)
@@ -342,10 +402,14 @@ func TestRouteOwnerStartupRestoresOnlyCheckedCheckpoint(t *testing.T) {
 				defer func() { require.NoError(t, next.head.Close()) }()
 				ownerTestPublish(t, next, newStages)
 				newRow = ownerTestRow(t, o)
-				// Leave the publication witness intact but change one family row.
-				// The startup integrity check, not witness decoding alone, must refuse.
-				require.NoError(t, next.head.db.Delete(pendingNodeKey("a.go::F"), pebble.Sync))
-				if corruptCheckpoint {
+				switch mode {
+				case "invalid rows", "invalid checkpoint":
+					// Leave the witness intact so the integrity check must refuse.
+					require.NoError(t, next.head.db.Delete(pendingNodeKey("a.go::F"), pebble.Sync))
+				case "missing witness":
+					require.NoError(t, next.head.db.Delete(publicationWitnessKey, pebble.Sync))
+				}
+				if mode == "invalid checkpoint" {
 					checkpoint, err := OpenHead(oldRow.Retained.Locator.Directory, o.incarnation, FullProfile)
 					require.NoError(t, err)
 					require.NoError(t, checkpoint.db.Delete(pendingNodeKey("a.go::F"), pebble.Sync))
@@ -353,8 +417,26 @@ func TestRouteOwnerStartupRestoresOnlyCheckedCheckpoint(t *testing.T) {
 				}
 			}()
 			o := ownerTestCatalog(t, lease)
+			serving := newRow.Serving.Directory
+			switch mode {
+			case "missing DB", "missing directory", "not a directory":
+				require.NoError(t, os.RemoveAll(serving))
+				switch mode {
+				case "missing DB":
+					require.NoError(t, os.Mkdir(serving, 0o700))
+				case "not a directory":
+					require.NoError(t, os.WriteFile(serving, []byte("not a DB"), 0o600))
+				}
+			case "corrupt manifest marker":
+				markers, err := filepath.Glob(filepath.Join(serving, "marker.manifest.*"))
+				require.NoError(t, err)
+				require.Len(t, markers, 1)
+				// Preserve the marker's sequence number, but make the selected
+				// manifest filename unparsable to Pebble.
+				require.NoError(t, os.Rename(markers[0], markers[0]+".bad"))
+			}
 			r, err := o.recover(ctx, ownerTestValidator(t))
-			if corruptCheckpoint {
+			if mode == "invalid checkpoint" {
 				require.ErrorIs(t, err, errInvalidRecord)
 				require.Nil(t, r.Head)
 				require.Equal(t, newRow, ownerTestRow(t, o))
@@ -364,16 +446,86 @@ func TestRouteOwnerStartupRestoresOnlyCheckedCheckpoint(t *testing.T) {
 			t.Cleanup(func() { require.NoError(t, r.Head.Close()) })
 			require.True(t, r.LastGood)
 			require.True(t, r.Requeue)
-			require.ErrorIs(t, r.Failure, errInvalidRecord)
+			switch mode {
+			case "missing witness":
+				require.ErrorIs(t, r.Failure, ErrNotPublished)
+			case "missing DB":
+				require.ErrorIs(t, r.Failure, pebble.ErrDBDoesNotExist)
+			case "missing directory":
+				require.ErrorIs(t, r.Failure, os.ErrNotExist)
+			case "corrupt manifest marker":
+				require.True(t, pebble.IsCorruptionError(r.Failure), "%v", r.Failure)
+			default:
+				require.ErrorIs(t, r.Failure, errInvalidRecord)
+			}
 			require.Equal(t, oldRow.Publication, r.Publication)
 			require.Equal(t, oldStages[len(oldStages)-1].Witness, r.Witness)
 			row := ownerTestRow(t, o)
 			require.Equal(t, oldRow.Retained.Locator, row.Serving)
 			require.True(t, row.LastGood)
 			require.Zero(t, row.Retained)
-			require.DirExists(t, newRow.Serving.Directory, "failed head is never selected or deleted by fallback")
+			switch mode {
+			case "missing directory":
+				require.NoDirExists(t, serving)
+			case "not a directory":
+				require.FileExists(t, serving)
+			default:
+				require.DirExists(t, serving, "fallback does not delete the failed head")
+			}
 		})
 	}
+}
+
+func TestRouteOwnerRecoveryKeepsSelectionOnTransientFailure(t *testing.T) {
+	ctx := t.Context()
+	o := ownerTestInit(t)
+	stages := ownerTestStages(t, routeTestSource, StageSearch, nil)
+	validate := ownerTestValidator(t)
+	b, err := o.begin(ctx, routeTestOldLease, nil, stages[0].Witness)
+	require.NoError(t, err)
+	func() {
+		defer func() { require.NoError(t, b.head.Close()) }()
+		ownerTestPublish(t, b, stages)
+		require.NoError(t, o.retainCheckpoint(ctx, b.head, routeTestNewLease))
+		before := ownerTestRow(t, o)
+
+		r, err := o.recover(ctx, validate)
+		if r.Head != nil {
+			t.Cleanup(func() { require.NoError(t, r.Head.Close()) })
+		}
+		require.Error(t, err, "the serving LOCK is held")
+		require.Nil(t, r.Head)
+		require.Equal(t, before, ownerTestRow(t, o))
+	}()
+	before := ownerTestRow(t, o)
+	for _, failure := range []error{syscall.EIO, syscall.EMFILE, syscall.EACCES} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			checks := 0
+			r, err := o.recover(ctx, func(ctx context.Context, snap *Snapshot, w Witness) error {
+				checks++
+				if checks == 1 {
+					if failure == syscall.EIO {
+						snap.retain(failure)
+						return invalid("partial read made a family look incomplete")
+					}
+					return failure
+				}
+				return validate(ctx, snap, w)
+			})
+			if r.Head != nil {
+				t.Cleanup(func() { require.NoError(t, r.Head.Close()) })
+			}
+			require.ErrorIs(t, err, failure)
+			require.Nil(t, r.Head)
+			require.Equal(t, before, ownerTestRow(t, o))
+		})
+	}
+	r, err := o.recover(ctx, validate)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, r.Head.Close()) })
+	require.Equal(t, before.Publication, r.Publication)
+	require.False(t, r.LastGood)
+	require.Equal(t, before, ownerTestRow(t, o))
 }
 
 func writeOwnerCrashRequest(t *testing.T, lease string, stage StageTables) {
