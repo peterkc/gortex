@@ -1273,6 +1273,18 @@ func (v RebuildView) VisitExternalCallEdges(ctx context.Context, selectEdge func
 }
 
 func readExternalCallRoleMetadata(c *recordCursor) map[string]any {
+	return readRebuildRoleMetadata(c, func(key string) bool {
+		switch key {
+		case "godot_connection", "godot_method", "rust_path", "rust_recv", "receiver_type", "rust_recv_expr":
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+// readRebuildRoleMetadata projects scalar role fields before the size check.
+func readRebuildRoleMetadata(c *recordCursor, selects func(string) bool) map[string]any {
 	if !c.boolean() {
 		return nil
 	}
@@ -1280,12 +1292,12 @@ func readExternalCallRoleMetadata(c *recordCursor) map[string]any {
 	if c.err != nil {
 		return nil
 	}
-	meta, err := externalCallRoleMetadata(raw)
+	meta, err := rebuildRoleMetadata(raw, selects)
 	c.err = err
 	return meta
 }
 
-func externalCallRoleMetadata(raw []byte) (map[string]any, error) {
+func rebuildRoleMetadata(raw []byte, selects func(string) bool) (map[string]any, error) {
 	if !isFlatMeta(raw) {
 		return nil, invalid("metadata revision")
 	}
@@ -1309,9 +1321,7 @@ func externalCallRoleMetadata(raw []byte) (map[string]any, error) {
 		if err := d.scanValue(1); err != nil {
 			return nil, err
 		}
-		switch string(key) {
-		case "godot_connection", "godot_method", "rust_path", "rust_recv", "receiver_type", "rust_recv_expr":
-		default:
+		if !selects(string(key)) {
 			continue
 		}
 		scalar := raw[2+start : 2+d.pos]
