@@ -86,6 +86,36 @@ func TestJSTS_BuiltinReceiverEvidence(t *testing.T) {
 		{"duplicate_in_scope", "javascript", `var xs; var xs = []; xs.slice();`, "shadowed", ""},
 		{"inner_tdz", "javascript", `const xs = []; { xs.slice(); const xs = []; }`, "shadowed", ""},
 		{"local_constructor_outside_scope", "javascript", `function f() { class Map {} } new Map().get(x);`, "instance", "map"},
+		{"sibling_whole_write", "typescript", `function f(xs) { xs = []; } function g(xs: string[]) { xs.slice(); }`, "instance", "array"},
+		{"sibling_member_write", "typescript", `function f(xs) { xs.slice = other; } function g(xs: string[]) { xs.slice(); }`, "instance", "array"},
+		{"sibling_computed_write", "typescript", `function f(xs) { xs[i] = other; } function g(xs: string[]) { xs.slice(); }`, "instance", "array"},
+		{"sibling_blocks", "javascript", `{ let items = []; items = items || []; } { const items = []; items.slice(); }`, "instance", "array"},
+		{"same_scope_whole_write", "typescript", `function f(xs: string[]) { xs = []; xs.slice(); }`, "shadowed", ""},
+		{"same_scope_member_write", "typescript", `function f(xs: string[]) { xs.slice = other; xs.slice(); }`, "shadowed", ""},
+		{"same_scope_computed_write", "typescript", `function f(xs: string[]) { xs[i] = other; xs.slice(); }`, "unknown", ""},
+		{"closure_write_outer", "javascript", `let xs = []; function f() { xs = other; } xs.slice();`, "shadowed", ""},
+		{"unbound_write_not_local", "typescript", `xs = other; function g(xs: string[]) { xs.slice(); }`, "instance", "array"},
+		{"same_name_constructor_write", "javascript", `function f(Map) { Map = other; } new Map().get(x);`, "instance", "map"},
+		{"sibling_class_type", "typescript", `function f() { class Map {} } function g(m: Map<string, number>) { m.get(k); }`, "unknown", ""},
+		{"script_global_interface", "typescript", `interface Array<T> { last(): T } let xs: Array<string>; xs.slice();`, "unknown", ""},
+		{"catch_var", "javascript", `try {} catch (e) { var Array = f(); } Array.from(xs);`, "shadowed", ""},
+		{"for_of_var", "javascript", `for (var Array of xs) {} Array.from(y);`, "shadowed", ""},
+		{"for_of_var_constructor", "javascript", `for (var Map of xs) {} new Map().get(k);`, "shadowed", ""},
+		{"sloppy_block_function", "javascript", `if (c) { function Array() {} } Array.from(y);`, "shadowed", ""},
+		{"sloppy_block_function_sibling", "javascript", `function f() { if (c) { function Array() {} } } Array.from(y);`, "static", "array"},
+		{"bound_self_write", "javascript", `let self = []; self = load(); self.slice();`, "shadowed", ""},
+		{"bound_window_member_write", "javascript", `const window = []; window.slice = other; window.slice();`, "shadowed", ""},
+		{"bound_global_write_sibling", "javascript", `function f(global) { global = other; } function g() { const global = []; global.slice(); }`, "instance", "array"},
+		{"prototype_alias_write", "javascript", `const AP = Array.prototype; AP.slice = f; [].slice();`, "shadowed", ""},
+		{"constructor_alias_write", "javascript", `const A = Array; A.from = f; Array.from(xs);`, "shadowed", ""},
+		{"global_prototype_alias_write", "javascript", `const AP = globalThis.Array.prototype; AP.slice = f; [].slice();`, "shadowed", ""},
+		{"prototype_alias_unrelated_member", "javascript", `const AP = Array.prototype; AP.other = f; [].slice();`, "instance", "array"},
+		{"prototype_alias_local_constructor", "javascript", `function f(Array) { const AP = Array.prototype; AP.slice = f; } [].slice();`, "instance", "array"},
+		{"nested_global_this_window", "javascript", `globalThis.window.Array.prototype.slice = f; [].slice();`, "unknown", ""},
+		{"nested_window_global_this", "javascript", `window.globalThis.Array.prototype.slice = f; [].slice();`, "unknown", ""},
+		{"whole_global_alias", "javascript", `window = X; [].slice();`, "unknown", ""},
+		{"computed_global_alias", "javascript", `window[k] = X; [].slice();`, "unknown", ""},
+		{"unrelated_global_member", "javascript", `window.foo = 1; [].slice();`, "instance", "array"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := []byte(tc.src)
@@ -101,7 +131,7 @@ func TestJSTS_BuiltinReceiverEvidence(t *testing.T) {
 					return
 				}
 				if fn := n.ChildByFieldName("function"); fn != nil && fn.Type() == "member_expression" {
-					hints = append(hints, r.memberHint(fn, n.StartByte()))
+					hints = append(hints, r.memberHint(fn, n))
 				}
 			})
 			require.Equal(t, []graph.BuiltinReceiverHint{{Form: tc.form, Family: tc.family}}, hints)
@@ -244,15 +274,31 @@ clean.slice(0);`,
 
 func TestJSTS_BuiltinReceiverObjectMutation(t *testing.T) {
 	for _, tc := range []struct {
-		name, mutation, form, family string
+		name, mutation, call, form, family string
 	}{
-		{"defineProperty", `Object.defineProperty(Array.prototype, "slice", {value: f});`, "unknown", ""},
-		{"assign", `Object.assign(Array.prototype, {slice: f});`, "unknown", ""},
-		{"unrelated object", `Object.assign({}, {slice: f});`, "instance", "array"},
-		{"local constructor", `function f(Array) { Object.assign(Array.prototype, {slice: f}); }`, "instance", "array"},
+		{"defineProperty", `Object.defineProperty(Array.prototype, "slice", {value: f});`, `[].slice();`, "unknown", ""},
+		{"assign", `Object.assign(Array.prototype, {slice: f});`, `[].slice();`, "unknown", ""},
+		{"unrelated object", `Object.assign({}, {slice: f});`, `[].slice();`, "instance", "array"},
+		{"local constructor", `function f(Array) { Object.assign(Array.prototype, {slice: f}); }`, `[].slice();`, "instance", "array"},
+		{"setPrototypeOf", `Object.setPrototypeOf(Array.prototype, value);`, `[].slice();`, "unknown", ""},
+		{"defineProperties", `Object.defineProperties(Array.prototype, descriptors);`, `[].slice();`, "unknown", ""},
+		{"global alias target", `Object.defineProperty(window, "Array", descriptor);`, `[].slice();`, "unknown", ""},
+		{"globalThis target", `Object.defineProperty(globalThis, "Array", descriptor);`, `[].slice();`, "unknown", ""},
+		{"assign global alias", `Object.assign(window, {Array: X});`, `[].slice();`, "unknown", ""},
+		{"whole constructor", `Object.assign(Array, {from: f});`, `Array.from(xs);`, "unknown", ""},
+		{"computed prototype property", `Object.assign(Array.prototype[k], value);`, `[].slice();`, "unknown", ""},
+		{"computed constructor property", `Object.assign(Array[k], value);`, `[].slice();`, "unknown", ""},
+		{"Reflect defineProperty", `Reflect.defineProperty(Array.prototype, "slice", descriptor);`, `[].slice();`, "unknown", ""},
+		{"Reflect set", `Reflect.set(Array.prototype, "slice", f);`, `[].slice();`, "unknown", ""},
+		{"Reflect setPrototypeOf", `Reflect.setPrototypeOf(Array.prototype, value);`, `[].slice();`, "unknown", ""},
+		{"local receiver assign", `const xs = []; Object.assign(xs, {slice: f});`, `xs.slice();`, "unknown", ""},
+		{"local receiver defineProperty", `const xs = []; Object.defineProperty(xs, "slice", descriptor);`, `xs.slice();`, "unknown", ""},
+		{"prototype alias mutation", `const AP = Array.prototype; Object.assign(AP, {slice: f});`, `[].slice();`, "unknown", ""},
+		{"sibling local mutation", `function f(xs) { Object.assign(xs, {slice: f}); } const xs = [];`, `xs.slice();`, "instance", "array"},
+		{"nested global alias target", `Object.assign(globalThis.window.Array.prototype, value);`, `[].slice();`, "unknown", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			src := []byte(tc.mutation + "\n[].slice();")
+			src := []byte(tc.mutation + "\n" + tc.call)
 			tree, err := parser.ParseFile(src, astquery.DefaultLanguageResolver("javascript"))
 			require.NoError(t, err)
 			defer tree.Close()
@@ -264,7 +310,7 @@ func TestJSTS_BuiltinReceiverObjectMutation(t *testing.T) {
 				if n.Type() != "call_expression" || n.StartPoint().Row != 1 {
 					return
 				}
-				hints = append(hints, r.memberHint(n.ChildByFieldName("function"), n.StartByte()))
+				hints = append(hints, r.memberHint(n.ChildByFieldName("function"), n))
 			})
 			require.Equal(t, []graph.BuiltinReceiverHint{{Form: tc.form, Family: tc.family}}, hints)
 		})
