@@ -622,6 +622,94 @@ func TestRebuildBuildLostAckKeepsIngestedStage(t *testing.T) {
 	require.NoError(t, latest.ReadError())
 }
 
+func TestRebuildBuildStageSequence(t *testing.T) {
+	stages := []store_pebble.Stage{
+		store_pebble.StageManifest, store_pebble.StageFileGraph, store_pebble.StageRelations,
+		store_pebble.StageContracts, store_pebble.StageDerived, store_pebble.StageSearch,
+	}
+	lease := t.TempDir()
+	req := rebuildBuildRequest{Incarnation: rebuildTestIncarnation, Witness: store_pebble.Witness{
+		Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2},
+		Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest,
+	}}
+	// These frames test the receiver only. They do not produce or ingest tables.
+	var frames []rebuildBuildReply
+	for i, stage := range stages {
+		require.NoError(t, os.Mkdir(filepath.Join(lease, stage.String()), 0o700))
+		w := req.Witness
+		w.Stage = stage
+		if i >= 2 {
+			w.Relations = &store_pebble.RelationCoverage{}
+		}
+		if i >= 3 {
+			w.Contracts = &store_pebble.ContractCoverage{}
+		}
+		frames = append(frames, rebuildBuildReply{Witness: w, Base: store_pebble.HeadDigest{byte(i)}})
+	}
+	check := func(t *testing.T, replies []rebuildBuildReply, seen, acked int, refuse store_pebble.Stage, wantErr error) error {
+		t.Helper()
+		var in, acks bytes.Buffer
+		for _, r := range replies {
+			require.NoError(t, writeRebuildBuildReply(&in, r))
+		}
+		calls := 0
+		err := receiveRebuildStages(t.Context(), lease, req, &in, &acks, func(_ context.Context, got store_pebble.StageTables) error {
+			require.Less(t, calls, seen)
+			stage := stages[calls]
+			require.Equal(t, frames[calls].Witness, got.Witness)
+			require.Equal(t, frames[calls].Base, got.Base)
+			require.Equal(t, filepath.Join(lease, stage.String()), got.Dir)
+			require.Equal(t, req.Incarnation, got.Incarnation)
+			require.Len(t, acks.Bytes(), calls, "ACK must follow callback")
+			calls++
+			if stage == refuse {
+				return store_pebble.ErrStaleBase
+			}
+			return nil
+		})
+		if wantErr == nil {
+			require.NoError(t, err)
+		} else {
+			require.ErrorIs(t, err, wantErr)
+		}
+		require.Equal(t, seen, calls)
+		require.True(t, bytes.Equal(bytes.Repeat([]byte{rebuildStageAck}, acked), acks.Bytes()))
+		return err
+	}
+	t.Run("complete", func(t *testing.T) {
+		check(t, frames, len(frames), len(frames), 0, nil)
+	})
+	for i, next := range stages {
+		t.Run("EOF before "+next.String(), func(t *testing.T) {
+			err := check(t, frames[:i], i, i, 0, errRebuildBuildIncomplete)
+			require.ErrorContains(t, err, "missing "+next.String())
+		})
+	}
+	t.Run("legacy sequence cannot skip contracts", func(t *testing.T) {
+		legacy := append(slices.Clone(frames[:3]), frames[4:]...)
+		for i := 3; i < len(legacy); i++ {
+			legacy[i].Witness.Contracts = nil
+		}
+		check(t, legacy, 3, 3, 0, store_pebble.ErrStageOrder)
+	})
+	t.Run("repeat contracts", func(t *testing.T) {
+		repeat := append(slices.Clone(frames[:4]), frames[3])
+		check(t, repeat, 4, 4, 0, store_pebble.ErrStageOrder)
+	})
+	t.Run("extra search", func(t *testing.T) {
+		extra := append(slices.Clone(frames), frames[5])
+		check(t, extra, 6, 6, 0, store_pebble.ErrStageOrder)
+	})
+	t.Run("contracts coverage missing", func(t *testing.T) {
+		bad := slices.Clone(frames[:4])
+		bad[3].Witness.Contracts = nil
+		check(t, bad, 3, 3, 0, errRebuildBuildWire)
+	})
+	t.Run("publisher refuses contracts", func(t *testing.T) {
+		check(t, frames, 4, 3, store_pebble.StageContracts, store_pebble.ErrStaleBase)
+	})
+}
+
 func TestRebuildBuildReplyRequiresCoverage(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

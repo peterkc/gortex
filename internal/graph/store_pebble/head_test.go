@@ -291,6 +291,17 @@ func TestContractWitnessEncoding(t *testing.T) {
 	got, err = decodeWitness(old)
 	require.NoError(t, err)
 	require.Equal(t, w, got)
+	// Old Search witnesses remain readable, but never prove Contracts.
+	h, err := OpenHead(filepath.Join(t.TempDir(), "legacy-head"), testHeadIncarnation, FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, h.Close()) })
+	require.NoError(t, h.db.Set(publicationWitnessKey, old, nil))
+	s := stageRead(t, h)
+	require.NoError(t, s.RequireStage(StageSearch))
+	var pending *ErrStagePending
+	require.ErrorAs(t, s.RequireStage(StageContracts), &pending)
+	require.Equal(t, &ErrStagePending{Need: StageContracts, Published: StageSearch}, pending)
+
 	old[1] = byte(StageContracts)
 	_, err = decodeWitness(old)
 	require.ErrorIs(t, err, errInvalidRecord, "a legacy layout cannot declare contracts")

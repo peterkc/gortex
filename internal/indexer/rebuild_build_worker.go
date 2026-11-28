@@ -120,15 +120,20 @@ func receiveRebuildStages(
 	ctx context.Context, lease string, req rebuildBuildRequest, in io.Reader, acks io.Writer,
 	publish func(context.Context, store_pebble.StageTables) error,
 ) error {
-	next := store_pebble.StageManifest
+	// Persisted stage numbers are not publication order: Contracts was appended.
+	order := [...]store_pebble.Stage{
+		store_pebble.StageManifest, store_pebble.StageFileGraph, store_pebble.StageRelations,
+		store_pebble.StageContracts, store_pebble.StageDerived, store_pebble.StageSearch,
+	}
+	next := 0
 	for {
 		r, err := readRebuildBuildReply(in)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if err == io.EOF {
-			if next != store_pebble.StageSearch+1 {
-				return fmt.Errorf("%w: %w: missing %s", ErrRebuildWorker, errRebuildBuildIncomplete, next)
+			if next < len(order) {
+				return fmt.Errorf("%w: %w: missing %s", ErrRebuildWorker, errRebuildBuildIncomplete, order[next])
 			}
 			return nil
 		}
@@ -163,18 +168,25 @@ func receiveRebuildStages(
 		if r.UnknownProvenance != 0 {
 			return fmt.Errorf("%w: unknown provenance count on a stage offer", errRebuildBuildWire)
 		}
-		if next > store_pebble.StageSearch || r.Witness.Stage != next {
-			return fmt.Errorf("%w: expected %s, got %s", store_pebble.ErrStageOrder, next, r.Witness.Stage)
+		if next == len(order) {
+			return fmt.Errorf("%w: extra %s after search", store_pebble.ErrStageOrder, r.Witness.Stage)
+		}
+		want := order[next]
+		if r.Witness.Stage != want {
+			return fmt.Errorf("%w: expected %s, got %s", store_pebble.ErrStageOrder, want, r.Witness.Stage)
 		}
 		if r.Witness.Version() != req.Witness.Version() || r.Witness.Profile != req.Witness.Profile ||
 			r.Witness.FrozenInputs != req.Witness.FrozenInputs {
-			return fmt.Errorf("%w: stage %s does not belong to the leased version", store_pebble.ErrStaleBase, next)
+			return fmt.Errorf("%w: stage %s does not belong to the leased version", store_pebble.ErrStaleBase, want)
 		}
-		if (next >= store_pebble.StageRelations) != (r.Witness.Relations != nil) {
-			return fmt.Errorf("%w: unexpected relation coverage at %s", errRebuildBuildWire, next)
+		if (want != store_pebble.StageManifest && want != store_pebble.StageFileGraph) != (r.Witness.Relations != nil) {
+			return fmt.Errorf("%w: unexpected relation coverage at %s", errRebuildBuildWire, want)
+		}
+		if (want == store_pebble.StageContracts || want == store_pebble.StageDerived || want == store_pebble.StageSearch) != (r.Witness.Contracts != nil) {
+			return fmt.Errorf("%w: unexpected contract coverage at %s", errRebuildBuildWire, want)
 		}
 		// Do not trust any directory or incarnation received from the child.
-		dir := filepath.Join(lease, next.String())
+		dir := filepath.Join(lease, want.String())
 		st, err := os.Lstat(dir)
 		if err != nil {
 			return fmt.Errorf("%w: stage directory: %w", errRebuildBuildWire, err)
@@ -187,7 +199,7 @@ func receiveRebuildStages(
 			return err
 		}
 		if _, err := acks.Write([]byte{rebuildStageAck}); err != nil {
-			return fmt.Errorf("%w: acknowledge %s: %w", ErrRebuildWorker, next, err)
+			return fmt.Errorf("%w: acknowledge %s: %w", ErrRebuildWorker, want, err)
 		}
 		next++
 	}

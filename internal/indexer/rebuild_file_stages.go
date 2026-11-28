@@ -36,6 +36,7 @@ type rebuildParsedCounts struct {
 	parsed, reused uint64
 	census         *rebuildExtractorCensus
 	claims         store_pebble.RebuildSharedClaimStats
+	fileGraphBase  store_pebble.FileGraphBase
 }
 
 var (
@@ -248,9 +249,16 @@ func (idx *Indexer) buildRebuildFileStages(
 	if err != nil {
 		return counts, err
 	}
+	// The owner consumes the outward SST names during send. Keep the exact
+	// FileGraph predecessor in the private store's scratch before offering it.
+	base, err := private.RetainFileGraph(ctx, fileGraph)
+	if err != nil {
+		return counts, err
+	}
 	if err := send(fileGraph); err != nil {
 		return counts, err
 	}
+	counts.fileGraphBase = base
 	counts.census = &census
 	return counts, nil
 }
