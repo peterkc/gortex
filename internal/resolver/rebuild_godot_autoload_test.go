@@ -4,6 +4,7 @@ import (
 	"context"
 	"iter"
 	"maps"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -230,18 +231,38 @@ func TestRebuildGodotAutoloadStationaryReceipt(t *testing.T) {
 	facts, call, method := rebuildGodotAutoloadFacts()
 	stationary := *call
 	stationary.To, stationary.Line = method.ID, call.Line+1
-	stationary.Context = strings.Repeat("x", 16<<20)
+	// Both stores persist Meta, while SQLite does not persist Edge.Context.
+	stationary.Meta = maps.Clone(call.Meta)
+	stationary.Meta["padding"] = strings.Repeat("x", 16<<20)
 	facts[2].Edges = []*graph.Edge{call, &stationary}
 	build, native := openRebuildEventStores(t, facts...)
 	receipt := stationary
-	receipt.Context = "different unused context"
+	receipt.Meta = maps.Clone(stationary.Meta)
+	receipt.Meta["padding"] = "different unused metadata"
 	receipt.Confidence = 0.5
 	facts[2].Edges = []*graph.Edge{call, &receipt}
 	changed, err := RunRebuildGodotAutoload(t.Context(), build, rebuildGRPCReceipts(facts...), rebuildGodotAutoloadSelection(t, build))
 	require.NoError(t, err)
 	require.EqualValues(t, 1, changed)
 	require.Equal(t, 1, ResolveGDScriptAutoloads(native))
-	saved := rebuildEventSavedRows(t, build)
-	require.Equal(t, rebuildEventSQLiteRows(native), saved)
-	require.Contains(t, saved.edges, &stationary)
+	want, saved := rebuildEventSQLiteRows(native), rebuildEventSavedRows(t, build)
+	id := graph.EdgeIdentityFor(&stationary)
+	checkStationary := func(store string, edges []*graph.Edge) {
+		t.Helper()
+		for _, e := range edges {
+			if graph.EdgeIdentityFor(e) != id {
+				continue
+			}
+			if !reflect.DeepEqual(&stationary, e) {
+				padding, _ := e.Meta["padding"].(string)
+				t.Logf("%s edge %+v: context bytes=%d, padding bytes=%d, confidence=%g", store, id, len(e.Context), len(padding), e.Confidence)
+				t.Fatalf("%s changed the stationary edge payload", store)
+			}
+			return
+		}
+		t.Fatalf("%s is missing stationary edge %+v", store, id)
+	}
+	checkStationary("SQLite", want.edges)
+	checkStationary("Pebble", saved.edges)
+	require.True(t, reflect.DeepEqual(want, saved), "complete saved rows differ from SQLite")
 }

@@ -275,21 +275,31 @@ func TestRebuildCSharpIfaceDispatchParentNodeCap(t *testing.T) {
 		{"ambiguous name", iface, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			build := openRebuildGRPCBuild(t, facts...)
+			inputs := facts
+			if tc.ambiguous {
+				second := *foreign
+				second.RepoPrefix = owner.RepoPrefix
+				// AddNode would preserve an existing nonempty repo prefix.
+				inputs = []store_pebble.ParseFacts{facts[0], rebuildEventFacts(second.FilePath, second.Language, []*graph.Node{&second})}
+			}
+			build := openRebuildGRPCBuild(t, inputs...)
 			frozen := ifaceRebuildSelection(t, build)
 			require.True(t, frozen.allows(SynthCSharpIfaceDispatch))
 			large := *tc.large
 			large.Meta = map[string]any{"padding": padding}
 			build.AddNode(&large)
-			receipts := facts
 			if tc.ambiguous {
-				second := *foreign
-				second.RepoPrefix = ""
-				build.AddNode(&second)
-				receipts = []store_pebble.ParseFacts{facts[0], rebuildEventFacts(second.FilePath, second.Language, []*graph.Node{&second})}
+				var local []string
+				require.NoError(t, build.RebuildView().VisitNameCandidates(t.Context(), iface.Name, []string{iface.Language}, func(n *graph.Node) error {
+					if csharpIfaceHierarchyCandidate(n, owner.RepoPrefix) {
+						local = append(local, n.ID)
+					}
+					return nil
+				}))
+				require.ElementsMatch(t, []string{iface.ID, foreign.ID}, local)
 			}
 			before := rebuildEventSavedRows(t, build).edges
-			adds, err := RunRebuildCSharpIfaceDispatch(t.Context(), build, rebuildGRPCReceipts(receipts...), frozen)
+			adds, err := RunRebuildCSharpIfaceDispatch(t.Context(), build, rebuildGRPCReceipts(inputs...), frozen)
 			after := rebuildEventSavedRows(t, build).edges
 			if tc.refuse {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildCSharpIfaceDispatch)
