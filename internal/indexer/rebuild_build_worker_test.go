@@ -884,6 +884,8 @@ func TestRebuildBuildViewRefusal(t *testing.T) {
 		{"denied", fmt.Errorf("%w: %w: %w", store_pebble.ErrRebuildView, errRebuildResolverNamespace, errRebuildResolverInputDenied), errRebuildResolverInputDenied, 29},
 		{"unproved namespace", fmt.Errorf("%w: %w", store_pebble.ErrRebuildView, errRebuildResolverNamespace), errRebuildResolverNamespace, 30},
 		{"external recording path", fmt.Errorf("%w: %w", store_pebble.ErrRebuildView, resolver.ErrRebuildGoExternalRecordingPath), resolver.ErrRebuildGoExternalRecordingPath, 35},
+		{"contract IDs", fmt.Errorf("%w: compare early and late", errRebuildContractIDs), errRebuildContractIDs, 103},
+		{"contract projection stale", fmt.Errorf("%w: changed owner", graph.ErrContractProjectionStale), graph.ErrContractProjectionStale, 104},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var reply, acks bytes.Buffer
@@ -1202,6 +1204,11 @@ func TestRunRebuildCheckout(t *testing.T) {
 					// inputs to the next cut; the published predecessor stays intact.
 					switch offer.Witness.Stage {
 					case store_pebble.StageFileGraph:
+						if tc.mixed {
+							retained, err := filepath.Glob(filepath.Join(filepath.Dir(offer.Dir), "working", "pending", "file-graph-base-*"))
+							require.NoError(t, err)
+							require.Empty(t, retained, "the incomplete route has no Relations consumer")
+						}
 						if tc.captureRefusal {
 							saved, err := os.ReadDir(req.ParseDir)
 							require.NoError(t, err)

@@ -302,11 +302,7 @@ func buildRebuildStages(
 					return fmt.Errorf("%w: duplicate root Go manifest", errRebuildGoEvidence)
 				}
 				rootDepFact = true
-				rootFact = rebuildGoManifest{Path: string(row.Path), Present: row.Present, Digest: row.Digest}
-				if p := row.Config; p != nil {
-					rootFact.RootClaim, rootFact.OwnerModule, rootFact.DirectDeps, rootFact.Replace = p.RootClaim, p.OwnerModule, p.DirectDeps, p.Replace
-					rootFact.ContractDeps = p.ContractDeps
-				}
+				rootFact = rebuildGoManifestFromSidecar(row)
 			}
 			if row.Classification == nil {
 				return nil
@@ -451,9 +447,9 @@ func buildRebuildStages(
 		}
 		return nil
 	}
-	// The mixed-language projection is not yet proved. Keep the private
-	// turn witnesses but never offer their unprojected rows.
-	if !exactCheckout || !counts.census.supportsRelationPublication() {
+	// Legacy captures and mixed checkouts keep their private turn witnesses
+	// but offer nothing after FileGraph until the D72 isolation is wired.
+	if !counts.publishRelations {
 		if err := runMain(); err != nil {
 			return err
 		}

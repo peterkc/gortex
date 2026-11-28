@@ -34,10 +34,11 @@ type rebuildFileStages struct {
 }
 
 type rebuildParsedCounts struct {
-	parsed, reused uint64
-	census         *rebuildExtractorCensus
-	claims         store_pebble.RebuildSharedClaimStats
-	fileGraphBase  store_pebble.FileGraphBase
+	parsed, reused   uint64
+	census           *rebuildExtractorCensus
+	claims           store_pebble.RebuildSharedClaimStats
+	fileGraphBase    store_pebble.FileGraphBase
+	publishRelations bool
 }
 
 var (
@@ -287,6 +288,7 @@ func (idx *Indexer) buildRebuildFileStages(
 		if err != nil {
 			return counts, err
 		}
+		counts.publishRelations = true
 	}
 	if err := send(fileGraph); err != nil {
 		return counts, err

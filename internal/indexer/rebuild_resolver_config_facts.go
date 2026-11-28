@@ -449,6 +449,15 @@ func (rows rebuildGoManifests) lookup(key string) (rebuildGoManifest, error) {
 	return rebuildGoManifest{}, fmt.Errorf("%w: manifest row %q not covered", errRebuildGoEvidence, key)
 }
 
+func rebuildGoManifestFromSidecar(row rebuildSidecarRow) rebuildGoManifest {
+	f := rebuildGoManifest{Path: string(row.Path), Present: row.Present, Digest: row.Digest}
+	if p := row.Config; p != nil {
+		f.RootClaim, f.OwnerModule, f.DirectDeps, f.Replace = p.RootClaim, p.OwnerModule, p.DirectDeps, p.Replace
+		f.ContractDeps = p.ContractDeps
+	}
+	return f
+}
+
 // openRebuildResolverConfigFacts reads the private sidecar only. Stage bounded
 // rows during the complete visit, but build neither reply map until the digest
 // and framing have passed. Missing keys remain unproved, including on nil maps.
@@ -460,11 +469,7 @@ func openRebuildResolverConfigFacts(ctx context.Context, lease string, expected 
 	if err := visitRebuildInputSidecar(ctx, lease, expected, func(r rebuildSidecarRow) error {
 		switch r.Kind {
 		case rebuildGoManifestFact:
-			f := rebuildGoManifest{Path: string(r.Path), Present: r.Present, Digest: r.Digest}
-			if p := r.Config; p != nil {
-				f.RootClaim, f.OwnerModule, f.DirectDeps, f.Replace = p.RootClaim, p.OwnerModule, p.DirectDeps, p.Replace
-				f.ContractDeps = p.ContractDeps
-			}
+			f := rebuildGoManifestFromSidecar(r)
 			goLeft -= rebuildGoManifestCharge(f)
 			if len(goRows) == rebuildGoKeyLimit || goLeft < 0 {
 				return fmt.Errorf("%w: replay Go manifest rows: %w", errRebuildInputSidecar, errRebuildGoCaptureLimit)

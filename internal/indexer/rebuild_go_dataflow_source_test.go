@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/config"
@@ -18,7 +19,8 @@ import (
 )
 
 func TestRunRebuildCheckoutGoDataflowSources(t *testing.T) {
-	ctx := t.Context()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	root, src := rebuildInputFixture(t)
 	const file = "source.go"
 	const placeholder = "unresolved::extern::net/http::StatusCreated"
