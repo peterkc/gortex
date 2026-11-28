@@ -109,7 +109,8 @@ func TestRebuildContractRecipeVersions(t *testing.T) {
 	cFile := rebuildInput{Path: "x.c", Language: "c"}
 	goFile := rebuildInput{Path: "x.go", Language: "go"}
 	beforeHeader := idx.rebuildExtractorRecipe(base, header)
-	require.Equal(t, "e0e37dacca8393b358f0f0ae3d5a88890d34058bf64262d81d70bea99556c29c", hex.EncodeToString(beforeHeader[:]))
+	// Contract capture v2 records empty local AST type lookups.
+	require.Equal(t, "7765e758782d6a33203bfbfa774bf8d6ad6ee5077f85b88135c3749c6e5fb8b6", hex.EncodeToString(beforeHeader[:]))
 	require.NotEqual(t, beforeHeader, idx.rebuildExtractorRecipe(rebuildDigest{2}, header))
 	beforeC := idx.rebuildExtractorRecipe(base, cFile)
 	beforeGo := idx.rebuildExtractorRecipe(base, goFile)
