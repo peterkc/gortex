@@ -52,7 +52,7 @@ func (b *BuildStore) RebuildTestFiles(ctx context.Context, receipts iter.Seq2[Pa
 	}
 	fileProof := func(n *graph.Node, bit byte) error {
 		if bit != unproved {
-			want, err := encodeNode(n)
+			want, err := encodeNode(projectRebuildReceiptNode(n))
 			if err != nil {
 				return err
 			}

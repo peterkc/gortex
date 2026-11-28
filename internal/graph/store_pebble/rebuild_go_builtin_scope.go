@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"go/token"
+	"maps"
 	"path"
 	"strings"
 
@@ -10,8 +11,27 @@ import (
 )
 
 // RebuildGoBuiltinScopeReceiptMeta transports private syntax facts through the
-// existing receipt codec. AddParsedFile removes it before writing graph nodes.
+// existing receipt codec. It is not part of the persisted graph node.
 const RebuildGoBuiltinScopeReceiptMeta = "platform_receiver_go_package_scope"
+
+// Use the same projection when writing the graph and proving the identity of
+// a working row against a receipt. Keep the original receipt available to the
+// package-scope census.
+func projectRebuildReceiptNode(n *graph.Node) *graph.Node {
+	if n == nil || n.Kind != graph.KindFile || n.Language != "go" {
+		return n
+	}
+	if _, present := n.Meta[RebuildGoBuiltinScopeReceiptMeta]; !present {
+		return n
+	}
+	projected := *n
+	projected.Meta = maps.Clone(n.Meta)
+	delete(projected.Meta, RebuildGoBuiltinScopeReceiptMeta)
+	if len(projected.Meta) == 0 {
+		projected.Meta = nil
+	}
+	return &projected
+}
 
 func rebuildGoBuiltinFileScopeKey(file string) []byte {
 	return keyStrings([]byte{'g', 'G', 'f'}, file)

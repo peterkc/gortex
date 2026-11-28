@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"maps"
 	"path/filepath"
 	"slices"
 
@@ -99,18 +98,7 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 					continue
 				}
 			}
-			if n != nil && n.Kind == graph.KindFile && n.Language == "go" {
-				if _, private := n.Meta[RebuildGoBuiltinScopeReceiptMeta]; private {
-					copy := *n
-					copy.Meta = maps.Clone(n.Meta)
-					delete(copy.Meta, RebuildGoBuiltinScopeReceiptMeta)
-					if len(copy.Meta) == 0 {
-						copy.Meta = nil
-					}
-					n = &copy
-				}
-			}
-			if err := b.writeNode(n); err != nil {
+			if err := b.writeNode(projectRebuildReceiptNode(n)); err != nil {
 				return err
 			}
 		}

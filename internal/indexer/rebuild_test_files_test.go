@@ -85,6 +85,63 @@ func TestRebuildTestFilesCheckedSizeSkip(t *testing.T) {
 	})
 }
 
+func TestRebuildTestFilesPrivateGoScope(t *testing.T) {
+	ctx := t.Context()
+	const path = "pkg/a_test.go"
+	src := []byte("package p\nfunc use(xs []int) int { return len(xs) }\n")
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	idx.SetRootPath(t.TempDir())
+	facts, err := idx.extractPreparedRebuildFile(ctx, path, languages.NewGoExtractor(), src)
+	require.NoError(t, err)
+	const key = store_pebble.RebuildGoBuiltinScopeReceiptMeta
+	var file *graph.Node
+	for _, n := range facts.Nodes {
+		if n.Kind == graph.KindFile && n.ID == path {
+			file = n
+			break
+		}
+	}
+	require.NotNil(t, file)
+	require.Equal(t, "p", file.Meta[key], "real extraction must carry package evidence")
+	receipts := func(yield func(store_pebble.ParseFacts, error) bool) { yield(facts, nil) }
+	for _, changed := range []bool{false, true} {
+		name := "private_key_only"
+		if changed {
+			name = "changed_pending_metadata"
+		}
+		t.Run(name, func(t *testing.T) {
+			build, _ := openRebuildTestFileStore(t)
+			require.NoError(t, build.AddParsedFile("", facts))
+			view := build.RebuildView()
+			before, err := view.Node(ctx, path)
+			require.NoError(t, err)
+			require.NotNil(t, before)
+			require.NotContains(t, before.Meta, key)
+			if changed {
+				before.Meta["unrelated"] = "changed"
+				build.AddNode(before)
+			}
+			err = runRebuildTestFiles(ctx, build, receipts, nil)
+			if changed {
+				var unknown *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &unknown)
+				require.EqualValues(t, 1, unknown.Count)
+				require.Equal(t, path, unknown.First.From)
+				after, err := view.Node(ctx, path)
+				require.NoError(t, err)
+				require.Equal(t, before, after)
+				return
+			}
+			require.NoError(t, err)
+			after, err := view.Node(ctx, path)
+			require.NoError(t, err)
+			require.Equal(t, nativeTestFileStamp(t, before, nil, "gotest"), after)
+			require.Equal(t, "p", file.Meta[key], "proof must not consume the receipt")
+		})
+	}
+}
+
 func noRebuildTestFileReceipts(func(store_pebble.ParseFacts, error) bool) {}
 
 const rebuildTestTSPath = "case.test.ts"
