@@ -27,9 +27,10 @@ func (r rebuildContractReceiptReader) withRebuildContractSources(ctx context.Con
 // All payload and selection reads finish before use. The caller runs the
 // remaining native tail and retains Relations, then calls seal once. A
 // failed capture or seal invalidates the private build; no offer is made here.
+// Preflight replays detached frozen batches only before the seal begins.
 func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Context, b *store_pebble.BuildStore,
 	source func(func(contracts.Contract) error) error, early rebuildEarlyContractIDs,
-	use func(seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error,
+	use func(preflight iter.Seq2[store_pebble.RebuildContractBatch, error], seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error,
 ) error {
 	if source == nil || early == nil || use == nil {
 		return fmt.Errorf("%w: missing contract producer input", errRebuildContractIDs)
@@ -108,7 +109,14 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 			}, func(batches iter.Seq2[store_pebble.RebuildContractBatch, error], coverage store_pebble.ContractCoverage) error {
 				active, attempted := true, false
 				var sealErr error
-				err := use(func(dir string, base store_pebble.RelationsBase) (tables store_pebble.StageTables, err error) {
+				preflight := func(yield func(store_pebble.RebuildContractBatch, error) bool) {
+					if !active || attempted {
+						yield(store_pebble.RebuildContractBatch{}, fmt.Errorf("%w: inactive or sealed contract preflight", errRebuildContractIDs))
+						return
+					}
+					batches(yield)
+				}
+				err := use(preflight, func(dir string, base store_pebble.RelationsBase) (tables store_pebble.StageTables, err error) {
 					if !active || attempted {
 						return tables, fmt.Errorf("%w: inactive or repeated contract seal", errRebuildContractIDs)
 					}

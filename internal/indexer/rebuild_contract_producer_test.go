@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,7 +154,23 @@ func Register(m *http.ServeMux) {
 					return err
 				}
 				require.Equal(t, wantIDs, early)
-				return r.withRebuildContractProducer(ctx, b, read, early, func(seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
+				return r.withRebuildContractProducer(ctx, b, read, early, func(preflight iter.Seq2[store_pebble.RebuildContractBatch, error], seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
+					for range 2 {
+						var nodes, edges, shapes int
+						for batch, err := range preflight {
+							require.NoError(t, err)
+							nodes += len(batch.Nodes)
+							edges += len(batch.Edges)
+							shapes += len(batch.Shapes)
+							for _, n := range batch.Nodes {
+								require.NotEqual(t, "changed detached row", n.ID)
+								n.ID = "changed detached row"
+							}
+						}
+						require.Positive(t, nodes)
+						require.Positive(t, edges)
+						require.Positive(t, shapes)
+					}
 					require.NoError(t, b.BeginRebuildContractOverlay(ctx, early))
 					require.NoError(t, b.EndRebuildContractOverlay(ctx))
 					relations, err := b.PrepareRelations(ctx, t.TempDir(), fileBase, r.extractorOf)
@@ -164,6 +181,12 @@ func Register(m *http.ServeMux) {
 					_, err = head.PublishStage(ctx, relations)
 					require.NoError(t, err)
 					tables, err = seal(t.TempDir(), base)
+					if err == nil {
+						for batch, err := range preflight {
+							require.Zero(t, batch)
+							require.ErrorIs(t, err, errRebuildContractIDs)
+						}
+					}
 					return err
 				})
 			})
@@ -222,19 +245,29 @@ func TestRebuildContractProducerRefusesUnbuiltAndUnsealed(t *testing.T) {
 		byPath: map[string]string{}, originByGraphPath: map[string]string{},
 	}}
 	source := func(func(contracts.Contract) error) error { return nil }
-	unexpected := func(func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
+	unexpected := func(iter.Seq2[store_pebble.RebuildContractBatch, error], func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
 		t.Fatal("unproved complete IDs reached the native tail")
 		return nil
 	}
 	require.ErrorIs(t, r.withRebuildContractProducer(ctx, b, source, nil, unexpected), errRebuildContractIDs)
 	require.ErrorIs(t, r.withRebuildContractProducer(ctx, b, source, rebuildEarlyContractIDs{"env::MISSING": "a.go"}, unexpected), errRebuildContractIDs)
 	var escaped func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)
-	err = r.withRebuildContractProducer(ctx, b, source, make(rebuildEarlyContractIDs), func(seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
+	var escapedPreflight iter.Seq2[store_pebble.RebuildContractBatch, error]
+	err = r.withRebuildContractProducer(ctx, b, source, make(rebuildEarlyContractIDs), func(preflight iter.Seq2[store_pebble.RebuildContractBatch, error], seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
 		escaped = seal
+		escapedPreflight = preflight
+		for _, err := range preflight {
+			require.NoError(t, err)
+			t.Fatal("built empty producer returned a row")
+		}
 		return nil
 	})
 	require.ErrorIs(t, err, errRebuildContractIDs)
 	require.ErrorContains(t, err, "was not sealed")
+	for batch, err := range escapedPreflight {
+		require.Zero(t, batch)
+		require.ErrorIs(t, err, errRebuildContractIDs)
+	}
 	stage, err := escaped(t.TempDir(), store_pebble.RelationsBase{})
 	require.Zero(t, stage)
 	require.ErrorIs(t, err, errRebuildContractIDs)

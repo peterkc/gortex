@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -469,7 +470,7 @@ func buildRebuildStages(
 		if err := runMain(); err != nil {
 			return err
 		}
-		return reader.withRebuildContractProducer(ctx, private, read, earlyIDs, func(seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
+		return reader.withRebuildContractProducer(ctx, private, read, earlyIDs, func(_ iter.Seq2[store_pebble.RebuildContractBatch, error], seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
 			if err := runTail(); err != nil {
 				return err
 			}
