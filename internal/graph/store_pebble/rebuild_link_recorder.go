@@ -73,6 +73,8 @@ const (
 	rebuildProofExternalCallSynthesis
 	// A checked Go builtin repoint or return lift supplied this source at this site.
 	rebuildProofGoBuiltinSource
+	// Exact checked Go AST dataflow source, recording site and kind.
+	rebuildProofGoDataflowSource
 	rebuildProofLimit
 )
 
@@ -160,6 +162,9 @@ func rebuildReceiptKey(reader pebble.Reader, live []byte) ([]byte, error) {
 func (c rebuildEdgeCustody) reindexed(key []byte, old, e *graph.Edge, capture, goBuiltinRepoint bool) rebuildEdgeCustody {
 	if old.Kind == e.Kind && old.FilePath == e.FilePath && old.Line == e.Line {
 		if old.From == e.From && c.proof == rebuildProofGoBuiltinSource {
+			return c
+		}
+		if old.From == e.From && c.proof == rebuildProofGoDataflowSource && rebuildGoDataflowReceiptSource(e) {
 			return c
 		}
 		if goBuiltinRepoint {

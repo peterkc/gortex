@@ -263,7 +263,7 @@ func (b *BuildStore) reindexChunkWithProof(batch []graph.EdgeReindex, capture, g
 			if index, ok := created[string(oldKey)]; ok {
 				prior := candidates[index]
 				custody = prior.custody
-				if custody.proof == rebuildProofGoBuiltinSource {
+				if custody.proof == rebuildProofGoBuiltinSource || custody.proof == rebuildProofGoDataflowSource {
 					custody = custody.reindexed(nil, prior.edge, e, false, false)
 				}
 				candidates[index] = claim{}

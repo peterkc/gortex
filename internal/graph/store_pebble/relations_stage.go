@@ -16,6 +16,7 @@ import (
 	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/graph"
+	"golang.org/x/mod/module"
 )
 
 // FileGraphBase retains the worker's exact file-graph data SSTs. Its links
@@ -192,7 +193,6 @@ type relationsEndpointCounts struct {
 }
 
 // Ordinary Go argument sources can be unresolved identifiers or selectors.
-// The built-in Go extractor is the only producer of these AST arg_of rows.
 // Match exact native name IDs, not the general unresolved namespace.
 func rebuildGoArgumentSource(e *graph.Edge, extractorOf func(string) string) bool {
 	if extractorOf == nil || e.Kind != graph.EdgeArgOf || e.Origin != graph.OriginASTInferred ||
@@ -202,6 +202,44 @@ func rebuildGoArgumentSource(e *graph.Edge, extractorOf func(string) string) boo
 	name := strings.TrimPrefix(graph.UnresolvedName(e.From), "*.")
 	return token.IsIdentifier(name) && name != "_" &&
 		slices.Contains(graph.UnresolvedNameCandidateIDsForName(name, ""), e.From)
+}
+
+// rebuildGoDataflowReceiptSource is the additional native source vocabulary
+// emitted by goFlowWalker.exprSources: qualified arguments and qualified or
+// bare value-flow sources. The original unprefixed argument rule stays intact.
+func rebuildGoDataflowReceiptSource(e *graph.Edge) bool {
+	if e == nil || e.FilePath == "" || e.Line <= 0 {
+		return false
+	}
+	switch e.Kind {
+	case graph.EdgeArgOf:
+		if e.Origin != graph.OriginASTInferred {
+			return false
+		}
+	case graph.EdgeValueFlow:
+		if e.Origin != graph.OriginASTResolved {
+			return false
+		}
+	default:
+		return false
+	}
+	if spec, ok := strings.CutPrefix(e.From, "unresolved::extern::"); ok {
+		at := strings.LastIndex(spec, "::")
+		return at > 0 && module.CheckImportPath(spec[:at]) == nil && token.IsIdentifier(spec[at+2:]) && spec[at+2:] != "_"
+	}
+	if e.Kind != graph.EdgeValueFlow {
+		return false
+	}
+	name := strings.TrimPrefix(graph.UnresolvedName(e.From), "*.")
+	return token.IsIdentifier(name) && name != "_" && slices.Contains(graph.UnresolvedNameCandidateIDsForName(name, ""), e.From)
+}
+
+func (b *BuildStore) rebuildGoDataflowSourceProved(r row, e *graph.Edge, extractorOf func(string) string) (bool, error) {
+	if extractorOf == nil || extractorOf(e.FilePath) != "go" || !rebuildGoDataflowReceiptSource(e) {
+		return false, nil
+	}
+	custody, err := readRebuildEdgeCustody(b.pending, r.key)
+	return custody.proof == rebuildProofGoDataflowSource, err
 }
 
 // rebuildExternalProved checks the emitted target against its installed bytes
@@ -304,11 +342,17 @@ func (b *BuildStore) checkRelationsEndpoints(ctx context.Context, revision uint3
 				return nil
 			}
 		}
-		if !target && rebuildGoArgumentSource(e, extractorOf) {
-			if kept {
-				counts.goArguments++
+		if !target {
+			proved, err := b.rebuildGoDataflowSourceProved(r, e, extractorOf)
+			if err != nil {
+				return err
 			}
-			return nil
+			if proved || rebuildGoArgumentSource(e, extractorOf) {
+				if kept {
+					counts.goArguments++
+				}
+				return nil
+			}
 		}
 		return fmt.Errorf("%w: dangling relations endpoint %q", errInvalidRecord, id)
 	}

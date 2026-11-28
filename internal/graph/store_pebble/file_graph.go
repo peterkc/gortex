@@ -10,6 +10,7 @@ import (
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zeebo/blake3"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/pathkey"
 )
 
 const fileMetaRows byte = 3
@@ -114,7 +115,11 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 					continue
 				}
 			}
-			if err := b.addEdge(e); err != nil {
+			var custody rebuildEdgeCustody
+			if repo == "" && f.EffectiveLanguage == "go" && e != nil && e.FilePath == pathkey.Normalize(f.File.FilePath) && rebuildGoDataflowReceiptSource(e) {
+				custody.proof = rebuildProofGoDataflowSource
+			}
+			if err := b.addEdgeWithCustody(e, custody); err != nil {
 				return err
 			}
 			if err := b.recordFactoryChainReceipt(f, e); err != nil {
