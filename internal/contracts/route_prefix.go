@@ -436,64 +436,28 @@ func collectRouterRewrites(reg *Registry, representatives []Contract, facts map[
 	sort.Strings(paths) // deterministic precedence for ambiguous parent/module names
 	for _, path := range paths {
 		f := facts[path]
-		for v, p := range f.SelfPrefix {
-			if existing, ok := globalSelf[v]; ok {
-				if existing != p && existing != "" && p != "" {
-					selfConflict[v] = true
-				}
-				if existing == "" && p != "" {
-					globalSelf[v] = p
-				}
-			} else {
-				globalSelf[v] = p
-			}
-		}
-		for v, p := range f.MountPrefix {
-			if existing, ok := globalMount[v]; ok {
-				if existing != p {
-					mountConflict[v] = true
-				}
-			} else {
-				globalMount[v] = p
-			}
-		}
-		for child, parent := range f.MountParent {
-			if _, ok := globalParent[child]; !ok {
-				globalParent[child] = parent
-			}
-		}
+		mergeRouterFactMap(RouterSelfPrefix, globalSelf, selfConflict, f.SelfPrefix)
+		mergeRouterFactMap(RouterMountPrefix, globalMount, mountConflict, f.MountPrefix)
+		mergeRouterFactMap(RouterMountParent, globalParent, nil, f.MountParent)
 	}
 
 	nestModulePrefix := joinNestModuleFacts(paths, facts)
-
-	// chainPrefix resolves the full mount prefix for a router var,
-	// walking parent includes so a router mounted into a router
-	// inherits both prefixes. Self-prefix is the router's own
-	// APIRouter(prefix=...); it is prepended by the per-route join, not
-	// here, because only the route's owning router contributes its self
-	// prefix.
-	var chainPrefix func(varName string, seen map[string]bool) string
-	chainPrefix = func(varName string, seen map[string]bool) string {
-		if seen[varName] {
-			return "" // cycle guard
-		}
-		seen[varName] = true
-		mount := ""
-		if mp, ok := globalMount[varName]; ok && !mountConflict[varName] {
-			mount = mp
-		}
-		// The parent router's own mount prefix prepends this one. The
-		// parent's *self* prefix also applies, since the parent is a
-		// real router whose routes sit under parentSelf+parentMount.
-		if parent, ok := globalParent[varName]; ok {
-			parentChain := chainPrefix(parent, seen)
-			parentSelf := ""
-			if ps, ok := globalSelf[parent]; ok && !selfConflict[parent] {
-				parentSelf = ps
+	chainPrefix := func(name string) string {
+		prefix, _ := RouterMountChain(name, func(key string) string {
+			if mountConflict[key] {
+				return ""
 			}
-			return joinPaths(parentChain, parentSelf, mount)
-		}
-		return mount
+			return globalMount[key]
+		}, func(key string) string {
+			if selfConflict[key] {
+				return ""
+			}
+			return globalSelf[key]
+		}, func(key string) (string, bool) {
+			parent, ok := globalParent[key]
+			return parent, ok
+		}, nil) // Native map lookups do not need a chain bound or cancellation check.
+		return prefix
 	}
 
 	// Second pass: rewrite each route contract.
@@ -626,16 +590,14 @@ func routerSharedKey(framework string, f RouterFacts, line RouterLineFacts) (key
 // prepend to a single route contract's declared path. Returns "" when
 // no prefix applies (plain join no-op).
 func prefixForRoute(c Contract, facts map[string]RouterFacts, globalSelf map[string]string, selfConflict map[string]bool,
-	chainPrefix func(string, map[string]bool) string, nestModulePrefix map[string]string,
+	chainPrefix func(string) string, nestModulePrefix map[string]string,
 ) string {
 	return RouterPrefixForRoute(c, facts[c.FilePath], func(key string) string {
 		if selfConflict[key] {
 			return ""
 		}
 		return globalSelf[key]
-	}, func(key string) string {
-		return chainPrefix(key, map[string]bool{})
-	}, func(key string) string { return nestModulePrefix[key] })
+	}, chainPrefix, func(key string) string { return nestModulePrefix[key] })
 }
 
 // RouterPrefixForRoute combines the route's local facts with the elected
@@ -827,9 +789,91 @@ func joinPaths(parts ...string) string {
 	return b.String()
 }
 
-// PrependRouterMount is one step of the native mount chain's path join.
-func PrependRouterMount(parentSelf, mount, suffix string) string {
-	return joinPaths(parentSelf, mount, suffix)
+// PrependRouterMount joins one mount-chain frame in native return order.
+func PrependRouterMount(parentChain, parentSelf, mount string) string {
+	return joinPaths(parentChain, parentSelf, mount)
+}
+
+// RouterFactKind identifies a shared fact's merge policy across files.
+type RouterFactKind uint8
+
+const (
+	RouterSelfPrefix RouterFactKind = iota
+	RouterMountPrefix
+	RouterMountParent
+	RouterModulePrefix
+	RouterControllerModule
+)
+
+// RouterFactMerge decides whether to store value or mark a conflict. The caller
+// visits files in path order and retains any conflict from earlier files.
+func RouterFactMerge(kind RouterFactKind, prior string, found bool, value string) (write, conflict bool) {
+	if !found || kind == RouterModulePrefix {
+		return true, false
+	}
+	switch kind {
+	case RouterSelfPrefix:
+		return prior == "" && value != "", prior != "" && value != "" && prior != value
+	case RouterMountPrefix:
+		return false, prior != value
+	default:
+		return false, false // Mount parents and controller modules keep the first answer.
+	}
+}
+
+func mergeRouterFactMap(kind RouterFactKind, dst map[string]string, conflicts map[string]bool, rows map[string]string) {
+	for key, value := range rows {
+		prior, found := dst[key]
+		write, conflict := RouterFactMerge(kind, prior, found, value)
+		if write {
+			dst[key] = value
+		}
+		if conflict {
+			conflicts[key] = true
+		}
+	}
+}
+
+// RouterMountChain follows parent includes and folds them in return order.
+// A cycle contributes no further mount, but its parent self prefix still
+// belongs to the frame that encountered it. check, when set, checks each
+// step for a read error, cancellation or an oversized prefix.
+func RouterMountChain(name string, mount, self func(string) string, parent func(string) (string, bool), check func(string) error) (string, error) {
+	type frame struct{ parent, mount string }
+	seen := make(map[string]bool)
+	var frames []frame
+	var prefix string
+	for !seen[name] {
+		if check != nil {
+			if err := check(""); err != nil {
+				return "", err
+			}
+		}
+		seen[name] = true
+		direct := mount(name)
+		next, ok := parent(name)
+		if !ok {
+			prefix = direct
+			break
+		}
+		frames = append(frames, frame{parent: next, mount: direct})
+		name = next
+	}
+	if check != nil {
+		if err := check(prefix); err != nil {
+			return "", err
+		}
+	}
+	for i := len(frames) - 1; i >= 0; i-- {
+		step := frames[i]
+		prefix = PrependRouterMount(prefix, self(step.parent), step.mount)
+		if check != nil {
+			if err := check(prefix); err != nil {
+				return "", err
+			}
+		}
+	}
+	return prefix, nil
 }
 
 // RouterFileCensus reports whether the native scanner reads the file without a route.

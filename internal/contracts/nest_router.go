@@ -53,14 +53,9 @@ func joinNestModuleFacts(paths []string, facts map[string]RouterFacts) map[strin
 	modulePrefix := map[string]string{}
 	controllerModule := map[string]string{}
 	for _, path := range paths {
-		for mod, prefix := range facts[path].ModulePrefix {
-			modulePrefix[mod] = prefix
-		}
-		for ctrl, mod := range facts[path].ControllerModule {
-			if _, ok := controllerModule[ctrl]; !ok {
-				controllerModule[ctrl] = mod
-			}
-		}
+		f := facts[path]
+		mergeRouterFactMap(RouterModulePrefix, modulePrefix, nil, f.ModulePrefix)
+		mergeRouterFactMap(RouterControllerModule, controllerModule, nil, f.ControllerModule)
 	}
 
 	out := map[string]string{}

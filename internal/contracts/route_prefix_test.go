@@ -200,6 +200,37 @@ def get_user(id): return id
 	}
 }
 
+func TestJoinRouterPrefixFacts_FastAPISelfConflict(t *testing.T) {
+	files := srcMap{
+		"a.py": `from fastapi import APIRouter
+router = APIRouter(prefix="/a")
+
+@router.get("/items")
+def items(): pass
+`,
+		"b.py": `from fastapi import APIRouter
+router = APIRouter(prefix="/b")
+`,
+	}
+	reg := NewRegistry()
+	extractInto(t, reg, files, "svc", "svc")
+	facts := make(map[string]RouterFacts)
+	for file, source := range files {
+		facts[file] = RouterFileFacts(file, []byte(source))
+	}
+	if facts["a.py"].SelfPrefix["router"] != "/a" || facts["b.py"].SelfPrefix["router"] != "/b" {
+		t.Fatal("fixture must contain two conflicting self prefixes")
+	}
+	const id = "http::GET::/items"
+	if got := reg.ByID(id); len(got) != 1 {
+		t.Fatalf("fixture must contain one route at %s; got %v", id, got)
+	}
+	JoinRouterPrefixFacts(reg, facts)
+	if ids := reg.AllIDs(); len(ids) != 1 || ids[0] != id {
+		t.Fatalf("conflicting self prefixes must leave the route unchanged; got %v", ids)
+	}
+}
+
 // TestJoinRouterPrefixes_ConsumerPairsViaMatch is the end-to-end pin:
 // after the join, a consumer calling /api/users/42 (full path) pairs
 // with the rewritten provider via Match.
