@@ -31,7 +31,7 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 	arg := &graph.Edge{From: win.ID, To: g.ID, Kind: graph.EdgeArgOf, FilePath: py}
 	facts := []ParseFacts{
 		{File: graph.FileMetaRow{FilePath: py, NodeCount: 2}, EffectiveLanguage: "python", Nodes: []*graph.Node{parent, win},
-			Edges: []*graph.Edge{defines, &later, contains, cross, call, imports, arg},
+			Edges:     []*graph.Edge{defines, &later, contains, cross, call, imports, arg},
 			Constants: []graph.ConstantValueRow{{NodeID: parent.ID, FilePath: py, Value: "python"}, {NodeID: g.ID, FilePath: py, Value: "not a Go input"}},
 			Shingles:  map[string][]uint64{parent.ID: {11}}},
 		{File: graph.FileMetaRow{FilePath: goFile, NodeCount: 2}, EffectiveLanguage: "go", Nodes: []*graph.Node{loser, g}, Edges: []*graph.Edge{ref, evidence},

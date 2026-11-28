@@ -119,8 +119,8 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 	}); err != nil {
 		return err
 	}
-	return view.visit(r.ctx, []byte{familyNode}, func(_ *pebble.Snapshot, row row) error {
-		reader, err := checkedRebuildLightNode(row, "Spring config")
+	return view.visit(r.ctx, []byte{familyNode}, func(_ *pebble.Snapshot, nodeRow row) error {
+		reader, err := checkedRebuildLightNode(nodeRow, "Spring config")
 		if err != nil || !matches(reader.RepoPrefix, reader.WorkspaceID) {
 			return err
 		}
@@ -129,7 +129,7 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 		default:
 			return nil
 		}
-		reader, err = decodeNode(row.value)
+		reader, err = decodeNode(nodeRow.value)
 		if err != nil {
 			return err
 		}
