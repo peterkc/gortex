@@ -190,15 +190,20 @@ func (r *RebuildContractRecords) visit(prefix []byte, yield func([]byte, Rebuild
 		if err != nil || id == "" || len(ordinal) != 8 {
 			return invalid("invalid contract record key")
 		}
-		d := recordCursor{buf: s.value}
-		unproved := d.boolean()
-		c := readFactRecord(&d)
-		if err := d.finish(); err != nil {
+		item, err := decodeRebuildContractRecord(s.value)
+		if err != nil {
 			return err
 		}
-		if c.ID != id {
+		if item.ID != id {
 			return invalid("contract record disagrees with key")
 		}
-		return yield(s.key, RebuildContractRecord{Contract: c, BodyUnproved: unproved})
+		return yield(s.key, item)
 	})
+}
+
+func decodeRebuildContractRecord(raw []byte) (RebuildContractRecord, error) {
+	d := recordCursor{buf: raw}
+	unproved := d.boolean()
+	c := readFactRecord(&d)
+	return RebuildContractRecord{Contract: c, BodyUnproved: unproved}, d.finish()
 }

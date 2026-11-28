@@ -543,41 +543,7 @@ func collectRouterRewrites(reg *Registry, representatives []Contract, facts map[
 			if rp == "" {
 				continue
 			}
-			rawPath, _ := items[i].Meta["path"].(string)
-			joinedRaw := joinPaths(rp, rawPath)
-			newPath, names := NormalizeHTTPPathWithParams(joinedRaw)
-			method, _ := items[i].Meta["method"].(string)
-			if method == "" {
-				method = "ANY"
-			}
-			newID := fmt.Sprintf("http::%s::%s", method, newPath)
-			// Clone the Meta map before mutating: ByID returns value
-			// copies whose Meta maps still alias the registry's other
-			// secondary indexes (maps are reference types). Mutating in
-			// place would leak the rewrite into stale index entries
-			// before ReplaceByID purges them.
-			items[i].Meta = cloneMeta(items[i].Meta)
-			if newID == items[i].ID {
-				// Already canonical (prefix was empty after norm).
-				items[i].Meta[routePrefixJoinedMeta] = true
-				changed = true
-				continue
-			}
-			items[i].ID = newID
-			items[i].Meta["path"] = newPath
-			if len(names) > 0 {
-				items[i].Meta["path_param_names"] = names
-			}
-			// Prepend the joined prefix to the route's developer-written path
-			// (which keeps the original param names the re-normalized path
-			// has already collapsed) and re-classify against the joined path.
-			prevOrig, ok := items[i].Meta["original_path"].(string)
-			if !ok || prevOrig == "" {
-				prevOrig = rawPath
-			}
-			items[i].Meta["original_path"] = joinPaths(rp, prevOrig)
-			items[i].Meta["route_kind"] = RouteKindForPath(newPath)
-			items[i].Meta[routePrefixJoinedMeta] = true
+			items[i] = RewriteRouterContract(items[i], rp)
 			changed = true
 		}
 		if changed {
@@ -586,6 +552,45 @@ func collectRouterRewrites(reg *Registry, representatives []Contract, facts map[
 		}
 	}
 	return rewrites
+}
+
+// RewriteRouterContract applies a nonempty elected router prefix to a route.
+func RewriteRouterContract(c Contract, prefix string) Contract {
+	rawPath, _ := c.Meta["path"].(string)
+	joinedRaw := joinPaths(prefix, rawPath)
+	newPath, names := NormalizeHTTPPathWithParams(joinedRaw)
+	method, _ := c.Meta["method"].(string)
+	if method == "" {
+		method = "ANY"
+	}
+	newID := fmt.Sprintf("http::%s::%s", method, newPath)
+	// Clone the Meta map before mutating: ByID returns value
+	// copies whose Meta maps still alias the registry's other
+	// secondary indexes (maps are reference types). Mutating in
+	// place would leak the rewrite into stale index entries
+	// before ReplaceByID purges them.
+	c.Meta = cloneMeta(c.Meta)
+	if newID == c.ID {
+		// Already canonical (prefix was empty after norm).
+		c.Meta[routePrefixJoinedMeta] = true
+		return c
+	}
+	c.ID = newID
+	c.Meta["path"] = newPath
+	if len(names) > 0 {
+		c.Meta["path_param_names"] = names
+	}
+	// Prepend the joined prefix to the route's developer-written path
+	// (which keeps the original param names the re-normalized path
+	// has already collapsed) and re-classify against the joined path.
+	prevOrig, ok := c.Meta["original_path"].(string)
+	if !ok || prevOrig == "" {
+		prevOrig = rawPath
+	}
+	c.Meta["original_path"] = joinPaths(prefix, prevOrig)
+	c.Meta["route_kind"] = RouteKindForPath(newPath)
+	c.Meta[routePrefixJoinedMeta] = true
+	return c
 }
 
 func applyRouterRewrites(reg *Registry, rewrites []routerRewrite) {
