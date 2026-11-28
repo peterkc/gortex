@@ -146,8 +146,8 @@ func contractOmissionIDMatchesType(o RebuildContractOmission) bool {
 	if o.ID == "" {
 		return true
 	}
-	kind, id, found := strings.Cut(o.ID, "::")
-	return found && kind == prefix && id != ""
+	kind, id, _ := strings.Cut(o.ID, "::")
+	return kind == prefix && id != ""
 }
 
 func decodeContractOmission(key, value []byte) (RebuildContractOmission, error) {
@@ -337,10 +337,6 @@ func (b *BuildStore) checkContractChange(r row) error {
 			return err
 		}
 		tag, key = 'e', pendingEdgeKey(e)
-	case familyShape:
-		tag, key = 't', r.key
-	case familyOmission:
-		tag, key = 'o', r.key
 	default:
 		return nil
 	}

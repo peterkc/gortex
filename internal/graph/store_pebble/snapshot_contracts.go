@@ -92,10 +92,6 @@ func (s *Snapshot) ContractShapesContext(ctx context.Context, ids []string) (map
 	if _, err := s.contractReadWitness(ctx); err != nil {
 		return nil, err
 	}
-	return s.contractShapes(ctx, ids)
-}
-
-func (s *Snapshot) contractShapes(ctx context.Context, ids []string) (map[string]*contracts.Shape, error) {
 	if len(ids) > graph.ContractProjectionRowLimit {
 		return nil, graph.ErrContractProjectionLimit
 	}
@@ -121,8 +117,8 @@ func (s *Snapshot) contractShapes(ctx context.Context, ids []string) (map[string
 	return out, nil
 }
 
-// FullNodesByIDsContext reconstructs complete Meta only for explicit full
-// node reads. Ordinary node reads continue to return the saved N row alone.
+// FullNodesByIDsContext and contract projections restore the split shape into
+// Meta. Ordinary node reads continue to return the saved N row alone.
 func (s *Snapshot) FullNodesByIDsContext(ctx context.Context, ids []string) (map[string]*graph.Node, error) {
 	if _, err := s.contractReadWitness(ctx); err != nil {
 		return nil, err

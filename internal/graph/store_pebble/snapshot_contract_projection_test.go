@@ -261,6 +261,7 @@ func TestSnapshotContractProjectionRejectsMalformedIndexes(t *testing.T) {
 		want string
 	}{
 		{"node ID", "contract projection node differs from its key"},
+		{"owner source ID", "contract projection node differs from its key"},
 		{"repo counter", "contract projection repository counter key"},
 		{"file index", "contract projection file index differs from its node"},
 		{"incoming index", "contract projection adjacency differs from its edge"},
@@ -293,6 +294,18 @@ func TestSnapshotContractProjectionRejectsMalformedIndexes(t *testing.T) {
 			case "node ID", "full node ID":
 				key = pendingNodeKey("forged")
 				value, err = encodeNode(owner)
+			case "owner source ID":
+				e.From = "forged"
+				id := edgeIdentity(e)
+				out := outEdgeKey(e, id)
+				encoded, err := encodeEdge(e)
+				require.NoError(t, err)
+				require.NoError(t, head.db.Set(out, encoded, pebble.Sync))
+				kind := append(appendKeyLine(keyStrings([]byte{familyEdge, edgeKind}, string(e.Kind), e.From), e.Line), id[:]...)
+				require.NoError(t, head.db.Set(kind, out, pebble.Sync))
+				key = pendingNodeKey(e.From)
+				value, err = encodeNode(owner)
+				require.NoError(t, err)
 			case "repo counter":
 				key = append(countKey("repo"), 0)
 				value = encodeCount(1)

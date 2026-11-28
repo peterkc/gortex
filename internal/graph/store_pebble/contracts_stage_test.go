@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
@@ -348,6 +347,9 @@ func TestContractOmissionNativeIDTypes(t *testing.T) {
 	} {
 		require.True(t, contractOmissionIDMatchesType(record), "%s: %s", record.Type, record.ID)
 	}
+	for _, id := range []string{"http", "http::"} {
+		require.False(t, contractOmissionIDMatchesType(RebuildContractOmission{Type: contracts.ContractHTTP, ID: id}))
+	}
 	for _, id := range []string{"", "cfg::spring::", "env::MISSING"} {
 		require.False(t, contractOmissionIDMatchesType(RebuildContractOmission{Type: contracts.ContractType(graph.EdgeReadsConfig), ID: id}))
 	}
@@ -360,9 +362,19 @@ func TestContractStageRejectsInvalidBatch(t *testing.T) {
 		want  string
 	}{
 		{"invalid node", RebuildContractBatch{Nodes: []*graph.Node{{ID: "ordinary", Kind: graph.KindType}}}, "invalid contract stage node"},
+		{"nil node", RebuildContractBatch{Nodes: []*graph.Node{nil}}, "invalid contract stage node"},
+		{"empty node ID", RebuildContractBatch{Nodes: []*graph.Node{{Kind: graph.KindConfigKey}}}, "invalid contract stage node"},
+		{"proxy node", RebuildContractBatch{Nodes: []*graph.Node{{ID: "cfg::local", Kind: graph.KindConfigKey, Stub: true, Origin: "peer"}}}, "invalid contract stage node"},
+		{"proxy ID", RebuildContractBatch{Nodes: []*graph.Node{{ID: graph.ProxyNodeID("peer", "cfg::key"), Kind: graph.KindConfigKey}}}, "invalid contract stage node"},
+		{"builtin ID", RebuildContractBatch{Nodes: []*graph.Node{{ID: "builtin::len", Kind: graph.KindConfigKey}}}, "invalid contract stage node"},
+		{"unresolved ID", RebuildContractBatch{Nodes: []*graph.Node{{ID: "unresolved::key", Kind: graph.KindConfigKey}}}, "invalid contract stage node"},
+		{"external import ID", RebuildContractBatch{Nodes: []*graph.Node{{ID: "external::lib", Kind: graph.KindConfigKey}}}, "invalid contract stage node"},
 		{"wrong registry language", RebuildContractBatch{Nodes: []*graph.Node{{ID: "http::GET::/a", Kind: graph.KindContract, Language: "go"}}}, "contract registry node language"},
 		{"unsplit shape", RebuildContractBatch{Nodes: []*graph.Node{{ID: "env::A", Kind: graph.KindContract, Language: "contract", Meta: map[string]any{"shape": nil}}}}, "contract batch must supply split shape rows"},
 		{"invalid edge", RebuildContractBatch{Edges: []*graph.Edge{{From: "", To: "env::A", Kind: graph.EdgeProvides}}}, "invalid contract stage edge"},
+		{"nil edge", RebuildContractBatch{Edges: []*graph.Edge{nil}}, "invalid contract stage edge"},
+		{"empty edge target", RebuildContractBatch{Edges: []*graph.Edge{{From: "a", Kind: graph.EdgeProvides}}}, "invalid contract stage edge"},
+		{"invalid structural target", RebuildContractBatch{Edges: []*graph.Edge{{From: "a", To: "a.go::F#param:x", Kind: graph.EdgeImplements}}}, "invalid contract stage edge"},
 		{"unproved Call", RebuildContractBatch{Edges: []*graph.Edge{{From: "a", To: "b", Kind: graph.EdgeCalls}}}, "unproved contract Call emitter"},
 		{"unexpected edge kind", RebuildContractBatch{Edges: []*graph.Edge{{From: "a", To: "b", Kind: graph.EdgeReferences}}}, "unexpected contract stage edge kind"},
 		{"empty type ID", RebuildContractBatch{Shapes: map[string]*contracts.Shape{"": {Kind: "struct"}}}, "empty contract shape ID"},
@@ -391,36 +403,36 @@ func TestContractStageAttemptAndIDVisit(t *testing.T) {
 		return nil
 	}
 	require.ErrorContains(t, b.VisitPreparedContractIDs(ctx, unsealed, visit), "does not name the prepared stage")
-	_, err = b.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), ContractCoverage{})
+	prepared, err := b.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), ContractCoverage{})
 	require.NoError(t, err)
+	require.NoError(t, b.VisitPreparedContractIDs(ctx, prepared, visit)) // built-empty
+	stale := prepared
+	stale.Witness.Recipe[0] ^= 1
+	require.ErrorContains(t, b.VisitPreparedContractIDs(ctx, stale, visit), "does not name the prepared stage")
+	require.ErrorContains(t, b.VisitPreparedContractIDs(ctx, prepared, nil), "does not name the prepared stage")
 	stage, err := b.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), ContractCoverage{})
 	require.ErrorContains(t, err, "contracts already attempted for this build")
 	require.Zero(t, stage)
 }
 
 func TestContractsStageRejectsUnclaimedPrivateRows(t *testing.T) {
-	for _, tag := range []byte{familyShape, familyOmission} {
-		t.Run(string(tag), func(t *testing.T) {
+	for _, kind := range []string{"node", "edge"} {
+		t.Run(kind, func(t *testing.T) {
 			ctx := t.Context()
 			b, _, files, owner, _, _, _ := relationsStageFixture(t, FullProfile)
-			owner.Kind = graph.KindInterface
-			b.AddNode(owner)
 			relations, err := b.PrepareRelations(ctx, t.TempDir(), files, nil)
 			require.NoError(t, err)
 			base, err := b.RetainRelations(ctx, files, relations)
 			require.NoError(t, err)
-			var coverage ContractCoverage
-			if tag == familyShape {
-				raw, err := encodeContractShape(&contracts.Shape{Kind: "interface"})
-				require.NoError(t, err)
-				require.NoError(t, b.pending.Set(contractShapeKey(owner.ID), raw, pebble.NoSync))
+			if kind == "node" {
+				changed := *owner
+				changed.Meta = map[string]any{"late": true}
+				b.AddNode(&changed)
 			} else {
-				key, err := contractOmissionKey(testContractOmission())
-				require.NoError(t, err)
-				require.NoError(t, b.pending.Set(key, []byte{contractOmissionFormat}, pebble.NoSync))
-				coverage.OmittedRecords = 1
+				b.AddEdge(&graph.Edge{From: owner.ID, To: owner.ID, Kind: graph.EdgeProvides, FilePath: owner.FilePath, Line: 9})
 			}
-			stage, err := b.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), coverage)
+			stage, err := b.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), ContractCoverage{})
+			require.ErrorIs(t, err, ErrContractsSeal)
 			require.ErrorContains(t, err, "unclaimed primary row changed after relations")
 			require.Zero(t, stage)
 		})
@@ -473,6 +485,14 @@ func TestRetainRelationsRefusesWrongWitness(t *testing.T) {
 	require.ErrorContains(t, err, "needs retained relations from this build")
 	wrong := relations
 	wrong.Witness.Stage = StageFileGraph
+	_, err = b.RetainRelations(ctx, files, wrong)
+	require.ErrorContains(t, err, "needs retained relations from this build")
+	wrong = relations
+	wrong.Witness.Profile = DefaultProfile
+	_, err = b.RetainRelations(ctx, files, wrong)
+	require.ErrorContains(t, err, "needs retained relations from this build")
+	wrong = relations
+	wrong.Dir = "relative"
 	_, err = b.RetainRelations(ctx, files, wrong)
 	require.ErrorContains(t, err, "needs retained relations from this build")
 	for _, tag := range []byte{familyManifest, familyFileMeta} {
