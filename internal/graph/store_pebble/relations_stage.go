@@ -117,6 +117,9 @@ func (b *BuildStore) PrepareRelations(ctx context.Context, dir string, base File
 	if b.first != nil {
 		return StageTables{}, b.first
 	}
+	if b.contractOverlay {
+		return StageTables{}, ErrRebuildContractOverlay
+	}
 	if base.build != b || !filepath.IsAbs(dir) {
 		return StageTables{}, invalid("relations needs a retained file graph from this build and an absolute stage directory")
 	}

@@ -194,6 +194,31 @@ func TestRebuildFrameworkCensusObserverRolesShareTarget(t *testing.T) {
 	require.True(t, next.allows(SynthObserverChannel))
 }
 
+func TestRebuildFrameworkCensusContractOverlay(t *testing.T) {
+	const file, language = "observer.go", "go"
+	registrar := rebuildEventNode(file, "subscribe", language, "")
+	dispatcher := rebuildEventNode(file, "notify", language, "")
+	field := rebuildEventNode(file, "handlers", language, "")
+	registrar.Kind, dispatcher.Kind, field.Kind = graph.KindMethod, graph.KindMethod, graph.KindField
+	b := openRebuildGRPCBuild(t, rebuildEventFacts(file, language, []*graph.Node{registrar, dispatcher, field},
+		rebuildObserverEdge(registrar, field, graph.EdgeAccessesField, 3),
+		rebuildObserverEdge(dispatcher, field, graph.EdgeAccessesField, 7),
+	))
+	ctx := t.Context()
+	selection, err := NewFrameworkSynthesizerSelection([]string{SynthObserverChannel})
+	require.NoError(t, err)
+	before, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.True(t, before.allows(SynthObserverChannel))
+
+	require.NoError(t, b.BeginRebuildContractOverlay(ctx, map[string]string{dispatcher.ID: "settings.rb"}))
+	// No selection mask: the captured graph itself must lack the dispatcher.
+	during, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
+	require.NoError(t, err)
+	require.False(t, during.allows(SynthObserverChannel))
+	require.NoError(t, b.EndRebuildContractOverlay(ctx))
+}
+
 func TestRebuildFrameworkCensusTemporalJavaAnnotation(t *testing.T) {
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthTemporalStub})
 	require.NoError(t, err)

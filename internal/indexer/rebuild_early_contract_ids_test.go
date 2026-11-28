@@ -32,6 +32,7 @@ func TestRebuildEarlyContractIDsNativeCuts(t *testing.T) {
 	files := []sourceFile{
 		{path: "routes.go", language: "go", body: "package app\nfunc Register(r Router) { r.GET(Route, Handle) }\n"},
 		{path: "constants.go", language: "go", body: "package app\nconst Route = \"/items\"\n"},
+		{path: "goframe.go", language: "go", body: "package app\ntype CreateReq struct { g.Meta `path:\"/goframe\" method:\"POST\"` }\n"},
 		{path: "users.py", language: "python", body: `from fastapi import APIRouter
 router = APIRouter(prefix="/users")
 @router.get("/{id}")
@@ -88,11 +89,19 @@ app.include_router(router, prefix="/api")
 	nativeGraph.AddEdge(di)
 	build.AddEdge(di)
 	idx.extractDIContracts(native)
+	const goframe = "route::goframe::POST::/goframe"
+	parseRoute := nativeGraph.GetNode(goframe)
+	require.NotNil(t, parseRoute, "GoFrame really emitted a parse-time route")
+	require.Equal(t, graph.KindContract, parseRoute.Kind)
+	require.Equal(t, "go", parseRoute.Language)
 	idx.commitContracts(native)
 	want := make(rebuildEarlyContractIDs)
 	for n := range nativeGraph.NodesByKind(graph.KindContract) {
-		want[n.ID] = n.FilePath
+		if n.Language == "contract" {
+			want[n.ID] = n.FilePath
+		}
 	}
+	require.NotContains(t, want, goframe)
 	require.Equal(t, rebuildEarlyContractIDs{
 		"dep::example.com/lib":       "go.mod",
 		"di::Token":                  "routes.go",
@@ -110,6 +119,22 @@ app.include_router(router, prefix="/api")
 	row, err := build.RebuildView().Node(ctx, "http::GET::/api/users/{p1}")
 	require.NoError(t, err)
 	require.Nil(t, row)
+
+	require.NoError(t, build.BeginRebuildContractOverlay(ctx, got))
+	for id := range want {
+		row, err := build.RebuildView().Node(ctx, id)
+		require.NoError(t, err)
+		nativeRow := *nativeGraph.GetNode(id)
+		// Full contract records are materialized by the later Contracts stage.
+		// The framework cut needs node identity and no displaced role stamps.
+		nativeRow.Meta = nil
+		require.Equal(t, &nativeRow, row)
+	}
+	liveRoute, err := build.RebuildView().Node(ctx, goframe)
+	require.NoError(t, err)
+	require.NotNil(t, liveRoute)
+	require.Equal(t, "go", liveRoute.Language)
+	require.NoError(t, build.EndRebuildContractOverlay(ctx))
 }
 
 func TestRebuildEarlyContractIDsBuiltEmpty(t *testing.T) {

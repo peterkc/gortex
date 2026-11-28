@@ -648,8 +648,13 @@ func (p *rebuildGRPC) wantProvenance(e *graph.Edge, old []byte, handler string) 
 	if err := p.put(rebuildGRPCRecorder(raw, e), []byte{rebuildCapabilityWanted}); err != nil {
 		return err
 	}
-	if err := p.put(rebuildGRPCKey('n', e.From), []byte{rebuildCapabilityWanted}); err != nil {
-		return err
+	// The early set already proves a replaced caller. Its displaced parse
+	// receipt cannot prove the live contract row, but the call still needs
+	// its exact original recorder and the selected handler needs its node.
+	if _, contract := p.contractIDs[e.From]; !contract {
+		if err := p.put(rebuildGRPCKey('n', e.From), []byte{rebuildCapabilityWanted}); err != nil {
+			return err
+		}
 	}
 	if handler != "" {
 		return p.put(rebuildGRPCKey('n', handler), []byte{rebuildCapabilityWanted})
@@ -736,7 +741,10 @@ func (p *rebuildGRPC) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, 
 		if err != nil {
 			return err
 		}
-		keys := [][]byte{rebuildGRPCRecorder(raw, e), rebuildGRPCKey('n', e.From)}
+		keys := [][]byte{rebuildGRPCRecorder(raw, e)}
+		if _, contract := p.contractIDs[e.From]; !contract {
+			keys = append(keys, rebuildGRPCKey('n', e.From))
+		}
 		if handler != "" {
 			keys = append(keys, rebuildGRPCKey('n', handler))
 		}

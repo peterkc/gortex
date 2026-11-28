@@ -114,6 +114,9 @@ func (b *BuildStore) PrepareContracts(ctx context.Context, dir string, base Rela
 		return StageTables{}, invalid("contracts needs its retained predecessor, stage directory and batches")
 	}
 	if err := b.withWrites(func() error {
+		if b.contractOverlay {
+			return ErrRebuildContractOverlay
+		}
 		if b.contractsStarted {
 			return invalid("contracts already attempted for this build")
 		}

@@ -138,6 +138,9 @@ func (b *BuildStore) PrepareFileGraph(ctx context.Context, dir string, manifest 
 	if b.first != nil {
 		return StageTables{}, b.first
 	}
+	if b.contractOverlay {
+		return StageTables{}, ErrRebuildContractOverlay
+	}
 	if !filepath.IsAbs(dir) || incarnation == "" || manifest.Profile != b.profile || manifest.Stage != StageManifest ||
 		len(manifest.Families) != 1 || manifest.Families[0].Family != familyManifest {
 		return StageTables{}, invalid("file graph needs its manifest witness")

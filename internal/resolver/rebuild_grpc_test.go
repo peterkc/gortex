@@ -439,6 +439,7 @@ func TestRebuildGRPCExactReceiptProof(t *testing.T) {
 	for _, mode := range []string{
 		"complete proof", "wrong old key", "wrong service", "wrong method", "missing caller",
 		"missing elected handler", "mixed handler evidence", "mismatched live attributes",
+		"contract caller", "contract caller without recorder", "contract caller without handler",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			facts := rebuildGRPCFixture(0)
@@ -449,12 +450,26 @@ func TestRebuildGRPCExactReceiptProof(t *testing.T) {
 			})
 			// Native always elects the registered method. The proved runner-up
 			// belongs to the interface fallback, not the registration bucket.
-			want := rebuildGRPCNativeCalls(t, rebuildGRPCNative(t, facts), 1)
+			native := rebuildGRPCNative(t, facts)
+			ids := map[string]string{}
+			if strings.HasPrefix(mode, "contract caller") {
+				ids[caller] = "settings.rb"
+				require.NoError(t, native.AddBatchChecked([]*graph.Node{{
+					ID: caller, Name: caller, Kind: graph.KindContract, FilePath: ids[caller], Language: "contract",
+				}}, nil))
+			}
+			want := rebuildGRPCNativeCalls(t, native, 1)
 			i := slices.IndexFunc(want, func(e *graph.Edge) bool { return e.From == caller })
 			require.NotEqual(t, -1, i)
 			require.Equal(t, handler, want[i].To)
 
 			b, _ := openRebuildGRPCFixture(t, facts)
+			if len(ids) != 0 {
+				require.NoError(t, b.BeginRebuildContractOverlay(t.Context(), ids))
+				n, err := b.RebuildView().Node(t.Context(), caller)
+				require.NoError(t, err)
+				require.Equal(t, graph.KindContract, n.Kind)
+			}
 			before := rebuildGRPCSavedCalls(t, b)
 			proof := facts
 			var mixed *graph.Node
@@ -472,9 +487,11 @@ func TestRebuildGRPCExactReceiptProof(t *testing.T) {
 				}
 				proof.Edges = slices.Clone(facts.Edges)
 				proof.Edges[slices.Index(proof.Edges, stub)] = &e
-			case "missing caller", "missing elected handler":
+			case "contract caller without recorder":
+				proof.Edges = slices.DeleteFunc(slices.Clone(facts.Edges), func(e *graph.Edge) bool { return e == stub })
+			case "missing caller", "missing elected handler", "contract caller without handler":
 				omit := caller
-				if mode == "missing elected handler" {
+				if mode != "missing caller" {
 					omit = handler
 				}
 				proof.Nodes = slices.DeleteFunc(slices.Clone(facts.Nodes), func(n *graph.Node) bool { return n.ID == omit })
@@ -498,9 +515,10 @@ func TestRebuildGRPCExactReceiptProof(t *testing.T) {
 					File: graph.FileMetaRow{FilePath: rebuildGRPCFixtureFile, NodeCount: 1},
 				})
 			}
-			stats, err := RunRebuildGRPC(t.Context(), b, rebuildGRPCReceipts(receipts...), AllFrameworkSynthesizers())
+			selection := AllFrameworkSynthesizers().WithRebuildEarlyContractIDs(ids)
+			stats, err := RunRebuildGRPC(t.Context(), b, rebuildGRPCReceipts(receipts...), selection)
 			got := rebuildGRPCSavedCalls(t, b)
-			if mode == "complete proof" {
+			if mode == "complete proof" || mode == "contract caller" {
 				require.NoError(t, err)
 				require.Equal(t, uint64(1), stats.Moves)
 				require.Equal(t, want, got)

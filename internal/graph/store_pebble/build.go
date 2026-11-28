@@ -30,6 +30,7 @@ type BuildStore struct {
 	cleanupErr       error
 	resolveMu        sync.Mutex
 	v3NodeWrites     uint64 // protected by mu; edge moves do not change it
+	contractOverlay  bool   // protected by mu; never present at a stage offer
 	contractsStarted bool
 	contractsSealed  HeadDigest
 }
@@ -140,6 +141,9 @@ func edgeIndexRows(e *graph.Edge, id [16]byte, owner sourceOwner, outKey, value 
 func (b *BuildStore) Publish(ctx context.Context) (err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.contractOverlay {
+		return ErrRebuildContractOverlay
+	}
 	// An unsupported legacy mutation cannot be mistaken for a complete build.
 	if b.first != nil {
 		return b.first

@@ -402,7 +402,7 @@ func TestRebuildClosureCollectionAppleMarkerNodeCap(t *testing.T) {
 	}
 }
 
-func TestRebuildClosureCollectionEarlyContractMasksRole(t *testing.T) {
+func TestRebuildClosureCollectionContractOverlayMasksRole(t *testing.T) {
 	const file, language, field = "roles.swift", "swift", "handlers"
 	dispatch := rebuildClosureCollectionNode(file, "dispatch", language, rebuildCCDispatch, field)
 	registrar := rebuildClosureCollectionNode(file, "register", language, rebuildCCAppend, field)
@@ -423,12 +423,15 @@ func TestRebuildClosureCollectionEarlyContractMasksRole(t *testing.T) {
 				}}, nil))
 			}
 			require.Equal(t, tc.want, ResolveClosureCollectionCalls(native))
-			selection := rebuildClosureCollectionSelection(t).WithRebuildEarlyContractIDs(tc.ids)
+			require.NoError(t, b.BeginRebuildContractOverlay(t.Context(), tc.ids))
+			// Do not supply the older selection mask. The store must hide the role.
+			selection := rebuildClosureCollectionSelection(t)
 			selection, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 			require.NoError(t, err)
 			s, err := RunRebuildClosureCollection(t.Context(), b, rebuildGRPCReceipts(proof...), selection)
 			require.NoError(t, err)
 			require.Equal(t, uint64(tc.want), s.Edges)
+			require.NoError(t, b.EndRebuildContractOverlay(t.Context()))
 			n, err := b.RebuildView().Node(t.Context(), dispatch.ID)
 			require.NoError(t, err)
 			require.Equal(t, graph.KindMethod, n.Kind)

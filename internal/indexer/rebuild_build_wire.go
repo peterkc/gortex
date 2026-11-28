@@ -227,6 +227,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildGDScriptReceiverGate,
 	store_pebble.ErrRebuildExternalCallSynthesis,
 	errRebuildRouterFactsMissing,
+	store_pebble.ErrRebuildContractOverlay,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

@@ -407,6 +407,11 @@ func buildRebuildStages(
 			return err
 		}
 		earlyFacts = nil
+		// The Manifest and FileGraph offers are complete. Only private readers
+		// run until the overlay is removed below, before any later stage seal.
+		if err := private.BeginRebuildContractOverlay(ctx, earlyIDs); err != nil {
+			return err
+		}
 	}
 	if err := runRebuildTestFiles(ctx, private, receipts, classifications); err != nil {
 		return err
@@ -897,6 +902,11 @@ func buildRebuildStages(
 		return counts.census.byPath[counts.census.originByGraphPath[p]]
 	}); err != nil {
 		return err
+	}
+	if exactCheckout {
+		if err := private.EndRebuildContractOverlay(ctx); err != nil {
+			return err
+		}
 	}
 	// The supported tails only changed private scratch. Relation projection
 	// and its remaining tails, derived and search stages are incomplete.
