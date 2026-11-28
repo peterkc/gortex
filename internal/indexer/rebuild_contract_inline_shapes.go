@@ -18,6 +18,17 @@ func inlineRebuildContractShapes(records *store_pebble.RebuildContractRecords, s
 		return shapeAt(id)
 	}
 	return records.VisitCurrentRepresentatives(func(c store_pebble.RebuildContractRecord) error {
+		if c.BodyUnproved {
+			// Do not open stale shape facts. Keep the native write targets'
+			// identities, but mark their payloads for D83 omission.
+			return records.UpdateByID(c.ID, func(item *store_pebble.RebuildContractRecord) (bool, error) {
+				if item.BodyUnproved || item.SymbolID != c.SymbolID || item.Role != contracts.RoleProvider {
+					return false, nil
+				}
+				item.BodyUnproved = true
+				return true, nil
+			})
+		}
 		env, _ := c.Meta["response_envelope"].([]map[string]any)
 		var envChanged bool
 		for _, row := range env {

@@ -10,6 +10,123 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
+func TestRebuildInlineContractShapesUnprovedRepresentative(t *testing.T) {
+	const id, symbol, stale = "http::GET::/a", "handler.go::Serve", "types.go::Stale"
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	staleResponse := map[string]any{"response_type": stale}
+	staleEnvelope := map[string]any{"response_envelope": []map[string]any{{"name": "stale", "type": stale}}}
+	for _, tc := range []struct {
+		name      string
+		meta      map[string]any
+		reachable bool
+	}{
+		{"response", staleResponse, true},
+		{"request", map[string]any{"request_type": stale}, true},
+		{"envelope", staleEnvelope, true},
+		{"missing stale type", nil, true},
+		{"no proved write target", staleEnvelope, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proved := store_pebble.RebuildContractRecord{Contract: contracts.Contract{
+				ID:       id,
+				Type:     contracts.ContractHTTP,
+				Role:     contracts.RoleProvider,
+				FilePath: "routes.go",
+				SymbolID: symbol,
+				Line:     2,
+				Meta:     map[string]any{"response_shape": &contracts.Shape{Kind: "struct"}},
+			}}
+			// The first row represents the hidden sibling in All.
+			unproved := proved
+			unproved.Line, unproved.Meta, unproved.BodyUnproved = 1, tc.meta, true
+			otherSymbol := proved
+			otherSymbol.SymbolID = "handler.go::Other"
+			consumer := proved
+			consumer.Role = contracts.RoleConsumer
+			inputs := []store_pebble.RebuildContractRecord{unproved, otherSymbol, consumer}
+			want := []store_pebble.RebuildContractRecord{unproved, otherSymbol, consumer}
+			if tc.reachable {
+				otherFile := proved
+				otherFile.FilePath = "other.go"
+				inputs = append(inputs, proved, otherFile)
+				proved.BodyUnproved, otherFile.BodyUnproved = true, true
+				want = append(want, proved, otherFile)
+			}
+			require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(records *store_pebble.RebuildContractRecords) error {
+				for _, item := range inputs {
+					require.NoError(t, records.Add(item))
+				}
+				lookups := 0
+				require.NoError(t, inlineRebuildContractShapes(records, func(string) (*contracts.Shape, error) {
+					lookups++
+					return &contracts.Shape{Kind: "struct"}, nil
+				}))
+				require.Zero(t, lookups)
+				var got []store_pebble.RebuildContractRecord
+				require.NoError(t, records.VisitByID(id, func(item store_pebble.RebuildContractRecord) error {
+					got = append(got, item)
+					return nil
+				}))
+				require.Equal(t, want, got)
+				return nil
+			}))
+		})
+	}
+}
+
+func TestRebuildInlineContractShapesEnvelopeTargets(t *testing.T) {
+	const id, typeID = "http::GET::/a", "types.go::Response"
+	shape := &contracts.Shape{Kind: "struct"}
+	envelope := func(name string, shape *contracts.Shape) map[string]any {
+		row := map[string]any{"name": name, "type": typeID}
+		if shape != nil {
+			row["shape"] = shape
+		}
+		return map[string]any{"response_envelope": []map[string]any{row}}
+	}
+	first := contracts.Contract{
+		ID:       id,
+		Type:     contracts.ContractHTTP,
+		Role:     contracts.RoleConsumer,
+		FilePath: "a.go",
+		SymbolID: "handler.go::Serve",
+		Line:     1,
+	}
+	provider := first
+	provider.Role, provider.Line, provider.Meta = contracts.RoleProvider, 2, envelope("provider", nil)
+	hidden := provider
+	hidden.Line, hidden.Meta = 3, nil
+	last := first
+	last.FilePath, last.Line, last.Meta = "b.go", 4, envelope("consumer", nil)
+	inputs := []contracts.Contract{first, provider, hidden, last}
+	want := []contracts.Contract{first, provider, hidden, last}
+	for i := 1; i < len(want); i++ {
+		want[i].Meta = envelope("consumer", shape)
+	}
+
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(records *store_pebble.RebuildContractRecords) error {
+		for _, c := range inputs {
+			require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c}))
+		}
+		require.NoError(t, inlineRebuildContractShapes(records, func(id string) (*contracts.Shape, error) {
+			require.Equal(t, typeID, id)
+			return shape, nil
+		}))
+		var got []contracts.Contract
+		require.NoError(t, records.VisitByID(id, func(item store_pebble.RebuildContractRecord) error {
+			got = append(got, item.Contract)
+			return nil
+		}))
+		require.Equal(t, want, got)
+		return nil
+	}))
+}
+
 func TestRebuildInlineContractShapesMatchNative(t *testing.T) {
 	const firstID, secondID = "types.go::First", "types.go::Second"
 	const providerID, consumerID = "http::GET::/a", "http::GET::/b"
