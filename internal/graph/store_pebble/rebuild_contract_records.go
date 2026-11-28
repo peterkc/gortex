@@ -91,7 +91,8 @@ func (r *RebuildContractRecords) write(key []byte, item RebuildContractRecord) e
 }
 
 // FirstOutputEdge claims the native insert identity in emission order. Call it
-// before selecting coverage, even for an omitted first candidate: a later
+// before selecting coverage, even for an omitted first candidate. An existing
+// ordinary edge belongs to Relations and is never a Contracts addition. A later
 // duplicate must not replace the native first payload. This touches only the
 // record scratch range; PrepareContracts still checks uniqueness independently.
 func (r *RebuildContractRecords) FirstOutputEdge(e *graph.Edge) (bool, error) {
@@ -101,7 +102,12 @@ func (r *RebuildContractRecords) FirstOutputEdge(e *graph.Edge) (bool, error) {
 	if e == nil || e.From == "" || e.To == "" || e.Kind == "" {
 		return false, invalid("contract output edge without identity")
 	}
-	key := append(rebuildContractRecordKey('e'), pendingEdgeKey(e)...)
+	physical := pendingEdgeKey(e)
+	incumbent, err := pendingGet(r.build.pending, physical, func([]byte) (bool, error) { return true, nil })
+	if err != nil || incumbent {
+		return false, err
+	}
+	key := append(rebuildContractRecordKey('e'), physical...)
 	seen, err := pendingGet(r.build.pending, key, func([]byte) (bool, error) { return true, nil })
 	if err != nil || seen {
 		return false, err

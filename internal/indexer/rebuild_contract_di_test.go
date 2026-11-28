@@ -48,7 +48,7 @@ func TestRebuildSpringBeanCallsNativePairs(t *testing.T) {
 	}
 	require.NoError(t, native.AddBatchChecked(nodes, nil))
 	b.AddBatch(nodes, nil)
-	unexpected := func(*graph.Edge) error {
+	unexpected := func(string, *graph.Edge, *graph.Edge) error {
 		t.Fatal("a graph without bean declarations returned a Call")
 		return nil
 	}
@@ -72,9 +72,9 @@ func TestRebuildSpringBeanCallsNativePairs(t *testing.T) {
 		require.Equal(t, 5, e.Line)
 	}
 	failure := errors.New("test sink failed")
-	require.ErrorIs(t, visitRebuildSpringBeanCalls(ctx, b, repo, func(*graph.Edge) error { return failure }), failure)
+	require.ErrorIs(t, visitRebuildSpringBeanCalls(ctx, b, repo, func(string, *graph.Edge, *graph.Edge) error { return failure }), failure)
 	var got []*graph.Edge
-	require.NoError(t, visitRebuildSpringBeanCalls(ctx, b, repo, func(e *graph.Edge) error {
+	require.NoError(t, visitRebuildSpringBeanCalls(ctx, b, repo, func(_ string, _ *graph.Edge, e *graph.Edge) error {
 		got = append(got, e)
 		return nil
 	}))
@@ -118,7 +118,7 @@ func TestRebuildSpringBeanCallInputBounds(t *testing.T) {
 			}
 			b.AddBatch([]*graph.Node{source, method}, []*graph.Edge{bean})
 			var got []*graph.Edge
-			err = visitRebuildSpringBeanCalls(t.Context(), b, repo, func(e *graph.Edge) error {
+			err = visitRebuildSpringBeanCalls(t.Context(), b, repo, func(_ string, _ *graph.Edge, e *graph.Edge) error {
 				got = append(got, e)
 				return nil
 			})

@@ -1,11 +1,13 @@
 package store_pebble
 
 import (
+	"crypto/sha256"
 	"errors"
 	"iter"
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/zzet/gortex/internal/contracts"
 )
 
 // RebuildContractSelection holds separately elected logical IDs, selected IDs,
@@ -113,6 +115,44 @@ func (s *RebuildContractSelection) Selected(id string) (bool, error) {
 		return false, err
 	}
 	return s.contains('s', id)
+}
+
+// MarkSelectedDI records the exact selected DI representative, including its
+// factory target and payload. A selected ID alone cannot prove a sibling.
+func (s *RebuildContractSelection) MarkSelectedDI(c contracts.Contract) error {
+	selected, err := s.Selected(c.ID)
+	if err != nil {
+		return err
+	}
+	if !selected {
+		return invalid("DI representative without selected contract ID")
+	}
+	id, err := rebuildSelectedDIKey(c)
+	if err != nil {
+		return err
+	}
+	return s.put('b', id)
+}
+
+func (s *RebuildContractSelection) SelectedDI(c contracts.Contract) (bool, error) {
+	if err := s.checkFrozen(); err != nil {
+		return false, err
+	}
+	id, err := rebuildSelectedDIKey(c)
+	if err != nil {
+		return false, err
+	}
+	return s.contains('b', id)
+}
+
+func rebuildSelectedDIKey(c contracts.Contract) (string, error) {
+	if c.Type != contracts.ContractDI {
+		return "", invalid("selected DI key requires a DI record")
+	}
+	e := contractFactsEncoder{}
+	writeFactRecord(&e, c)
+	digest := sha256.Sum256(e.buf)
+	return string(digest[:]), e.err
 }
 
 // RememberShapeRef records one checked full type reference at the shape cut.

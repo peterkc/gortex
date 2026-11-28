@@ -146,15 +146,82 @@ func (r rebuildContractReceiptReader) forGraphPath(ctx context.Context, file str
 	return r.load(ctx, r.job.inputs[i])
 }
 
-func (r rebuildContractReceiptReader) visitSpringConfig(ctx context.Context, records *store_pebble.RebuildContractRecords,
+// springRawDeclaration requires an actual parse declaration, not a synthetic
+// or moved linked node. Receipt failures still refuse the build.
+func (r rebuildContractReceiptReader) springRawDeclaration(ctx context.Context, n *graph.Node) (store_pebble.ParseFacts, *graph.Node, error) {
+	if n == nil || n.FilePath == "" || n.RepoPrefix != r.idx.repoPrefix || r.extractorOf(n.FilePath) == "" {
+		return store_pebble.ParseFacts{}, nil, nil
+	}
+	base, _, err := r.forGraphPath(ctx, n.FilePath)
+	if err != nil {
+		return store_pebble.ParseFacts{}, nil, err
+	}
+	return base, springRawNode(base, n), nil
+}
+
+func springRawNode(base store_pebble.ParseFacts, n *graph.Node) *graph.Node {
+	for i := len(base.Nodes) - 1; i >= 0; i-- {
+		saved := base.Nodes[i]
+		if saved.ID == n.ID {
+			if checkLinkedContractDeclaration(n, saved) == nil && n.Name == saved.Name {
+				return saved
+			}
+			break
+		}
+	}
+	return nil
+}
+
+func (r rebuildContractReceiptReader) visitSpringConfig(ctx context.Context, view store_pebble.RebuildView, records *store_pebble.RebuildContractRecords,
 	yield func(store_pebble.RebuildContractBatch) error,
 ) error {
 	scope := contracts.SpringConfigScope{RepoRoot: r.idx.rootPath, RepoPrefix: r.idx.repoPrefix, WorkspaceID: r.idx.workspaceID}
+	var lastReader string
+	var readerProved bool
 	return records.VisitSpringConfig(scope, func(path string) ([]*graph.Node, error) {
 		_, facts, err := r.forGraphPath(ctx, path)
 		if err != nil {
 			return nil, err
 		}
 		return facts.ConfigKeys, nil
-	}, yield)
+	}, func(batch store_pebble.RebuildContractBatch) error {
+		// Key nodes are elected directly from checked, value-redacted file
+		// facts above. That pass has no link inputs. Existing targets, unlike
+		// newly elected keys, must be proved retained declarations.
+		for _, e := range batch.Edges {
+			if e.From != lastReader {
+				lastReader, readerProved = e.From, false
+				reader, err := view.Node(ctx, e.From)
+				if err != nil {
+					return err
+				}
+				_, raw, err := r.springRawDeclaration(ctx, reader)
+				if err != nil {
+					return err
+				}
+				readerProved = raw != nil && r.extractorOf(reader.FilePath) == "java" &&
+					slices.Equal(contracts.SpringConfigKeysOf(raw), contracts.SpringConfigKeysOf(reader))
+			}
+			keep := readerProved
+			if keep {
+				target, err := view.Node(ctx, e.To)
+				if err != nil {
+					return err
+				}
+				if target != nil {
+					_, raw, err := r.springRawDeclaration(ctx, target)
+					if err != nil {
+						return err
+					}
+					keep = raw != nil
+				}
+			}
+			if !keep {
+				return yield(store_pebble.RebuildContractBatch{Omitted: []store_pebble.RebuildContractOmission{
+					store_pebble.RebuildContractEdgeOmission(scope.RepoPrefix, contracts.ContractType(graph.EdgeReadsConfig), e.To, e),
+				}})
+			}
+		}
+		return yield(batch)
+	})
 }

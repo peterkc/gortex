@@ -22,7 +22,7 @@ var rebuildSpringBeanPrefix = []byte{'g', 'q', 's'}
 func (b *BuildStore) VisitSpringBeanConsumers(ctx context.Context, repo string,
 	beanType func(*graph.Edge) string,
 	methodParams func(*graph.Node) (class string, tokens map[string]struct{}),
-	yield func(class string, bean *graph.Edge) error,
+	yield func(class, method string, bean *graph.Edge) error,
 ) (err error) {
 	if beanType == nil || methodParams == nil || yield == nil {
 		return invalid("Spring bean candidates need native selectors and a visitor")
@@ -110,7 +110,7 @@ func (b *BuildStore) VisitSpringBeanConsumers(ctx context.Context, repo string,
 			if err := put(key, nil); err != nil {
 				return err
 			}
-			return yield(class, e)
+			return yield(class, method, e)
 		})
 	})
 }

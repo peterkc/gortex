@@ -48,11 +48,6 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 		}
 		return records.WithContractSelection(func(s *store_pebble.RebuildContractSelection) error {
 			return records.WithContractOutput(func(add func(store_pebble.RebuildContractBatch) error) error {
-				if err := visitRebuildSpringBeanCalls(ctx, b, r.idx.repoPrefix, func(e *graph.Edge) error {
-					return add(store_pebble.RebuildContractBatch{Edges: []*graph.Edge{e}})
-				}); err != nil {
-					return err
-				}
 				if err := r.idx.appendRebuildDIContracts(records); err != nil {
 					return err
 				}
@@ -66,9 +61,6 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 					r.idx.logger.Debug("rebuild late router native map-order difference", zap.String("path", file))
 					return nil
 				}); err != nil {
-					return err
-				}
-				if err := r.visitSpringConfig(ctx, records, add); err != nil {
 					return err
 				}
 				if err := r.resolveLateCallReturnTypes(ctx, view, records); err != nil {
@@ -105,7 +97,15 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 				if err := inlineRebuildContractShapes(records, r.shapeLookup(ctx, view)); err != nil {
 					return err
 				}
-				return r.captureRebuildContractRows(ctx, view, records, s, add)
+				if err := r.captureRebuildContractRows(ctx, view, records, s, add); err != nil {
+					return err
+				}
+				// Neither direct Spring delta supplies inputs to the late registry
+				// reducers. Classify at the same quiet cut, after D83 election.
+				if err := r.captureRebuildSpringBeanCalls(ctx, b, records, s, add); err != nil {
+					return err
+				}
+				return r.visitSpringConfig(ctx, view, records, add)
 			}, func(batches iter.Seq2[store_pebble.RebuildContractBatch, error], coverage store_pebble.ContractCoverage) error {
 				active, attempted := true, false
 				var sealErr error
@@ -183,6 +183,11 @@ func (r rebuildContractReceiptReader) captureRebuildContractRows(ctx context.Con
 				// A later sibling must never replace an omitted canonical
 				// winner or publish ownership of an absent target.
 				return add(store_pebble.RebuildContractBatch{Omitted: []store_pebble.RebuildContractOmission{rebuildContractRecordOmission(c)}})
+			}
+			if c.Type == contracts.ContractDI && c.Meta[graph.MetaDIBinding] == graph.DIBindingBean {
+				if err := selection.MarkSelectedDI(c); err != nil {
+					return err
+				}
 			}
 			return add(batch)
 		})

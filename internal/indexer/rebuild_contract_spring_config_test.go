@@ -44,7 +44,7 @@ func TestRebuildSpringConfigUsesCheckedReceipt(t *testing.T) {
 	parses := parser.ParseCount()
 	var nodes []*graph.Node
 	require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
-		return reader.visitSpringConfig(ctx, records, func(batch store_pebble.RebuildContractBatch) error {
+		return reader.visitSpringConfig(ctx, b.RebuildView(), records, func(batch store_pebble.RebuildContractBatch) error {
 			nodes = append(nodes, batch.Nodes...)
 			return nil
 		})
@@ -53,7 +53,7 @@ func TestRebuildSpringConfigUsesCheckedReceipt(t *testing.T) {
 	require.Equal(t, parses, parser.ParseCount())
 	delete(reader.census.originByGraphPath, file)
 	err = b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
-		return reader.visitSpringConfig(ctx, records, func(store_pebble.RebuildContractBatch) error {
+		return reader.visitSpringConfig(ctx, b.RebuildView(), records, func(store_pebble.RebuildContractBatch) error {
 			t.Fatal("emitted from an unadmitted config file")
 			return nil
 		})

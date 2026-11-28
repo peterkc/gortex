@@ -138,10 +138,7 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 				if target == nil {
 					// Native emits this direct edge even when its target is absent.
 					// Record the physical edge identity, not its raw annotation spelling.
-					omission := RebuildContractOmission{
-						RepoPrefix: reader.RepoPrefix, FilePath: reader.FilePath, ID: id,
-						Type: contracts.ContractType(graph.EdgeReadsConfig), RecordKey: HeadDigest(sha256.Sum256(edgeKey)),
-					}
+					omission := RebuildContractEdgeOmission(reader.RepoPrefix, contracts.ContractType(graph.EdgeReadsConfig), id, e)
 					return yield(RebuildContractBatch{Omitted: []RebuildContractOmission{omission}})
 				}
 			}
@@ -168,4 +165,11 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 		}
 		return nil
 	})
+}
+
+// RebuildContractEdgeOmission scopes an omitted direct native edge to its
+// recording file and exact physical identity, independent of its payload.
+func RebuildContractEdgeOmission(repo string, kind contracts.ContractType, id string, e *graph.Edge) RebuildContractOmission {
+	return RebuildContractOmission{RepoPrefix: repo, FilePath: e.FilePath, Type: kind, ID: id,
+		RecordKey: HeadDigest(sha256.Sum256(pendingEdgeKey(e)))}
 }
