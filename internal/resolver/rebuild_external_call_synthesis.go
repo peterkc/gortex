@@ -148,6 +148,9 @@ func rebuildExternalIndexedEdge(raw *graph.Edge) *graph.Edge {
 		return nil
 	}
 	name := graph.UnresolvedName(raw.To)
+	// Main does not bind a resolved target. The gRPC and Python relative
+	// import branches leave the key for their dedicated passes, and the
+	// latter only changes Imports, not a Call or Reference.
 	if name == "" || strings.HasPrefix(name, "grpc::") || strings.HasPrefix(name, "pyrel::") {
 		return nil
 	}
@@ -203,6 +206,11 @@ func rebuildExternalIndexedLookup(e *graph.Edge, n *graph.Node) bool {
 		return false
 	}
 	callable := n.Kind == graph.KindFunction || n.Kind == graph.KindMethod
+	// Main promotes Reads only in its bare-name and selector branches,
+	// and only on a callable. Extern and import keep their original kind.
+	if e.Kind == graph.EdgeReads && (!callable || strings.HasPrefix(name, "extern::") || strings.HasPrefix(name, "import::")) {
+		return false
+	}
 	if n.Language == "php" {
 		if method := phpEdgeMetaString(e, "eloquent_method"); n.Kind == graph.KindMethod && method != "" && method == n.Name {
 			return true
@@ -218,8 +226,22 @@ func rebuildExternalIndexedLookup(e *graph.Edge, n *graph.Node) bool {
 		}
 	}
 	if spec, ok := strings.CutPrefix(name, "extern::"); ok {
-		_, leaf, ok := splitExternSpec(spec)
-		return ok && leaf == n.Name && (callable || n.Kind == graph.KindType || n.Kind == graph.KindInterface)
+		path, leaf, ok := splitExternSpec(spec)
+		if !ok {
+			return false
+		}
+		// Python also reads a module attribute named by the final segment
+		// of the path, not the alias spelling at the Call site.
+		if isPythonSourcePath(e.FilePath) && isDottedPythonModule(path) && (n.Kind == graph.KindFunction || n.Kind == graph.KindType) {
+			if n.Name == leaf && pythonModuleFileMatches(n.FilePath, path) {
+				return true
+			}
+			if imported := pythonImportedName(path); imported != "" && n.Name == imported &&
+				pythonModuleFileMatches(n.FilePath, path[:len(path)-len(imported)-1]) {
+				return true
+			}
+		}
+		return leaf == n.Name && (callable || n.Kind == graph.KindType || n.Kind == graph.KindInterface)
 	}
 	if spec, ok := strings.CutPrefix(name, "import::"); ok {
 		if isGodotResPlaceholder(e.To) || isLuaRequireEdge(e) {

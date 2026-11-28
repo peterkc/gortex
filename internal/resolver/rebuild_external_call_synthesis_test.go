@@ -462,3 +462,63 @@ func TestRebuildExternalCallIndexedReceiptReplay(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildExternalCallPythonImportedName(t *testing.T) {
+	for _, file := range []string{"acme.py", "other.py"} {
+		t.Run(file, func(t *testing.T) {
+			const terminal = "external::shared.tools"
+			goCaller := rebuildEventNode("z.go", "run", "go", "")
+			caller := rebuildEventNode("a.py", "run", "python", "")
+			decl := rebuildEventNode(file, "tools", "python", "")
+			decl.ID = terminal
+			goEdge := &graph.Edge{From: goCaller.ID, To: terminal, Kind: graph.EdgeCalls, FilePath: goCaller.FilePath}
+			pyEdge := &graph.Edge{From: caller.ID, To: "unresolved::extern::acme.tools::fetch", Kind: graph.EdgeCalls, FilePath: caller.FilePath}
+			facts := []store_pebble.ParseFacts{
+				rebuildEventFacts(goCaller.FilePath, goCaller.Language, []*graph.Node{goCaller}, goEdge),
+				rebuildEventFacts(caller.FilePath, caller.Language, []*graph.Node{caller}, pyEdge),
+				rebuildEventFacts(decl.FilePath, decl.Language, []*graph.Node{decl}),
+			}
+			b, native := openRebuildEventStores(t, facts...)
+			before := rebuildEventSavedRows(t, b)
+			count, err := runRebuildExternalCallSynthesisTest(t.Context(), b, rebuildGRPCReceipts(facts...), true, nil)
+			bound := *pyEdge
+			old, changed := New(native).resolveEdge(&bound, &ResolveStats{})
+			require.True(t, changed)
+			native.ReindexEdges([]graph.EdgeReindex{{Edge: &bound, OldTo: old}})
+			SynthesizeExternalCalls(native, true)
+			want := rebuildRetainedExternalCallRows(t, rebuildEventSQLiteRows(native), goCaller.ID)
+			if file == "acme.py" {
+				require.Equal(t, terminal, bound.To)
+				require.Equal(t, "python", want.nodes[0].Language)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildExternalCallSynthesis)
+				require.Zero(t, count)
+				require.Equal(t, before, rebuildEventSavedRows(t, b))
+				return
+			}
+			require.NoError(t, err)
+			require.EqualValues(t, 1, count)
+			require.Equal(t, want, rebuildRetainedExternalCallRows(t, rebuildEventSavedRows(t, b), goCaller.ID))
+		})
+	}
+}
+
+func TestRebuildExternalCallReadPromotion(t *testing.T) {
+	for _, tc := range []struct {
+		kind graph.NodeKind
+		to   string
+		want bool
+	}{
+		{graph.KindFunction, "unresolved::fetch", true},
+		{graph.KindMethod, "unresolved::*.fetch", true},
+		{graph.KindVariable, "unresolved::import::acme.tools", false},
+		{graph.KindConstant, "unresolved::import::acme.tools", false},
+		{graph.KindType, "unresolved::extern::acme.tools::fetch", false},
+		{graph.KindFunction, "unresolved::extern::acme.tools::fetch", false},
+	} {
+		t.Run(string(tc.kind)+tc.to, func(t *testing.T) {
+			n := &graph.Node{ID: "external::acme.tools", Kind: tc.kind, Name: "fetch", QualName: "acme.tools"}
+			e := &graph.Edge{From: "a.custom::run", Kind: graph.EdgeReads, To: tc.to, FilePath: "a.custom"}
+			require.Equal(t, tc.want, rebuildExternalIndexedLookup(e, n))
+		})
+	}
+}
