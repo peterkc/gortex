@@ -5,6 +5,7 @@ import (
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"go.uber.org/zap"
 )
 
 // rebuildCallReturnName uses the native method candidate and signature rules
@@ -22,4 +23,20 @@ func rebuildCallReturnName(ctx context.Context, view store_pebble.RebuildView, k
 		return rawContractCallType{}, err
 	}
 	return choice.result(), nil
+}
+
+// logRebuildCallReturnTypeOrder gives the VM one count per replay and debug
+// detail for every order-sensitive native lookup, without holding a list.
+func logRebuildCallReturnTypeOrder(records *store_pebble.RebuildContractRecords, logger *zap.Logger) error {
+	var cases int
+	if err := records.VisitCallReturnTypeOrderDifferences(func(repo, name, id string, candidates int) error {
+		cases++
+		logger.Debug("rebuild call return type native order difference", zap.String("repo", repo), zap.String("type", name),
+			zap.String("selected_id", id), zap.Int("candidates", candidates))
+		return nil
+	}); err != nil {
+		return err
+	}
+	logger.Info("rebuild call return type native order differences", zap.Int("cases", cases))
+	return nil
 }
