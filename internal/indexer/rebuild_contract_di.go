@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
@@ -23,4 +24,16 @@ func visitRebuildSpringBeanCalls(ctx context.Context, b *store_pebble.BuildStore
 			bean, _ := springBeanFromEdge(e)
 			return yield(springBeanCall(class, bean))
 		})
+}
+
+// appendRebuildDIContracts runs after capturing the Spring Calls delta. The
+// native linkage adds Calls only, so the same live DI input still applies.
+func (idx *Indexer) appendRebuildDIContracts(records *store_pebble.RebuildContractRecords) error {
+	return records.AppendDIContracts(idx.repoPrefix, func(e *graph.Edge) (contracts.Contract, bool) {
+		c, ok := diContractFromEdge(e)
+		if ok {
+			c.RepoPrefix, c.WorkspaceID, c.ProjectID = idx.repoPrefix, idx.workspaceID, idx.projectID
+		}
+		return c, ok
+	})
 }
