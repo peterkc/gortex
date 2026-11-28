@@ -9,8 +9,12 @@ import (
 )
 
 func TestRebuildCheckedRouterMountsMatchNative(t *testing.T) {
-	for _, missingFile := range []string{"", "z-mount.ts"} {
-		t.Run("mount_"+missingFile, func(t *testing.T) {
+	for _, tc := range []struct{ name, missingFile string }{
+		{name: "complete_mount_facts"},
+		{name: "missing_mount_facts", missingFile: "z-mount.ts"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			missingFile := tc.missingFile
 			b, err := OpenBuild(t.TempDir(), FullProfile)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, b.Close()) })
@@ -78,12 +82,15 @@ func TestRebuildCheckedRouterMountsMatchNative(t *testing.T) {
 				var ids []string
 				require.NoError(t, r.VisitIDs(func(id string) error {
 					ids = append(ids, id)
-					var actual []contracts.Contract
+					want := reg.ByID(id)
+					var seen int
 					require.NoError(t, r.VisitByID(id, func(item RebuildContractRecord) error {
-						actual = append(actual, item.Contract)
+						require.Less(t, seen, len(want), "extra record for %s", id)
+						require.Equal(t, want[seen], item.Contract)
+						seen++
 						return nil
 					}))
-					require.Equal(t, reg.ByID(id), actual)
+					require.Len(t, want, seen, "missing records for %s", id)
 					return nil
 				}))
 				require.ElementsMatch(t, reg.AllIDs(), ids)
