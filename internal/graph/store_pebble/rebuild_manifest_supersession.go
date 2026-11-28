@@ -8,7 +8,6 @@ import (
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/pathkey"
 )
 
 // AddRebuildManifestArtifacts is the native-ordered writer for checked root
@@ -133,8 +132,10 @@ func rebuildManifestWriterFile(file string) bool {
 	if path.Base(file) == "package.json" {
 		return true
 	}
+	// Only parsed or checked-skip paths can be held. The native module
+	// writer also emits go.mod and yarn.lock, which have no extractor.
 	switch file {
-	case "go.mod", "package-lock.json", "yarn.lock", "pnpm-lock.yaml":
+	case "package-lock.json", "pnpm-lock.yaml":
 		return true
 	}
 	return false
@@ -143,7 +144,9 @@ func rebuildManifestWriterFile(file string) bool {
 func (b *BuildStore) rebuildHeldNodeCapture(id string) (*graph.Node, error) {
 	return pendingGet(b.pending, rebuildHoldoutKey('n', pendingNodeKey(id)), func(raw []byte) (*graph.Node, error) {
 		d := recordCursor{buf: raw}
-		receipt := d.str()
+		// Isolation already used the receipt to select the raw edges to
+		// restore. The writer replaces the captured node by ID.
+		_ = d.bytes()
 		if d.err != nil {
 			return nil, d.err
 		}
@@ -153,9 +156,6 @@ func (b *BuildStore) rebuildHeldNodeCapture(id string) (*graph.Node, error) {
 		}
 		if n.ID != id {
 			return nil, invalid("held manifest capture identity")
-		}
-		if n.Kind == graph.KindFile && n.ID == n.FilePath && rebuildManifestWriterFile(n.FilePath) && receipt != "" && pathkey.Normalize(receipt) != n.FilePath {
-			return nil, invalid("held file receipt identity")
 		}
 		return n, nil
 	})
