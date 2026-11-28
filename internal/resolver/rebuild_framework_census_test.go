@@ -289,12 +289,11 @@ func TestRebuildFrameworkCensusMacroOnlySelection(t *testing.T) {
 		largeKind      graph.NodeKind
 		includeMacro   bool
 		admitted       bool
-		freezeRefusal  bool
 	}{
-		{"large nonmacro", "c", graph.KindFunction, true, true, false},
-		{"no macro", "c", graph.KindFunction, false, false, false},
-		{"no C family", "go", graph.KindMacro, false, false, false},
-		{"admitted large macro", "c", graph.KindMacro, false, true, true},
+		{"large nonmacro", "c", graph.KindFunction, true, true},
+		{"no macro", "c", graph.KindFunction, false, false},
+		{"no C family", "go", graph.KindMacro, false, false},
+		{"unused large macro", "c", graph.KindMacro, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wide := rebuildEventNode(file, "wide", tc.sourceLanguage, "")
@@ -312,13 +311,11 @@ func TestRebuildFrameworkCensusMacroOnlySelection(t *testing.T) {
 			frozen, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 			require.NoError(t, err)
 			require.Equal(t, tc.admitted, frozen.allows(SynthMacroExpansion))
-			err = FreezeRebuildMacroExpansionInputs(t.Context(), b, rebuildGRPCReceipts(facts), frozen)
-			if tc.freezeRefusal {
-				require.ErrorIs(t, err, store_pebble.ErrRebuildMacroExpansion)
-				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
-				return
-			}
+			receipts := rebuildGRPCReceipts(facts)
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(t.Context(), b, receipts, frozen))
+			stats, err := RunRebuildMacroExpansion(t.Context(), b, receipts, frozen)
 			require.NoError(t, err)
+			require.Zero(t, stats)
 		})
 	}
 }

@@ -79,7 +79,17 @@ func (b *BuildStore) FreezeMacroExpansionInputs(ctx context.Context, receipts it
 			return err
 		}
 		eligible = true
-		if err := p.put(p.key('n', n.ID), r.value); err != nil {
+		key := p.key('n', n.ID)
+		if len(key)+len(r.value) > p.rowBytes {
+			if err := p.put(p.key('N', n.ID), nil); err != nil {
+				return err
+			}
+		}
+		value, err := encodeNode(&graph.Node{ID: n.ID, Name: n.Name, FilePath: n.FilePath, RepoPrefix: n.RepoPrefix, Kind: n.Kind})
+		if err != nil {
+			return err
+		}
+		if err := p.put(key, value); err != nil {
 			return err
 		}
 		return p.put(p.key('v', n.Name), nil)
@@ -182,15 +192,6 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 			return p.stats, err
 		}
 	}
-	if ambiguous {
-		if err := p.ambiguousCohorts(ctx, func(cohort []byte) error {
-			return p.cohortMacros(ctx, cohort, func(id string) error {
-				return p.put(p.key('m', id), []byte{rebuildCapabilityWanted})
-			})
-		}); err != nil {
-			return stats, err
-		}
-	}
 	if err := p.wantFinalProof(ctx); err != nil {
 		return stats, err
 	}
@@ -202,10 +203,8 @@ func (b *BuildStore) RebuildMacroExpansion(ctx context.Context, receipts iter.Se
 			return stats, err
 		}
 	}
-	if ambiguous {
-		if err := p.proveAmbiguity(ctx); err != nil {
-			return stats, err
-		}
+	if err := p.proveAmbiguity(ctx); err != nil {
+		return stats, err
 	}
 	if err := p.prove(ctx); err != nil || p.stats.Adds == 0 {
 		return p.stats, err
@@ -362,9 +361,8 @@ func (p *rebuildMacroExpansion) noteRawDeclarationOutput(ctx context.Context, e 
 		if err != nil || exists {
 			return err
 		}
-		planned, err := p.present(append(p.column('p'), key...))
-		if err != nil || planned {
-			return err // existing proposal proof checks this identity
+		if err := p.checkOutputSize(id, callee); err != nil {
+			return err
 		}
 		return p.put(append(p.column('y'), key...), nil)
 	})
@@ -385,9 +383,6 @@ func (p *rebuildMacroExpansion) body(ctx context.Context, id string, yield func(
 			return err
 		}
 		if callee := p.rules.Body(e); callee != "" {
-			if err := p.input(r.key, r.value); err != nil {
-				return err
-			}
 			return yield(r, callee)
 		}
 		return nil
@@ -406,10 +401,7 @@ func (p *rebuildMacroExpansion) collectBodies(ctx context.Context) error {
 			if err := p.put(p.key('b', n.ID, callee), nil); err != nil {
 				return err
 			}
-			if err := p.put(append(p.column('c'), r.key...), nil); err != nil {
-				return err
-			}
-			return p.claimInput(r.key)
+			return p.noteBodyInput(n.ID, callee, r)
 		}); err != nil || !active {
 			return err
 		}
@@ -425,13 +417,41 @@ func (p *rebuildMacroExpansion) collectBodies(ctx context.Context) error {
 		if err != nil || len(rest) != 0 || id == "" {
 			return invalid("macro receipt declaration key")
 		}
-		return p.body(ctx, id, func(r row, _ string) error {
-			if err := p.put(append(p.column('c'), r.key...), nil); err != nil {
-				return err
-			}
-			return p.claimInput(r.key)
+		return p.body(ctx, id, func(r row, callee string) error {
+			return p.noteBodyInput(id, callee, r)
 		})
 	})
+}
+
+// Save the size of a body input without refusing a macro that no output uses.
+func (p *rebuildMacroExpansion) noteBodyInput(id, callee string, r row) error {
+	if len(r.key)+len(r.value) > p.rowBytes {
+		if err := p.put(p.key('W', id, callee), nil); err != nil {
+			return err
+		}
+	}
+	if err := p.put(append(p.column('c'), r.key...), nil); err != nil {
+		return err
+	}
+	return p.claimInput(r.key)
+}
+
+func (p *rebuildMacroExpansion) checkOutputSize(id, callee string) error {
+	oversized, err := p.present(p.key('N', id))
+	if err != nil {
+		return err
+	}
+	if oversized {
+		return fmt.Errorf("%w: %s declaration node", ErrRebuildLinkInputSize, p.label)
+	}
+	oversized, err = p.present(p.key('W', id, callee))
+	if err != nil {
+		return err
+	}
+	if oversized {
+		return fmt.Errorf("%w: %s %s", ErrRebuildLinkInputSize, p.label, p.inputRow)
+	}
+	return nil
 }
 
 func (p *rebuildMacroExpansion) claimInput(live []byte) error {
@@ -509,10 +529,7 @@ func (p *rebuildMacroExpansion) collectUses(ctx context.Context) error {
 			return fmt.Errorf("%w: %s caller node", ErrRebuildLinkInputSize, p.label)
 		}
 		if id == "" {
-			if err := p.put(p.key('L', repo, name), nil); err != nil {
-				return err
-			}
-			return p.put(append(p.key('t', repo, name), old...), nil)
+			return p.noteAmbiguousUse(repo, name, old, false)
 		}
 		if !unresolved && id != e.To {
 			return nil
@@ -580,8 +597,15 @@ func (p *rebuildMacroExpansion) wantFinalProof(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			id, _, err := readKeyString(rest)
+			id, rest, err := readKeyString(rest)
 			if err != nil {
+				return err
+			}
+			callee, rest, err := readKeyString(rest)
+			if err != nil || len(rest) != 0 {
+				return invalid("macro expansion output proof")
+			}
+			if err := p.checkOutputSize(id, callee); err != nil {
 				return err
 			}
 			n, err := p.macro(id)
@@ -726,9 +750,22 @@ func (p *rebuildMacroExpansion) recordNode(ctx context.Context, n *graph.Node, f
 	}
 	admitted := language != "" && n.FilePath == file
 	exact := rawRole && admitted && frozen != nil && frozen.FilePath == file && n.RepoPrefix == frozen.RepoPrefix && n.Name == frozen.Name
-	if claim != 0 {
-		if err := noteRebuildScratchState(p.put, macroKey, claim, rebuildScratchProofBit(exact)); err != nil {
-			return err
+	if exact && claim != rebuildScratchExact {
+		// Record an ambiguous declaration before a later caller receipt
+		// can bring a use into its cohort.
+		if claim == 0 {
+			id, seen, err := p.unique(p.key('a', n.RepoPrefix, n.Name))
+			if err != nil {
+				return err
+			}
+			if seen && id == "" {
+				claim = rebuildCapabilityWanted
+			}
+		}
+		if claim != 0 {
+			if err := p.put(macroKey, []byte{rebuildScratchExact}); err != nil {
+				return err
+			}
 		}
 	}
 	if rawRole && admitted && p.rawDecls {
@@ -760,9 +797,12 @@ func (p *rebuildMacroExpansion) noteRawCallerOutputs(ctx context.Context, n *gra
 			return errors.Join(err, invalid("macro expansion use missing"))
 		}
 		name := graph.UnresolvedName(e.To)
-		id, _, err := p.unique(p.key('a', n.RepoPrefix, name))
-		if err != nil || id == "" {
+		id, seen, err := p.unique(p.key('a', n.RepoPrefix, name))
+		if err != nil || !seen {
 			return err
+		}
+		if id == "" {
+			return p.noteAmbiguousUse(n.RepoPrefix, name, r.key[len(uses):], oversizedCaller)
 		}
 		prefix := p.key('b', id)
 		return p.visit(ctx, prefix, func(r row) error {
@@ -782,9 +822,23 @@ func (p *rebuildMacroExpansion) noteRawCallerOutputs(ctx context.Context, n *gra
 			if oversizedCaller {
 				return fmt.Errorf("%w: %s caller node", ErrRebuildLinkInputSize, p.label)
 			}
+			if err := p.checkOutputSize(id, callee); err != nil {
+				return err
+			}
 			return p.put(append(p.column('y'), key...), nil)
 		})
 	})
+}
+
+func (p *rebuildMacroExpansion) noteAmbiguousUse(repo, name string, old []byte, oversizedCaller bool) error {
+	if err := p.put(p.key('L', repo, name), nil); err != nil {
+		return err
+	}
+	var value []byte
+	if oversizedCaller {
+		value = []byte{1}
+	}
+	return p.put(append(p.key('t', repo, name), old...), value)
 }
 
 func (p *rebuildMacroExpansion) ambiguousCohorts(ctx context.Context, visit func([]byte) error) error {
@@ -855,6 +909,12 @@ func (p *rebuildMacroExpansion) noteAmbiguousOutputs(ctx context.Context, cohort
 			key := pendingEdgeKey(p.rules.Add(e.From, callee, e.FilePath, e.Line, n.Name))
 			exists, err := p.present(key)
 			if err != nil || exists {
+				return err
+			}
+			if len(r.value) != 0 {
+				return fmt.Errorf("%w: %s caller node", ErrRebuildLinkInputSize, p.label)
+			}
+			if err := p.checkOutputSize(id, callee); err != nil {
 				return err
 			}
 			return p.put(append(p.column('y'), key...), nil)

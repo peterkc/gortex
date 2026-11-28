@@ -365,7 +365,7 @@ func TestRebuildMacroExpansionRequiresDeclarationAndBody(t *testing.T) {
 	callee := rebuildEventNode(file, "work", lang, "")
 	macro := &graph.Node{ID: file + "::ACTIVE", Name: "ACTIVE", Kind: graph.KindMacro, FilePath: file, Language: lang,
 		Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
-	dormant := &graph.Node{ID: file + "::DORMANT", Name: "DORMANT", Kind: graph.KindMacro, FilePath: file, Language: lang,
+	dormant := &graph.Node{ID: file + "::DORMANT", Name: macro.Name, Kind: graph.KindMacro, FilePath: file, Language: lang,
 		Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
 	call := func(from, to string, line int) *graph.Edge {
 		return &graph.Edge{From: from, To: to, Kind: graph.EdgeCalls, FilePath: file, Line: line}
@@ -436,33 +436,44 @@ func TestRebuildMacroExpansionCapsOnlyReachedRoles(t *testing.T) {
 		refusal        string
 	}{
 		{"large active body", "body", false, "macro expansion edge row"},
+		{"large deciding declaration", "declaration", false, "macro expansion declaration node"},
 		{"large deciding caller", "caller", false, "macro expansion caller node"},
-		{"large unrelated body", "body", true, ""},
+		{"large unused macro body", "body", true, ""},
+		{"large unused macro declaration", "declaration", true, ""},
 		{"large unrelated caller", "caller", true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			caller := rebuildEventNode(file, "run", lang, "")
-			nonmacro := rebuildEventNode(file, "ordinary", lang, "")
 			callee := rebuildEventNode(file, "work", lang, "")
 			macro := &graph.Node{ID: file + "::APPLY", Name: "APPLY", Kind: graph.KindMacro, FilePath: file, Language: lang,
 				Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
 			body := &graph.Edge{From: macro.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 1}
 			use := &graph.Edge{From: caller.ID, To: "unresolved::APPLY", Kind: graph.EdgeCalls, FilePath: file, Line: 3}
 			edges := []*graph.Edge{body, use}
+			nodes := []*graph.Node{caller, callee, macro}
 			if tc.largeRow == "caller" {
 				caller.Meta = map[string]any{"payload": large}
 				if tc.unrelated {
 					caller.RepoPrefix = "another-repo"
 				}
-			} else if tc.unrelated {
-				extra := *body
-				extra.From, extra.Context = nonmacro.ID, large
-				edges = append(edges, &extra)
 			} else {
-				body.Context = large
+				decl, input := macro, body
+				if tc.unrelated {
+					unused := *macro
+					unused.ID, unused.Name = file+"::UNUSED", "UNUSED"
+					unusedBody := *body
+					unusedBody.From = unused.ID
+					nodes, edges = append(nodes, &unused), append(edges, &unusedBody)
+					decl, input = &unused, &unusedBody
+				}
+				if tc.largeRow == "declaration" {
+					decl.Meta = map[string]any{"macro_kind": macroFunctionKindMeta, "payload": large}
+				} else {
+					input.Context = large
+				}
 			}
-			facts := rebuildEventFacts(file, lang, []*graph.Node{caller, callee, macro, nonmacro}, edges...)
+			facts := rebuildEventFacts(file, lang, nodes, edges...)
 			b := openRebuildGRPCBuild(t, facts)
 			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 			require.NoError(t, err)
@@ -550,13 +561,14 @@ func TestRebuildMacroExpansionReceiptOnlyDeclaration(t *testing.T) {
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
 	require.NoError(t, err)
 	for _, tc := range []struct {
-		name                    string
-		direct, occupied, empty bool
+		name                         string
+		direct, occupied, empty, tie bool
 	}{
 		{name: "unresolved use"},
 		{name: "direct use", direct: true},
 		{name: "incumbent suppresses add", occupied: true},
 		{name: "no body", empty: true},
+		{name: "two exact body-backed members", direct: true, tie: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -573,15 +585,24 @@ func TestRebuildMacroExpansionReceiptOnlyDeclaration(t *testing.T) {
 				incumbent.Meta = map[string]any{"witness": "ordinary call"}
 				edges = append(edges, &incumbent)
 			}
-			facts := rebuildEventFacts(file, lang, []*graph.Node{caller, callee, macro}, edges...)
 			entrant := *macro
 			entrant.Meta = map[string]any{"macro_kind": macroFunctionKindMeta}
-			receipt := rebuildEventFacts(file, lang, []*graph.Node{caller, callee, &entrant}, edges...)
+			liveNodes, rawNodes := []*graph.Node{caller, callee, macro}, []*graph.Node{caller, callee, &entrant}
+			if tc.tie {
+				peer := entrant
+				peer.ID = file + "::other"
+				peerBody := *body
+				peerBody.From = peer.ID
+				liveNodes, rawNodes = append(liveNodes, &peer), append(rawNodes, &peer)
+				edges = append(edges, &peerBody)
+			}
+			facts := rebuildEventFacts(file, lang, liveNodes, edges...)
+			receipt := rebuildEventFacts(file, lang, rawNodes, edges...)
 			native := rebuildGRPCNative(t, receipt)
 			report := RunFrameworkSynthesizersWithSelection(native, selection)
 			require.NoError(t, report.Err)
 			want := rebuildEventSQLiteRows(native)
-			if tc.occupied || tc.empty {
+			if tc.occupied || tc.empty || tc.tie {
 				require.NotContains(t, want.edges, add)
 			} else {
 				require.Contains(t, want.edges, add)
@@ -595,7 +616,7 @@ func TestRebuildMacroExpansionReceiptOnlyDeclaration(t *testing.T) {
 			receipts := rebuildGRPCReceipts(receipt)
 			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, receipts, frozen))
 			stats, err := RunRebuildMacroExpansion(ctx, b, receipts, frozen)
-			if tc.occupied || tc.empty {
+			if tc.occupied || tc.empty || tc.tie {
 				require.NoError(t, err)
 			} else {
 				var refused *store_pebble.RebuildUnknownProvenanceError
@@ -605,6 +626,53 @@ func TestRebuildMacroExpansionReceiptOnlyDeclaration(t *testing.T) {
 				require.Equal(t, graph.EdgeIdentityFor(add), refused.First)
 			}
 			require.Zero(t, stats.Adds)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildMacroExpansionReceiptChangesWinningProposal(t *testing.T) {
+	const file, lang = "dupe.c", "c"
+	caller := rebuildEventNode(file, "run", lang, "")
+	callee := rebuildEventNode(file, "work", lang, "")
+	log := &graph.Node{ID: file + "::LOG", Name: "LOG", Kind: graph.KindMacro, FilePath: file, Language: lang,
+		Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
+	trace := &graph.Node{ID: file + "::TRACE", Name: "TRACE", Kind: graph.KindMacro, FilePath: file, Language: lang}
+	rawTrace := *trace
+	rawTrace.Meta = log.Meta
+	logBody := &graph.Edge{From: log.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 1}
+	traceBody := &graph.Edge{From: trace.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 2}
+	logUse := &graph.Edge{From: caller.ID, To: log.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 3}
+	traceUse := &graph.Edge{From: caller.ID, To: trace.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 3}
+	facts := rebuildEventFacts(file, lang, []*graph.Node{caller, callee, log, trace}, logBody, traceBody, logUse, traceUse)
+	receipt := rebuildEventFacts(file, lang, []*graph.Node{caller, callee, log, &rawTrace}, facts.Edges...)
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	want := macroExpansionEdge(caller.ID, callee.ID, file, logUse.Line, trace.Name)
+	for _, name := range []string{"complete live proof", "also missing live claim"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			b, native := openRebuildEventStores(t, facts)
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selected).Err)
+			require.Contains(t, rebuildEventSQLiteRows(native).edges, macroExpansionEdge(caller.ID, callee.ID, file, logUse.Line, log.Name))
+			raw := receipt
+			if name == "also missing live claim" {
+				raw.Edges = slices.DeleteFunc(slices.Clone(receipt.Edges), func(e *graph.Edge) bool { return e == logUse })
+			}
+			oracle := rebuildGRPCNative(t, raw)
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(oracle, selected).Err)
+			require.Contains(t, rebuildEventSQLiteRows(oracle).edges, want)
+
+			before := rebuildEventSavedRows(t, b)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+			require.NoError(t, err)
+			receipts := rebuildGRPCReceipts(raw)
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, receipts, frozen))
+			stats, err := RunRebuildMacroExpansion(ctx, b, receipts, frozen)
+			var refused *store_pebble.RebuildUnknownProvenanceError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(want)}, refused)
+			require.Zero(t, stats)
 			require.Equal(t, before, rebuildEventSavedRows(t, b))
 		})
 	}

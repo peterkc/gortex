@@ -181,3 +181,120 @@ func rebuildMacroExpansionHasEdge(edges []*graph.Edge, want *graph.Edge) bool {
 	id := graph.EdgeIdentityFor(want)
 	return slices.ContainsFunc(edges, func(e *graph.Edge) bool { return graph.EdgeIdentityFor(e) == id })
 }
+
+func TestRebuildMacroExpansionReceiptCallerAmbiguity(t *testing.T) {
+	const callerFile, macroFile, lang = "left/main.c", "right/apply.c", "c"
+	caller := rebuildEventNode(callerFile, "run", lang, "")
+	caller.RepoPrefix = "left"
+	entrant := *caller
+	entrant.RepoPrefix = "right"
+	callee := rebuildEventNode(macroFile, "work", lang, "")
+	first := &graph.Node{ID: macroFile + "::A", Name: "APPLY", Kind: graph.KindMacro, FilePath: macroFile,
+		Language: lang, RepoPrefix: "right", Meta: map[string]any{"macro_kind": macroFunctionKindMeta}}
+	second := *first
+	second.ID = macroFile + "::B"
+	firstBody := &graph.Edge{From: first.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: macroFile, Line: 1}
+	secondBody := &graph.Edge{From: second.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: macroFile, Line: 2}
+	use := &graph.Edge{From: caller.ID, To: "unresolved::APPLY", Kind: graph.EdgeCalls, FilePath: callerFile, Line: 3}
+	want := macroExpansionEdge(caller.ID, callee.ID, callerFile, use.Line, first.Name)
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	for _, complete := range []bool{true, false} {
+		name := "potential sole survivor"
+		if complete {
+			name = "two exact members"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			macros := rebuildEventFacts(macroFile, lang, []*graph.Node{callee, first, &second}, firstBody, secondBody)
+			rawMacros := macros
+			if !complete {
+				rawMacros.Edges = []*graph.Edge{firstBody}
+			}
+			// Supply macros first. A later caller receipt discovers the cohort.
+			liveCaller := rebuildEventFacts(callerFile, lang, []*graph.Node{caller}, use)
+			rawCaller := rebuildEventFacts(callerFile, lang, []*graph.Node{&entrant}, use)
+			b := openRebuildGRPCBuild(t, macros, liveCaller)
+			native := rebuildGRPCNative(t, rawMacros)
+			require.NoError(t, native.AddBatchChecked(rawCaller.Nodes, rawCaller.Edges))
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selected).Err)
+			require.Equal(t, !complete, rebuildMacroExpansionHasEdge(rebuildEventSQLiteRows(native).edges, want))
+
+			before := rebuildEventSavedRows(t, b)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+			require.NoError(t, err)
+			receipts := rebuildGRPCReceipts(rawMacros, rawCaller)
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, receipts, frozen))
+			stats, err := RunRebuildMacroExpansion(ctx, b, receipts, frozen)
+			if complete {
+				require.NoError(t, err)
+			} else {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(want)}, refused)
+			}
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildMacroExpansionReceiptDeclarationCallerRepository(t *testing.T) {
+	const callerFile, macroFile, lang = "left/main.c", "right/apply.c", "c"
+	caller := rebuildEventNode(callerFile, "run", lang, "")
+	caller.RepoPrefix = "left"
+	callee := rebuildEventNode(macroFile, "work", lang, "")
+	macro := &graph.Node{ID: macroFile + "::APPLY", Name: "APPLY", Kind: graph.KindMacro, FilePath: macroFile,
+		Language: lang, RepoPrefix: "right", Meta: map[string]any{"macro_kind": "object"}}
+	entrant := *macro
+	entrant.Meta = map[string]any{"macro_kind": macroFunctionKindMeta}
+	body := &graph.Edge{From: macro.ID, To: callee.ID, Kind: graph.EdgeCalls, FilePath: macroFile, Line: 1}
+	use := &graph.Edge{From: caller.ID, To: "unresolved::APPLY", Kind: graph.EdgeCalls, FilePath: callerFile, Line: 3}
+	add := macroExpansionEdge(caller.ID, callee.ID, callerFile, use.Line, macro.Name)
+	liveMacros := rebuildEventFacts(macroFile, lang, []*graph.Node{callee, macro}, body)
+	rawMacros := rebuildEventFacts(macroFile, lang, []*graph.Node{callee, &entrant}, body)
+	selected, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name, liveRepo, rawRepo string
+		refuse                  bool
+	}{
+		{"receipt selects declaration", "left", "right", true},
+		{"receipt excludes declaration", "right", "left", false},
+		{"absent caller receipt falls back to live", "right", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			liveCaller := *caller
+			liveCaller.RepoPrefix = tc.liveRepo
+			live := rebuildEventFacts(callerFile, lang, []*graph.Node{&liveCaller}, use)
+			raw := rebuildEventFacts(callerFile, lang, nil, use)
+			if tc.rawRepo != "" {
+				rawCaller := liveCaller
+				rawCaller.RepoPrefix = tc.rawRepo
+				raw = rebuildEventFacts(callerFile, lang, []*graph.Node{&rawCaller}, use)
+			}
+			native := rebuildGRPCNative(t, rawMacros)
+			require.NoError(t, native.AddBatchChecked(raw.Nodes, raw.Edges))
+			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selected).Err)
+			require.Equal(t, tc.rawRepo == "right", rebuildMacroExpansionHasEdge(rebuildEventSQLiteRows(native).edges, add))
+
+			b := openRebuildGRPCBuild(t, liveMacros, live)
+			before := rebuildEventSavedRows(t, b)
+			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
+			require.NoError(t, err)
+			receipts := rebuildGRPCReceipts(rawMacros, raw)
+			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, receipts, frozen))
+			stats, err := RunRebuildMacroExpansion(ctx, b, receipts, frozen)
+			if tc.refuse {
+				var refused *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &refused)
+				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(add)}, refused)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, stats)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
