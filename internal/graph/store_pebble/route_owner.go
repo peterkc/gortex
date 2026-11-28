@@ -57,8 +57,7 @@ func (o *routeOwner) lookup() (routeCheckout, error) {
 }
 
 func completeRoute(w Witness) bool {
-	return w.Stage == StageSearch && w.Relations != nil && w.Contracts != nil &&
-		(w.Relations.IsolationChecked || len(w.Relations.DeferredLanguages) == 0)
+	return w.Stage == StageSearch && w.Relations != nil && w.Contracts != nil
 }
 
 // begin registers a fresh candidate before creating its directory. A nil
@@ -79,7 +78,9 @@ func (o *routeOwner) begin(ctx context.Context, lease string, prior *Head, reque
 		if err != nil {
 			return nil, err
 		}
-		if completeRoute(w) && w.Profile == requested.Profile && w.Version() == requested.Version() {
+		// A legacy mixed head can serve as last-good, but cannot skip a rebuild.
+		if completeRoute(w) && (w.Relations.IsolationChecked || len(w.Relations.DeferredLanguages) == 0) &&
+			w.Profile == requested.Profile && w.Version() == requested.Version() {
 			return nil, nil
 		}
 	}

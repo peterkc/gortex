@@ -147,7 +147,7 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 				continue
 			}
 			// Bind only the first raw payload's supported receipt attribution.
-			if keep != nil && linkedIsolationLanguage(f.EffectiveLanguage) {
+			if keep != nil && RebuildLinkedExtractor(f.EffectiveLanguage) {
 				value := appendMetaString(nil, f.File.FilePath)
 				value = appendMetaString(value, f.EffectiveLanguage)
 				if err := b.pending.Set(rebuildHoldoutKey('p', edgeKey), value, pebble.NoSync); err != nil {

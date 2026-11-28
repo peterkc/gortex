@@ -63,7 +63,7 @@ type rebuildExtractorCensus struct {
 // rebuildLinkedExtractor applies D71 to the effective receipt ID, not a
 // filename suffix or a language stamped on a node by an embedded parser.
 func rebuildLinkedExtractor(id string) bool {
-	return id == "go" || id == "javascript" || id == "typescript"
+	return store_pebble.RebuildLinkedExtractor(id)
 }
 
 // holdsOutLinkInput classifies a literal manifest path from the full checked

@@ -144,7 +144,9 @@ func (h *Head) publish(ctx context.Context, tables StageTables, delta bool) (Hea
 			return zero, invalid("publication relation coverage changed after relations stage")
 		}
 	}
-	if delta && prior.Relations != nil && prior.Relations.IsolationChecked &&
+	// Only a fresh relation seal can establish or change isolation proof.
+	if delta && ((prior.Relations != nil && prior.Relations.IsolationChecked) ||
+		(tables.Witness.Relations != nil && tables.Witness.Relations.IsolationChecked)) &&
 		(!equalRelationCoverage(tables.Witness.Relations, prior.Relations) || isolationFamily(tables.Witness) != isolationFamily(prior)) {
 		return zero, ErrCoverageRegression
 	}
@@ -229,14 +231,8 @@ func (w Witness) CoversRelationsAtLeast(prior Witness) bool {
 	if !prior.Relations.IsolationChecked && len(prior.Relations.DeferredLanguages) != 0 && w.Relations.IsolationChecked {
 		return true // the old mixed witness proved no supported language complete
 	}
-	for _, pair := range w.Relations.IsolationDependencies {
-		if !slices.Contains(prior.Relations.DeferredLanguages, pair.SupportedLanguage) &&
-			!slices.ContainsFunc(prior.Relations.IsolationDependencies, func(old RebuildIsolationDependency) bool {
-				return old.SupportedLanguage == pair.SupportedLanguage
-			}) {
-			return false
-		}
-	}
+	// Checked scopes describe the recomputed input, not a fixed promise about
+	// which supported files can be affected by future edits.
 	for _, id := range w.Relations.DeferredLanguages {
 		if _, found := slices.BinarySearch(prior.Relations.DeferredLanguages, id); !found {
 			return false

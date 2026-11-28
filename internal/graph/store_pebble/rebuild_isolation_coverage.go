@@ -34,13 +34,14 @@ func compareIsolationDependency(a, b RebuildIsolationDependency) int {
 	return cmp.Compare(a.DeferredLanguage, b.DeferredLanguage)
 }
 
-func linkedIsolationLanguage(id string) bool {
+// RebuildLinkedExtractor reports whether the rebuild links this extractor.
+func RebuildLinkedExtractor(id string) bool {
 	return id == "go" || id == "javascript" || id == "typescript"
 }
 
 func validIsolationDependency(pair RebuildIsolationDependency) bool {
-	return linkedIsolationLanguage(pair.SupportedLanguage) && pair.DeferredLanguage != "" &&
-		!linkedIsolationLanguage(pair.DeferredLanguage) && !strings.ContainsRune(pair.DeferredLanguage, 0)
+	return RebuildLinkedExtractor(pair.SupportedLanguage) && pair.DeferredLanguage != "" &&
+		!RebuildLinkedExtractor(pair.DeferredLanguage) && !strings.ContainsRune(pair.DeferredLanguage, 0)
 }
 
 func isolationScopeKey(s RebuildIsolationAffectedScope) ([]byte, error) {
@@ -111,7 +112,7 @@ func (b *BuildStore) CheckRebuildIsolationCoverage(deferred []string) error {
 		}
 		var prev string
 		for _, id := range deferred {
-			if id <= prev || linkedIsolationLanguage(id) || strings.ContainsRune(id, 0) {
+			if id <= prev || RebuildLinkedExtractor(id) || strings.ContainsRune(id, 0) {
 				return invalid("invalid isolation deferred census")
 			}
 			prev = id
@@ -236,7 +237,7 @@ func checkIsolationWitness(w Witness) error {
 		}
 	}
 	for _, id := range c.DeferredLanguages {
-		if linkedIsolationLanguage(id) || strings.ContainsRune(id, 0) {
+		if RebuildLinkedExtractor(id) || strings.ContainsRune(id, 0) {
 			return invalid("invalid checked deferred language")
 		}
 	}
@@ -361,14 +362,14 @@ func (s *Snapshot) RequireRelationCoverageContext(ctx context.Context, languages
 	if err != nil {
 		return err
 	}
-	if err := w.RequireRelationCoverage(languages); err != nil && (w.Relations == nil || !w.Relations.IsolationChecked) {
-		return err
+	if w.Relations == nil || !w.Relations.IsolationChecked {
+		if err := w.RequireRelationCoverage(languages); err != nil {
+			return err
+		}
+		return errors.Join(ctx.Err(), s.ReadError())
 	}
 	if err := errors.Join(ctx.Err(), s.ReadError()); err != nil {
 		return err
-	}
-	if w.Relations == nil || !w.Relations.IsolationChecked {
-		return w.RequireRelationCoverage(languages)
 	}
 	missing := w.Relations.deferredInScope(languages)
 	var affected []RebuildIsolationAffectedScope
