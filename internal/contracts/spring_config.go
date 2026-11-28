@@ -40,6 +40,28 @@ func springConfigKeyID(key string) string {
 	return "cfg::spring::" + canonicalizeSpringKey(key)
 }
 
+// SpringConfigFileProjection is the native language/extension projection.
+func SpringConfigFileProjection() (languages, extensions []string) {
+	return []string{"java"}, []string{".yml", ".yaml", ".properties"}
+}
+
+// SpringConfigParentPrefix returns the canonical immediate parent of a key.
+func SpringConfigParentPrefix(key string) (string, bool) {
+	canonical := canonicalizeSpringKey(key)
+	if dot := strings.LastIndexByte(canonical, '.'); dot >= 0 {
+		return canonical[:dot], true
+	}
+	return "", false
+}
+
+// SpringConfigWildcardPrefix returns the canonical prefix of a wildcard read.
+func SpringConfigWildcardPrefix(raw string) (string, bool) {
+	if !strings.HasSuffix(raw, "*") {
+		return "", false
+	}
+	return canonicalizeSpringKey(strings.TrimSuffix(strings.TrimSuffix(raw, "*"), ".")), true
+}
+
 // SpringConfigScope identifies the repository boundary for one binding pass.
 // RepoRoot is the on-disk root used to resolve graph paths; RepoPrefix and
 // WorkspaceID are persisted on synthetic nodes and form their repo-scoped ID
@@ -66,6 +88,13 @@ func (scope SpringConfigScope) KeyID(key string) string {
 		workspace = scope.RepoPrefix
 	}
 	return "cfg::spring::" + workspace + "::" + scope.RepoPrefix + "::" + canonical
+}
+
+// ScopeKeyNode stamps one extracted key with its native scope.
+func (scope SpringConfigScope) ScopeKeyNode(node *graph.Node) {
+	node.ID = scope.KeyID(node.Name)
+	node.RepoPrefix = scope.RepoPrefix
+	node.WorkspaceID = scope.WorkspaceID
 }
 
 func springConfigSource(scope SpringConfigScope, graphPath string) []byte {
@@ -167,7 +196,8 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) (int, error) {
 		desired string
 		legacy  string
 	}
-	projectedFiles := graph.ReadRepoFilePaths(g, scope.RepoPrefix, scope.WorkspaceID, []string{"java"}, []string{".yml", ".yaml", ".properties"})
+	languages, extensions := SpringConfigFileProjection()
+	projectedFiles := graph.ReadRepoFilePaths(g, scope.RepoPrefix, scope.WorkspaceID, languages, extensions)
 	if len(projectedFiles) == 0 {
 		return 0, nil
 	}
@@ -187,18 +217,14 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) (int, error) {
 		}
 		for _, node := range ExtractSpringConfigKeys(filePath, src, profile) {
 			legacyID := node.ID
-			node.ID = scope.KeyID(node.Name)
-			node.RepoPrefix = scope.RepoPrefix
-			node.WorkspaceID = scope.WorkspaceID
+			scope.ScopeKeyNode(node)
 			if _, duplicate := desiredNodes[node.ID]; !duplicate {
 				desiredNodes[node.ID] = node
 			}
 			if legacyID != node.ID {
 				legacyIDs[legacyID] = struct{}{}
 			}
-			canonical := canonicalizeSpringKey(node.Name)
-			if dot := strings.LastIndexByte(canonical, '.'); dot >= 0 {
-				prefix := canonical[:dot]
+			if prefix, ok := SpringConfigParentPrefix(node.Name); ok {
 				byPrefix[prefix] = append(byPrefix[prefix], target{desired: node.ID, legacy: legacyID})
 			}
 		}
@@ -259,8 +285,7 @@ func BindSpringConfig(g graph.Store, scope SpringConfigScope) (int, error) {
 	for _, reader := range readers {
 		readerIDs = append(readerIDs, reader.ID)
 		for _, key := range SpringConfigKeysOf(reader) {
-			if strings.HasSuffix(key, "*") {
-				prefix := canonicalizeSpringKey(strings.TrimSuffix(strings.TrimSuffix(key, "*"), "."))
+			if prefix, ok := SpringConfigWildcardPrefix(key); ok {
 				for _, candidate := range byPrefix[prefix] {
 					emit(reader, candidate, key)
 				}
