@@ -193,12 +193,18 @@ func TestRebuildExternalCallGroupReceiptProof(t *testing.T) {
 		{"duplicate winner", "uncertain retained external-call duplicate payload"},
 		{"duplicate loser", ""},
 		{"caller language", "uncertain retained external-call terminal"},
+		{"caller language alternate first", "uncertain retained external-call winner"},
 		{"unproved terminal", "uncertain retained external-call terminal"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newBuild(t, FullProfile)
 			n := &graph.Node{ID: "caller", Language: "go"}
 			a := &graph.Edge{From: n.ID, To: "dep::acme.tools::A", Kind: graph.EdgeCalls, FilePath: "m.go", Line: 1}
+			if tc.name == "caller language" {
+				// The optional live Go vote sorts before the possible receipt
+				// TypeScript vote at the same native tuple.
+				n.Language, a.FilePath = "typescript", "m.ts"
+			}
 			z := *a
 			z.To = "dep::acme.tools::Z"
 			facts := testExternalCallFacts(a.FilePath, n.Language, []*graph.Node{n}, a, &z)
@@ -225,9 +231,12 @@ func TestRebuildExternalCallGroupReceiptProof(t *testing.T) {
 				last.Meta = map[string]any{"marker": "last"}
 				facts.Edges = append(facts.Edges, &last)
 				b.AddBatch(nil, facts.Edges)
-			case "caller language":
+			case "caller language", "caller language alternate first":
 				changed := *n
 				changed.Language = "typescript"
+				if tc.name == "caller language" {
+					changed.Language = "go"
+				}
 				b.AddNode(&changed)
 				b.AddBatch(nil, facts.Edges)
 			case "unproved terminal":
