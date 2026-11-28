@@ -607,6 +607,17 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 		if err != nil {
 			return err
 		}
+		language := func(file string) string {
+			raw := counts.census.originByGraphPath[file]
+			if id := counts.census.byPath[raw]; id != "" {
+				return id
+			}
+			fact := classifications[raw]
+			if fact.sizeSkipped() || fact.ContentSkipReason != "" {
+				return fact.Language
+			}
+			return ""
+		}
 		if err := resolver.FreezeRebuildFnPointerInputs(ctx, private, selection); err != nil {
 			return err
 		}
@@ -668,6 +679,9 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 			logger.Info("rebuild Swift/ObjC applied to private build",
 				zap.Uint64("edges", swiftObjC.Edges))
 		}
+		if err := resolver.MarkRebuildFrameworkIsolation(ctx, private, requestedSelection, selection, resolver.SynthReactNative, language, receipts); err != nil {
+			return err
+		}
 		reactNative, err := resolver.RunRebuildReactNativeBridge(ctx, private, receipts, selection)
 		if err != nil {
 			return err
@@ -724,6 +738,9 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 			logger.Info("rebuild KMP expect/actual applied to private build",
 				zap.Uint64("edges", kmp.Edges))
 		}
+		if err := resolver.MarkRebuildFrameworkIsolation(ctx, private, requestedSelection, selection, resolver.SynthExpoModules, language, receipts); err != nil {
+			return err
+		}
 		expoModules, err := resolver.RunRebuildExpoModuleBridge(ctx, private, receipts, selection)
 		if err != nil {
 			return err
@@ -731,6 +748,9 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 		if expoModules.Edges != 0 {
 			logger.Info("rebuild Expo module bridge applied to private build",
 				zap.Uint64("edges", expoModules.Edges))
+		}
+		if err := resolver.MarkRebuildFrameworkIsolation(ctx, private, requestedSelection, selection, resolver.SynthFabric, language, receipts); err != nil {
+			return err
 		}
 		fabric, err := resolver.RunRebuildFabric(ctx, private, receipts, selection)
 		if err != nil {
@@ -974,6 +994,9 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 		}
 		if goFrameMoves != 0 {
 			logger.Info("rebuild GoFrame applied to private build", zap.Uint64("moves", goFrameMoves))
+		}
+		if err := resolver.MarkRebuildFrameworkIsolation(ctx, private, requestedSelection, selection, resolver.SynthSvelteKitLoad, language, receipts); err != nil {
+			return err
 		}
 		svelteKitAdds, err := resolver.RunRebuildSvelteKitLoad(ctx, private, receipts, selection, rebuildCheckedSkips(skips))
 		if err != nil {

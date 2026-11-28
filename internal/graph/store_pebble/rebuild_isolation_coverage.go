@@ -50,7 +50,7 @@ func isolationScopeKey(s RebuildIsolationAffectedScope) ([]byte, error) {
 		return nil, invalid("invalid isolation scope")
 	}
 	switch s.Cause {
-	case "clone-corpus", "ts-alias", "npm-candidate", "held-endpoint":
+	case "clone-corpus", "ts-alias", "npm-candidate", "held-endpoint", "rn-bridge", "expo-bridge", "fabric", "sveltekit-load":
 	default:
 		return nil, invalid("unknown isolation cause")
 	}

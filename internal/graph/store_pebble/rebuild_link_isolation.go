@@ -21,6 +21,7 @@ var ErrRebuildLinkIsolation = errors.New("pebble rebuild link isolation failed")
 // s/w: exact sanctioned native manifest replacement node/edge bytes.
 // o: contract isolation affected scope omissions. p: supported first edge receipt attribution.
 // a: checked receipt or selected skip path to effective extractor.
+// f: attribution-only dropped native bridge call markers.
 var rebuildHoldoutPrefix = []byte{'g', '!'}
 
 func rebuildHoldoutKey(col byte, key []byte) []byte {
@@ -276,6 +277,9 @@ func (b *BuildStore) holdRebuildEdge(ctx context.Context, r row) error {
 				return err
 			}
 		}
+	}
+	if err := b.captureRebuildFrameworkHeldMarker(e, r.key, deferred); err != nil {
+		return err
 	}
 	if err := b.deleteEdge(r.key, e); err != nil {
 		return err
