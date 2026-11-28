@@ -516,7 +516,7 @@ func collectRouterRewrites(reg *Registry, representatives []Contract, facts map[
 			continue
 		}
 
-		prefix := prefixForRoute(c, fw, facts, globalSelf, globalMount, selfConflict, mountConflict, chainPrefix, nestModulePrefix)
+		prefix := prefixForRoute(c, facts, globalSelf, selfConflict, chainPrefix, nestModulePrefix)
 		if prefix == "" {
 			continue
 		}
@@ -539,7 +539,7 @@ func collectRouterRewrites(reg *Registry, representatives []Contract, facts map[
 			if visitOpen != nil {
 				visitOpen(items[i])
 			}
-			rp := prefixForRoute(items[i], ifw, facts, globalSelf, globalMount, selfConflict, mountConflict, chainPrefix, nestModulePrefix)
+			rp := prefixForRoute(items[i], facts, globalSelf, selfConflict, chainPrefix, nestModulePrefix)
 			if rp == "" {
 				continue
 			}
@@ -625,16 +625,23 @@ func routerSharedKey(framework string, f RouterFacts, line RouterLineFacts) (key
 // route's own router self-prefix, or NestJS controller prefix) to
 // prepend to a single route contract's declared path. Returns "" when
 // no prefix applies (plain join no-op).
-func prefixForRoute(
-	c Contract,
-	framework string,
-	facts map[string]RouterFacts,
-	globalSelf, globalMount map[string]string,
-	selfConflict, mountConflict map[string]bool,
-	chainPrefix func(string, map[string]bool) string,
-	nestModulePrefix map[string]string,
+func prefixForRoute(c Contract, facts map[string]RouterFacts, globalSelf map[string]string, selfConflict map[string]bool,
+	chainPrefix func(string, map[string]bool) string, nestModulePrefix map[string]string,
 ) string {
-	f := facts[c.FilePath]
+	return RouterPrefixForRoute(c, facts[c.FilePath], func(key string) string {
+		if selfConflict[key] {
+			return ""
+		}
+		return globalSelf[key]
+	}, func(key string) string {
+		return chainPrefix(key, map[string]bool{})
+	}, func(key string) string { return nestModulePrefix[key] })
+}
+
+// RouterPrefixForRoute combines the route's local facts with the elected
+// shared self, mount-chain and Nest module prefixes.
+func RouterPrefixForRoute(c Contract, f RouterFacts, selfPrefix, chainPrefix, modulePrefix func(string) string) string {
+	framework, _ := c.Meta["framework"].(string)
 	line := f.lineFacts(c.Line)
 	sharedKey, _ := routerSharedKey(framework, f, line)
 	switch framework {
@@ -643,12 +650,10 @@ func prefixForRoute(
 		if varName == "" {
 			return ""
 		}
-		mount := chainPrefix(varName, map[string]bool{})
+		mount := chainPrefix(varName)
 		self := ""
 		if framework == "fastapi/flask" || framework == "flask" {
-			if ps, ok := globalSelf[varName]; ok && !selfConflict[varName] {
-				self = ps
-			}
+			self = selfPrefix(varName)
 		}
 		return joinPaths(mount, self)
 	case "gin/echo/chi", "fiber", "vapor":
@@ -658,10 +663,8 @@ func prefixForRoute(
 		varName := sharedKey
 		mount, self := "", ""
 		if varName != "" {
-			mount = chainPrefix(varName, map[string]bool{})
-			if ps, ok := globalSelf[varName]; ok && !selfConflict[varName] {
-				self = ps
-			}
+			mount = chainPrefix(varName)
+			self = selfPrefix(varName)
 		}
 		if framework == "vapor" {
 			// Vapor's closure-block group form `app.group("api") { ... }`
@@ -683,7 +686,7 @@ func prefixForRoute(
 		if varName == "" {
 			return ""
 		}
-		return chainPrefix(varName, map[string]bool{})
+		return chainPrefix(varName)
 	case "actix":
 		// actix: a route's enclosing config function is mounted under a
 		// web::scope(...) prefix (possibly in another file). Single-file
@@ -693,17 +696,15 @@ func prefixForRoute(
 		if fnName == "" {
 			return ""
 		}
-		return chainPrefix(fnName, map[string]bool{})
+		return chainPrefix(fnName)
 	case "nestjs":
 		// Class-level @Controller('cats') prefix, found by scanning
 		// upward from the route line for the nearest preceding
 		// decorator in the same file, prefixed by the cross-module
 		// RouterModule mount path of the controller's module (if any).
 		ctrlPrefix := line.NestPrefix
-		if len(nestModulePrefix) > 0 {
-			if mp := nestModulePrefix[sharedKey]; mp != "" {
-				return joinPaths(mp, ctrlPrefix)
-			}
+		if mp := modulePrefix(sharedKey); mp != "" {
+			return joinPaths(mp, ctrlPrefix)
 		}
 		return ctrlPrefix
 	case "spring":
@@ -824,6 +825,11 @@ func joinPaths(parts ...string) string {
 		return ""
 	}
 	return b.String()
+}
+
+// PrependRouterMount is one step of the native mount chain's path join.
+func PrependRouterMount(parentSelf, mount, suffix string) string {
+	return joinPaths(parentSelf, mount, suffix)
 }
 
 // RouterFileCensus reports whether the native scanner reads the file without a route.
