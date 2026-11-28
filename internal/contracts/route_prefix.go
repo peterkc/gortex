@@ -404,7 +404,15 @@ func JoinRouterPrefixFacts(reg *Registry, facts map[string]RouterFacts) {
 	if reg == nil {
 		return
 	}
+	applyRouterRewrites(reg, collectRouterRewrites(reg, reg.All(), facts, nil))
+}
 
+type routerRewrite struct {
+	oldID string
+	list  []Contract
+}
+
+func collectRouterRewrites(reg *Registry, representatives []Contract, facts map[string]RouterFacts, visitOpen func(Contract)) []routerRewrite {
 	// Global maps merged across every contract file. Router var names
 	// commonly collide ("router"), so cross-file resolution is
 	// best-effort within a workspace: when exactly one file declares a
@@ -489,14 +497,10 @@ func JoinRouterPrefixFacts(reg *Registry, facts map[string]RouterFacts) {
 	}
 
 	// Second pass: rewrite each route contract.
-	type rewrite struct {
-		oldID string
-		list  []Contract
-	}
-	var rewrites []rewrite
+	var rewrites []routerRewrite
 	processed := map[string]bool{} // contract ID -> already collected
 
-	for _, c := range reg.All() {
+	for _, c := range representatives {
 		if c.Type != ContractHTTP || c.Meta == nil {
 			continue
 		}
@@ -531,6 +535,9 @@ func JoinRouterPrefixFacts(reg *Registry, facts map[string]RouterFacts) {
 			}
 			if joined, _ := items[i].Meta[routePrefixJoinedMeta].(bool); joined {
 				continue
+			}
+			if visitOpen != nil {
+				visitOpen(items[i])
 			}
 			rp := prefixForRoute(items[i], ifw, facts, globalSelf, globalMount, selfConflict, mountConflict, chainPrefix, nestModulePrefix)
 			if rp == "" {
@@ -575,10 +582,13 @@ func JoinRouterPrefixFacts(reg *Registry, facts map[string]RouterFacts) {
 		}
 		if changed {
 			processed[c.ID] = true
-			rewrites = append(rewrites, rewrite{oldID: c.ID, list: items})
+			rewrites = append(rewrites, routerRewrite{oldID: c.ID, list: items})
 		}
 	}
+	return rewrites
+}
 
+func applyRouterRewrites(reg *Registry, rewrites []routerRewrite) {
 	// Apply rewrites. ReplaceByID keys the byID bucket on the OLD id,
 	// so it can't be used directly when the rewrite *changes* the ID
 	// (it would file the new contract under the stale key and the
