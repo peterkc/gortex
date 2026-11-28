@@ -373,8 +373,9 @@ func TestRebuildBuildFrameworkCensusStaysFrozenAfterEvent(t *testing.T) {
 		sent = append(sent, tables.Witness.Stage)
 		return nil
 	})
-	require.ErrorIs(t, err, errRebuildBuildIncomplete)
-	require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
+	require.NoError(t, err)
+	require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph,
+		store_pebble.StageRelations, store_pebble.StageContracts, store_pebble.StageDerived, store_pebble.StageSearch}, sent)
 	require.Equal(t, 1, logs.FilterMessage(cloneMessage).Len())
 	event := logs.FilterMessage(eventMessage).All()
 	require.Len(t, event, 1)

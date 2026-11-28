@@ -373,14 +373,14 @@ func buildRebuildStages(
 	if err != nil {
 		return err
 	}
+	if exactCheckout && !rootDepFact {
+		return fmt.Errorf("%w: manifest row %q not covered", errRebuildGoEvidence, "go.mod")
+	}
 	var earlyIDs rebuildEarlyContractIDs
 	runMain := func() error {
 		var earlyFacts *rebuildEarlyContractFacts
 		var err error
 		if exactCheckout {
-			if !rootDepFact {
-				return fmt.Errorf("%w: manifest row %q not covered", errRebuildGoEvidence, "go.mod")
-			}
 			earlyFacts, err = idx.readRebuildEarlyContractFacts(ctx, private.RebuildView(), job, store, counts.census, rootFact.DirectDeps)
 			if err != nil {
 				return err
