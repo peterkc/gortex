@@ -204,14 +204,8 @@ func (h *Head) publish(ctx context.Context, tables StageTables, delta bool) (Hea
 }
 
 func followsStage(next, prior Stage) bool {
-	switch {
-	case next == StageContracts:
-		return prior == StageRelations
-	case prior == StageContracts:
-		return next == StageDerived
-	default:
-		return next == prior+1
-	}
+	// The low-level head still accepts legacy stages without Contracts.
+	return next.rank() == prior.rank()+1 || (prior == StageRelations && next == StageDerived)
 }
 
 // CoversRelationsAtLeast compares proved coverage in validated witnesses.

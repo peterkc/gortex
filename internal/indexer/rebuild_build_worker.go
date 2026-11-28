@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/zzet/gortex/internal/config"
@@ -120,11 +121,9 @@ func receiveRebuildStages(
 	ctx context.Context, lease string, req rebuildBuildRequest, in io.Reader, acks io.Writer,
 	publish func(context.Context, store_pebble.StageTables) error,
 ) error {
-	// Persisted stage numbers are not publication order: Contracts was appended.
-	order := [...]store_pebble.Stage{
-		store_pebble.StageManifest, store_pebble.StageFileGraph, store_pebble.StageRelations,
-		store_pebble.StageContracts, store_pebble.StageDerived, store_pebble.StageSearch,
-	}
+	order := store_pebble.CoreStages()
+	relations := slices.Index(order[:], store_pebble.StageRelations)
+	contracts := slices.Index(order[:], store_pebble.StageContracts)
 	next := 0
 	for {
 		r, err := readRebuildBuildReply(in)
@@ -179,10 +178,10 @@ func receiveRebuildStages(
 			r.Witness.FrozenInputs != req.Witness.FrozenInputs {
 			return fmt.Errorf("%w: stage %s does not belong to the leased version", store_pebble.ErrStaleBase, want)
 		}
-		if (want != store_pebble.StageManifest && want != store_pebble.StageFileGraph) != (r.Witness.Relations != nil) {
+		if (next >= relations) != (r.Witness.Relations != nil) {
 			return fmt.Errorf("%w: unexpected relation coverage at %s", errRebuildBuildWire, want)
 		}
-		if (want == store_pebble.StageContracts || want == store_pebble.StageDerived || want == store_pebble.StageSearch) != (r.Witness.Contracts != nil) {
+		if (next >= contracts) != (r.Witness.Contracts != nil) {
 			return fmt.Errorf("%w: unexpected contract coverage at %s", errRebuildBuildWire, want)
 		}
 		// Do not trust any directory or incarnation received from the child.

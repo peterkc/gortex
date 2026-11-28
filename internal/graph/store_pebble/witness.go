@@ -43,16 +43,18 @@ func (s Stage) String() string {
 	}
 }
 
-// rank is publication order, independent of the persisted stage number.
+// CoreStages lists the core stages in publication order, independent of the
+// persisted stage numbers. The array is a copy; callers cannot change the order.
+func CoreStages() [6]Stage {
+	return [6]Stage{StageManifest, StageFileGraph, StageRelations, StageContracts, StageDerived, StageSearch}
+}
+
 func (s Stage) rank() int {
-	switch s {
-	case StageContracts:
-		return int(StageRelations) + 1
-	case StageDerived, StageSearch:
-		return int(s) + 1
-	default:
-		return int(s)
+	order := CoreStages()
+	if i := slices.Index(order[:], s); i >= 0 {
+		return i + 1
 	}
+	return int(s)
 }
 
 var ErrNotPublished = errors.New("no head has been published")
