@@ -369,11 +369,8 @@ func buildRustScopeIndex(g graph.Store, snap *frameworkNodeSnapshot) (*rustScope
 	// Params are read lazily-but-once: index every Rust param by its
 	// enclosing function/method ID for the shadow check.
 	for _, n := range frameworkKindNodes(g, snap, graph.KindParam) {
-		if n == nil || n.Language != "rust" {
-			continue
-		}
-		owner := enclosingFunctionForBinding(n.ID)
-		if owner == "" {
+		owner, rust := rustParameterOwner(n)
+		if !rust || owner == "" {
 			continue
 		}
 		set := idx.paramsByOwner[owner]
@@ -805,22 +802,48 @@ func (idx *rustScopeIndex) uniqueFreeFunc(repo, name, callerFile string) string 
 		return cands[0].ID
 	}
 	callerDir := rustParentDir(callerFile)
-	var sameFile, sameDir []*graph.Node
-	for _, f := range cands {
-		if f.FilePath == callerFile {
-			sameFile = append(sameFile, f)
-		}
-		if rustParentDir(f.FilePath) == callerDir {
-			sameDir = append(sameDir, f)
-		}
+	var election rustFreeFuncElection
+	for _, n := range cands {
+		election.add(n, callerFile, callerDir)
 	}
-	if len(sameFile) == 1 {
-		return sameFile[0].ID
+	return election.target()
+}
+
+// rustFreeFuncElection counts at most two candidates per locality tier.
+type rustFreeFuncElection struct {
+	all, file, dir struct {
+		count int
+		id    string
 	}
-	if len(sameFile) == 0 && len(sameDir) == 1 {
-		return sameDir[0].ID
+}
+
+func (e *rustFreeFuncElection) add(n *graph.Node, callerFile, callerDir string) {
+	e.all.count, e.all.id = min(2, e.all.count+1), n.ID
+	if n.FilePath == callerFile {
+		e.file.count, e.file.id = min(2, e.file.count+1), n.ID
 	}
-	return "" // ambiguous across files
+	if rustParentDir(n.FilePath) == callerDir {
+		e.dir.count, e.dir.id = min(2, e.dir.count+1), n.ID
+	}
+}
+
+func (e *rustFreeFuncElection) target() string {
+	switch {
+	case e.all.count == 1:
+		return e.all.id
+	case e.file.count == 1:
+		return e.file.id
+	case e.file.count == 0 && e.dir.count == 1:
+		return e.dir.id
+	}
+	return ""
+}
+
+func rustParameterOwner(n *graph.Node) (string, bool) {
+	if n == nil || n.Language != "rust" {
+		return "", false
+	}
+	return enclosingFunctionForBinding(n.ID), true
 }
 
 // callerShadows reports whether the calling function/method declares a

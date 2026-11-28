@@ -43,13 +43,23 @@ func ResolveGodotSceneConnections(g graph.Store) int {
 	// The scene node that owns the connection carries the script binding as
 	// an outgoing reference; a scene whose root holds the script covers the
 	// common `to="."` case directly.
+	visitRefs := func(id string, yield func(*graph.Edge) (bool, error)) error {
+		for _, e := range g.GetOutEdges(id) {
+			more, err := yield(e)
+			if err != nil || !more {
+				return err
+			}
+		}
+		return nil
+	}
+	readNode := func(id string) (*graph.Node, error) { return g.GetNode(id), nil }
 	scripts := make(map[string]string, len(pending))
 	scriptFiles := make(map[string]bool)
 	for _, e := range pending {
 		if _, done := scripts[e.From]; done {
 			continue
 		}
-		fileID := gdScriptOfSceneNode(g, e.From)
+		fileID, _ := gdScriptOfSceneNode(e.From, visitRefs, readNode)
 		scripts[e.From] = fileID
 		if fileID != "" {
 			scriptFiles[fileID] = true
@@ -117,34 +127,50 @@ func gdConnectionEdges(g graph.Store) []*graph.Edge {
 // to a scene node, or to the scene's own file when the node itself
 // carries none — Godot resolves a connection's target against the scene
 // it is declared in, whose root script is the usual holder.
-func gdScriptOfSceneNode(g graph.Store, nodeID string) string {
-	if id := gdScriptRefTarget(g, nodeID); id != "" {
-		return id
+func gdScriptOfSceneNode(nodeID string, visitRefs func(string, func(*graph.Edge) (bool, error)) error,
+	readNode func(string) (*graph.Node, error),
+) (string, error) {
+	if id, err := gdScriptRefTarget(nodeID, visitRefs, readNode); err != nil || id != "" {
+		return id, err
 	}
 	sceneFile, _, ok := strings.Cut(nodeID, "::")
 	if !ok {
-		return ""
+		return "", nil
 	}
-	return gdScriptRefTarget(g, sceneFile)
+	return gdScriptRefTarget(sceneFile, visitRefs, readNode)
 }
 
 // gdScriptRefTarget returns the single GDScript file a node references,
 // or "" when it references none or several — two scripts on one node is
 // malformed, and guessing between them is worse than declining.
-func gdScriptRefTarget(g graph.Store, id string) string {
+func gdScriptRefTarget(id string, visitRefs func(string, func(*graph.Edge) (bool, error)) error,
+	readNode func(string) (*graph.Node, error),
+) (string, error) {
 	found := ""
-	for _, e := range g.GetOutEdges(id) {
-		if e == nil || e.Kind != graph.EdgeReferences || graph.IsUnresolvedTarget(e.To) {
-			continue
+	ambiguous := false
+	err := visitRefs(id, func(e *graph.Edge) (bool, error) {
+		if ambiguous {
+			return false, nil
 		}
-		n := g.GetNode(e.To)
+		if e == nil || e.Kind != graph.EdgeReferences || graph.IsUnresolvedTarget(e.To) {
+			return true, nil
+		}
+		n, err := readNode(e.To)
+		if err != nil {
+			return false, err
+		}
 		if n == nil || n.Kind != graph.KindFile || n.Language != "gdscript" {
-			continue
+			return true, nil
 		}
 		if found != "" && found != n.ID {
-			return ""
+			ambiguous = true
+			return false, nil
 		}
 		found = n.ID
+		return true, nil
+	})
+	if err != nil || ambiguous {
+		return "", err
 	}
-	return found
+	return found, nil
 }

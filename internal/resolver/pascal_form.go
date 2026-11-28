@@ -29,10 +29,10 @@ func ResolvePascalForms(g graph.Store) int {
 	units := map[string]graph.FileNodeIdentity{}
 	forms := map[string]graph.FileNodeIdentity{}
 	for n := range graph.FileNodeIdentitiesSeq(g, nil) {
-		switch strings.ToLower(filepath.Ext(n.FilePath)) {
-		case ".pas", ".pp", ".dpr", ".lpr":
+		switch pascalFormRole(n.FilePath) {
+		case pascalUnitFile:
 			units[pascalFormKey(n.FilePath)] = n
-		case ".dfm", ".lfm", ".fmx":
+		case pascalDefinitionFile:
 			forms[pascalFormKey(n.FilePath)] = n
 		}
 	}
@@ -49,28 +49,49 @@ func ResolvePascalForms(g graph.Store) int {
 	for _, key := range keys {
 		unit := units[key]
 		form, ok := forms[key]
-		if !ok || unit.WorkspaceID != form.WorkspaceID {
+		if !ok {
 			continue
 		}
-		batch = append(batch, &graph.Edge{
-			From:            unit.ID,
-			To:              form.ID,
-			Kind:            graph.EdgeReferences,
-			FilePath:        unit.FilePath,
-			Confidence:      0.85,
-			ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeReferences, 0.85),
-			Origin:          graph.OriginASTInferred,
-			Meta: map[string]any{
-				"via":             pascalFormVia,
-				MetaSynthesizedBy: SynthPascalForm,
-				MetaProvenance:    ProvenanceHeuristic,
-			},
-		})
+		e := pascalFormPair(unit, form)
+		if e == nil {
+			continue
+		}
+		e.Confidence = 0.85
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeReferences, 0.85)
+		e.Origin = graph.OriginASTInferred
+		e.Meta = map[string]any{
+			"via":             pascalFormVia,
+			MetaSynthesizedBy: SynthPascalForm,
+			MetaProvenance:    ProvenanceHeuristic,
+		}
+		batch = append(batch, e)
 	}
 	for _, e := range batch {
 		g.AddEdge(e)
 	}
 	return len(batch)
+}
+
+const (
+	pascalUnitFile = iota + 1
+	pascalDefinitionFile
+)
+
+func pascalFormRole(path string) int {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".pas", ".pp", ".dpr", ".lpr":
+		return pascalUnitFile
+	case ".dfm", ".lfm", ".fmx":
+		return pascalDefinitionFile
+	}
+	return 0
+}
+
+func pascalFormPair(unit, form graph.FileNodeIdentity) *graph.Edge {
+	if unit.WorkspaceID != form.WorkspaceID {
+		return nil
+	}
+	return &graph.Edge{From: unit.ID, To: form.ID, Kind: graph.EdgeReferences, FilePath: unit.FilePath}
 }
 
 // pascalFormKey is the directory plus lowercased extension-less basename that a
