@@ -142,6 +142,78 @@ func TestRebuildTestFilesPrivateGoScope(t *testing.T) {
 	}
 }
 
+func TestRebuildTestFilesCheckedDeferredFile(t *testing.T) {
+	const py = "test_x.py"
+	for _, tc := range []struct {
+		name, path, language, runner string
+		stamped                      bool
+		receiptImport, workingImport bool
+		legacy, parseError, conflict bool
+	}{
+		{name: "python_without_imports", path: py, language: "python", stamped: true, runner: "pytest"},
+		{name: "java_without_imports", path: "FooTest.java", language: "java", stamped: true},
+		{name: "import_dependent", path: py, language: "python", receiptImport: true, workingImport: true},
+		{name: "receipt_import_missing_from_working_graph", path: py, language: "python", receiptImport: true},
+		{name: "working_import_missing_from_receipt", path: py, language: "python", workingImport: true},
+		{name: "missing_extractor_authority", path: py, language: "python", legacy: true},
+		{name: "parse_error_does_not_prove_import_absence", path: py, language: "python", parseError: true},
+		{name: "conflicting_duplicate", path: py, language: "python", conflict: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			build, _ := openRebuildTestFileStore(t)
+			file := &graph.Node{ID: tc.path, Kind: graph.KindFile, Name: tc.path, FilePath: tc.path,
+				Language: tc.language, Meta: map[string]any{"keep": "raw metadata"}}
+			imp := &graph.Edge{From: tc.path, To: "unresolved::import::unittest", Kind: graph.EdgeImports,
+				FilePath: tc.path, Line: 1, Origin: graph.OriginASTResolved}
+			facts := store_pebble.ParseFacts{
+				File:              graph.FileMetaRow{FilePath: tc.path, NodeCount: 1},
+				EffectiveLanguage: tc.language,
+				Nodes:             []*graph.Node{file},
+			}
+			if tc.legacy {
+				facts.EffectiveLanguage = ""
+			}
+			if tc.parseError {
+				facts.File.Errors = "syntax error"
+			}
+			if tc.receiptImport {
+				facts.Edges = []*graph.Edge{imp}
+				nativeTestFileStamp(t, file, facts.Edges, "unittest")
+			}
+			working := facts
+			working.Edges = nil
+			if tc.workingImport {
+				working.Edges = []*graph.Edge{imp}
+			}
+			require.NoError(t, build.AddParsedFile("", working))
+			requireRebuildTestFileRows(t, build, []*graph.Node{file}, working.Edges)
+
+			receipts := func(yield func(store_pebble.ParseFacts, error) bool) {
+				if yield(facts, nil) && tc.conflict {
+					other := facts
+					other.EffectiveLanguage = "ruby"
+					yield(other, nil)
+				}
+			}
+			err := runRebuildTestFiles(t.Context(), build, receipts, nil)
+			if tc.conflict {
+				var unknown *store_pebble.RebuildUnknownProvenanceError
+				require.ErrorAs(t, err, &unknown)
+				require.EqualValues(t, 1, unknown.Count)
+				require.Equal(t, tc.path, unknown.First.From)
+			} else {
+				require.NoError(t, err)
+			}
+			want := file
+			if tc.stamped {
+				want = nativeTestFileStamp(t, file, nil, tc.runner)
+			}
+			requireRebuildTestFileRows(t, build, []*graph.Node{want}, working.Edges)
+			require.Equal(t, map[string]any{"keep": "raw metadata"}, file.Meta, "raw node is not mutated")
+		})
+	}
+}
+
 func noRebuildTestFileReceipts(func(store_pebble.ParseFacts, error) bool) {}
 
 const rebuildTestTSPath = "case.test.ts"

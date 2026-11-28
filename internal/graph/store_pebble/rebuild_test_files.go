@@ -20,6 +20,7 @@ func (b *BuildStore) RebuildTestFiles(ctx context.Context, receipts iter.Seq2[Pa
 ) (err error) {
 	const rowLimit = 16 << 20
 	const supported, deferred, unproved, skipped = byte(1), byte(2), byte(4), byte(8)
+	const completeDeferred = byte(16)
 	prefix := []byte{'g', 'T'}
 	occupied, err := rebuildGuardHasPrefix(ctx, b.pending, prefix)
 	if err != nil {
@@ -43,6 +44,11 @@ func (b *BuildStore) RebuildTestFiles(ctx context.Context, receipts iter.Seq2[Pa
 			return err
 		}
 		if len(prev) == 1 {
+			// The checked census has one receipt per file. A second candidate
+			// cannot establish that owner even when its node bytes agree.
+			if bit == completeDeferred && prev[0]&completeDeferred != 0 {
+				bit = unproved
+			}
 			if prev[0]&bit != 0 {
 				return nil
 			}
@@ -89,8 +95,11 @@ func (b *BuildStore) RebuildTestFiles(ctx context.Context, receipts iter.Seq2[Pa
 				continue
 			}
 			bit := producer
-			if n.ID != file || n.FilePath != file {
+			switch {
+			case n.ID != file || n.FilePath != file:
 				bit = unproved
+			case producer == deferred && facts.EffectiveLanguage != "" && facts.File.Errors == "":
+				bit = completeDeferred
 			}
 			if err := fileProof(n, bit); err != nil {
 				return err
@@ -143,9 +152,20 @@ func (b *BuildStore) RebuildTestFiles(ctx context.Context, receipts iter.Seq2[Pa
 		if err != nil || bytes.Equal(proof, []byte{deferred}) {
 			return err
 		}
-		if !bytes.Equal(proof, []byte{supported}) && !bytes.Equal(proof, []byte{skipped}) {
+		deferredFile := bytes.Equal(proof, []byte{completeDeferred})
+		if !deferredFile && !bytes.Equal(proof, []byte{supported}) && !bytes.Equal(proof, []byte{skipped}) {
 			recordUnknown(light)
 			return nil
+		}
+		if deferredFile {
+			// Native runner detection can read outgoing imports before using its
+			// default. A missing working edge cannot disprove a raw import site.
+			for _, prefix := range [][]byte{key('i', light.ID), guardOutgoing(light.ID, graph.EdgeImports)} {
+				found, err := rebuildGuardHasPrefix(ctx, b.pending, prefix)
+				if err != nil || found {
+					return err
+				}
+			}
 		}
 		if len(r.key)+len(r.value) > rowLimit {
 			return fmt.Errorf("%w: test file row", ErrRebuildLinkInputSize)
@@ -155,7 +175,7 @@ func (b *BuildStore) RebuildTestFiles(ctx context.Context, receipts iter.Seq2[Pa
 			return err
 		}
 		runner := defaultRunner(n)
-		if stamp, _ := n.Meta["test_runner"].(string); stamp == "" {
+		if stamp, _ := n.Meta["test_runner"].(string); stamp == "" && !deferredFile {
 			// Native takes the first recognized import. Lock it to the
 			// complete working key, not parser line or node arrival order.
 			var firstUnproved, proved string
