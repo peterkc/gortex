@@ -306,6 +306,11 @@ func TestContractWitnessEncoding(t *testing.T) {
 	_, err = decodeWitness(old)
 	require.ErrorIs(t, err, errInvalidRecord, "a legacy layout cannot declare contracts")
 
+	withoutCoverage := w
+	withoutCoverage.Families = []FamilyWitness{{Family: familyOmission, Count: 1, Digest: HeadDigest{1}}}
+	_, err = encodeWitness(withoutCoverage)
+	require.ErrorContains(t, err, "publication contract omission family without coverage or rows")
+
 	w.Stage, w.Unsupported = StageContracts, nil
 	w.PlatformCatalogRevision = 7
 	w.Relations = &RelationCoverage{DeferredLanguages: []string{"python"}}
@@ -350,6 +355,12 @@ func TestContractStageWitnessOrder(t *testing.T) {
 		require.NoError(t, err)
 	}
 	old := stageRead(t, h)
+	legacyDerived, err := PrepareDeferredDerived(t.TempDir(), stage)
+	require.NoError(t, err)
+	legacyDerived.Witness.Contracts = &ContractCoverage{}
+	legacyDerived.Witness.Unsupported = deferredFamilies(true)
+	_, err = h.PublishStage(ctx, legacyDerived)
+	require.ErrorContains(t, err, "publication contract coverage must start at contracts")
 	stage.Witness.Stage = StageContracts
 	stage.Witness.Contracts = &ContractCoverage{}
 	base, err := h.PublishStage(ctx, stage)
@@ -373,8 +384,30 @@ func TestContractStageWitnessOrder(t *testing.T) {
 	_, err = h.PublishStage(ctx, derived)
 	require.ErrorIs(t, err, errInvalidRecord)
 	derived.Witness.Contracts.OmittedRecords--
-	_, err = h.PublishStage(ctx, derived)
+	changed := derived
+	changed.Witness.Contracts = &ContractCoverage{OmittedRecords: 1}
+	changed.Witness.Families = []FamilyWitness{{Family: familyOmission, Count: 1, Digest: HeadDigest{1}}}
+	_, err = h.PublishStage(ctx, changed)
+	require.ErrorContains(t, err, "publication contract coverage changed")
+	dropped := derived
+	dropped.Witness.Contracts = nil
+	dropped.Witness.Unsupported = deferredFamilies(false)
+	_, err = h.PublishStage(ctx, dropped)
+	require.ErrorContains(t, err, "publication contract coverage changed")
+	base, err = h.PublishStage(ctx, derived)
 	require.NoError(t, err)
 	require.NoError(t, stageRead(t, h).RequireStage(StageDerived))
 	require.ErrorAs(t, cur.RequireStage(StageDerived), new(*ErrStagePending))
+
+	search := derived
+	search.Base = base
+	search.Witness.Stage = StageSearch
+	search.Base, err = h.PublishStage(ctx, search)
+	require.NoError(t, err)
+	delta := search
+	delta.Witness.Contracts = nil
+	delta.Witness.Unsupported = deferredFamilies(false)
+	_, err = h.PublishDelta(ctx, delta)
+	require.ErrorContains(t, err, "publication contract coverage changed")
+	require.NoError(t, stageRead(t, h).RequireStage(StageContracts))
 }

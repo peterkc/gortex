@@ -147,11 +147,12 @@ func (h *Head) publish(ctx context.Context, tables StageTables, delta bool) (Hea
 		}
 	}
 
-	if prior.Contracts != nil {
-		next := tables.Witness.Contracts
-		if next == nil || (!delta && *next != *prior.Contracts) {
-			return zero, invalid("publication contract coverage changed")
-		}
+	nextContracts := tables.Witness.Contracts
+	if prior.Contracts == nil && nextContracts != nil && tables.Witness.Stage != StageContracts {
+		return zero, invalid("publication contract coverage must start at contracts")
+	}
+	if prior.Contracts != nil && (nextContracts == nil || (!delta && *nextContracts != *prior.Contracts)) {
+		return zero, invalid("publication contract coverage changed")
 	}
 	if !delta && tables.Witness.Stage == StageDerived {
 		if len(tables.Witness.Unsupported) == 0 || len(tables.Files) != 0 || !slices.Equal(tables.Witness.Families, prior.Families) {
