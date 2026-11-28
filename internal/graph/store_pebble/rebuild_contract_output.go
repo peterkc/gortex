@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"iter"
+	"maps"
 	"slices"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -135,8 +136,8 @@ func encodeContractOutput(batch RebuildContractBatch, put func(byte, []byte) err
 			return err
 		}
 	}
-	for id, shape := range batch.Shapes {
-		raw, err := encodeContractShape(shape)
+	for _, id := range slices.Sorted(maps.Keys(batch.Shapes)) {
+		raw, err := encodeContractShape(batch.Shapes[id])
 		if err != nil {
 			return err
 		}

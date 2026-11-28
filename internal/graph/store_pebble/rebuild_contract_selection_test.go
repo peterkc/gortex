@@ -21,6 +21,7 @@ func TestRebuildContractSelectionKeepsIndependentSets(t *testing.T) {
 		return ids
 	}
 	require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(r *RebuildContractRecords) error {
+		require.Error(t, r.WithContractSelection(nil))
 		for _, id := range []string{"z", "a", "a", "empty"} {
 			require.NoError(t, r.Add(RebuildContractRecord{Contract: contracts.Contract{ID: id}}))
 		}

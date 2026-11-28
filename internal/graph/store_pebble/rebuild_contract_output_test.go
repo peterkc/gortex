@@ -1,10 +1,12 @@
 package store_pebble
 
 import (
+	"encoding/binary"
 	"errors"
 	"iter"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
@@ -58,5 +60,53 @@ func TestRebuildContractOutputFreezesRows(t *testing.T) {
 			require.Equal(t, want, got)
 			return nil
 		})
+	}))
+}
+
+func TestRebuildContractOutputRefusesFailedCollectionAndReplay(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(r *RebuildContractRecords) error {
+		empty := func(func(RebuildContractBatch) error) error { return nil }
+		unused := func(iter.Seq2[RebuildContractBatch, error], ContractCoverage) error {
+			t.Fatal("invalid contract output reached use")
+			return nil
+		}
+		require.Error(t, r.WithContractOutput(nil, unused))
+		require.Error(t, r.WithContractOutput(empty, nil))
+		for _, invalidBatch := range []RebuildContractBatch{{Nodes: []*graph.Node{nil}}, {Edges: []*graph.Edge{nil}}} {
+			var addErr error
+			collect := func(add func(RebuildContractBatch) error) error {
+				addErr = add(invalidBatch)
+				require.Error(t, addErr)
+				return nil // a producer cannot suppress an encoding failure
+			}
+			err := r.WithContractOutput(collect, unused)
+			require.ErrorIs(t, err, addErr)
+		}
+		var escaped func(RebuildContractBatch) error
+		collect := func(add func(RebuildContractBatch) error) error {
+			escaped = add
+			return nil
+		}
+		rows := append(rebuildContractRecordKey('u'), 'r')
+		badKey := append(binary.BigEndian.AppendUint64(rows, 1), 'n')
+		err := r.WithContractOutput(collect, func(read iter.Seq2[RebuildContractBatch, error], _ ContractCoverage) error {
+			require.Error(t, r.WithContractOutput(empty, unused))
+			require.ErrorContains(t, escaped(RebuildContractBatch{}), "inactive contract output collector")
+			require.NoError(t, b.pending.Set(badKey, nil, pebble.NoSync))
+			for range 2 {
+				var observed error
+				for batch, err := range read {
+					require.Zero(t, batch)
+					observed = err
+				}
+				require.ErrorContains(t, observed, "ordinal changed")
+				// After the scratch is repaired, a prior failure still sticks.
+				require.NoError(t, b.pending.Delete(badKey, pebble.NoSync))
+			}
+			return nil
+		})
+		require.ErrorContains(t, err, "ordinal changed")
+		return r.WithContractOutput(empty, func(iter.Seq2[RebuildContractBatch, error], ContractCoverage) error { return nil })
 	}))
 }

@@ -26,6 +26,7 @@ func TestRebuildOrderedRepresentativesPreserveElection(t *testing.T) {
 	stop := errors.New("stop reading contract records")
 	const empty = "http::GET::/empty"
 	require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(r *RebuildContractRecords) error {
+		require.Error(t, r.WithOrderedRepresentatives(nil))
 		for _, item := range []RebuildContractRecord{other, later, provider, hidden, consumer, earlierSymbol} {
 			require.NoError(t, r.Add(item))
 		}
@@ -33,6 +34,11 @@ func TestRebuildOrderedRepresentativesPreserveElection(t *testing.T) {
 		var readAfter func(func(RebuildContractRecord) error) error
 		require.ErrorIs(t, r.WithOrderedRepresentatives(func(read func(func(RebuildContractRecord) error) error) error {
 			readAfter = read
+			require.Error(t, read(nil))
+			require.Error(t, r.WithOrderedRepresentatives(func(func(func(RebuildContractRecord) error) error) error {
+				t.Fatal("nested ordered representative scan")
+				return nil
+			}))
 			return read(func(item RebuildContractRecord) error {
 				require.Equal(t, earlierSymbol, item)
 				return stop

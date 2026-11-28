@@ -196,6 +196,28 @@ func TestRebuildContractOutputEdgesKeepFirstPhysicalKey(t *testing.T) {
 	}))
 }
 
+func TestRebuildContractOutputEdgeKeepsIncumbent(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	ctx := t.Context()
+	incumbent := &graph.Edge{From: "a.go::Read", To: "env::KEY", Kind: graph.EdgeConsumes, FilePath: "a.go", Line: 4}
+	b.AddEdge(incumbent)
+	candidate := *incumbent
+	candidate.Origin = graph.OriginASTInferred
+	require.NoError(t, b.WithRebuildContractRecords(ctx, func(r *RebuildContractRecords) error {
+		_, err := r.FirstOutputEdge(&graph.Edge{To: candidate.To, Kind: candidate.Kind})
+		require.ErrorContains(t, err, "without identity")
+		for range 2 {
+			first, err := r.FirstOutputEdge(&candidate)
+			require.NoError(t, err)
+			require.False(t, first)
+		}
+		has, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildContractRecordKey('e'))
+		require.NoError(t, err)
+		require.False(t, has, "incumbents never claim contract output")
+		return nil
+	}))
+}
+
 func TestRebuildContractRecordsRejectCorruptRows(t *testing.T) {
 	for _, mode := range []string{"empty ID", "empty clear", "bucket key", "record key", "record identity", "changed ID", "nested representative", "live identity"} {
 		t.Run(mode, func(t *testing.T) {
