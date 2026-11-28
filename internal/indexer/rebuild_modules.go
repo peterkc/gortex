@@ -180,7 +180,9 @@ func runRebuildModules(ctx context.Context, lease string, digest rebuildDigest, 
 		}
 		manifest := &graph.Node{ID: key, Name: key, FilePath: key, Kind: graph.KindFile, Language: manifestLanguage(key)}
 		nodes, edges := modules.BuildGraphArtifacts(key, p.Specs)
-		build.AddBatch(append([]*graph.Node{manifest}, nodes...), edges)
+		if err := build.AddRebuildManifestArtifacts(ctx, append([]*graph.Node{manifest}, nodes...), edges); err != nil {
+			return err
+		}
 		if len(p.Specs) == 0 {
 			// No import scan is needed. A view read still surfaces a sticky
 			// error from writing the synthetic manifest node.

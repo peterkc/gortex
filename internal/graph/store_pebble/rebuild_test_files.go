@@ -148,6 +148,12 @@ func (b *BuildStore) RebuildTestFiles(ctx context.Context, receipts iter.Seq2[Pa
 		if !bytes.Equal(r.key, pendingNodeKey(light.ID)) {
 			return invalid("working test file identity does not match key")
 		}
+		// The checked workspace writer may replace a held member manifest.
+		// It is not a selected receipt and must not receive a deferred stamp.
+		owned, err := b.rebuildManifestSupersession(light.ID)
+		if err != nil || owned {
+			return err
+		}
 		proof, err := pendingGet(b.pending, key('n', light.ID), copyValue)
 		if err != nil || bytes.Equal(proof, []byte{deferred}) {
 			return err

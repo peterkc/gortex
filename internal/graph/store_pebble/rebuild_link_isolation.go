@@ -18,6 +18,8 @@ var ErrRebuildLinkIsolation = errors.New("pebble rebuild link isolation failed")
 // n: elected node bytes with receipt path (empty only for a checked skip).
 // e: exact parsed edge key to owning receipt path. r: saved restore edge bytes.
 // l: effective extractor by held ID. m: exact name/kind/extractor presence.
+// s/w: exact sanctioned native manifest replacement node/edge bytes.
+// o: contract isolation affected scope omissions.
 var rebuildHoldoutPrefix = []byte{'g', '!'}
 
 func rebuildHoldoutKey(col byte, key []byte) []byte {
@@ -224,8 +226,8 @@ func (b *BuildStore) SelectRebuildLinkFacts(ctx context.Context, f ParseFacts) (
 }
 
 // RestoreRebuildDeclarations closes the private cut after all resolver and C3
-// input reads, before any Relations or later stage writer. A collision is a
-// refusal, never an upsert over the result of isolated linking.
+// input reads, before any Relations or later stage writer. Only an exact
+// writer-owned manifest supersession may replace a held file.
 func (b *BuildStore) RestoreRebuildDeclarations(ctx context.Context) error {
 	return b.withWrites(func() error {
 		if !b.rebuildLinksIsolated || b.contractOverlay {
@@ -249,23 +251,49 @@ func (b *BuildStore) restoreRebuildDeclarations(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if live != nil {
+		owned, err := b.rebuildManifestSupersession(n.ID)
+		if err != nil {
+			return err
+		}
+		if live != nil && !owned {
 			return fmt.Errorf("isolated link node collides with held node %q", n.ID)
 		}
 		for _, dir := range []byte{edgeIn, edgeOut} {
-			found, err := rebuildGuardHasPrefix(ctx, b.pending, keyStrings([]byte{familyEdge, dir}, n.ID))
-			if err != nil {
-				return err
-			}
-			if found {
+			if err := pendingVisit(ctx, b.pending, keyStrings([]byte{familyEdge, dir}, n.ID), func(r row) error {
+				key := r.key
+				if dir == edgeIn {
+					key = r.value
+				}
+				if owned {
+					match, err := b.rebuildManifestEdgeMatches(key)
+					if err != nil || match {
+						return err
+					}
+				}
 				return fmt.Errorf("isolated link edge uses held node %q", n.ID)
+			}); err != nil {
+				return err
 			}
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
+	edgeProof := rebuildHoldoutKey('w', nil)
+	if err := pendingVisit(ctx, b.pending, edgeProof, func(r row) error {
+		match, err := b.rebuildManifestEdgeMatches(r.key[len(edgeProof):])
+		if err != nil || match {
+			return err
+		}
+		return invalid("manifest writer edge differs from capture")
+	}); err != nil {
+		return err
+	}
 	if err := b.visitRebuildHeldNodes(ctx, func(n *graph.Node, _ string, raw []byte) error {
+		owned, err := b.rebuildManifestSupersession(n.ID)
+		if err != nil || owned {
+			return err
+		}
 		return b.writeNodeRecord(n, nil, raw)
 	}); err != nil {
 		return err

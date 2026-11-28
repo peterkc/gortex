@@ -347,3 +347,68 @@ func TestRebuildHeldSkipRestoresNativeUpsert(t *testing.T) {
 	require.Equal(t, skip.Name, n.Name)
 	require.Equal(t, true, n.Meta["skipped_due_to_content"])
 }
+
+func TestRebuildHeldManifestSupersession(t *testing.T) {
+	for _, mode := range []string{"native writer", "modules disabled", "unrelated edge", "changed node", "changed edge", "unrelated node"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			b := newBuild(t, FullProfile)
+			const file = "package.json"
+			raw := &graph.Node{ID: file, Name: file, FilePath: file, Kind: graph.KindFile, Language: "json", StartLine: 1}
+			decl := &graph.Node{ID: file + "::name", Name: "name", FilePath: file, Kind: graph.KindVariable, Language: "json"}
+			defines := &graph.Edge{From: file, To: decl.ID, Kind: graph.EdgeDefines, FilePath: file}
+			require.NoError(t, b.AddRebuildDeferredFile("", ParseFacts{
+				File: graph.FileMetaRow{FilePath: file, NodeCount: 2}, EffectiveLanguage: "json", Nodes: []*graph.Node{raw, decl}, Edges: []*graph.Edge{defines},
+			}, func(string) (bool, error) { return true, nil }))
+			require.NoError(t, b.IsolateRebuildLinks(ctx))
+			winner := &graph.Node{ID: file, Name: file, FilePath: file, Kind: graph.KindFile, Language: "json"}
+			module := &graph.Node{ID: "module::npm:a@1", Name: "a", Kind: graph.KindModule, FilePath: file, Language: "typescript"}
+			dependency := &graph.Edge{From: file, To: module.ID, Kind: graph.EdgeDependsOnModule, FilePath: file, Origin: graph.OriginASTResolved}
+			if mode == "unrelated node" {
+				b.AddNode(winner)
+				require.ErrorIs(t, b.AddRebuildManifestArtifacts(ctx, []*graph.Node{winner, module}, []*graph.Edge{dependency}), ErrRebuildLinkIsolation)
+				return
+			}
+			if mode != "modules disabled" {
+				require.NoError(t, b.AddRebuildManifestArtifacts(ctx, []*graph.Node{winner, module}, []*graph.Edge{dependency}))
+				n, err := b.RebuildView().Node(ctx, file)
+				require.NoError(t, err)
+				require.Equal(t, winner, n)
+			}
+			n, err := b.RebuildView().Node(ctx, decl.ID)
+			require.NoError(t, err)
+			require.Nil(t, n, "the raw declaration never enters the cut")
+			switch mode {
+			case "unrelated edge":
+				b.AddEdge(&graph.Edge{From: module.ID, To: file, Kind: graph.EdgeReferences, FilePath: "other.go"})
+			case "changed node":
+				changed := *winner
+				changed.Name = "changed later"
+				b.AddNode(&changed)
+			case "changed edge":
+				changed := *dependency
+				changed.Meta = map[string]any{"changed": true}
+				b.AddEdge(&changed)
+			}
+			err = b.RestoreRebuildDeclarations(ctx)
+			if mode != "native writer" && mode != "modules disabled" {
+				require.ErrorIs(t, err, ErrRebuildLinkIsolation)
+				return
+			}
+			require.NoError(t, err)
+			n, err = b.RebuildView().Node(ctx, file)
+			require.NoError(t, err)
+			if mode == "modules disabled" {
+				require.Equal(t, raw, n)
+			} else {
+				require.Equal(t, winner, n)
+				edge, err := b.pendingEdge(pendingEdgeKey(dependency))
+				require.NoError(t, err)
+				require.Equal(t, dependency, edge)
+			}
+			edge, err := b.pendingEdge(pendingEdgeKey(defines))
+			require.NoError(t, err)
+			require.Equal(t, defines, edge)
+		})
+	}
+}

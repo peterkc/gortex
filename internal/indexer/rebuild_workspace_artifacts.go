@@ -53,7 +53,5 @@ func runRebuildPackageWorkspace(ctx context.Context, lease string, digest rebuil
 		key := mem.ManifestPath
 		nodes = append(nodes, &graph.Node{ID: key, Name: path.Base(key), FilePath: key, Kind: graph.KindFile, Language: manifestLanguage(key)})
 	}
-	build.AddBatch(nodes, edges)
-	_, err = build.RebuildView().Node(ctx, root.ID)
-	return err
+	return build.AddRebuildManifestArtifacts(ctx, nodes, edges)
 }

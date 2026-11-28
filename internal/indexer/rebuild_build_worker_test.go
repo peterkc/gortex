@@ -1149,11 +1149,14 @@ func TestRunRebuildCheckout(t *testing.T) {
 		name                                                       string
 		mismatch, denied, omitJSONRecipe                           bool
 		captureRefusal, sealRefusal, mixed, deferredOnly, skipOnly bool
+		manifests, modulesOff                                      bool
 	}{
 		{name: "verified checkout builds all six stages"},
 		{name: "capture refusal keeps file graph", captureRefusal: true},
 		{name: "seal refusal keeps relations", sealRefusal: true},
 		{name: "mixed checkout isolates links", mixed: true},
+		{name: "mixed manifests retain native writers", mixed: true, manifests: true},
+		{name: "mixed manifests modules disabled", mixed: true, manifests: true, modulesOff: true},
 		{name: "deferred-only checkout isolates links", deferredOnly: true},
 		{name: "deferred checked skip alone labels all later stages", skipOnly: true},
 		{name: "supplied input root differs", mismatch: true},
@@ -1184,6 +1187,11 @@ func TestRunRebuildCheckout(t *testing.T) {
 			if tc.skipOnly {
 				require.NoError(t, os.WriteFile(filepath.Join(root, "test_document.txt"), []byte(strings.Repeat("x", 96)), 0o600))
 			}
+			if tc.manifests {
+				writeRebuildTSAliasFixtureFile(t, root, "package.json", `{"name":"root","workspaces":["tests/*"],"dependencies":{"left-pad":"1.3.0"}}`)
+				writeRebuildTSAliasFixtureFile(t, root, "package-lock.json", `{"name":"root","lockfileVersion":2,"packages":{"":{"name":"root"},"node_modules/left-pad":{"version":"1.3.0"}}}`)
+				writeRebuildTSAliasFixtureFile(t, root, "tests/pkg/package.json", `{"name":"member"}`)
+			}
 			if tc.denied {
 				writeRebuildTSAliasFixtureFile(t, root, "caller.ts", `import "@lib/x"`)
 				writeRebuildTSAliasFixtureFile(t, root, "tsconfig.json", `{"compilerOptions":{"paths":{"@lib/*":["./excluded/*"]}}}`)
@@ -1192,6 +1200,10 @@ func TestRunRebuildCheckout(t *testing.T) {
 			cfg := config.Default().Index
 			cfg.MaxFileSize = 128
 			cfg.Content.MaxDocumentBytes = 64
+			if tc.manifests {
+				on := !tc.modulesOff
+				cfg.Coverage.Modules.Enabled = &on
+			}
 			cfg.SkipUntrackedAssets = false
 			cfg.Coverage.Clones.Threshold = 0.95 // the owner must seal this before dispatch
 			req := rebuildBuildRequest{
@@ -1224,6 +1236,9 @@ func TestRunRebuildCheckout(t *testing.T) {
 			var stages []store_pebble.Stage
 			var pinnedRelations *store_pebble.Snapshot
 			wantDeferred := []string{"python"}
+			if tc.manifests {
+				wantDeferred = []string{"json", "python"}
+			}
 			if tc.skipOnly {
 				wantDeferred = append(wantDeferred, "text")
 			}
@@ -1384,6 +1399,33 @@ func TestRunRebuildCheckout(t *testing.T) {
 				require.Equal(t, store_pebble.StageContracts, pending.Need)
 				require.Equal(t, store_pebble.StageRelations, pending.Published)
 				require.Nil(t, pinnedRelations.GetNode(contractID))
+			}
+			if tc.manifests {
+				wantPaths = append(wantPaths, "package.json", "package-lock.json", "tests/pkg/package.json")
+				slices.Sort(wantPaths)
+				for _, file := range []string{"package.json", "package-lock.json", "tests/pkg/package.json"} {
+					n := s.GetNode(file)
+					require.NotNil(t, n)
+					require.NotContains(t, n.Meta, "is_test_file")
+					require.True(t, slices.ContainsFunc(s.GetOutEdges(file), func(e *graph.Edge) bool {
+						return e.Kind == graph.EdgeDefines && e.To == file+"::name"
+					}), "raw Defines survives native manifest supersession: %s", file)
+					if tc.modulesOff {
+						require.Equal(t, 1, n.StartLine)
+					} else {
+						require.Zero(t, n.StartLine)
+					}
+				}
+				if tc.modulesOff {
+					require.Nil(t, s.GetNode("pkgws::npm:."))
+					require.Nil(t, s.GetNode("module::npm:left-pad@1.3.0"))
+				} else {
+					require.NotNil(t, s.GetNode("pkgws::npm:."))
+					require.NotNil(t, s.GetNode("module::npm:left-pad@1.3.0"))
+					require.True(t, slices.ContainsFunc(s.GetOutEdges("pkgws::npm:."), func(e *graph.Edge) bool {
+						return e.Kind == graph.EdgePackageWorkspaceMember && e.To == "tests/pkg/package.json"
+					}))
+				}
 			}
 			var paths []string
 			require.NoError(t, s.ManifestFiles(ctx, func(f store_pebble.ManifestFile) error {
