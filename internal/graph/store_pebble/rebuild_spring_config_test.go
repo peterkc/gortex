@@ -174,32 +174,35 @@ class Bean {
 	require.False(t, partial, "present target scope is not partial")
 }
 
-func TestRebuildSpringConfigSkippedWildcardKeepsExactOmissions(t *testing.T) {
+func TestRebuildSpringConfigSkippedWildcardKeepsKnownRows(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	const skipped, checked, readerFile = "application-a.yml", "application-z.yml", "Reader.java"
-	const id = "cfg::spring::service.port"
+	const id, other = "cfg::spring::service.port", "cfg::spring::other.host"
 	reader := &graph.Node{ID: readerFile + "::Reader", FilePath: readerFile, Kind: graph.KindType, Language: "java", StartLine: 1,
-		Meta: map[string]any{"spring_config_keys": []string{"service.*"}}}
+		Meta: map[string]any{"spring_config_keys": []string{"service.*", "other.*", "service.*"}}}
 	b.AddBatch([]*graph.Node{reader, {ID: skipped, FilePath: skipped, Kind: graph.KindFile, Language: "yaml"},
 		{ID: checked, FilePath: checked, Kind: graph.KindFile, Language: "yaml"}}, nil)
 	scope := contracts.SpringConfigScope{RepoRoot: t.TempDir()}
 	var actual []RebuildContractOmission
+	var edges []*graph.Edge
 	require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(records *RebuildContractRecords) error {
 		return records.VisitSpringConfig(scope, func(path string) ([]*graph.Node, bool, error) {
 			if path == skipped {
 				return nil, true, nil
 			}
-			return contracts.SpringFileFacts(path, []byte("service:\n  port: 8080\n")), false, nil
+			return contracts.SpringFileFacts(path, []byte("service:\n  port: 8080\nother:\n  host: localhost\n")), false, nil
 		}, func(batch RebuildContractBatch) error {
-			require.Empty(t, batch.Edges)
+			edges = append(edges, batch.Edges...)
 			actual = append(actual, batch.Omitted...)
 			return nil
 		})
 	}))
-	e := contracts.SpringConfigReadEdge(reader, id, "service.*")
+	require.ElementsMatch(t, []*graph.Edge{
+		contracts.SpringConfigReadEdge(reader, id, "service.*"),
+		contracts.SpringConfigReadEdge(reader, other, "other.*"),
+	}, edges)
 	require.ElementsMatch(t, []RebuildContractOmission{
 		RebuildSpringConfigUnknownOmission("", skipped),
 		RebuildSpringConfigUnknownOmission("", readerFile),
-		RebuildContractEdgeOmission("", contracts.ContractType(graph.EdgeReadsConfig), id, e),
 	}, actual)
 }

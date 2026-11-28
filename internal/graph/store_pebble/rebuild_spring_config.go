@@ -3,8 +3,6 @@ package store_pebble
 import (
 	"crypto/sha256"
 	"errors"
-	"slices"
-	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/contracts"
@@ -41,10 +39,7 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 		if !matches(repo, workspace) {
 			return nil
 		}
-		lower := strings.ToLower(path)
-		if !slices.Contains(languages, strings.ToLower(language)) && !slices.ContainsFunc(extensions, func(ext string) bool {
-			return strings.HasSuffix(lower, ext)
-		}) {
+		if !graph.ProjectionMatches(path, language, languages, extensions) {
 			return nil
 		}
 		projected = true
@@ -124,16 +119,14 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 		if err != nil || !matches(reader.RepoPrefix, reader.WorkspaceID) {
 			return err
 		}
-		switch reader.Kind {
-		case graph.KindField, graph.KindType, graph.KindInterface, graph.KindMethod:
-		default:
+		if !contracts.SpringReaderKind(reader.Kind) {
 			return nil
 		}
 		reader, err = decodeNode(nodeRow.value)
 		if err != nil {
 			return err
 		}
-		emit := func(id, raw string, wildcardUnproved bool) error {
+		emit := func(id, raw string) error {
 			seenKey := rebuildSpringConfigKey('s', reader.ID, id)
 			seen, err := state(seenKey)
 			if err != nil || seen != 0 {
@@ -147,9 +140,6 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 			old, err := r.build.pendingEdge(edgeKey)
 			if err != nil || old != nil {
 				return err
-			}
-			if wildcardUnproved {
-				return yield(RebuildContractBatch{Omitted: []RebuildContractOmission{RebuildContractEdgeOmission(reader.RepoPrefix, contracts.ContractType(graph.EdgeReadsConfig), id, e)}})
 			}
 			present, err := state(rebuildSpringConfigKey('k', id))
 			if err != nil {
@@ -172,7 +162,7 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 		for _, raw := range contracts.SpringConfigKeysOf(reader) {
 			prefix, wildcard := contracts.SpringConfigWildcardPrefix(raw)
 			if !wildcard {
-				if err := emit(scope.KeyID(raw), raw, false); err != nil {
+				if err := emit(scope.KeyID(raw), raw); err != nil {
 					return err
 				}
 				continue
@@ -188,7 +178,7 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 				if err != nil || len(rest) != 0 {
 					return invalid("invalid Spring config target key")
 				}
-				return emit(id, raw, skippedConfig)
+				return emit(id, raw)
 			}); err != nil {
 				return err
 			}

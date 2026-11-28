@@ -71,9 +71,7 @@ func (r rebuildContractReceiptReader) visitHeldOutContractOmissions(ctx context.
 			}
 		}
 		for _, n := range base.Nodes {
-			switch n.Kind {
-			case graph.KindField, graph.KindType, graph.KindInterface, graph.KindMethod:
-			default:
+			if !contracts.SpringReaderKind(n.Kind) {
 				continue
 			}
 			for _, raw := range contracts.SpringConfigKeysOf(n) {
