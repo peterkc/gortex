@@ -28,10 +28,11 @@ type jsReceiverWrite struct {
 }
 
 type jsReceiverBinding struct {
-	scope     *sitter.Node
-	decl      *sitter.Node
-	aliasInit *sitter.Node // var initializers can prove a possible write, not a receiver.
-	known     graph.BuiltinReceiverHint
+	scope      *sitter.Node
+	decl       *sitter.Node
+	aliasInits []*sitter.Node // Possible write targets, even without a proved receiver.
+	known      graph.BuiltinReceiverHint
+	annexB     bool
 }
 
 func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *jsBuiltinReceivers {
@@ -62,7 +63,17 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 	}
 	bind := func(n *sitter.Node) {
 		name := n.Content(src)
-		b := jsReceiverBindingAt(n, n.Parent(), src)
+		p := n.Parent()
+		b := jsReceiverBindingAt(n, p, src)
+		decl := b.decl
+		if p.Type() == "variable_declarator" {
+			decl = p // Switch/for/var initializers may prove a write, not a read.
+		}
+		if decl != nil {
+			if value := decl.ChildByFieldName("value"); value != nil {
+				b.aliasInits = []*sitter.Node{value}
+			}
+		}
 		if b.scope == nil {
 			b.scope = jsReceiverBindingScope(n)
 		}
@@ -72,8 +83,12 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 			r.bindings[name] = make(map[uintptr]jsReceiverBinding)
 		}
 		key := b.scope.Id()
-		if _, duplicate := r.bindings[name][key]; duplicate {
-			b = jsReceiverBinding{scope: b.scope, known: graph.BuiltinReceiverHint{Form: "shadowed"}}
+		if prior, duplicate := r.bindings[name][key]; duplicate {
+			b = jsReceiverBinding{
+				scope:      b.scope,
+				aliasInits: append(prior.aliasInits, b.aliasInits...),
+				known:      graph.BuiltinReceiverHint{Form: "shadowed"},
+			}
 		}
 		r.bindings[name][key] = b
 	}
@@ -277,27 +292,28 @@ func jsReceiverWritePath(n *sitter.Node, src []byte) (string, []string) {
 // function can write through the alias after initialization even if its body
 // appears earlier in source. Do not follow alias chains, later assignments,
 // or local __proto__ replacement.
-func (r *jsBuiltinReceivers) platformAlias(binding jsReceiverBinding, write []string) (string, []string) {
-	value := binding.aliasInit
-	if binding.decl != nil {
-		value = binding.decl.ChildByFieldName("value")
-	}
+func (r *jsBuiltinReceivers) platformAlias(value *sitter.Node, write []string) (string, []string) {
 	name, fields := jsReceiverWritePath(value, r.src)
 	if name == "" {
 		return "", nil
 	}
-	if _, bound := r.bindingAt(name, value); bound {
+	binding, _ := r.bindingAt(name, value)
+	for binding.annexB {
+		binding, _ = r.bindingAt(name, binding.scope.Parent())
+	}
+	if binding.scope != nil {
 		return "", nil
 	}
-	if len(fields) == 0 && (name == "globalThis" || jsGlobalAlias(name)) {
-		// An indirect global-object mutation is not a per-member proof.
-		name, _, unsafe := jsReceiverGlobalPath(name, write)
-		r.unsafe = r.unsafe || unsafe || jsStaticReceiverFamily(name) != ""
+	owner, prefix, _ := jsReceiverGlobalPath(name, fields)
+	if owner == "" {
+		// The initializer ends at a global object or a computed global key.
+		// Include the write path to exclude unrelated properties.
+		owner, _, unsafe := jsReceiverGlobalPath(name, append(fields, write...))
+		r.unsafe = r.unsafe || unsafe || jsStaticReceiverFamily(owner) != ""
 		return "", nil
 	}
-	name, fields, _ = jsReceiverGlobalPath(name, fields)
-	if jsStaticReceiverFamily(name) != "" && (len(fields) == 0 || len(fields) == 1 && fields[0] == "prototype") {
-		return name, append(fields, write...)
+	if jsStaticReceiverFamily(owner) != "" && (len(prefix) == 0 || len(prefix) == 1 && prefix[0] == "prototype") {
+		return owner, append(prefix, write...)
 	}
 	return "", nil
 }
@@ -326,29 +342,45 @@ func (r *jsBuiltinReceivers) recordWrite(n *sitter.Node) {
 	if !bound && (name == "globalThis" || jsStaticReceiverFamily(name) != "") && len(r.bindings[name]) != 0 {
 		r.unsafe = true // A platform write outside the local binding's scope.
 	}
-	if bound || !platformName {
+	r.visitWriteBindings(name, binding, func(binding jsReceiverBinding) {
+		if binding.scope == nil && platformName {
+			owner, path, unsafe := jsReceiverGlobalPath(name, fields)
+			if unsafe {
+				r.unsafe = true
+				return
+			}
+			r.recordPlatformWrite(owner, path)
+			return
+		}
 		switch len(fields) {
 		case 0:
 			r.writes[jsReceiverWrite{owner: name, scope: binding.scope.Id()}] = true
 		case 1:
 			r.writes[jsReceiverWrite{owner: name, member: fields[0], scope: binding.scope.Id()}] = true
 		}
-		if bound && !binding.visibleAt(n) && (name == "globalThis" || jsStaticReceiverFamily(name) != "") {
+		if binding.scope != nil && !binding.visibleAt(n) && (name == "globalThis" || jsStaticReceiverFamily(name) != "") {
 			r.unsafe = true // Cannot tell whether this write reaches the platform.
 		}
 		if len(fields) != 0 {
-			if alias, path := r.platformAlias(binding, fields); alias != "" {
-				r.recordPlatformWrite(alias, path)
+			for _, value := range binding.aliasInits {
+				if alias, path := r.platformAlias(value, fields); alias != "" {
+					r.recordPlatformWrite(alias, path)
+				}
 			}
 		}
-		return
+	})
+}
+
+// A source without import/export may still run as a module. A synthetic
+// Annex B binding cannot rule out a write to the next enclosing binding.
+func (r *jsBuiltinReceivers) visitWriteBindings(name string, binding jsReceiverBinding, visit func(jsReceiverBinding)) {
+	for {
+		visit(binding)
+		if !binding.annexB {
+			return
+		}
+		binding, _ = r.bindingAt(name, binding.scope.Parent())
 	}
-	name, fields, unsafe := jsReceiverGlobalPath(name, fields)
-	if unsafe {
-		r.unsafe = true
-		return
-	}
-	r.recordPlatformWrite(name, fields)
 }
 
 func (r *jsBuiltinReceivers) recordPlatformWrite(name string, fields []string) {
@@ -379,16 +411,23 @@ func (r *jsBuiltinReceivers) recordMutation(target *sitter.Node) {
 	if name == "" {
 		return
 	}
-	if binding, bound := r.bindingAt(name, target); bound {
+	binding, _ := r.bindingAt(name, target)
+	r.visitWriteBindings(name, binding, func(binding jsReceiverBinding) {
+		if binding.scope == nil {
+			r.recordPlatformMutation(name, fields)
+			return
+		}
 		if len(fields) == 0 {
 			r.writes[jsReceiverWrite{owner: name, member: "*", scope: binding.scope.Id()}] = true
 		}
-		alias, path := r.platformAlias(binding, fields)
-		if alias == "" {
-			return
+		for _, value := range binding.aliasInits {
+			alias, path := r.platformAlias(value, fields)
+			r.recordPlatformMutation(alias, path)
 		}
-		name, fields = alias, path
-	}
+	})
+}
+
+func (r *jsBuiltinReceivers) recordPlatformMutation(name string, fields []string) {
 	if name == "globalThis" || jsGlobalAlias(name) || jsStaticReceiverFamily(name) != "" && (len(fields) == 0 || fields[0] == "prototype" || fields[0] == "*") {
 		r.unsafe = true
 	}
@@ -433,7 +472,7 @@ func jsReceiverBindingAt(n, p *sitter.Node, src []byte) jsReceiverBinding {
 		}
 		declaration := p.Parent()
 		if declaration.Type() != "lexical_declaration" {
-			return jsReceiverBinding{aliasInit: p.ChildByFieldName("value"), known: graph.BuiltinReceiverHint{Form: "unknown"}}
+			return jsReceiverBinding{known: graph.BuiltinReceiverHint{Form: "unknown"}}
 		}
 		scope := declaration.Parent()
 		if scope.Type() == "export_statement" {
@@ -547,7 +586,7 @@ func (r *jsBuiltinReceivers) bindSloppyBlockFunction(name *sitter.Node) {
 			}
 		}
 	}
-	entries[varBody.Id()] = jsReceiverBinding{scope: varBody}
+	entries[varBody.Id()] = jsReceiverBinding{scope: varBody, annexB: true}
 }
 
 func jsReceiverUseStrict(body *sitter.Node, src []byte) bool {

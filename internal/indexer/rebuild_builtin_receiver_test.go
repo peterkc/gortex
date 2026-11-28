@@ -337,19 +337,19 @@ func TestRebuildGoBuiltinScopeFromExtraction(t *testing.T) {
 	}
 }
 
-func TestRebuildReceiverV2ThroughV5ReceiptsAreStale(t *testing.T) {
+func TestRebuildOlderCaptureVersionReceiptsAreStale(t *testing.T) {
 	for _, tc := range []struct {
 		file, language, source string
 		extractor              parser.Extractor
 		versions               []uint64
 	}{
-		{"a.go", "go", "package p\nfunc use(xs []int) int { return len(xs) }\n", languages.NewGoExtractor(), []uint64{2, 3, 4, 5}},
-		{"a.js", "javascript", "function use(xs) { xs.slice(0); }", languages.NewJavaScriptExtractor(), []uint64{3, 4, 5}},
-		{"a.ts", "typescript", "function use(xs: number[]) { xs.slice(0); }", languages.NewTypeScriptExtractor(), []uint64{3, 4, 5}},
-		{"A.vue", "vue", "<!-- host -->\n<script setup lang=\"ts\">\nfunction use() { [1].slice(0); }\n</script>", languages.NewVueExtractor(), []uint64{4, 5}},
-		{"A.svelte", "svelte", "<!-- host -->\n<script>\nfunction use() { [1].slice(0); }\n</script>", languages.NewSvelteExtractor(), []uint64{4, 5}},
-		{"A.astro", "astro", "<!-- host -->\n<script lang=\"ts\">\nfunction use() { [1].slice(0); }\n</script>", languages.NewAstroExtractor(), []uint64{4, 5}},
-		{"a.html", "html", "<!-- host -->\n<script>\nfunction use() { [1].slice(0); }\n</script>", languages.NewHTMLExtractor(), []uint64{4, 5}},
+		{"a.go", "go", "package p\nfunc use(xs []int) int { return len(xs) }\n", languages.NewGoExtractor(), []uint64{2, 3, 4, 5, 6}},
+		{"a.js", "javascript", "function use(xs) { xs.slice(0); }", languages.NewJavaScriptExtractor(), []uint64{3, 4, 5, 6}},
+		{"a.ts", "typescript", "function use(xs: number[]) { xs.slice(0); }", languages.NewTypeScriptExtractor(), []uint64{3, 4, 5, 6}},
+		{"A.vue", "vue", "<!-- host -->\n<script setup lang=\"ts\">\nfunction use() { [1].slice(0); }\n</script>", languages.NewVueExtractor(), []uint64{4, 5, 6}},
+		{"A.svelte", "svelte", "<!-- host -->\n<script>\nfunction use() { [1].slice(0); }\n</script>", languages.NewSvelteExtractor(), []uint64{4, 5, 6}},
+		{"A.astro", "astro", "<!-- host -->\n<script lang=\"ts\">\nfunction use() { [1].slice(0); }\n</script>", languages.NewAstroExtractor(), []uint64{4, 5, 6}},
+		{"a.html", "html", "<!-- host -->\n<script>\nfunction use() { [1].slice(0); }\n</script>", languages.NewHTMLExtractor(), []uint64{4, 5, 6}},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			ctx := t.Context()
@@ -369,29 +369,29 @@ func TestRebuildReceiverV2ThroughV5ReceiptsAreStale(t *testing.T) {
 			payload := encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
 				File: graph.FileMetaRow{FilePath: tc.file}, EffectiveLanguage: tc.language,
 			})
+			keyForVersions := func(receiver, contract uint64) rebuildDigest {
+				b := append([]byte("gortex/rebuild/contract-parse-receiver\x00"), ordinary[:]...)
+				b = append(b, store_pebble.ContractParseFactsFormat)
+				b = binary.AppendUvarint(b, receiver)
+				b = binary.AppendUvarint(b, contract)
+				b = binary.AppendUvarint(b, postExtractionPolicyVersion)
+				b = binary.AppendUvarint(b, uint64(extractorVersionForLang(tc.language)))
+				b = binary.AppendUvarint(b, 0)
+				return input.parseKey(blake3.Sum256(append(b, idx.rebuildContractPolicy().suffix...)))
+			}
+			currentKey := input.parseKey(idx.rebuildExtractorRecipe(recipe, input))
+			require.Equal(t, currentKey, keyForVersions(rebuildBuiltinReceiverCaptureVersion, rebuildContractCaptureVersion),
+				"the old keys must use the current recipe layout")
+
 			oldKeys := make([]rebuildDigest, 0, len(tc.versions)+1)
 			for _, version := range tc.versions {
-				old := append([]byte("gortex/rebuild/contract-parse-receiver\x00"), ordinary[:]...)
-				old = append(old, store_pebble.ContractParseFactsFormat)
-				old = binary.AppendUvarint(old, version)
-				old = binary.AppendUvarint(old, rebuildContractCaptureVersion)
-				old = binary.AppendUvarint(old, postExtractionPolicyVersion)
-				old = binary.AppendUvarint(old, uint64(extractorVersionForLang(tc.language)))
-				old = binary.AppendUvarint(old, 0)
-				key := input.parseKey(blake3.Sum256(append(old, idx.rebuildContractPolicy().suffix...)))
+				key := keyForVersions(version, rebuildContractCaptureVersion)
 				require.NoError(t, store.write(key, payload))
 				oldKeys = append(oldKeys, key)
 			}
 			// The old contract capture version must miss even when the
 			// receiver capture version already matches the current one.
-			old := append([]byte("gortex/rebuild/contract-parse-receiver\x00"), ordinary[:]...)
-			old = append(old, store_pebble.ContractParseFactsFormat)
-			old = binary.AppendUvarint(old, rebuildBuiltinReceiverCaptureVersion)
-			old = binary.AppendUvarint(old, 1)
-			old = binary.AppendUvarint(old, postExtractionPolicyVersion)
-			old = binary.AppendUvarint(old, uint64(extractorVersionForLang(tc.language)))
-			old = binary.AppendUvarint(old, 0)
-			key := input.parseKey(blake3.Sum256(append(old, idx.rebuildContractPolicy().suffix...)))
+			key := keyForVersions(rebuildBuiltinReceiverCaptureVersion, 1)
 			require.NoError(t, store.write(key, payload))
 			oldKeys = append(oldKeys, key)
 			bounds := rebuildTransformBounds{FileBytes: 1024, CaptureBytes: 1024}

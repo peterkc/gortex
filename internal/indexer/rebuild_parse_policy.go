@@ -71,8 +71,9 @@ const rebuildContractCaptureVersion = 2
 // 3: Go package-scope builtin declarations on the file receipt.
 // 4: JS/TS lexical-scope bindings, unproved user receivers and global-alias writes (host delegates included).
 // 5: JS/TS lexical/function scopes, scoped types and writes, and additional mutation forms (host delegates included).
-// 6: range 21 receiver scope/write fixes.
-const rebuildBuiltinReceiverCaptureVersion = 6
+// 6: JS/TS var and early-declared alias writes, global-object alias writes, and Annex B block-function bindings.
+// 7: JS/TS writes through redeclared or scoped aliases, nested global aliases, and Annex B outer bindings.
+const rebuildBuiltinReceiverCaptureVersion = 7
 
 // The same language selection controls parser opt-in and receipt invalidation.
 func capturesRebuildBuiltinReceiverFacts(lang string) bool {
