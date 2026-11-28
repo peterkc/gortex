@@ -182,9 +182,12 @@ func TestRebuildEarlyRouterHandlerElection(t *testing.T) {
 	for _, tc := range []struct {
 		name, firstDecl          string
 		wantMounted, skipHandler bool
+		direct, unadmitted       bool
 	}{
 		{name: "handler_move_opens_bucket", firstDecl: "export function first(req, res) {}", wantMounted: true},
 		{name: "unresolved_handler_keeps_bucket"},
+		{name: "direct_express_calls", direct: true},
+		{name: "unadmitted_handler_refuses", unadmitted: true},
 		{name: "size_skipped_handler_still_moves", wantMounted: true, skipHandler: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,12 +209,10 @@ func TestRebuildEarlyRouterHandlerElection(t *testing.T) {
 				// A Go handler falls outside the TypeScript router census.
 				handlerPath, handlerLanguage, handlerSource = "handlers.go", "go", "package handlers\nfunc first() {}\n"
 			}
-			sources := []struct{ path, language, text string }{
-				{handlerPath, handlerLanguage, handlerSource},
-				// A state member call is still an Express route for the native
-				// contract and mount patterns. Its root is not app/router, so
-				// the parser does not give each line its own synthetic owner.
-				{"routes.ts", "typescript", `import express from 'express';
+			// A state member call is still an Express route for the native
+			// contract and mount patterns. Its root is not app/router, so
+			// the parser does not give each line its own synthetic owner.
+			routes := `import express from 'express';
 const router = express.Router();
 const state = { app: express(), router };
 export function register() {
@@ -219,7 +220,21 @@ export function register() {
     state.router.get("/x", second);
     state.app.use("/api", router);
 }
-`},
+`
+			if tc.direct {
+				routes = `import express from 'express';
+const router = express.Router();
+const app = express();
+export function register() {
+    app.get("/x", first);
+    router.get("/x", second);
+    app.use("/api", router);
+}
+`
+			}
+			sources := []struct{ path, language, text string }{
+				{handlerPath, handlerLanguage, handlerSource},
+				{"routes.ts", "typescript", routes},
 			}
 			native := contracts.NewRegistry()
 			for _, file := range sources {
@@ -255,11 +270,16 @@ export function register() {
 			const raw, mounted = "http::GET::/x", "http::GET::/api/x"
 			registrations := native.ByID(raw)
 			require.Len(t, registrations, 2)
-			require.Equal(t, "routes.ts::register", registrations[0].SymbolID)
-			require.Equal(t, registrations[0].SymbolID, registrations[1].SymbolID)
-			require.NotEqual(t, registrations[0].Line, registrations[1].Line)
-			require.Len(t, native.All(), 1, "the raw registry hides the mounted registration")
-			require.Equal(t, "first", native.All()[0].Meta["handler_ident"])
+			if tc.direct {
+				require.NotEqual(t, registrations[0].SymbolID, registrations[1].SymbolID)
+				require.Len(t, native.All(), 2)
+			} else {
+				require.Equal(t, "routes.ts::register", registrations[0].SymbolID)
+				require.Equal(t, registrations[0].SymbolID, registrations[1].SymbolID)
+				require.NotEqual(t, registrations[0].Line, registrations[1].Line)
+				require.Len(t, native.All(), 1, "the raw registry hides the mounted registration")
+				require.Equal(t, "first", native.All()[0].Meta["handler_ident"])
+			}
 			f, err := idx.readRebuildEarlyContractFacts(ctx, b.RebuildView(), job, store, &census, nil)
 			require.NoError(t, err)
 			idx.commitContracts(native)
@@ -273,27 +293,46 @@ export function register() {
 					nativeIDs[n.ID] = n.FilePath
 				}
 			}
-			require.Equal(t, want, nativeIDs)
+			if !tc.direct {
+				require.Equal(t, want, nativeIDs)
+			}
 			for _, file := range sources {
 				require.NoError(t, os.Remove(filepath.Join(root, file.path)))
 			}
 			if tc.skipHandler {
 				require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
-					for _, c := range f.registry.ByID(raw) {
+					for _, c := range cloneContractRecords(f.registry.ByID(raw)) {
+						if c.Meta["handler_ident"] == "first" {
+							c.Meta["response_expr"] = "payload"
+						}
 						require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c}))
 					}
 					require.NoError(t, f.receipts.bindRebuildProviderHandlers(ctx, b.RebuildView(), records))
-					var moved int
-					require.NoError(t, records.VisitByID(raw, func(item store_pebble.RebuildContractRecord) error {
-						if item.SymbolID == handlerPath+"::first" {
-							moved++
-							require.True(t, item.BodyUnproved)
-						}
-						return nil
-					}))
-					require.Equal(t, 1, moved)
+					moved := func() store_pebble.RebuildContractRecord {
+						var rows []store_pebble.RebuildContractRecord
+						require.NoError(t, records.VisitByID(raw, func(item store_pebble.RebuildContractRecord) error {
+							if item.SymbolID == handlerPath+"::first" {
+								rows = append(rows, item)
+							}
+							return nil
+						}))
+						require.Len(t, rows, 1)
+						return rows[0]
+					}
+					before := moved()
+					require.True(t, before.BodyUnproved)
+					require.Equal(t, []string{"payload"}, unresolvedContractBindingNames(before.Contract))
+					require.NoError(t, f.receipts.resolveLateCallReturnTypes(ctx, b.RebuildView(), records))
+					require.Equal(t, before, moved())
 					return nil
 				}))
+			}
+			if tc.unadmitted {
+				b.AddNode(&graph.Node{ID: "outside.go::first", FilePath: "outside.go", Name: "first", Kind: graph.KindFunction, Language: "go"})
+				_, err := f.finish(ctx, b.RebuildView(), "", "", "")
+				require.ErrorIs(t, err, graph.ErrContractProjectionStale)
+				require.ErrorContains(t, err, `no admitted router handler source for "outside.go::first"`)
+				return
 			}
 			got, err := f.finish(ctx, b.RebuildView(), "", "", "")
 			require.NoError(t, err)
@@ -301,7 +340,8 @@ export function register() {
 			require.NoError(t, b.BeginRebuildContractOverlay(ctx, got))
 			n, err := b.RebuildView().Node(ctx, mounted)
 			require.NoError(t, err)
-			require.Equal(t, tc.wantMounted, n != nil)
+			_, nativeMounted := nativeIDs[mounted]
+			require.Equal(t, nativeMounted, n != nil)
 			require.NoError(t, b.EndRebuildContractOverlay(ctx))
 		})
 	}

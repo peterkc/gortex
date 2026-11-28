@@ -12,7 +12,7 @@ import (
 )
 
 // A non-nil empty map proves the set was built. Values are the native
-// contract-node file paths, needed by gRPC registration's untyped read.
+// contract-node paths that the overlay writes as each node's FilePath.
 type rebuildEarlyContractIDs map[string]string
 
 func (ids rebuildEarlyContractIDs) contains(id string) bool {
