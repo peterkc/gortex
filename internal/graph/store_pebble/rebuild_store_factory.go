@@ -115,7 +115,8 @@ func (p *rebuildStoreFactoryPass) run(ctx context.Context, receipts iter.Seq2[Pa
 // b: needed getter bindings; c/g: action/getter proof with affected key by ID.
 // a/w: global/workspace action singleton; f/s: their file singletons.
 // t: live getter files, x: exact getter files. u/v: wanted action/getter cohorts.
-// l: deferred Calls; n: affected caller proof; p: election witnesses; r: raw-key claims;
+// l: deferred Calls; n: live caller proof; R: receipt-only caller scope.
+// p: election witnesses; r: raw-key claims;
 // m: new payload by old key; o: raw receipt key in move order.
 func (p *rebuildStoreFactoryPass) key(col byte, fields ...string) []byte {
 	return keyStrings(p.column(col), fields...)
@@ -317,7 +318,7 @@ func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
 			return err
 		}
 		if !pick.getter {
-			return p.planCall(r.key, e, call, pick)
+			return p.planScopedCall(r.key, e, call, pick)
 		}
 		// Only a many-candidate scoped election consults the getter.
 		deferred = true
@@ -346,7 +347,7 @@ func (p *rebuildStoreFactoryPass) plan(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		return p.planCall(old, e, call, pick)
+		return p.planScopedCall(old, e, call, pick)
 	})
 }
 
@@ -387,7 +388,88 @@ func (p *rebuildStoreFactoryPass) want(key []byte) error {
 	return p.put(key, []byte{rebuildCapabilityWanted})
 }
 
+// Only moving Calls with a nonempty global cohort can change their
+// election when receipts introduce an otherwise missing caller.
+func (p *rebuildStoreFactoryPass) planScopedCall(old []byte, e *graph.Edge, call rebuildStoreDispatchCall, pick rebuildStoreFactoryElection) error {
+	moves := p.stats.Moves
+	if err := p.planCall(old, e, call, pick); err != nil {
+		return err
+	}
+	if p.stats.Moves != moves && pick.nonempty && pick.caller == nil {
+		// A receipt caller can leave an already ambiguous cohort empty.
+		p.needsAnchor = p.needsAnchor || pick.target == ""
+		return p.put(p.key('R', e.From), nil)
+	}
+	return nil
+}
+
+// Mark the deciding receipt-only caller buckets before recording candidate
+// receipts. A scoped decision does not need proof of an unrelated global row.
+func (p *rebuildStoreFactoryPass) prepareReceiptCallerProof(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
+	wanted, err := rebuildGuardHasPrefix(ctx, p.b.pending, p.key('R'))
+	if err != nil || !wanted {
+		return err
+	}
+	for facts, err := range receipts {
+		if err != nil {
+			return err
+		}
+		if facts.EffectiveLanguage == "" {
+			continue
+		}
+		file := pathkey.Normalize(facts.File.FilePath)
+		for _, n := range facts.Nodes {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if n == nil || n.FilePath != file {
+				continue
+			}
+			key := p.key('R', n.ID)
+			wanted, err := p.present(key)
+			if err != nil {
+				return err
+			}
+			if wanted {
+				// Like the native node upsert, keep the last admitted row.
+				if err := p.put(key, keyStrings(nil, n.WorkspaceID, file)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return p.moves(ctx, func(_ []byte, e *graph.Edge) error {
+		call := p.rules.call(e)
+		pick, err := p.receiptCallerPick(e.From, call)
+		if err != nil || pick.caller == nil {
+			return err
+		}
+		return p.wantCandidateBuckets(pick.buckets)
+	})
+}
+
+func (p *rebuildStoreFactoryPass) receiptCallerPick(from string, call rebuildStoreDispatchCall) (rebuildStoreFactoryElection, error) {
+	val, err := p.get(p.key('R', from))
+	if err != nil || len(val) == 0 {
+		return rebuildStoreFactoryElection{}, err
+	}
+	return p.electWithCaller(call, true, func() (*graph.Node, error) {
+		workspace, tail, err := readKeyString(val)
+		if err != nil {
+			return nil, err
+		}
+		file, _, err := readKeyString(tail)
+		if err != nil {
+			return nil, err
+		}
+		return &graph.Node{WorkspaceID: workspace, FilePath: file}, nil
+	})
+}
+
 func (p *rebuildStoreFactoryPass) prove(ctx context.Context, receipts iter.Seq2[ParseFacts, error]) error {
+	if err := p.prepareReceiptCallerProof(ctx, receipts); err != nil {
+		return err
+	}
 	for facts, err := range receipts {
 		if err != nil {
 			return err
@@ -547,6 +629,18 @@ func (p *rebuildStoreFactoryPass) proved(old []byte, e *graph.Edge, anchor bool)
 	pick, err := p.elect(e.From, call, true)
 	if err != nil {
 		return false, err
+	}
+	if pick.caller == nil && pick.nonempty {
+		receipt, err := p.receiptCallerPick(e.From, call)
+		if err != nil {
+			return false, err
+		}
+		if receipt.caller != nil {
+			if receipt.target != pick.target {
+				return false, nil
+			}
+			return p.electionProved(call, receipt, anchor)
+		}
 	}
 	if ok, err := p.electionProved(call, pick, anchor); err != nil || !ok {
 		return false, err

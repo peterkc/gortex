@@ -180,7 +180,7 @@ func (p *rebuildNgRxEffectPass) planCalls(ctx context.Context) error {
 				}
 				return p.put(append(p.key('l'), old...), nil)
 			}
-			return p.planCall(old, e, call, pick)
+			return p.planScopedCall(old, e, call, pick)
 		})
 	}
 	if err := plan(p.key('h'), false); err != nil || !deferred {
@@ -196,6 +196,9 @@ func (p *rebuildNgRxEffectPass) proveCalls(ctx context.Context, receipts iter.Se
 	// An exact owned Call proves activation. Unlike Store Factory, native
 	// NgRx still checks Calls when there are no action nodes at all.
 	p.needsAnchor = false
+	if err := p.prepareReceiptCallerProof(ctx, receipts); err != nil {
+		return err
+	}
 	for facts, err := range receipts {
 		if err != nil {
 			return err

@@ -1,6 +1,8 @@
 package resolver
 
 import (
+	"context"
+	"iter"
 	"maps"
 	"slices"
 	"strings"
@@ -291,6 +293,68 @@ func TestRebuildStoreFactoryOrder(t *testing.T) {
 			}
 			require.Equal(t, tc.want, payloads)
 			require.Equal(t, want, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildStoreDispatchReceiptOnlyCaller(t *testing.T) {
+	const file, lang = "store.ts", "typescript"
+	caller := rebuildEventNode(file, "submit", lang, "local")
+	foreign := *caller
+	foreign.WorkspaceID = "foreign"
+	for _, stage := range []struct {
+		name   string
+		target *graph.Node
+		call   *graph.Edge
+		native func(graph.Store) int
+		run    func(
+			context.Context, *store_pebble.BuildStore, iter.Seq2[store_pebble.ParseFacts, error], FrameworkSynthesizerSelection,
+		) (store_pebble.RebuildStoreFactoryStats, error)
+	}{
+		{SynthStoreFactory, rebuildStoreFactoryAction(file, "local"), rebuildStoreFactoryMarker(file, caller.ID, "unresolved::*.reset", "reset"), ResolveStoreFactoryCalls, RunRebuildStoreFactory},
+		{SynthVuexDispatch, rebuildVuexTestNode(file, "action", "", "reset", "action", graph.KindFunction), rebuildVuexTestCall(caller.ID, "unresolved::*.reset", file, "reset", "action", 9), ResolveVuexDispatchCalls, RunRebuildVuexDispatch},
+		{SynthNgRxEffect, rebuildEventNode(file, "reset", lang, "local"), rebuildNgRxEffectCall(caller.ID, file, "reset", 9), ResolveNgRxEffects, RunRebuildNgRxEffect},
+	} {
+		t.Run(stage.name, func(t *testing.T) {
+			stage.target.WorkspaceID = "local"
+			input := rebuildEventFacts(file, lang, []*graph.Node{stage.target}, stage.call)
+			selection, err := NewFrameworkSynthesizerSelection([]string{stage.name})
+			require.NoError(t, err)
+			for _, tc := range []struct {
+				name   string
+				caller *graph.Node
+			}{
+				{"absent caller", nil},
+				{"matching workspace", caller},
+				{"other workspace", &foreign},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					b := openRebuildGRPCBuild(t, input)
+					before := rebuildEventSavedRows(t, b)
+					receipt := input
+					if tc.caller != nil {
+						receipt.Nodes = []*graph.Node{stage.target, tc.caller}
+					}
+					native := openRebuildTemporalOracle(t, receipt)
+					resolved := stage.native(native)
+					stats, err := stage.run(t.Context(), b, rebuildGRPCReceipts(receipt), selection)
+					if tc.caller == &foreign {
+						require.Zero(t, resolved)
+						var refused *store_pebble.RebuildUnknownProvenanceError
+						require.ErrorAs(t, err, &refused)
+						want := graph.EdgeIdentityFor(stage.call)
+						want.To = stage.target.ID
+						require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
+						require.Zero(t, stats)
+						require.Equal(t, before, rebuildEventSavedRows(t, b))
+						return
+					}
+					require.Equal(t, 1, resolved)
+					require.NoError(t, err)
+					require.Equal(t, store_pebble.RebuildStoreFactoryStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+					require.Equal(t, rebuildEventSQLiteRows(native).edges, rebuildEventSavedRows(t, b).edges)
+				})
+			}
 		})
 	}
 }
