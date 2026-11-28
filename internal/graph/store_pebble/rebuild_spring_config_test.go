@@ -55,9 +55,9 @@ class Bean {
 	// File node ID order is not projected path order.
 	nodes := []*graph.Node{bean,
 		file(beanFile, beanFile, "java", "r"),
-		file("last-id", firstPath, "", "r"),
-		file("first-id", laterPath, "", "r"),
-		file("foreign", foreignPath, "", "other"),
+		file("last-id", firstPath, "properties", "r"),
+		file("first-id", laterPath, "properties", "r"),
+		file("foreign", foreignPath, "properties", "other"),
 	}
 	native := graph.New()
 	native.AddBatch(nodes, nil)
