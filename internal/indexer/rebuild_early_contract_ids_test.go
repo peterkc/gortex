@@ -88,10 +88,18 @@ app.include_router(router, prefix="/api")
 	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: &census}
 	var replayed []contracts.Contract
 	require.NoError(t, os.Remove(filepath.Join(root, "go.mod")))
-	require.NoError(t, reader.visitLateContractSourcesAtParseCut(ctx, build.RebuildView(), manifest, func(c contracts.Contract) error {
-		replayed = append(replayed, c)
-		return nil
-	}))
+	stats, err := store_pebble.WithRebuildContractSources(ctx, t.TempDir(), 1,
+		func(appendRecord func(contracts.Contract) error) error {
+			return reader.visitLateContractSourcesAtParseCut(ctx, build.RebuildView(), manifest, appendRecord)
+		},
+		func(read func(func(contracts.Contract) error) error) error {
+			return read(func(c contracts.Contract) error {
+				replayed = append(replayed, c)
+				return nil
+			})
+		})
+	require.NoError(t, err)
+	require.Positive(t, stats.SpillBytes)
 	require.Equal(t, nativeRecords, replayed)
 	for _, root := range []rebuildGoManifest{{}, {Path: "go.mod", DirectDeps: manifest.DirectDeps}} {
 		err := reader.visitLateContractSourcesAtParseCut(ctx, build.RebuildView(), root, func(contracts.Contract) error {
