@@ -91,10 +91,32 @@ func Literal(w http.ResponseWriter, r *http.Request) {
 
 	_, err = reader.providerBody(ctx, view, handler)
 	require.ErrorIs(t, err, errRebuildContractBodyUnproved)
+	renamed := *handler
+	renamed.Name = "renamed"
+	_, err = reader.providerBody(ctx, view, &renamed)
+	require.ErrorContains(t, err, "ambiguous or renamed handler")
+	bad, err := view.Node(ctx, file+"::Payload")
+	require.NoError(t, err)
+	require.NotNil(t, bad)
+	_, err = reader.providerBody(ctx, view, bad)
+	require.ErrorContains(t, err, "missing body facts")
 	moved := *handler
 	moved.StartLine = 0
 	_, err = reader.providerBody(ctx, view, &moved)
 	require.ErrorIs(t, err, graph.ErrContractProjectionStale)
+	b.EvictFile(file)
+	b.AddNode(handler)
+	_, err = reader.providerBody(ctx, view, handler)
+	require.ErrorIs(t, err, errRebuildContractBodyUnproved, "the selected local type is now absent")
+	b.AddNode(&renamed)
+	err = b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+		broken := route
+		broken.SymbolID = "register"
+		broken.Meta = map[string]any{"handler_ident": renamed.Name}
+		require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: broken}))
+		return reader.bindRebuildProviderHandlers(ctx, view, records)
+	})
+	require.ErrorContains(t, err, "ambiguous or renamed handler")
 }
 
 func TestRebuildProviderBodyIgnoresUnreferencedNestedTypes(t *testing.T) {
