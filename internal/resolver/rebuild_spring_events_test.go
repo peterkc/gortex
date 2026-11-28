@@ -580,6 +580,33 @@ func TestRebuildSpringEventsUnprovedSoleInheritedListener(t *testing.T) {
 	require.Equal(t, before, rebuildEventSavedRows(t, b))
 }
 
+func TestRebuildSpringEventsMixedSoleInheritedListener(t *testing.T) {
+	pub := springRebuildNode("publish", "")
+	listener := springRebuildNode("A", "Base")
+	call := springRebuildCall(pub.ID, listener.ID, "Sub", 10)
+	arc := springRebuildArc("Sub", "Base", graph.EdgeExtends, 1)
+	b := openRebuildGRPCBuild(t, rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, listener}, call, arc))
+	before := rebuildEventSavedRows(t, b)
+	// The non-listener receipt comes first; the last row still activates
+	// native event resets, but the hierarchy arc has no receipt proof.
+	raw := []*graph.Node{pub, springRebuildNode("A", ""), listener}
+	receipt := rebuildEventFacts(springRebuildFile, "java", raw, call)
+	native := rebuildGRPCNative(t, receipt)
+	require.Zero(t, ResolveSpringEventCalls(native))
+	want := graph.EdgeIdentityFor(call)
+	want.To = "unresolved::*.Sub"
+	nativeRows := rebuildEventSQLiteRows(native)
+	require.Len(t, nativeRows.edges, 1)
+	require.Equal(t, want, graph.EdgeIdentityFor(nativeRows.edges[0]))
+
+	stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(receipt), springRebuildSelection(t, b))
+	var refused *store_pebble.RebuildUnknownProvenanceError
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: want}, refused)
+	require.Zero(t, stats)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
+}
+
 func TestRebuildSpringEventsInertReceiptEntrants(t *testing.T) {
 	pub := springRebuildNode("publish", "")
 	listener := springRebuildNode("A", "Other")

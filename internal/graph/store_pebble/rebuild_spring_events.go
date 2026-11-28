@@ -525,12 +525,12 @@ func (p *rebuildSpringEventPass) proveMoves(ctx context.Context) error {
 		root := p.rules.Simple(t)
 		if p.liveListeners == 1 && !p.entrantListener {
 			state, err := p.state(p.key('n', e.To))
-			if err != nil || state != rebuildScratchExact {
-				return err // No remaining listener can activate native resets.
+			if err != nil || state&rebuildCapabilityProved == 0 {
+				return err // No receipt proves a listener that can activate resets.
 			}
 			direct, err := p.present(p.key('l', root, e.To))
 			if err != nil || direct {
-				return err // A direct, proved listener remains the first match.
+				return err // A direct listener, if present, remains the first match.
 			}
 		}
 		_, first, err := p.listeners(ctx, root, 'T')
