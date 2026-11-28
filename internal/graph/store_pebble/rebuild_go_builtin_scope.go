@@ -63,6 +63,9 @@ func (b *BuildStore) recordRebuildGoBuiltinScope(repo string, facts ParseFacts) 
 	dir := path.Dir(file)
 	if scope == "" {
 		// An unchecked file could declare any name in any package in its dir.
+		// Known limit: size- and content-skipped Go siblings have no parse
+		// receipt and are written via AddNode, so they do not record this blocker.
+		// A declaration in such a sibling may leave a builtin Call at platform.
 		return b.pending.Set(rebuildGoBuiltinBlockerKey(repo, dir, "", ""), []byte{1}, pebble.NoSync)
 	}
 	fields := strings.Fields(scope)

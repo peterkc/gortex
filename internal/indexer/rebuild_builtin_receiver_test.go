@@ -203,11 +203,25 @@ func TestRebuildReceiverFingerprintKeepsRawEdgesProof(t *testing.T) {
 }
 
 func TestRebuildGoBuiltinScopeFromExtraction(t *testing.T) {
-	for _, file := range []string{"pkg/use.go", "pkg/use_test.go"} {
-		for _, blocked := range []bool{false, true} {
+	for _, tc := range []struct {
+		file, pkg, sibling, siblingPkg string
+	}{
+		{"pkg/use.go", "p", "pkg/sibling.go", "p"},
+		{"pkg/use_test.go", "p", "pkg/sibling.go", "p"},
+		{"pkg/use.go", "p", "pkg/sibling_test.go", "p_test"},
+		{"pkg/use_test.go", "p_test", "pkg/sibling.go", "p"},
+	} {
+		file := tc.file
+		for _, declared := range []bool{false, true} {
 			name := file + "/unbound"
-			if blocked {
+			if declared {
 				name = file + "/same_package_declaration"
+			}
+			if tc.pkg != tc.siblingPkg {
+				name = file + "/different_package_unbound"
+				if declared {
+					name = file + "/different_package_declaration"
+				}
 			}
 			t.Run(name, func(t *testing.T) {
 				ctx := t.Context()
@@ -215,13 +229,13 @@ func TestRebuildGoBuiltinScopeFromExtraction(t *testing.T) {
 				t.Cleanup(idx.Close)
 				idx.SetRootPath(t.TempDir())
 				ext := languages.NewGoExtractor()
-				caller, err := idx.extractPreparedRebuildFile(ctx, file, ext, []byte("package p\nfunc use(xs []int) int { return len(xs) }\n"))
+				caller, err := idx.extractPreparedRebuildFile(ctx, file, ext, []byte("package "+tc.pkg+"\nfunc use(xs []int) int { return len(xs) }\n"))
 				require.NoError(t, err)
-				siblingSource := "package p\nfunc other(xs []int) int { return 1 }\n"
-				if blocked {
-					siblingSource = "package p\nfunc len(xs []int) int { return 1 }\n"
+				siblingSource := "package " + tc.siblingPkg + "\nfunc other(xs []int) int { return 1 }\n"
+				if declared {
+					siblingSource = "package " + tc.siblingPkg + "\nfunc len(xs []int) int { return 1 }\n"
 				}
-				sibling, err := idx.extractPreparedRebuildFile(ctx, "pkg/sibling.go", ext, []byte(siblingSource))
+				sibling, err := idx.extractPreparedRebuildFile(ctx, tc.sibling, ext, []byte(siblingSource))
 				require.NoError(t, err)
 				for _, facts := range []store_pebble.ParseFacts{sibling, caller} {
 					var scope string
@@ -230,9 +244,12 @@ func TestRebuildGoBuiltinScopeFromExtraction(t *testing.T) {
 							scope, _ = n.Meta[store_pebble.RebuildGoBuiltinScopeReceiptMeta].(string)
 						}
 					}
-					want := "p"
-					if blocked && facts.File.FilePath == sibling.File.FilePath {
-						want = "p len"
+					want := tc.pkg
+					if facts.File.FilePath == sibling.File.FilePath {
+						want = tc.siblingPkg
+						if declared {
+							want += " len"
+						}
 					}
 					require.Equal(t, want, scope)
 				}
@@ -269,49 +286,49 @@ func TestRebuildGoBuiltinScopeFromExtraction(t *testing.T) {
 				_, err = applyRebuildCloneRelations(ctx, build, receipts, rebuildClonePredecessors{fileClaims: &claims}, 0.8)
 				require.NoError(t, err)
 				const builtin = "builtin::go::len"
-				var calls []*graph.Edge
-				require.NoError(t, build.RebuildView().VisitEdges(ctx, func(e *graph.Edge) error {
-					if e.From == file+"::use" && e.Kind == graph.EdgeCalls {
-						calls = append(calls, e)
-					}
-					return nil
-				}))
-				require.Len(t, calls, 1)
-				if blocked {
-					// Main can resolve the ordinary declaration before builtin fallback.
-					// On a separate build, keep the same raw caller and receipts, and
-					// exercise status settlement on a selected native builtin move.
-					extractor := func(string) string { return "go" }
-					require.NoError(t, build.SettleRebuildPlatformCalls(ctx, extractor))
-					require.Equal(t, "pkg/sibling.go::len", calls[0].To)
-					status, ok := calls[0].LinkStatus()
-					require.True(t, ok)
-					require.Equal(t, graph.LinkStatusResolved, status)
-					build, _ = openRebuildTestFileStore(t)
-					require.NoError(t, build.AddParsedFile("", sibling))
-					require.NoError(t, build.AddParsedFile("", caller))
-					require.NoError(t, build.RebuildGoBuiltins(ctx, true, 1<<20, func(e *graph.Edge, _ func(string) (*graph.Node, error)) (string, error) {
-						if e.Kind == graph.EdgeCalls && e.To == "unresolved::len" {
-							return builtin, nil
+				readCall := func() *graph.Edge {
+					var calls []*graph.Edge
+					require.NoError(t, build.RebuildView().VisitEdges(ctx, func(e *graph.Edge) error {
+						if e.From == file+"::use" && e.Kind == graph.EdgeCalls {
+							calls = append(calls, e)
 						}
-						return "", nil
+						return nil
 					}))
-				} else {
-					require.Equal(t, builtin, calls[0].To)
+					require.Len(t, calls, 1)
+					return calls[0]
 				}
-				require.NoError(t, build.SettleRebuildPlatformCalls(ctx, func(string) string { return "go" }))
-				var matches []*graph.Edge
-				require.NoError(t, build.RebuildView().VisitEdges(ctx, func(e *graph.Edge) error {
-					if e.Kind == graph.EdgeCalls && e.From == file+"::use" && e.To == builtin {
-						matches = append(matches, e)
+				extractor := func(string) string { return "go" }
+				require.NoError(t, build.SettleRebuildPlatformCalls(ctx, extractor))
+				call := readCall()
+				status, ok := call.LinkStatus()
+				require.True(t, ok)
+				if !declared {
+					require.Equal(t, builtin, call.To)
+					require.Equal(t, graph.LinkStatusPlatform, status)
+					return
+				}
+				// Main's same-directory lookup can pick the ordinary declaration,
+				// even from a different Go package. Settlement must leave it alone.
+				require.Equal(t, tc.sibling+"::len", call.To)
+				require.Equal(t, graph.LinkStatusResolved, status)
+				// Isolate the fallback status decision when a builtin move is selected.
+				// The actual main result above is not changed to force a builtin target.
+				build, _ = openRebuildTestFileStore(t)
+				require.NoError(t, build.AddParsedFile("", sibling))
+				require.NoError(t, build.AddParsedFile("", caller))
+				require.NoError(t, build.RebuildGoBuiltins(ctx, true, 1<<20, func(e *graph.Edge, _ func(string) (*graph.Node, error)) (string, error) {
+					if e.Kind == graph.EdgeCalls && e.To == "unresolved::len" {
+						return builtin, nil
 					}
-					return nil
+					return "", nil
 				}))
-				require.Len(t, matches, 1)
-				status, ok := matches[0].LinkStatus()
+				require.NoError(t, build.SettleRebuildPlatformCalls(ctx, extractor))
+				call = readCall()
+				require.Equal(t, builtin, call.To)
+				status, ok = call.LinkStatus()
 				require.True(t, ok)
 				want := graph.LinkStatusPlatform
-				if blocked {
+				if tc.pkg == tc.siblingPkg {
 					want = graph.LinkStatusProbablePlatform
 				}
 				require.Equal(t, want, status)
@@ -320,15 +337,19 @@ func TestRebuildGoBuiltinScopeFromExtraction(t *testing.T) {
 	}
 }
 
-func TestRebuildReceiverV2AndV3ReceiptsAreStale(t *testing.T) {
+func TestRebuildReceiverV2V3AndV4ReceiptsAreStale(t *testing.T) {
 	for _, tc := range []struct {
 		file, language, source string
 		extractor              parser.Extractor
 		versions               []uint64
 	}{
-		{"a.go", "go", "package p\nfunc use(xs []int) int { return len(xs) }\n", languages.NewGoExtractor(), []uint64{2, 3}},
-		{"a.js", "javascript", "function use(xs) { xs.slice(0); }", languages.NewJavaScriptExtractor(), []uint64{3}},
-		{"a.ts", "typescript", "function use(xs: number[]) { xs.slice(0); }", languages.NewTypeScriptExtractor(), []uint64{3}},
+		{"a.go", "go", "package p\nfunc use(xs []int) int { return len(xs) }\n", languages.NewGoExtractor(), []uint64{2, 3, 4}},
+		{"a.js", "javascript", "function use(xs) { xs.slice(0); }", languages.NewJavaScriptExtractor(), []uint64{3, 4}},
+		{"a.ts", "typescript", "function use(xs: number[]) { xs.slice(0); }", languages.NewTypeScriptExtractor(), []uint64{3, 4}},
+		{"A.vue", "vue", "<!-- host -->\n<script setup lang=\"ts\">\nfunction use() { [1].slice(0); }\n</script>", languages.NewVueExtractor(), []uint64{4}},
+		{"A.svelte", "svelte", "<!-- host -->\n<script>\nfunction use() { [1].slice(0); }\n</script>", languages.NewSvelteExtractor(), []uint64{4}},
+		{"A.astro", "astro", "<!-- host -->\n<script lang=\"ts\">\nfunction use() { [1].slice(0); }\n</script>", languages.NewAstroExtractor(), []uint64{4}},
+		{"a.html", "html", "<!-- host -->\n<script>\nfunction use() { [1].slice(0); }\n</script>", languages.NewHTMLExtractor(), []uint64{4}},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			ctx := t.Context()
