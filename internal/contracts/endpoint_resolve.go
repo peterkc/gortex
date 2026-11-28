@@ -319,12 +319,11 @@ func resolveConstIdentifier(name, filePath, repoPrefix string, store EndpointCon
 	if err != nil || len(vals) == 0 {
 		return "", false
 	}
-	// A same-file definition wins outright.
-	if v, ok := uniqueEndpointValue(vals, sameFileIDs); ok {
-		return v, true
+	var values EndpointConstantValues
+	for id, value := range vals {
+		values.Add(value, sameFileIDs[id])
 	}
-	// Otherwise require a repo-wide unique value.
-	return uniqueEndpointValue(vals, nil)
+	return values.Value()
 }
 
 func endpointConstantCandidates(name, repoPrefix string, store EndpointConstStore) []EndpointConstantCandidate {
@@ -340,31 +339,44 @@ func endpointConstantCandidates(name, repoPrefix string, store EndpointConstStor
 	return out
 }
 
-// uniqueEndpointValue collapses candidate const values to a single non-empty
-// value, returning ok=false when the candidates disagree (ambiguous) or none
-// carries a recorded value. When restrict is non-nil only ids present in it are
-// considered (the same-file preference).
-func uniqueEndpointValue(vals map[string]string, restrict map[string]bool) (string, bool) {
-	found := ""
-	for id, v := range vals {
-		if restrict != nil && !restrict[id] {
-			continue
-		}
-		if v == "" {
-			continue
-		}
-		if found == "" {
-			found = v
-			continue
-		}
-		if v != found {
-			return "", false // ambiguous — distinct candidate values
-		}
+// EndpointConstantValues reduces values for one identifier without retaining
+// its declarations. Empty values are not votes. A unique same-file value
+// wins; otherwise the repo-wide value must be unique.
+type EndpointConstantValues struct {
+	sameFile, anywhere endpointConstantValue
+}
+
+type endpointConstantValue struct {
+	value     string
+	ambiguous bool
+}
+
+func (v *endpointConstantValue) add(value string) {
+	if value == "" {
+		return
 	}
-	if found == "" {
-		return "", false
+	if v.value == "" {
+		v.value = value
+	} else if value != v.value {
+		v.ambiguous = true
 	}
-	return found, true
+}
+
+func (v *EndpointConstantValues) Add(value string, sameFile bool) {
+	v.anywhere.add(value)
+	if sameFile {
+		v.sameFile.add(value)
+	}
+}
+
+func (v EndpointConstantValues) Value() (string, bool) {
+	if v.sameFile.value != "" && !v.sameFile.ambiguous {
+		return v.sameFile.value, true
+	}
+	if v.anywhere.value != "" && !v.anywhere.ambiguous {
+		return v.anywhere.value, true
+	}
+	return "", false
 }
 
 // crossLangStringLiteral extracts the literal value of a non-Go string node
