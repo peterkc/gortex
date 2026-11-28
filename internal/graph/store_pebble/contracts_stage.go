@@ -125,6 +125,27 @@ func contractOmissionKey(o RebuildContractOmission) ([]byte, error) {
 	return key, nil
 }
 
+// Native uses http IDs for OpenAPI operations and dep IDs for Go modules.
+func contractOmissionIDMatchesType(o RebuildContractOmission) bool {
+	var prefix string
+	switch o.Type {
+	case contracts.ContractHTTP, contracts.ContractGRPC, contracts.ContractThrift, contracts.ContractGraphQL,
+		contracts.ContractTopic, contracts.ContractWS, contracts.ContractEnv, contracts.ContractDI, contracts.ContractTRPC:
+		prefix = string(o.Type)
+	case contracts.ContractOpenAPI:
+		prefix = "http"
+	case contracts.ContractDependency:
+		prefix = "dep"
+	default:
+		return false
+	}
+	if o.ID == "" {
+		return true
+	}
+	kind, id, found := strings.Cut(o.ID, "::")
+	return found && kind == prefix && id != ""
+}
+
 func decodeContractOmission(key, value []byte) (RebuildContractOmission, error) {
 	if len(key) == 0 || key[0] != familyOmission || len(key) > maxContractOmissionKeyBytes ||
 		len(value) != 1 || value[0] != contractOmissionFormat {
@@ -437,6 +458,20 @@ func (b *BuildStore) writeContractBatch(ctx context.Context, batch RebuildContra
 		key, err := contractOmissionKey(omitted)
 		if err != nil {
 			return err
+		}
+		if !contractOmissionIDMatchesType(omitted) {
+			return invalid("contract omission type or ID")
+		}
+		// The file-graph receipt binds the admitted graph path to its exact
+		// repository. An arbitrary node with that path is not file authority.
+		file, err := pendingGet(b.pending, fileMetaKey(omitted.RepoPrefix, omitted.FilePath), func(raw []byte) (graph.FileMetaRow, error) {
+			return decodeFileMeta(omitted.FilePath, raw)
+		})
+		if err != nil {
+			return err
+		}
+		if file.FilePath == "" {
+			return invalid("contract omission lacks admitted file scope")
 		}
 		if err := b.claimContractRow('o', key); err != nil {
 			return err

@@ -31,7 +31,7 @@ func testContractRow() *graph.Node {
 }
 
 func testContractOmission() RebuildContractOmission {
-	return RebuildContractOmission{RepoPrefix: "old", FilePath: "deferred.py", Type: contracts.ContractHTTP, ID: "http::GET::/deferred", RecordKey: HeadDigest{1}}
+	return RebuildContractOmission{RepoPrefix: "old", FilePath: "old.go", Type: contracts.ContractHTTP, ID: "http::GET::/deferred", RecordKey: HeadDigest{1}}
 }
 
 func TestContractsStagePublishesExactDiff(t *testing.T) {
@@ -280,4 +280,50 @@ func TestContractOmissionCodec(t *testing.T) {
 	o.FilePath = strings.Repeat("a", maxContractOmissionKeyBytes)
 	_, err := contractOmissionKey(o)
 	require.ErrorIs(t, err, errInvalidRecord)
+}
+
+func TestContractsStageOmissionScope(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*RebuildContractOmission)
+		want   string
+	}{
+		{"unadmitted file", func(o *RebuildContractOmission) { o.FilePath = "not-admitted.py" }, "omission lacks admitted file scope"},
+		{"foreign repo", func(o *RebuildContractOmission) { o.RepoPrefix = "other" }, "omission lacks admitted file scope"},
+		{"empty scope", func(o *RebuildContractOmission) { o.FilePath = "" }, "omission scope"},
+		{"unknown type", func(o *RebuildContractOmission) {
+			o.Type = "invented"
+			o.ID = ""
+		}, "omission type or ID"},
+		{"mismatched ID", func(o *RebuildContractOmission) { o.ID = "env::KNOWN" }, "omission type or ID"},
+		{"OpenAPI alias", func(o *RebuildContractOmission) { o.Type = contracts.ContractOpenAPI }, ""},
+		{"dependency alias", func(o *RebuildContractOmission) {
+			o.Type = contracts.ContractDependency
+			o.ID = "dep::example.org/pkg"
+		}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			worker, head, files, _, _, _, _ := relationsStageFixture(t, FullProfile)
+			relations, err := worker.PrepareRelations(ctx, t.TempDir(), files, nil)
+			require.NoError(t, err)
+			base, err := worker.RetainRelations(ctx, files, relations)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, relations)
+			require.NoError(t, err)
+			omitted := testContractOmission()
+			tc.change(&omitted)
+			batch := RebuildContractBatch{Omitted: []RebuildContractOmission{omitted}}
+			stage, err := worker.PrepareContracts(ctx, t.TempDir(), base, contractBatches(batch), ContractCoverage{OmittedRecords: 1})
+			if tc.want == "" {
+				require.NoError(t, err)
+				require.Equal(t, uint64(1), stage.Witness.Contracts.OmittedRecords)
+				return
+			}
+			require.ErrorIs(t, err, ErrContractsSeal)
+			require.ErrorContains(t, err, tc.want)
+			require.Zero(t, stage)
+			require.ErrorAs(t, stageRead(t, head).RequireStage(StageContracts), new(*ErrStagePending))
+		})
+	}
 }

@@ -24,7 +24,7 @@ func TestSnapshotContractShapesAndCoverage(t *testing.T) {
 	pinned := stageRead(t, head)
 	shape := &contracts.Shape{Kind: "struct", Fields: []contracts.ShapeField{{Name: "Z", Type: "string"}, {Name: "A", Type: "int"}}, Notes: []string{}}
 	known := testContractOmission()
-	unknown := RebuildContractOmission{FilePath: "standalone.py", Type: contracts.ContractEnv, RecordKey: HeadDigest{2}}
+	unknown := RebuildContractOmission{RepoPrefix: known.RepoPrefix, FilePath: known.FilePath, Type: contracts.ContractEnv, RecordKey: HeadDigest{2}}
 	stage, err := worker.PrepareContracts(ctx, t.TempDir(), base, contractBatches(RebuildContractBatch{
 		Shapes:  map[string]*contracts.Shape{typeNode.ID: shape},
 		Omitted: []RebuildContractOmission{known, unknown},
@@ -67,9 +67,10 @@ func TestSnapshotContractShapesAndCoverage(t *testing.T) {
 		{scope: contracts.ReadScope{RepoPrefixes: []string{"old"}, FilePaths: []string{known.FilePath}, Types: []contracts.ContractType{known.Type}, ContractIDs: []string{known.ID}}, partial: true},
 		{scope: contracts.ReadScope{RepoPrefixes: []string{"other"}, ContractIDs: []string{known.ID}}},
 		{scope: contracts.ReadScope{RepoPrefixes: []string{"old"}, FilePaths: []string{"different.py"}}},
-		{scope: contracts.ReadScope{RepoPrefixes: []string{"old"}, Types: []contracts.ContractType{contracts.ContractEnv}}},
-		{scope: contracts.ReadScope{RepoPrefixes: []string{"old"}, ContractIDs: []string{"unrelated"}}},
-		{scope: contracts.ReadScope{RepoPrefixes: []string{""}, FilePaths: []string{unknown.FilePath}, ContractIDs: []string{"env::POSSIBLE"}}, partial: true},
+		{scope: contracts.ReadScope{RepoPrefixes: []string{"old"}, Types: []contracts.ContractType{contracts.ContractGRPC}}},
+		{scope: contracts.ReadScope{RepoPrefixes: []string{"old"}, Types: []contracts.ContractType{known.Type}, ContractIDs: []string{"unrelated"}}},
+		{scope: contracts.ReadScope{RepoPrefixes: []string{""}, FilePaths: []string{unknown.FilePath}, ContractIDs: []string{"env::POSSIBLE"}}},
+		{scope: contracts.ReadScope{RepoPrefixes: []string{"old"}, FilePaths: []string{unknown.FilePath}, ContractIDs: []string{"env::POSSIBLE"}}, partial: true},
 	} {
 		positive, err := capability.ContractCoverageContext(ctx, tc.scope, false)
 		require.NoError(t, err)

@@ -48,7 +48,7 @@ func TestSnapshotContractProjectionMatchesNative(t *testing.T) {
 	shape := contracts.ExtractShape(shapeNode.FilePath, []byte("type Response struct {\n\tZ string `json:\"z\"`\n\tA []int `json:\"a,omitempty\"`\n}\n"), shapeNode.StartLine, shapeNode.EndLine)
 	require.NotNil(t, shape)
 	require.Len(t, shape.Fields, 2)
-	omitted := RebuildContractOmission{RepoPrefix: repo, FilePath: "old/deferred.py", Type: contracts.ContractHTTP, ID: "http::GET::/maybe", RecordKey: HeadDigest{9}}
+	omitted := RebuildContractOmission{RepoPrefix: repo, FilePath: owner.FilePath, Type: contracts.ContractHTTP, ID: "http::GET::/maybe", RecordKey: HeadDigest{9}}
 	batch := RebuildContractBatch{
 		Nodes:   []*graph.Node{winner, ownerless},
 		Edges:   []*graph.Edge{provider, consumer, route},
