@@ -31,8 +31,28 @@ func (r rebuildContractReceiptReader) joinLateRouterPrefixes(ctx context.Context
 		}
 		return facts.Router, nil
 	}, overlap)
-	if missing != "" {
-		return fmt.Errorf("%w: %w", errRebuildRouterFactsMissing, err)
+	return lateRouterJoinError(missing, err)
+}
+
+func lateRouterJoinError(missing string, err error) error {
+	if missing == "" {
+		return err
+	}
+	// The proof check set missing and returned an error. A second cause
+	// in either scratch cleanup means this is not just a missing proof.
+	for cause := err; cause != nil; {
+		switch e := cause.(type) {
+		case interface{ Unwrap() []error }:
+			children := e.Unwrap()
+			if len(children) != 1 {
+				return err
+			}
+			cause = children[0]
+		case interface{ Unwrap() error }:
+			cause = e.Unwrap()
+		default:
+			return fmt.Errorf("%w: %w", errRebuildRouterFactsMissing, err)
+		}
 	}
 	return err
 }

@@ -3,7 +3,9 @@ package indexer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -426,11 +428,12 @@ app = FastAPI()
 app.include_router(router, prefix="`
 	for _, tc := range []struct {
 		name, skipPath, skipLang, prefix, nativeID string
-		refuse, lostReceipt                        bool
+		refuse, lostReceipt, lostInput             bool
 	}{
 		{name: "selected api", skipPath: "main.py", skipLang: "python", prefix: "/api", nativeID: "http::GET::/api/users/{p1}", refuse: true},
 		{name: "selected alt", skipPath: "main.py", skipLang: "python", prefix: "/alt", nativeID: "http::GET::/alt/users/{p1}", refuse: true},
 		{name: "no skip", nativeID: "http::GET::/users/{p1}"},
+		{name: "missing admitted input", nativeID: "http::GET::/users/{p1}", lostInput: true},
 		{name: "lost admitted receipt", nativeID: "http::GET::/users/{p1}", lostReceipt: true},
 		{name: "unselected skip", skipPath: "big.go", skipLang: "go", prefix: "/api", nativeID: "http::GET::/users/{p1}"},
 	} {
@@ -495,6 +498,9 @@ app.include_router(router, prefix="`
 			require.NoError(t, err)
 			key := input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input))
 			require.NoError(t, store.write(key, wire))
+			if tc.lostInput {
+				reader.job.inputs = nil // Keep the census entry and its stored receipt.
+			}
 			if tc.lostReceipt {
 				require.NoError(t, os.Remove(store.entry(key)))
 			}
@@ -514,9 +520,13 @@ app.include_router(router, prefix="`
 					require.Equal(t, uint8(100), reply.Refusal)
 					require.Contains(t, reply.Detail, `"main.py"`)
 					want = facts.Records[0]
-				case tc.lostReceipt:
+				case tc.lostInput, tc.lostReceipt:
+					if tc.lostInput {
+						require.ErrorContains(t, err, `missing admitted router input for "users.py"`)
+					}
 					require.ErrorIs(t, err, errParseEntryCorrupt)
 					require.NotErrorIs(t, err, errRebuildRouterFactsMissing)
+					require.Equal(t, buildRefusal(errParseEntryCorrupt).Refusal, buildRefusal(err).Refusal)
 					want = facts.Records[0]
 				default:
 					require.NoError(t, err)
@@ -546,6 +556,29 @@ app.include_router(router, prefix="`
 			require.Equal(t, tc.nativeID, replay.All()[0].ID)
 		})
 	}
+}
+
+func TestRebuildLateRouterJoinError(t *testing.T) {
+	const path = "mount.py"
+	proof := fmt.Errorf("missing checked router proof for %q", path)
+	joined := errors.Join(proof, nil)
+	pure := lateRouterJoinError(path, errors.Join(joined, nil))
+	require.ErrorIs(t, pure, proof)
+	require.Equal(t, uint8(100), buildRefusal(pure).Refusal)
+
+	for _, err := range []error{
+		errors.Join(fmt.Errorf("rewrite: %w", errors.Join(proof, io.ErrUnexpectedEOF)), nil),
+		errors.Join(joined, io.ErrUnexpectedEOF),
+	} {
+		got := lateRouterJoinError(path, err)
+		require.ErrorIs(t, got, proof)
+		require.ErrorIs(t, got, io.ErrUnexpectedEOF)
+		require.NotErrorIs(t, got, errRebuildRouterFactsMissing)
+		require.Same(t, err, got)
+		require.Equal(t, uint8(1), buildRefusal(got).Refusal)
+	}
+
+	require.Equal(t, errParseEntryCorrupt, lateRouterJoinError("", errParseEntryCorrupt))
 }
 
 func TestRebuildEarlyContractReceiptRefusals(t *testing.T) {
