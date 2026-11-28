@@ -186,8 +186,11 @@ func TestRebuildExpressFirstCallReceipt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := rebuildEventFacts(file, lang, []*graph.Node{caller, method}, member, tc.first, tc.last)
 			build, native := openRebuildEventStores(t, facts)
-			before := rebuildEventSavedRows(t, build)
 			nativeBefore := rebuildEventSQLiteRows(native)
+			require.Equal(t, nativeBefore.edges, rebuildEventSavedRows(t, build).edges)
+			// Disagree at the private graph cut, not at parse insertion.
+			build.AddEdge(tc.last)
+			before := rebuildEventSavedRows(t, build)
 			var firstClass, lastClass any
 			for _, e := range nativeBefore.edges {
 				if e.Kind == graph.EdgeCalls {

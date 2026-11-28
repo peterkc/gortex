@@ -283,14 +283,16 @@ func TestRebuildReactNativeBridgeRejectsOverwrittenMarker(t *testing.T) {
 			} else {
 				last.Meta[tc.field] = tc.value
 			}
-			// No second valid site can hide the absent live marker. Both
-			// stores consume the same receipt in the same insertion order.
+			// Parse keeps the marker in both stores. Overwrite only the live
+			// private row; no second valid site can hide the lost marker.
 			facts[0].Edges = []*graph.Edge{marker, &last}
 			facts[0] = roundTripRebuildRNBridgeFacts(t, facts[0])
 			private, native := openRebuildEventStores(t, facts...)
+			require.Equal(t, []*graph.Edge{marker}, rebuildEventSQLiteRows(native).edges)
+			require.Equal(t, []*graph.Edge{marker}, rebuildEventSavedRows(t, private).edges)
+			private.AddEdge(&last)
 			before := rebuildEventSavedRows(t, private)
 			require.Equal(t, []*graph.Edge{&last}, before.edges)
-			require.Equal(t, []*graph.Edge{marker}, rebuildEventSQLiteRows(native).edges)
 
 			selection, err := NewFrameworkSynthesizerSelection([]string{SynthReactNative})
 			require.NoError(t, err)

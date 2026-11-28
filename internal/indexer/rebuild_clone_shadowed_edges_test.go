@@ -52,7 +52,9 @@ func TestRebuildCloneShadowedReceiptEdges(t *testing.T) {
 	require.Contains(t, reply.Detail, "shadowed_id=0 shadowed_edge=1")
 	require.Equal(t, 1, passes)
 	require.Equal(t, 3, read)
-	requireRebuildTestFileRows(t, build, a.Nodes, []*graph.Edge{&untagged})
+	want := []*graph.Edge{tagged}
+	requireCloneParseEdgesMatchSQLite(t, want, a, m, z)
+	requireRebuildTestFileRows(t, build, a.Nodes, want)
 	got := make(map[string][]uint64)
 	require.NoError(t, build.RebuildView().VisitCloneShingles(t.Context(), "", func(id string, values []uint64) error {
 		got[id] = values
@@ -61,7 +63,7 @@ func TestRebuildCloneShadowedReceiptEdges(t *testing.T) {
 	require.Equal(t, a.Shingles, got)
 }
 
-func TestRebuildCloneReceiptEdgesKeepDistinctSitesAndLastPayload(t *testing.T) {
+func TestRebuildCloneReceiptEdgesKeepDistinctSitesAndFirstPayload(t *testing.T) {
 	n := &graph.Node{ID: "a.go::F", Kind: graph.KindFunction, Name: "F", FilePath: "a.go", Language: "go", StartLine: 3, EndLine: 6}
 	first := &graph.Edge{From: n.ID, Kind: graph.EdgeCalls, To: "unresolved::grpc::Inventory::Get", FilePath: "a.go", Line: 4}
 	pathOnly, lineOnly := *first, *first
@@ -93,5 +95,16 @@ func TestRebuildCloneReceiptEdgesKeepDistinctSitesAndLastPayload(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, passes, "the empty clone corpus needs only the first receipt pass")
 	require.Equal(t, 2, read)
-	requireRebuildTestFileRows(t, build, []*graph.Node{n}, []*graph.Edge{first, &last, &pathOnly})
+	want := []*graph.Edge{first, &lineOnly, &pathOnly}
+	requireCloneParseEdgesMatchSQLite(t, want, a, z)
+	requireRebuildTestFileRows(t, build, []*graph.Node{n}, want)
+}
+
+func requireCloneParseEdgesMatchSQLite(t *testing.T, want []*graph.Edge, facts ...store_pebble.ParseFacts) {
+	t.Helper()
+	native := newFTSStore(t)
+	for _, receipt := range facts {
+		require.NoError(t, native.AddBatchChecked(receipt.Nodes, receipt.Edges))
+	}
+	require.ElementsMatch(t, want, native.AllEdges())
 }
