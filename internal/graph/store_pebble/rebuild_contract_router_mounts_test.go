@@ -210,7 +210,15 @@ func TestRebuildCheckedRouterMountRules(t *testing.T) {
 			reg := contracts.NewRegistry()
 			reg.Add(c)
 			contracts.JoinRouterPrefixFacts(reg, facts)
-			require.Equal(t, []string{tc.want}, reg.AllIDs())
+			wantIDs := []string{tc.want}
+			if tc.want != c.ID {
+				// A rewrite clears the old bucket but retains its key in AllIDs.
+				wantIDs = append(wantIDs, c.ID)
+				require.Empty(t, reg.ByID(c.ID))
+			}
+			require.ElementsMatch(t, wantIDs, reg.AllIDs())
+			want := reg.ByID(tc.want)
+			require.Len(t, want, 1)
 			b := newBuild(t, FullProfile)
 			for path := range facts {
 				b.AddNode(&graph.Node{ID: path, FilePath: path, Kind: graph.KindFile})
@@ -229,7 +237,7 @@ func TestRebuildCheckedRouterMountRules(t *testing.T) {
 					got = append(got, item.Contract)
 					return nil
 				}))
-				require.Equal(t, reg.ByID(tc.want), got)
+				require.Equal(t, want, got)
 				return nil
 			}))
 		})
