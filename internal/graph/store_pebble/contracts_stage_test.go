@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"iter"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -455,4 +457,64 @@ func TestContractsStageRetainsIncumbentEdge(t *testing.T) {
 	require.Contains(t, current.GetOutEdges(source.ID), incumbent)
 	require.ElementsMatch(t, append(pinned.GetOutEdges(source.ID), &inserted), current.GetOutEdges(source.ID))
 	require.Equal(t, pinned.EdgeIdentityRevisions(), current.EdgeIdentityRevisions())
+}
+
+func TestRetainRelationsRefusesWrongWitness(t *testing.T) {
+	ctx := t.Context()
+	b, _, files, _, _, _, _ := relationsStageFixture(t, FullProfile)
+	relations, err := b.PrepareRelations(ctx, t.TempDir(), files, nil)
+	require.NoError(t, err)
+	other := newBuild(t, FullProfile)
+	_, err = other.RetainRelations(ctx, files, relations)
+	require.ErrorContains(t, err, "needs retained relations from this build")
+	wrong := relations
+	wrong.Witness.Stage = StageFileGraph
+	_, err = b.RetainRelations(ctx, files, wrong)
+	require.ErrorContains(t, err, "needs retained relations from this build")
+	for _, tag := range []byte{familyManifest, familyFileMeta} {
+		wrong = relations
+		wrong.Witness.Families = slices.Clone(relations.Witness.Families)
+		for i := range wrong.Witness.Families {
+			if wrong.Witness.Families[i].Family == tag {
+				wrong.Witness.Families[i].Count++
+			}
+		}
+		_, err = b.RetainRelations(ctx, files, wrong)
+		require.ErrorContains(t, err, "relations changed an immutable family")
+	}
+}
+
+func TestContractsStageRejectsForgedPredecessorRows(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  []byte
+		want string
+	}{
+		{"absent deletion", pendingNodeKey("absent"), "retained relations deletes an absent row"},
+		{"endpoint counter deletion", countKey("external import endpoints"), "invalid retained endpoint counter"},
+		{"missing relations rows", nil, "retained relations rows differ from their witness"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			b, _, files, _, _, _, _ := relationsStageFixture(t, FullProfile)
+			relations, err := b.PrepareRelations(ctx, t.TempDir(), files, nil)
+			require.NoError(t, err)
+			base, err := b.RetainRelations(ctx, files, relations)
+			require.NoError(t, err)
+			require.NotEmpty(t, base.paths, "raw relation edge creates a diff")
+			base.paths = nil
+			if tc.key != nil {
+				path := filepath.Join(t.TempDir(), "forged.sst")
+				w, err := newTable(path, b.options.MakeWriterOptions(goldLevel, b.db.FormatMajorVersion().MaxTableFormat()))
+				require.NoError(t, err)
+				require.NoError(t, w.Delete(tc.key))
+				require.NoError(t, w.Close())
+				base.paths = []string{path}
+			}
+			stage, err := b.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), ContractCoverage{})
+			require.ErrorIs(t, err, ErrContractsSeal)
+			require.ErrorContains(t, err, tc.want)
+			require.Zero(t, stage)
+		})
+	}
 }
