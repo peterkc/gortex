@@ -186,12 +186,8 @@ func Register(m *http.ServeMux) {
 				actual[n.ID] = n.FilePath
 				require.Equal(t, g.GetNode(n.ID), n)
 				var gotEdges, wantEdges []*graph.Edge
-				for _, e := range snap.GetInEdges(n.ID) {
-					gotEdges = append(gotEdges, e)
-				}
-				for _, e := range g.GetInEdges(n.ID) {
-					wantEdges = append(wantEdges, e)
-				}
+				gotEdges = append(gotEdges, snap.GetInEdges(n.ID)...)
+				wantEdges = append(wantEdges, g.GetInEdges(n.ID)...)
 				require.ElementsMatch(t, wantEdges, gotEdges)
 			}
 			require.Equal(t, wantIDs, actual)
