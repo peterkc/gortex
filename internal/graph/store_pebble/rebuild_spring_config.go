@@ -3,6 +3,7 @@ package store_pebble
 import (
 	"crypto/sha256"
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -35,13 +36,15 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 	}
 	view := r.build.RebuildView()
 	var projected bool
+	languages, extensions := contracts.SpringConfigFileProjection()
 	if err := view.VisitFileIdentities(r.ctx, func(path, language, repo, workspace string) error {
 		if !matches(repo, workspace) {
 			return nil
 		}
 		lower := strings.ToLower(path)
-		if !strings.EqualFold(language, "java") && !strings.HasSuffix(lower, ".yml") &&
-			!strings.HasSuffix(lower, ".yaml") && !strings.HasSuffix(lower, ".properties") {
+		if !slices.Contains(languages, strings.ToLower(language)) && !slices.ContainsFunc(extensions, func(ext string) bool {
+			return strings.HasSuffix(lower, ext)
+		}) {
 			return nil
 		}
 		projected = true
@@ -67,13 +70,11 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 		}
 		for _, saved := range keys {
 			n := *saved
-			n.ID = scope.KeyID(n.Name)
-			n.RepoPrefix = scope.RepoPrefix
-			n.WorkspaceID = scope.WorkspaceID
+			scope.ScopeKeyNode(&n)
 			// Equal relaxed spellings have the same parent prefix. Separate
 			// prefix keys preserve immediate-child election and target order.
-			if dot := strings.LastIndexByte(n.Name, '.'); dot >= 0 {
-				if err := put(rebuildSpringConfigKey('x', scope.KeyID(n.Name[:dot]), n.ID)); err != nil {
+			if parent, ok := contracts.SpringConfigParentPrefix(n.Name); ok {
+				if err := put(rebuildSpringConfigKey('x', scope.KeyID(parent), n.ID)); err != nil {
 					return err
 				}
 			}
@@ -102,14 +103,19 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 	}); err != nil {
 		return err
 	}
-	return view.VisitNodes(r.ctx, func(reader *graph.Node) error {
-		if !matches(reader.RepoPrefix, reader.WorkspaceID) {
-			return nil
+	return view.visit(r.ctx, []byte{familyNode}, func(_ *pebble.Snapshot, row row) error {
+		reader, err := checkedRebuildLightNode(row, "Spring config")
+		if err != nil || !matches(reader.RepoPrefix, reader.WorkspaceID) {
+			return err
 		}
 		switch reader.Kind {
 		case graph.KindField, graph.KindType, graph.KindInterface, graph.KindMethod:
 		default:
 			return nil
+		}
+		reader, err = decodeNode(row.value)
+		if err != nil {
+			return err
 		}
 		emit := func(id, raw string) error {
 			seenKey := rebuildSpringConfigKey('s', reader.ID, id)
@@ -145,13 +151,13 @@ func (r *RebuildContractRecords) VisitSpringConfig(scope contracts.SpringConfigS
 			return yield(RebuildContractBatch{Edges: []*graph.Edge{e}})
 		}
 		for _, raw := range contracts.SpringConfigKeysOf(reader) {
-			if !strings.HasSuffix(raw, "*") {
+			prefix, wildcard := contracts.SpringConfigWildcardPrefix(raw)
+			if !wildcard {
 				if err := emit(scope.KeyID(raw), raw); err != nil {
 					return err
 				}
 				continue
 			}
-			prefix := strings.TrimSuffix(strings.TrimSuffix(raw, "*"), ".")
 			bucket := rebuildSpringConfigKey('x', scope.KeyID(prefix))
 			if err := pendingVisit(r.ctx, r.build.pending, bucket, func(s row) error {
 				id, rest, err := readKeyString(s.key[len(bucket):])
