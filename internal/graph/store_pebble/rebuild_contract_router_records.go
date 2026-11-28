@@ -29,8 +29,8 @@ func (r *RebuildContractRecords) RewriteRouterPrefixes(prefix func(contracts.Con
 		value, err := rebuildScratchState(r.build.pending, rebuildRouterRecordKey(column, field), "invalid router rewrite key")
 		return value != 0, err
 	}
-	visitKeys := func(column byte, yield func(string) error) error {
-		p := rebuildRouterRecordKey(column)
+	visitKeys := func(column byte, yield func(string) error, fields ...string) error {
+		p := rebuildRouterRecordKey(column, fields...)
 		return pendingVisit(r.ctx, r.build.pending, p, func(s row) error {
 			key, rest, err := readKeyString(s.key[len(p):])
 			if err != nil || len(rest) != 0 {
@@ -38,6 +38,25 @@ func (r *RebuildContractRecords) RewriteRouterPrefixes(prefix func(contracts.Con
 			}
 			return yield(key)
 		})
+	}
+	// An unopened destination keeps its current rows. If a second source
+	// appends to it, label those files and all incoming files for this ID.
+	noteIncoming := func(dest, source, file string) error {
+		key := rebuildRouterRecordKey('s', dest)
+		first, err := pendingGet(r.build.pending, key, func(raw []byte) (string, error) { return string(raw), nil })
+		if err != nil {
+			return err
+		}
+		if first == "" {
+			if err := r.build.putRebuildScratch(key, []byte(source), goldBufferBytes, "router rewrite source"); err != nil {
+				return err
+			}
+		} else if first != source {
+			if err := put('c', dest); err != nil {
+				return err
+			}
+		}
+		return put('d', dest, file)
 	}
 	eligiblePrefix := func(c contracts.Contract) (string, error) {
 		if local, _ := contracts.RouterPrefixFactUse(c, nil); !local {
@@ -76,6 +95,8 @@ func (r *RebuildContractRecords) RewriteRouterPrefixes(prefix func(contracts.Con
 					if err := put('v', item.ID); err != nil {
 						return err
 					}
+				} else if err := noteIncoming(item.ID, id, item.FilePath); err != nil {
+					return err
 				}
 			}
 			frozen := rebuildRouterRecordKey('r', id)
@@ -100,8 +121,17 @@ func (r *RebuildContractRecords) RewriteRouterPrefixes(prefix func(contracts.Con
 			return yield(item)
 		})
 	}
+	noteFile := func(item RebuildContractRecord) error { return put('f', item.FilePath) }
+	if err := visitKeys('c', func(id string) error {
+		if err := r.VisitByID(id, noteFile); err != nil {
+			return err
+		}
+		return visitKeys('d', func(file string) error { return put('f', file) }, id)
+	}); err != nil {
+		return err
+	}
 	if err := visitKeys('v', func(id string) error {
-		return visitFrozen(id, func(item RebuildContractRecord) error { return put('f', item.FilePath) })
+		return visitFrozen(id, noteFile)
 	}); err != nil {
 		return err
 	}

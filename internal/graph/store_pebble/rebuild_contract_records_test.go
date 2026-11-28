@@ -11,6 +11,43 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+func TestRebuildCurrentRepresentativesRejectChangedIdentity(t *testing.T) {
+	b, err := OpenBuild(t.TempDir(), FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	for _, tc := range []struct {
+		name    string
+		corrupt func(*contracts.Contract)
+	}{
+		{"id", func(c *contracts.Contract) { c.ID = "wrong" }},
+		{"file", func(c *contracts.Contract) { c.FilePath = "wrong.go" }},
+		{"symbol", func(c *contracts.Contract) { c.SymbolID = "wrong" }},
+		{"role", func(c *contracts.Contract) { c.Role = contracts.RoleConsumer }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(r *RebuildContractRecords) error {
+				first := RebuildContractRecord{Contract: contracts.Contract{ID: "a"}}
+				next := RebuildContractRecord{Contract: contracts.Contract{ID: "b", FilePath: "b.go", SymbolID: "B", Role: contracts.RoleProvider}}
+				require.NoError(t, r.Add(first))
+				require.NoError(t, r.Add(next))
+				var seen []string
+				err := r.VisitCurrentRepresentatives(func(item RebuildContractRecord) error {
+					seen = append(seen, item.ID)
+					// Change the next live payload without changing its frozen key.
+					return r.visit(rebuildContractRecordKey('r', next.ID), func(key []byte, live RebuildContractRecord) error {
+						tc.corrupt(&live.Contract)
+						return r.write(key, live)
+					})
+				})
+				require.ErrorIs(t, err, errInvalidRecord)
+				require.ErrorContains(t, err, "live contract representative changed identity")
+				require.Equal(t, []string{first.ID}, seen)
+				return nil
+			}))
+		})
+	}
+}
+
 func TestRebuildContractRecordsKeepLiveAndRawBucketViews(t *testing.T) {
 	ctx := t.Context()
 	b, err := OpenBuild(t.TempDir(), FullProfile)

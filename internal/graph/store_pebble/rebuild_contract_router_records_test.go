@@ -25,6 +25,9 @@ func TestRebuildRouterRecordMovesMatchCheckedRegistry(t *testing.T) {
 		{Contract: record(rawID, "/x", "routes.py", 1)},
 		{Contract: record(rawID, "/x", "routes.py", 2), BodyUnproved: true},
 		{Contract: record(intermediate, "/api/x", "other.py", 1)},
+		{Contract: record(intermediate, "/api/x", "other.py", 2), BodyUnproved: true},
+		{Contract: record(intermediate, "/api/x", "other.py", 3)},
+		{Contract: record("http::GET::/", "/", "root.py", 1)},
 	}
 	reg := contracts.NewRegistry()
 	for _, item := range input {
@@ -35,14 +38,26 @@ func TestRebuildRouterRecordMovesMatchCheckedRegistry(t *testing.T) {
 	}
 	files := map[string]contracts.RouterFacts{
 		"routes.py": {LineCount: 2, Lines: []contracts.RouterLineFacts{receivers(1, "a"), receivers(2, "h")}},
-		"other.py":  {LineCount: 1, Lines: []contracts.RouterLineFacts{receivers(1, "b")}},
-		"mount.py":  {MountPrefix: map[string]string{"a": "/api", "h": "/local", "b": "/v2"}},
+		"other.py":  {LineCount: 3, Lines: []contracts.RouterLineFacts{receivers(1, "b"), {Line: 2}}},
+		"root.py":   {LineCount: 1, Lines: []contracts.RouterLineFacts{receivers(1, "r")}},
+		"mount.py":  {MountPrefix: map[string]string{"a": "/api", "h": "/local", "b": "/v2", "r": "/api/x"}},
 	}
 	want, missing := contracts.JoinRebuildRouterPrefixFacts(reg, files, nil)
 	require.Empty(t, missing)
-	require.Equal(t, []string{"other.py", "routes.py"}, want)
+	require.Equal(t, []string{"other.py", "root.py", "routes.py"}, want)
+	// / < /api/x < /x: the clear drops the root move, restores the two
+	// stationary rows, then the later /x move appends after them.
+	require.Equal(t, []contracts.Contract{
+		input[3].Contract, input[4].Contract, contracts.RewriteRouterContract(input[0].Contract, "/api"),
+	}, reg.ByID(intermediate))
 	prefix := func(c contracts.Contract) (string, error) {
-		if c.FilePath == "other.py" {
+		switch c.FilePath {
+		case "root.py":
+			return "/api/x", nil
+		case "other.py":
+			if c.Line != 1 {
+				return "", nil
+			}
 			return "/v2", nil
 		}
 		if c.Line == 2 {
@@ -74,16 +89,64 @@ func TestRebuildRouterRecordMovesMatchCheckedRegistry(t *testing.T) {
 		var ids []string
 		require.NoError(t, r.VisitIDs(func(id string) error {
 			ids = append(ids, id)
-			var actual []contracts.Contract
+			actual := make([]contracts.Contract, 0)
 			require.NoError(t, r.VisitByID(id, func(item RebuildContractRecord) error {
 				actual = append(actual, item.Contract)
-				require.Equal(t, id == hidden, item.BodyUnproved)
+				require.Equal(t, id == hidden || id == intermediate && item.Line == 2, item.BodyUnproved)
 				return nil
 			}))
-			require.ElementsMatch(t, reg.ByID(id), actual)
+			require.Equal(t, reg.ByID(id), actual)
 			return nil
 		}))
 		require.ElementsMatch(t, reg.AllIDs(), ids)
+		return nil
+	}))
+}
+
+func TestRebuildRouterRecordUnopenedConvergence(t *testing.T) {
+	b, err := OpenBuild(t.TempDir(), FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	reg := contracts.NewRegistry()
+	facts := make(map[string]contracts.RouterFacts)
+	require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(r *RebuildContractRecords) error {
+		for _, row := range []struct{ path, file, prefix string }{
+			{"/x", "x.ts", "/api/part"},
+			{"/part/x", "part.ts", "/api"},
+			{"/api/part/x", "resident.ts", ""},
+			// One source writes two rows to /solo/x. Neither file is affected.
+			{"/x", "solo-a.ts", "/solo"},
+			{"/x", "solo-b.ts", "/solo"},
+		} {
+			c := contracts.Contract{
+				ID: "http::GET::" + row.path, Type: contracts.ContractHTTP, Role: contracts.RoleProvider, FilePath: row.file, Line: 1,
+				Meta: map[string]any{"framework": "nestjs", "method": "GET", "path": row.path},
+			}
+			reg.Add(c)
+			require.NoError(t, r.Add(RebuildContractRecord{Contract: c}))
+			facts[row.file] = contracts.RouterFacts{LineCount: 1, Lines: []contracts.RouterLineFacts{{Line: 1, NestPrefix: row.prefix}}}
+		}
+		want := []string{"part.ts", "resident.ts", "x.ts"}
+		files, missing := contracts.JoinRebuildRouterPrefixFacts(reg, facts, nil)
+		require.Empty(t, missing)
+		require.Equal(t, want, files)
+		var overlap []string
+		require.NoError(t, r.RewriteRouterPrefixes(func(c contracts.Contract) (string, error) {
+			return facts[c.FilePath].Lines[0].NestPrefix, nil
+		}, func() error { return nil }, func(path string) error {
+			overlap = append(overlap, path)
+			return nil
+		}))
+		require.Equal(t, want, overlap)
+		const dest = "http::GET::/api/part/x"
+		var rows []contracts.Contract
+		require.NoError(t, r.VisitByID(dest, func(item RebuildContractRecord) error {
+			rows = append(rows, item.Contract)
+			return nil
+		}))
+		require.Equal(t, reg.ByID(dest), rows)
+		require.Len(t, rows, 3)
+		require.Equal(t, []string{"resident.ts", "part.ts", "x.ts"}, []string{rows[0].FilePath, rows[1].FilePath, rows[2].FilePath})
 		return nil
 	}))
 }

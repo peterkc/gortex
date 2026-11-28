@@ -83,33 +83,49 @@ func JoinRebuildRouterPrefixFacts(reg *Registry, facts map[string]RouterFacts, u
 	if missing != "" {
 		return nil, missing
 	}
-	overlapFiles = routerRewriteOverlapFiles(rewrites)
 	// Native ranges a map. Only rebuild chooses a fixed application order.
 	slices.SortFunc(rewrites, func(a, b routerRewrite) int { return cmp.Compare(a.oldID, b.oldID) })
 	applyRouterRewrites(reg, rewrites)
-	return overlapFiles, ""
+	return routerRewriteOverlapFiles(reg, rewrites), ""
 }
 
 // A destination that is also a different source can be cleared by the other
 // source's rewrite, depending on order. U5 must not count either bucket's
-// files as exact native parity, even if a particular run happens to match.
-func routerRewriteOverlapFiles(rewrites []routerRewrite) []string {
+// files as exact native parity. Two sources appending to an unopened bucket
+// can also change its row order; report all files in that final bucket.
+func routerRewriteOverlapFiles(reg *Registry, rewrites []routerRewrite) []string {
 	bySource := make(map[string][]Contract, len(rewrites))
 	for _, rw := range rewrites {
 		bySource[rw.oldID] = rw.list
 	}
+	firstSource := make(map[string]string)
+	converged := make(map[string]struct{})
 	overlapped := make(map[string]struct{})
 	for _, rw := range rewrites {
 		for _, c := range rw.list {
-			if c.ID != rw.oldID && bySource[c.ID] != nil {
+			if c.ID == rw.oldID {
+				continue
+			}
+			if bySource[c.ID] != nil {
 				overlapped[rw.oldID] = struct{}{}
 				overlapped[c.ID] = struct{}{}
+				continue
+			}
+			if first, ok := firstSource[c.ID]; !ok {
+				firstSource[c.ID] = rw.oldID
+			} else if first != rw.oldID {
+				converged[c.ID] = struct{}{}
 			}
 		}
 	}
 	files := make(map[string]struct{})
 	for id := range overlapped {
 		for _, c := range bySource[id] {
+			files[c.FilePath] = struct{}{}
+		}
+	}
+	for id := range converged {
+		for _, c := range reg.ByID(id) {
 			files[c.FilePath] = struct{}{}
 		}
 	}
