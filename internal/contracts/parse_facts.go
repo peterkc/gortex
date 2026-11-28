@@ -195,18 +195,24 @@ func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []s
 			c.Meta = f.AST
 			f.ASTTypeLookups = make(map[string]string)
 			applyProviderFactsWithLookup(&c, bf, func(name string) string {
-				answer := resolveTypeInFile(name, nodes)
-				name, lookup := typeLookupName(name)
-				if lookup {
-					f.ASTTypeLookups[name] = answer
-				}
-				return answer
+				return f.captureASTTypeLookup(name, nodes)
 			})
 			f.Bindings = maps.Clone(bf.bindings)
 		}
 		out[n.ID] = f
 	}
 	return out, nil
+}
+
+// captureASTTypeLookup records the name native actually queries, even when
+// stripping the qualifier leaves an empty name.
+func (f *HandlerFacts) captureASTTypeLookup(name string, nodes []*graph.Node) string {
+	answer := resolveTypeInFile(name, nodes)
+	name, lookup := typeLookupName(name)
+	if lookup {
+		f.ASTTypeLookups[name] = answer
+	}
+	return answer
 }
 
 // EnrichProvider applies precisely the native provider regex/AST updates to

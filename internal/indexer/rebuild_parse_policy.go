@@ -65,7 +65,8 @@ func (idx *Indexer) installRebuildParsePolicy(policy rebuildParsePolicy) {
 
 // Bump this for a change to detached fact capture that does not change the
 // binary layout or the shared native contract extraction policy.
-const rebuildContractCaptureVersion = 1
+// 2: capture empty local AST type lookups for checked handler replay.
+const rebuildContractCaptureVersion = 2
 
 // 3: Go package-scope builtin declarations on the file receipt.
 // 4: JS/TS lexical-scope bindings, unproved user receivers and global-alias writes (host delegates included).

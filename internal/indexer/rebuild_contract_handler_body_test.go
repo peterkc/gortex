@@ -34,6 +34,12 @@ func Literal(w http.ResponseWriter, r *http.Request) {
 func Missing(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, ExternalPayload{})
 }
+
+type Item struct{}
+
+func Qualified(w http.ResponseWriter, r *http.Request) {
+	WriteJSON(w, http.StatusCreated, &other.Item{})
+}
 `)
 	path := filepath.Join(root, file)
 	require.NoError(t, os.WriteFile(path, src, 0o600))
@@ -83,6 +89,17 @@ func Missing(w http.ResponseWriter, r *http.Request) {
 	require.Equal(t, want[0], route)
 	require.Equal(t, parses, parser.ParseCount())
 
+	qualified, err := view.Node(ctx, file+"::Qualified")
+	require.NoError(t, err)
+	require.NotNil(t, qualified)
+	qualifiedBody, err := reader.providerBody(ctx, view, qualified)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"Item": file + "::Item"}, qualifiedBody.ASTTypeLookups)
+	require.Equal(t, file+"::Item", qualifiedBody.AST["response_type"])
+	b.AddNode(&graph.Node{ID: file + "::OtherItem", Name: "Item", Kind: graph.KindType, Language: "go", FilePath: file})
+	_, err = reader.providerBody(ctx, view, qualified)
+	require.ErrorIs(t, err, errRebuildContractBodyUnproved)
+
 	b.AddNode(&graph.Node{ID: file + "::Added", Name: "Payload", Kind: graph.KindType, Language: "go", FilePath: file})
 	b.AddNode(&graph.Node{ID: file + "::string", Name: "string", Kind: graph.KindType, Language: "go", FilePath: file})
 	literal, err := view.Node(ctx, file+"::Literal")
@@ -131,6 +148,71 @@ func Missing(w http.ResponseWriter, r *http.Request) {
 		return reader.bindRebuildProviderHandlers(ctx, view, records)
 	})
 	require.ErrorContains(t, err, "ambiguous or renamed handler")
+}
+
+func TestRebuildProviderBodyEmptyLookupName(t *testing.T) {
+	const file = "handler.go"
+	ctx := t.Context()
+	idx := newTestIndexer(graph.New())
+	idx.SetRootPath(t.TempDir())
+	t.Cleanup(idx.Close)
+	handler := &graph.Node{ID: file + "::Serve", Name: "Serve", Kind: graph.KindFunction, FilePath: file, Language: "go", StartLine: 1, EndLine: 1}
+	nameless := &graph.Node{ID: file + "::Empty", Kind: graph.KindType, FilePath: file, Language: "go"}
+	other := *nameless
+	other.ID = file + "::Moved"
+	for _, tc := range []struct {
+		name          string
+		saved, linked *graph.Node
+	}{
+		{"disappeared", nameless, nil},
+		{"changed ID", nameless, &other},
+		{"appeared", nil, nameless},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A synthetic checked lookup exercises the receipt reader even
+			// when the Go grammar recovers an empty type tail differently.
+			answer := ""
+			nodes := []*graph.Node{handler}
+			shapes := make(map[string]*contracts.Shape)
+			if tc.saved != nil {
+				answer = tc.saved.ID
+				nodes = append(nodes, tc.saved)
+				shapes[answer] = nil
+			}
+			body := contracts.HandlerFacts{
+				Regex:          map[string]any{},
+				AST:            map[string]any{"response_type": answer},
+				ASTTypeLookups: map[string]string{"": answer},
+				Bindings:       map[string]contracts.Binding{},
+			}
+			facts := &contracts.FileFacts{Shapes: shapes, Handlers: map[string]contracts.HandlerFacts{handler.ID: body}}
+			parsed := store_pebble.ParseFacts{File: graph.FileMetaRow{FilePath: file, NodeCount: len(nodes)}, EffectiveLanguage: "go", Nodes: nodes}
+			input := rebuildInput{Path: file, Language: "go"}
+			job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{"go": {1}}}
+			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+			wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
+			require.NoError(t, err)
+			require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
+			reader := rebuildContractReceiptReader{idx: idx, job: job, store: store,
+				census: &rebuildExtractorCensus{byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file}}}
+			b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, b.Close()) })
+			require.NoError(t, b.AddParsedFile("", parsed))
+			view := b.RebuildView()
+			got, err := reader.providerBody(ctx, view, handler)
+			require.NoError(t, err)
+			require.Equal(t, body, got)
+			b.EvictFile(file)
+			b.AddNode(handler)
+			if tc.linked != nil {
+				b.AddNode(tc.linked)
+			}
+			_, err = reader.providerBody(ctx, view, handler)
+			require.ErrorIs(t, err, errRebuildContractBodyUnproved)
+			require.ErrorContains(t, err, `local type ""`)
+		})
+	}
 }
 
 func TestRebuildProviderBodyIgnoresUnreferencedNestedTypes(t *testing.T) {
@@ -312,8 +394,8 @@ def ambiguous() -> Meta:
 			}
 			require.Equal(t, store_pebble.RebuildContractRecord{Contract: want[i]}, item)
 		}
-		for i, stationary := range []contracts.Contract{consumer, foreign, otherFile, stationary} {
-			require.Equal(t, store_pebble.RebuildContractRecord{Contract: stationary}, got[i+2])
+		for i, input := range []contracts.Contract{consumer, foreign, otherFile, stationary} {
+			require.Equal(t, store_pebble.RebuildContractRecord{Contract: input}, got[i+2])
 		}
 		return nil
 	}))

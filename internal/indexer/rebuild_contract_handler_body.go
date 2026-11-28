@@ -73,13 +73,14 @@ func (r rebuildContractReceiptReader) providerBody(ctx context.Context, view sto
 	}
 	seen := make(map[string]bool)
 	var changed string
+	var hasChange bool
 	if err := view.VisitContractFileTypes(ctx, handler.FilePath, func(n *graph.Node) error {
 		id, used := local[n.Name]
 		if !used {
 			return nil
 		}
-		if id != n.ID && changed == "" {
-			changed = n.Name
+		if id != n.ID && !hasChange {
+			changed, hasChange = n.Name, true
 		}
 		seen[n.Name] = true
 		return nil
@@ -87,11 +88,11 @@ func (r rebuildContractReceiptReader) providerBody(ctx context.Context, view sto
 		return contracts.HandlerFacts{}, err
 	}
 	for name, id := range local {
-		if id != "" && !seen[name] && (changed == "" || name < changed) {
-			changed = name
+		if id != "" && !seen[name] && (!hasChange || name < changed) {
+			changed, hasChange = name, true
 		}
 	}
-	if changed != "" {
+	if hasChange {
 		return contracts.HandlerFacts{}, fmt.Errorf("%w: local type %q in %q", errRebuildContractBodyUnproved, changed, handler.FilePath)
 	}
 	return body, nil

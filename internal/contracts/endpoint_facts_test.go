@@ -11,6 +11,32 @@ import (
 	"github.com/zzet/gortex/internal/parser/tsitter/typescript"
 )
 
+func TestHandlerASTTypeLookupCapture(t *testing.T) {
+	nodes := []*graph.Node{
+		{ID: "handler.go::Item", Name: "Item", Kind: graph.KindType},
+		{ID: "handler.go::Empty", Kind: graph.KindType},
+	}
+	for _, tc := range []struct {
+		input string
+		want  string
+		keys  map[string]string
+	}{
+		{"other.Item", "handler.go::Item", map[string]string{"Item": "handler.go::Item"}},
+		{"*Item", "handler.go::Item", map[string]string{"Item": "handler.go::Item"}},
+		{"pkg.", "handler.go::Empty", map[string]string{"": "handler.go::Empty"}},
+		{"* ", "", map[string]string{}},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			facts := HandlerFacts{ASTTypeLookups: make(map[string]string)}
+			require.Equal(t, tc.want, facts.captureASTTypeLookup(tc.input, nodes))
+			require.Equal(t, tc.keys, facts.ASTTypeLookups)
+		})
+	}
+	facts := HandlerFacts{ASTTypeLookups: make(map[string]string)}
+	require.Empty(t, facts.captureASTTypeLookup("pkg.", nil))
+	require.Equal(t, map[string]string{"": ""}, facts.ASTTypeLookups)
+}
+
 func TestEndpointContractQuestionsNativeOrder(t *testing.T) {
 	const path = "routes.go"
 	src := []byte(`package p

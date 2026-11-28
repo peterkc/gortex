@@ -369,7 +369,7 @@ func TestRebuildReceiverV2ThroughV5ReceiptsAreStale(t *testing.T) {
 			payload := encodeRebuildTestParseFacts(t, store_pebble.ParseFacts{
 				File: graph.FileMetaRow{FilePath: tc.file}, EffectiveLanguage: tc.language,
 			})
-			oldKeys := make([]rebuildDigest, 0, len(tc.versions))
+			oldKeys := make([]rebuildDigest, 0, len(tc.versions)+1)
 			for _, version := range tc.versions {
 				old := append([]byte("gortex/rebuild/contract-parse-receiver\x00"), ordinary[:]...)
 				old = append(old, store_pebble.ContractParseFactsFormat)
@@ -382,6 +382,18 @@ func TestRebuildReceiverV2ThroughV5ReceiptsAreStale(t *testing.T) {
 				require.NoError(t, store.write(key, payload))
 				oldKeys = append(oldKeys, key)
 			}
+			// The old contract capture version must miss even when the
+			// receiver capture version already matches the current one.
+			old := append([]byte("gortex/rebuild/contract-parse-receiver\x00"), ordinary[:]...)
+			old = append(old, store_pebble.ContractParseFactsFormat)
+			old = binary.AppendUvarint(old, rebuildBuiltinReceiverCaptureVersion)
+			old = binary.AppendUvarint(old, 1)
+			old = binary.AppendUvarint(old, postExtractionPolicyVersion)
+			old = binary.AppendUvarint(old, uint64(extractorVersionForLang(tc.language)))
+			old = binary.AppendUvarint(old, 0)
+			key := input.parseKey(blake3.Sum256(append(old, idx.rebuildContractPolicy().suffix...)))
+			require.NoError(t, store.write(key, payload))
+			oldKeys = append(oldKeys, key)
 			bounds := rebuildTransformBounds{FileBytes: 1024, CaptureBytes: 1024}
 			fresh, reused, err := idx.loadRebuildFile(ctx, src, store, input, recipe, bounds)
 			require.NoError(t, err)
