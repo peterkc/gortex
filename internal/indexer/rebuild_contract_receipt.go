@@ -104,26 +104,31 @@ func (r rebuildContractReceiptReader) visitLateContractSourcesAtParseCut(ctx con
 // declaration; it is not an input identity. An absent shape for a proved
 // declaration is represented in FileFacts, never by an absent receipt.
 func (r rebuildContractReceiptReader) forLinkedNode(ctx context.Context, n *graph.Node) (*contracts.FileFacts, error) {
+	_, facts, err := r.forLinkedDeclaration(ctx, n)
+	return facts, err
+}
+
+func (r rebuildContractReceiptReader) forLinkedDeclaration(ctx context.Context, n *graph.Node) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
 	if n.FilePath == "" || n.RepoPrefix != "" {
-		return nil, fmt.Errorf("%w: no admitted contract declaration for %q", graph.ErrContractProjectionStale, n.ID)
+		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: no admitted contract declaration for %q", graph.ErrContractProjectionStale, n.ID)
 	}
 	path := r.census.originByGraphPath[n.FilePath]
 	i, ok := slices.BinarySearchFunc(r.job.inputs, path, func(in rebuildInput, key string) int {
 		return strings.Compare(in.Path, key)
 	})
 	if !ok {
-		return nil, fmt.Errorf("%w: no admitted contract receipt for %q", graph.ErrContractProjectionStale, n.FilePath)
+		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: no admitted contract receipt for %q", graph.ErrContractProjectionStale, n.FilePath)
 	}
 	base, facts, err := r.load(ctx, r.job.inputs[i])
 	if err != nil {
-		return nil, err
+		return store_pebble.ParseFacts{}, nil, err
 	}
 	for _, saved := range base.Nodes {
 		if saved.ID == n.ID && saved.FilePath == n.FilePath && saved.Kind == n.Kind && saved.Language == n.Language &&
 			saved.StartLine == n.StartLine && saved.EndLine == n.EndLine &&
 			saved.StartColumn == n.StartColumn && saved.EndColumn == n.EndColumn {
-			return facts, nil
+			return base, facts, nil
 		}
 	}
-	return nil, fmt.Errorf("%w: contract declaration %q does not match its receipt", graph.ErrContractProjectionStale, n.ID)
+	return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: contract declaration %q does not match its receipt", graph.ErrContractProjectionStale, n.ID)
 }
