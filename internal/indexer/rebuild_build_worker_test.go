@@ -174,10 +174,12 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		exact, shadowed bool
+		mixed           bool
 		badCallStatus   bool
 		rootManifests   int
 	}{
 		{name: "signed_only_with_extraction_off", exact: true, rootManifests: 1},
+		{name: "mixed_clone_and_held_endpoint_coverage", exact: true, mixed: true, rootManifests: 1},
 		{name: "refuses_shadow_before_apply", exact: true, shadowed: true, rootManifests: 1},
 		{name: "legacy_capture_stops_before_clones", shadowed: true},
 		{name: "final_call_status_refuses_relations", exact: true, badCallStatus: true, rootManifests: 1},
@@ -193,7 +195,7 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 			cfg.Coverage.Modules.Enabled, cfg.Coverage.Clones.Enabled = &off, &off
 			req := rebuildBuildRequest{
 				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
-				BaseRecipe: store_pebble.HeadDigest{1}, ProvidersOff: true, Recipes: map[string]rebuildDigest{"go": {1}},
+				BaseRecipe: store_pebble.HeadDigest{1}, ProvidersOff: true, Recipes: map[string]rebuildDigest{"go": {1}, "python": {2}},
 				Policy: freezeRebuildParsePolicy(root, cfg), Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
 				Witness: store_pebble.Witness{Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile},
 			}
@@ -204,24 +206,35 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 			store := rebuildParseStore{dir: req.ParseDir, limit: req.ParseLimit}
 			sig := clones.EncodeSignature(clones.Signature{1})
 			var inputs []rebuildInput
-			for _, path := range []string{"a.go", "b.go"} {
-				require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte("package p\n"), 0o600))
-				input, _, err := readRebuildInput(ctx, src, path, "go", 1024)
+			paths := []string{"a.go", "b.go"}
+			if tc.mixed {
+				paths = append(paths, "c.py")
+			}
+			for _, path := range paths {
+				language, source := "go", "package p\n"
+				if path == "c.py" {
+					language, source = "python", "def F(): pass\n"
+				}
+				require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte(source), 0o600))
+				input, _, err := readRebuildInput(ctx, src, path, language, 1024)
 				require.NoError(t, err)
 				inputs = append(inputs, input)
-				n := &graph.Node{ID: path + "::F", Kind: graph.KindFunction, Name: "F", FilePath: path, Language: "go",
+				n := &graph.Node{ID: path + "::F", Kind: graph.KindFunction, Name: "F", FilePath: path, Language: language,
 					StartLine: 1, EndLine: 2, Meta: map[string]any{cloneSigMetaKey: sig, cloneTokensMetaKey: 80}}
 				if tc.shadowed && path == "a.go" {
 					n.ID, n.FilePath, n.Kind, n.Meta = "b.go::F", "b.go", graph.KindVariable, nil
 				}
 				facts := rebuildCloneClaimFixture(path, n)
+				if tc.mixed && path == "a.go" {
+					facts.Edges = []*graph.Edge{{From: n.ID, To: "c.py::F", Kind: graph.EdgeReferences, FilePath: path, Line: 1}}
+				}
 				if tc.badCallStatus && path == "a.go" {
 					// A call to an ordinary function must not carry platform status.
 					facts.Edges = []*graph.Edge{{From: n.ID, To: n.ID, Kind: graph.EdgeCalls, FilePath: path, Line: 1,
 						Meta: map[string]any{graph.MetaLinkStatus: string(graph.LinkStatusPlatform)}}}
 				}
 				payload := encodeRebuildTestParseFacts(t, facts)
-				require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(req.Recipes["go"], input)), payload))
+				require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(req.Recipes[language], input)), payload))
 			}
 			inputRoot, err := rebuildInputRoot(inputs)
 			require.NoError(t, err)
@@ -253,10 +266,35 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 			require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, inputs))
 			core, logs := observer.New(zap.InfoLevel)
 			var sent []store_pebble.Stage
+			var head *store_pebble.Head
+			if tc.mixed {
+				head, err = store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), req.Incarnation, req.Witness.Profile)
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, head.Close()) })
+			}
 			err = buildRebuildStages(ctx, lease, zap.New(core), store_pebble.OpenBuild, rebuildTestLinkOptions(t), func(tables store_pebble.StageTables) error {
 				sent = append(sent, tables.Witness.Stage)
 				if tables.Witness.Stage == store_pebble.StageContracts {
 					require.Equal(t, &store_pebble.ContractCoverage{}, tables.Witness.Contracts)
+				}
+				if head != nil {
+					if _, err := head.PublishStage(ctx, tables); err != nil {
+						return err
+					}
+					if tables.Witness.Stage == store_pebble.StageRelations || tables.Witness.Stage == store_pebble.StageSearch {
+						snap := head.OpenSnapshot()
+						defer func() { require.NoError(t, snap.Close()) }()
+						var missing *store_pebble.ErrLinksNotAvailable
+						require.ErrorAs(t, snap.RequireRelationCoverageContext(ctx, []string{"go"}, []string{"a.go", "b.go"}), &missing)
+						require.Equal(t, []store_pebble.RebuildIsolationAffectedScope{
+							{FilePath: "a.go", SupportedLanguage: "go", DeferredLanguage: "python", Cause: "clone-corpus", Count: 1},
+							{FilePath: "a.go", SupportedLanguage: "go", DeferredLanguage: "python", Cause: "held-endpoint", Count: 1},
+							{FilePath: "b.go", SupportedLanguage: "go", DeferredLanguage: "python", Cause: "clone-corpus", Count: 1},
+						}, missing.Affected)
+						require.NotNil(t, snap.GetNode("c.py::F"))
+						require.False(t, slices.ContainsFunc(snap.GetOutEdges("a.go::F"), func(e *graph.Edge) bool { return e.To == "c.py::F" }))
+						require.NoError(t, snap.RequireRelationCoverageContext(ctx, []string{"go"}, []string{"other.go"}))
+					}
 				}
 				return nil
 			})
@@ -317,7 +355,7 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 			require.EqualValues(t, 0, fields["raw_bodies"])
 			require.EqualValues(t, 2, fields["signed_only"])
 			require.EqualValues(t, 1, fields["clone_pairs"])
-			require.EqualValues(t, 38, fields["claim_scratch_bytes"])
+			require.EqualValues(t, 19*len(paths), fields["claim_scratch_bytes"])
 		})
 	}
 }

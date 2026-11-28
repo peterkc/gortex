@@ -249,6 +249,32 @@ func TestRouteOwnerDeltaPreservesIsolationRows(t *testing.T) {
 	require.Equal(t, []RebuildIsolationAffectedScope{scope}, missing.Affected)
 }
 
+func TestCoversRelationsAtLeastCheckedCensus(t *testing.T) {
+	unchecked := &RelationCoverage{DeferredLanguages: []string{"python"}}
+	checked := &RelationCoverage{DeferredLanguages: []string{"python"}, IsolationChecked: true}
+	larger := &RelationCoverage{DeferredLanguages: []string{"python", "ruby"}, IsolationChecked: true}
+	complete := &RelationCoverage{IsolationChecked: true}
+	for _, tc := range []struct {
+		name        string
+		prior, next *RelationCoverage
+		want        bool
+	}{
+		{"legacy without declaration", nil, checked, true},
+		{"cannot lose declaration", checked, nil, false},
+		{"cannot lose checked proof", checked, unchecked, false},
+		{"legacy mixed has no checked supported coverage", unchecked, larger, true},
+		{"cannot grow checked deferred census", checked, larger, false},
+		{"can reduce checked deferred census", larger, checked, true},
+		{"complete cannot become mixed", complete, checked, false},
+		{"can become complete", checked, complete, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prior, next := Witness{Relations: tc.prior}, Witness{Relations: tc.next}
+			require.Equal(t, tc.want, next.CoversRelationsAtLeast(prior))
+		})
+	}
+}
+
 func TestRebuildIsolationCensusRefusals(t *testing.T) {
 	scope := RebuildIsolationAffectedScope{FilePath: "a.go", SupportedLanguage: "go", DeferredLanguage: "python", Cause: "held-endpoint"}
 	t.Run("outside census", func(t *testing.T) {
@@ -278,6 +304,19 @@ func TestRebuildIsolationCensusRefusals(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, worker.Close()) })
 			require.ErrorContains(t, worker.CheckRebuildIsolationCoverage(tc.ids), "invalid isolation deferred census")
+		})
+	}
+	for _, mode := range []string{"already checked", "cut open"} {
+		t.Run(mode, func(t *testing.T) {
+			worker, err := OpenBuild(filepath.Join(t.TempDir(), "worker"), FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, worker.Close()) })
+			if mode == "already checked" {
+				require.NoError(t, worker.CheckRebuildIsolationCoverage([]string{"python"}))
+			} else {
+				require.NoError(t, worker.IsolateRebuildLinks(t.Context()))
+			}
+			require.ErrorContains(t, worker.CheckRebuildIsolationCoverage([]string{"ruby"}), "isolation census already checked or cut still open")
 		})
 	}
 	t.Run("late event", func(t *testing.T) {
