@@ -294,24 +294,32 @@ func (b *BuildStore) evict(prefix []byte) (nodes, edges int, err error) {
 		}); err != nil {
 			return err
 		}
-		batch := b.pending.NewBatch()
-		defer batch.Close()
-		for _, k := range [][]byte{pendingNodeKey(n.ID), keyStrings([]byte{familyFile}, n.FilePath, n.ID), keyStrings([]byte{familyRepo}, n.RepoPrefix, n.ID), pendingSymbolKey(n.ID)} {
-			if err := batch.Delete(k, nil); err != nil {
-				return err
-			}
-		}
-		if err := updateRebuildCandidates(batch, n, nil, 0); err != nil {
+		if err := b.deleteNodeRecord(n); err != nil {
 			return err
 		}
-		if err := batch.Commit(pebble.NoSync); err != nil {
-			return err
-		}
-		b.v3NodeWrites++
 		nodes++
 		return nil
 	})
 	return nodes, edges, err
+}
+
+// deleteNodeRecord removes a node and its secondary rows once its edges are gone.
+func (b *BuildStore) deleteNodeRecord(n *graph.Node) error {
+	batch := b.pending.NewBatch()
+	defer batch.Close()
+	for _, k := range [][]byte{pendingNodeKey(n.ID), keyStrings([]byte{familyFile}, n.FilePath, n.ID), keyStrings([]byte{familyRepo}, n.RepoPrefix, n.ID), pendingSymbolKey(n.ID)} {
+		if err := batch.Delete(k, nil); err != nil {
+			return err
+		}
+	}
+	if err := updateRebuildCandidates(batch, n, nil, 0); err != nil {
+		return err
+	}
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return err
+	}
+	b.v3NodeWrites++
+	return nil
 }
 
 func addPendingCount(db *pebble.DB, key []byte, increment int) error {
