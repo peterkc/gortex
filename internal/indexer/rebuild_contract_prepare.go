@@ -32,7 +32,7 @@ func prepareRebuildContracts(ctx context.Context, b *store_pebble.BuildStore, di
 			if err == nil {
 				for _, e := range batch.Edges {
 					if e != nil && e.Kind == graph.EdgeCalls {
-						if err = b.ValidateRebuildCallDelta(ctx, e, graph.PlatformCatalogRevision, extractorOf); err != nil {
+						if err = b.ValidateRebuildCallDelta(ctx, e, base.PlatformCatalogRevision(), extractorOf); err != nil {
 							break
 						}
 					}

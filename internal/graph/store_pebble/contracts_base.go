@@ -20,6 +20,9 @@ type RelationsBase struct {
 	digest  HeadDigest
 }
 
+// PlatformCatalogRevision returns the catalog revision of the retained witness.
+func (r RelationsBase) PlatformCatalogRevision() uint32 { return r.witness.PlatformCatalogRevision }
+
 // RetainRelations keeps the sealed relation tables before ingest consumes
 // their outward names. Nothing is ingested into the private working store.
 func (b *BuildStore) RetainRelations(ctx context.Context, base FileGraphBase, relations StageTables) (RelationsBase, error) {

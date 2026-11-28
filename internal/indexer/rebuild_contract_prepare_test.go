@@ -12,7 +12,7 @@ import (
 
 func TestPrepareRebuildContractsChecksActualSeal(t *testing.T) {
 	const path, contractID, privateID, seedID, methodID = "a.go", "env::KEPT", "env::PRIVATE", "dep::example.org/seed", "a.go::Method"
-	for _, mode := range []string{"equal", "private mismatch", "unemitted selected ID", "retained extra seed", "wrong Call status"} {
+	for _, mode := range []string{"equal", "private mismatch", "unemitted selected ID", "retained extra seed", "wrong Call status", "legacy catalog"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := t.Context()
 			b, err := store_pebble.OpenBuild(filepath.Join(t.TempDir(), "working"), store_pebble.FullProfile)
@@ -21,9 +21,13 @@ func TestPrepareRebuildContractsChecksActualSeal(t *testing.T) {
 			head, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), rebuildTestIncarnation, store_pebble.FullProfile)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, head.Close()) })
+			revision := graph.PlatformCatalogRevision
+			if mode == "legacy catalog" {
+				revision = 0
+			}
 			manifest, err := store_pebble.PrepareManifest(ctx, t.TempDir(), []store_pebble.ManifestFile{{Path: path, Kind: 'f', Language: "go"}}, store_pebble.Witness{
 				Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2}, Stage: store_pebble.StageManifest,
-				Profile: store_pebble.FullProfile, PlatformCatalogRevision: graph.PlatformCatalogRevision,
+				Profile: store_pebble.FullProfile, PlatformCatalogRevision: revision,
 			}, rebuildTestIncarnation)
 			require.NoError(t, err)
 			_, err = head.PublishStage(ctx, manifest)
@@ -65,6 +69,10 @@ func TestPrepareRebuildContractsChecksActualSeal(t *testing.T) {
 				selected[privateID] = path
 			case "wrong Call status":
 				batch.Edges[0].Meta[graph.MetaLinkStatus] = string(graph.LinkStatusResolved)
+			case "legacy catalog":
+				batch.Edges[0].To = graph.StubID("", graph.StubKindBuiltin, "go", "len")
+				_, exists := graph.LookupPlatformBuiltin(graph.PlatformCatalogRevision, batch.Edges[0].To)
+				require.True(t, exists, "current catalog recognizes the probe")
 			}
 			consumed := false
 			var batches iter.Seq2[store_pebble.RebuildContractBatch, error] = func(yield func(store_pebble.RebuildContractBatch, error) bool) {
@@ -72,7 +80,7 @@ func TestPrepareRebuildContractsChecksActualSeal(t *testing.T) {
 				yield(batch, nil)
 			}
 			tables, err := prepareRebuildContracts(ctx, b, t.TempDir(), retained, early, orderedEarlyContractIDs(complete),
-				orderedEarlyContractIDs(selected), batches, store_pebble.ContractCoverage{OmittedRecords: 1}, nil)
+				orderedEarlyContractIDs(selected), batches, store_pebble.ContractCoverage{OmittedRecords: 1}, func(string) string { return "go" })
 			switch mode {
 			case "equal":
 				require.NoError(t, err)
@@ -95,6 +103,10 @@ func TestPrepareRebuildContractsChecksActualSeal(t *testing.T) {
 			case "wrong Call status":
 				require.ErrorIs(t, err, store_pebble.ErrContractsSeal)
 				require.ErrorContains(t, err, "link_status outside a builtin Call")
+			case "legacy catalog":
+				require.ErrorIs(t, err, store_pebble.ErrContractsSeal)
+				// Revision zero cannot reach the Go catalog's validation branch.
+				require.ErrorContains(t, err, "builtin target recording language is not admitted")
 			}
 			require.Zero(t, tables)
 			snapshot := head.OpenSnapshot()
