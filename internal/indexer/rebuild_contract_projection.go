@@ -32,6 +32,13 @@ func (r rebuildContractReceiptReader) deferredContractLanguages() ([]string, err
 			deferred[id] = struct{}{}
 		}
 	}
+	if r.isolate {
+		for _, fact := range r.job.classifications {
+			if rebuildHoldsOutCheckedSkip(fact) {
+				deferred[fact.Language] = struct{}{}
+			}
+		}
+	}
 	return slices.Sorted(maps.Keys(deferred)), nil
 }
 

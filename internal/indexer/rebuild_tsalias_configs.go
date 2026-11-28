@@ -42,8 +42,8 @@ func (rows rebuildTSAliasConfigs) config(rel string) (*tsalias.FrozenAliasConfig
 
 // resolve re-evaluates a post-parse alias from the verified sidecar. Native
 // probe order and fallback remain in tsalias; there is no live resolver read.
-func (rows rebuildTSAliasConfigs) resolve(n *rebuildResolverNamespace, caller, spec string) (tsalias.FrozenAliasStem, error) {
-	return tsalias.ResolveFrozenAlias(caller, spec, rows.config, n.probeFile)
+func (rows rebuildTSAliasConfigs) resolve(probe func(string) (bool, error), caller, spec string) (tsalias.FrozenAliasStem, error) {
+	return tsalias.ResolveFrozenAlias(caller, spec, rows.config, probe)
 }
 
 // captureRebuildTSAliasConfigs collects only config candidates in the literal

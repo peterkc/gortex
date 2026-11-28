@@ -232,6 +232,7 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrContractsSeal,
 	errRebuildContractIDs,
 	graph.ErrContractProjectionStale,
+	store_pebble.ErrRebuildLinkIsolation,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

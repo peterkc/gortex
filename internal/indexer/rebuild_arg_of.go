@@ -25,11 +25,29 @@ func runRebuildReturnsTo(ctx context.Context, build *store_pebble.BuildStore, re
 func (idx *Indexer) rebuildDataflowReceipts(ctx context.Context, job rebuildFileStages, store rebuildParseStore,
 	census *rebuildExtractorCensus,
 ) iter.Seq2[store_pebble.ParseFacts, error] {
+	return idx.rebuildSelectedDataflowReceipts(ctx, job, store, census, nil)
+}
+
+// The non-nil isolated build selects before opening the receipt, then removes
+// any remaining claims on held-out winners from this supported receipt.
+func (idx *Indexer) rebuildSelectedDataflowReceipts(ctx context.Context, job rebuildFileStages, store rebuildParseStore,
+	census *rebuildExtractorCensus, isolated *store_pebble.BuildStore,
+) iter.Seq2[store_pebble.ParseFacts, error] {
 	return func(yield func(store_pebble.ParseFacts, error) bool) {
 		for _, input := range job.inputs {
 			if err := ctx.Err(); err != nil {
 				yield(store_pebble.ParseFacts{}, err)
 				return
+			}
+			if isolated != nil {
+				held, err := census.holdsOutLinkInput(input.Path)
+				if err != nil {
+					yield(store_pebble.ParseFacts{}, err)
+					return
+				}
+				if held {
+					continue
+				}
 			}
 			recipe := idx.rebuildExtractorRecipe(job.recipes[input.Language], input)
 			raw, err := store.read(input.parseKey(recipe))
@@ -45,6 +63,13 @@ func (idx *Indexer) rebuildDataflowReceipts(ctx context.Context, job rebuildFile
 			if facts.File.FilePath != input.Path || facts.EffectiveLanguage != census.byPath[input.Path] {
 				yield(store_pebble.ParseFacts{}, fmt.Errorf("%w: receipt attribution changed for %q", errParseEntryCorrupt, input.Path))
 				return
+			}
+			if isolated != nil {
+				facts, err = isolated.SelectRebuildLinkFacts(ctx, facts)
+				if err != nil {
+					yield(store_pebble.ParseFacts{}, err)
+					return
+				}
 			}
 			if !yield(facts, nil) {
 				return

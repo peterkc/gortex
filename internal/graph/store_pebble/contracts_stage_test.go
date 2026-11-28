@@ -331,8 +331,19 @@ func TestContractsStageOmissionScope(t *testing.T) {
 }
 
 func TestContractOmissionNativeIDTypes(t *testing.T) {
+	held := RebuildSpringConfigHeldOutOmission("repo", "Reader.java")
+	require.True(t, contractOmissionIDMatchesType(held))
+	forged := held
+	forged.RecordKey = HeadDigest{1}
+	require.False(t, contractOmissionIDMatchesType(forged))
+	forged.RecordKey = RebuildSpringConfigUnknownOmission("repo", "application.yml").RecordKey
+	require.False(t, contractOmissionIDMatchesType(forged))
+	require.NotEqual(t, held.RecordKey, RebuildSpringConfigUnknownOmission("repo", "Reader.java").RecordKey)
 	unknown := RebuildSpringConfigUnknownOmission("repo", "application.yml")
 	require.True(t, contractOmissionIDMatchesType(unknown))
+	forged = unknown
+	forged.RecordKey = held.RecordKey
+	require.False(t, contractOmissionIDMatchesType(forged))
 	unknown.FilePath = "different.yml"
 	require.False(t, contractOmissionIDMatchesType(unknown))
 	for _, record := range []RebuildContractOmission{

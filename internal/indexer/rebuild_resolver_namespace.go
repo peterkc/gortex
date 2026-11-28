@@ -182,6 +182,29 @@ func (n *rebuildResolverNamespace) probeFile(key string) (bool, error) {
 	}
 }
 
+// rebuildLinkCandidateProbe projects only candidate-file presence. Keep the
+// original namespace for independent config, manifest and directory lookups.
+func rebuildLinkCandidateProbe(n *rebuildResolverNamespace, census *rebuildExtractorCensus,
+	classifications map[string]rebuildClassificationFact,
+) func(string) (bool, error) {
+	return func(key string) (bool, error) {
+		present, err := n.probeFile(key)
+		if err != nil || !present {
+			return present, err
+		}
+		if census == nil || uint64(len(census.byPath)) != census.admitted {
+			return false, fmt.Errorf("%w: incomplete extractor census", errRebuildCallerAttribution)
+		}
+		if _, admitted := census.byPath[key]; admitted {
+			heldOut, err := census.holdsOutLinkInput(key)
+			return !heldOut && err == nil, err
+		}
+		// A nonparse key can still have independently checked regular-file
+		// evidence. A validated deferred skip, however, is a held-out input.
+		return !rebuildHoldsOutCheckedSkip(classifications[key]), nil
+	}
+}
+
 func validRebuildNamespaceKey(key string) bool {
 	return len(key) > 0 && len(key) <= rebuildNamespaceKeyLimit && key != "." && key != ".." &&
 		!path.IsAbs(key) && !strings.HasPrefix(key, "../") && !strings.ContainsAny(key, "\\:\x00") && path.Clean(key) == key

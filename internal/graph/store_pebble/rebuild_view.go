@@ -37,6 +37,11 @@ type RebuildView struct {
 // RebuildView returns the typed read surface without changing graph.Store reads.
 func (b *BuildStore) RebuildView() RebuildView { return RebuildView{build: b} }
 
+// SelectRebuildLinkFacts limits a detached base receipt to the private F cut.
+func (v RebuildView) SelectRebuildLinkFacts(ctx context.Context, f ParseFacts) (ParseFacts, error) {
+	return v.build.SelectRebuildLinkFacts(ctx, f)
+}
+
 // Node returns the saved node by exact ID, or (nil, nil) for a genuine miss.
 func (v RebuildView) Node(ctx context.Context, id string) (*graph.Node, error) {
 	var n *graph.Node

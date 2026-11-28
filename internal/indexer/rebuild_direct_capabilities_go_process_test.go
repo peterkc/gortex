@@ -79,7 +79,7 @@ func TestRebuildDirectCapabilitiesGoProcess(t *testing.T) {
 						require.NoError(t, build.AddParsedFile("", facts))
 					}
 					require.Equal(t, []graph.EdgeIdentity{call}, rawCalls)
-					require.NoError(t, runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, link, bound.SkipPlaceholderSources))
+					require.NoError(t, runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, nil, link, bound.SkipPlaceholderSources))
 
 					view := build.RebuildView()
 					priorProcess, err := view.Node(ctx, process)

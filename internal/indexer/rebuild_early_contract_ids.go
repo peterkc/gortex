@@ -28,13 +28,13 @@ type rebuildEarlyContractFacts struct {
 }
 
 // readRebuildEarlyContractFacts runs at the post-parse, pre-main cut. It
-// answers endpoint questions from the complete parse graph and constant
+// answers endpoint questions from the selected parse graph and constant
 // sidecar, not from a graph that main has changed.
 func (idx *Indexer) readRebuildEarlyContractFacts(ctx context.Context, view store_pebble.RebuildView,
 	job rebuildFileStages, store rebuildParseStore, census *rebuildExtractorCensus,
-	rootDeps []string,
+	rootDeps []string, isolate bool,
 ) (*rebuildEarlyContractFacts, error) {
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census, isolate: isolate, linkView: view}
 	out := &rebuildEarlyContractFacts{registry: contracts.NewRegistry(), receipts: reader, routers: make(map[string]contracts.RouterFacts)}
 	if err := reader.visitFilesAtParseCut(ctx, view, func(path string, records []contracts.Contract, facts *contracts.FileFacts) error {
 		out.registry.AddAllScoped(records, idx.repoPrefix, idx.workspaceID, idx.projectID)

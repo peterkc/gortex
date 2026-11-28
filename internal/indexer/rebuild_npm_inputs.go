@@ -49,11 +49,11 @@ func newRebuildNpmLookup(ctx context.Context, in rebuildNpmInputs) *rebuildNpmLo
 }
 
 func newRebuildNpmLookupFromNamespace(ctx context.Context, ns *rebuildResolverNamespace,
-	manifests map[string]rebuildNpmManifestFact, followed rebuildDigest, glob *rebuildWorkspaceGlob,
+	manifests map[string]rebuildNpmManifestFact, followed rebuildDigest, glob *rebuildWorkspaceGlob, probe func(string) (bool, error),
 ) *rebuildNpmLookup {
 	return newRebuildNpmLookup(ctx, rebuildNpmInputs{
 		namespace: ns, manifests: manifests, followedRoot: followed,
-		isFile:    func(_ context.Context, key string) (bool, error) { return ns.probeFile(key) },
+		isFile:    func(_ context.Context, key string) (bool, error) { return probe(key) },
 		matchDirs: glob.matchDirs,
 	})
 }
@@ -61,7 +61,9 @@ func newRebuildNpmLookupFromNamespace(ctx context.Context, ns *rebuildResolverNa
 // rebuildExternalNpmRewrite uses the edge path as native npm resolution does.
 // Only the queried manifest and package paths need filesystem evidence. A
 // configured extractor can supply a recording path with no file at that path.
-func rebuildExternalNpmRewrite(ctx context.Context, lease string, digest rebuildDigest) func(string, string) (string, error) {
+func rebuildExternalNpmRewrite(ctx context.Context, lease string, digest rebuildDigest, census *rebuildExtractorCensus,
+	classifications map[string]rebuildClassificationFact,
+) func(string, string) (string, error) {
 	var npm *rebuildNpmLookup
 	return func(file, spec string) (string, error) {
 		if npm == nil {
@@ -73,7 +75,7 @@ func rebuildExternalNpmRewrite(ctx context.Context, lease string, digest rebuild
 			if err != nil {
 				return "", err
 			}
-			npm = newRebuildNpmLookupFromNamespace(ctx, ns, manifests, followed, glob)
+			npm = newRebuildNpmLookupFromNamespace(ctx, ns, manifests, followed, glob, rebuildLinkCandidateProbe(ns, census, classifications))
 		}
 		return npm.rewrite(file, spec)
 	}

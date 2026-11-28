@@ -184,7 +184,7 @@ void c_entry(void) {
 			live.To = "external::" + spec
 			require.ElementsMatch(t, []*graph.Edge{&live, &settledRelative}, slices.Collect(replayNative().EdgesByKind(graph.EdgeImports)))
 
-			require.NoError(t, runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, link, bound.SkipPlaceholderSources))
+			require.NoError(t, runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, nil, link, bound.SkipPlaceholderSources))
 			privateImports := imports()
 			require.Equal(t, []*graph.Edge{&settled, &settledRelative}, privateImports, "private complete edge-key order")
 			require.ElementsMatch(t, nativeImports, privateImports, "complete retained Imports family in this fixture")
@@ -462,7 +462,7 @@ func TestRebuildResolverInputsRestart(t *testing.T) {
 			for _, spec := range specs {
 				switch spec {
 				case alias:
-					stem, err := aliases.resolve(ns, caller, spec)
+					stem, err := aliases.resolve(ns.probeFile, caller, spec)
 					require.NoError(t, err)
 					require.Equal(t, tsalias.FrozenAliasStem("shared/x"), stem)
 				case npmSpec:

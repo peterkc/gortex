@@ -101,7 +101,7 @@ func goEntry() {
 	}
 	require.Equal(t, map[graph.EdgeIdentity]*graph.Edge{cOld: &cRaw, goOld: &goRaw}, readCalls(), "exact pending call rows")
 
-	require.NoError(t, runRebuildFrozenMain(ctx, lease, rebuildDigest{}, build, &census, rebuildTestLinkOptions(t), false))
+	require.NoError(t, runRebuildFrozenMain(ctx, lease, rebuildDigest{}, build, &census, nil, rebuildTestLinkOptions(t), false))
 
 	require.Equal(t, declarations, readNodes(), "all declarations survive the private cut")
 	require.Equal(t, map[graph.EdgeIdentity]*graph.Edge{cOld: &cRaw, goBound: &goResolved}, readCalls(),

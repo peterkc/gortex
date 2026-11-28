@@ -49,6 +49,12 @@ func rebuildContentSkipSidecarRow(sf skippedFile, maxFileSize int64, prefix []by
 	return row, nil
 }
 
+// rebuildHoldsOutCheckedSkip uses only the owner's validated classification.
+// A skip has no parse receipt or later effective extractor refinement.
+func rebuildHoldsOutCheckedSkip(fact rebuildClassificationFact) bool {
+	return (fact.sizeSkipped() || fact.ContentSkipReason != "") && !rebuildLinkedExtractor(fact.Language)
+}
+
 func (f rebuildClassificationFact) sizeSkipped() bool {
 	return f.Language != "" && f.MaxFileSize > 0 && f.Size > f.MaxFileSize
 }

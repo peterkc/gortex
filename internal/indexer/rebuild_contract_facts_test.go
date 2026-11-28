@@ -629,7 +629,7 @@ func TestRebuildEarlyContractReceiptRefusals(t *testing.T) {
 				build.AddNode(&graph.Node{ID: "remote:repo~unpublishable"})
 				view = build.RebuildView()
 			}
-			got, err := idx.readRebuildEarlyContractFacts(ctx, view, job, store, &census, nil)
+			got, err := idx.readRebuildEarlyContractFacts(ctx, view, job, store, &census, nil, false)
 			require.Nil(t, got)
 			if mode == "constant view" {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildView)

@@ -95,7 +95,7 @@ func TestRebuildReceiverMutationsGoSource(t *testing.T) {
 					stats, err := resolver.New(native).ResolveAllContext(ctx)
 					require.NoError(t, err)
 					require.False(t, stats.Incomplete)
-					require.NoError(t, runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, link, bound.SkipPlaceholderSources))
+					require.NoError(t, runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, nil, link, bound.SkipPlaceholderSources))
 					checkRebuildGoReceiverOutputs(t, build.RebuildView(), native, tc.writeLine)
 					_, err = build.RebuildCapabilities(ctx, receipts, processExecMechanism, rebuildProcessImport,
 						rebuildReceiverRules(), 1<<20)

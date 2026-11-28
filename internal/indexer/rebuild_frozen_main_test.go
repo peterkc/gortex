@@ -102,7 +102,7 @@ require (
 						byPath:            langs,
 						originByGraphPath: map[string]string{callerKey: callerRaw, configKey: configRaw, target: target},
 					}
-					err = runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, link, bound.SkipPlaceholderSources)
+					err = runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, nil, link, bound.SkipPlaceholderSources)
 					if denied {
 						require.ErrorIs(t, err, errRebuildResolverInputDenied)
 						require.Equal(t, buildRefusal(err).Refusal, buildRefusal(errRebuildResolverInputDenied).Refusal)
@@ -198,7 +198,7 @@ func TestRebuildFrozenMainGoExtern(t *testing.T) {
 						byPath:            map[string]string{caller: "go", candidate: "go"},
 						originByGraphPath: map[string]string{caller: caller, candidate: candidate},
 					}
-					err = runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, link, bound.SkipPlaceholderSources)
+					err = runRebuildFrozenMain(ctx, lease, rebuildDigest(bound.Witness.FrozenInputs), build, census, nil, link, bound.SkipPlaceholderSources)
 					if tc.refuse {
 						require.ErrorIs(t, err, errRebuildGoEvidence)
 						require.ErrorContains(t, err, "local Go replacement")
@@ -274,7 +274,7 @@ func TestRebuildFrozenMainGoReceiverReceiptOrder(t *testing.T) {
 	for _, f := range facts {
 		require.NoError(t, build.AddParsedFile("", f))
 	}
-	require.NoError(t, runRebuildFrozenMain(t.Context(), lease, rebuildDigest{}, build, census, rebuildTestLinkOptions(t), false))
+	require.NoError(t, runRebuildFrozenMain(t.Context(), lease, rebuildDigest{}, build, census, nil, rebuildTestLinkOptions(t), false))
 	winner := *first
 	winner.To = receiver.ID
 	var saved []*graph.Edge

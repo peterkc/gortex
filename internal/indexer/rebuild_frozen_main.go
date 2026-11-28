@@ -13,7 +13,8 @@ import (
 // filesystem-shaped queries from the exact receipt origin and the sealed
 // sidecar. Unproved input is an error, not an unresolved import result.
 func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDigest,
-	build *store_pebble.BuildStore, census *rebuildExtractorCensus, opts store_pebble.RebuildLinkOptions, skipPlaceholderSources bool,
+	build *store_pebble.BuildStore, census *rebuildExtractorCensus, classifications map[string]rebuildClassificationFact,
+	opts store_pebble.RebuildLinkOptions, skipPlaceholderSources bool,
 ) error {
 	var goFacts rebuildGoManifests
 	var aliases rebuildTSAliasConfigs
@@ -42,13 +43,18 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 	var ns *rebuildResolverNamespace
 	var manifests map[string]rebuildNpmManifestFact
 	var followed rebuildDigest
+	var probeCandidate func(string) (bool, error)
 	loadNamespace := func() error {
 		if ns != nil {
 			return nil
 		}
 		var err error
 		ns, manifests, followed, err = openRebuildNpmManifestFacts(ctx, lease, digest)
-		return err
+		if err != nil {
+			return err
+		}
+		probeCandidate = rebuildLinkCandidateProbe(ns, census, classifications)
+		return nil
 	}
 	rawPath := func(file string) (string, error) {
 		raw := census.originByGraphPath[file]
@@ -77,7 +83,7 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 		if err := loadGlob(); err != nil {
 			return err
 		}
-		npm = newRebuildNpmLookupFromNamespace(ctx, ns, manifests, followed, glob)
+		npm = newRebuildNpmLookupFromNamespace(ctx, ns, manifests, followed, glob, probeCandidate)
 		return nil
 	}
 	var workspaceMembers map[string]struct{} // nil until one checked lookup builds the membership index
@@ -99,7 +105,7 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 			if err := loadNamespace(); err != nil {
 				return "", err
 			}
-			stem, err := aliases.resolve(ns, caller, spec)
+			stem, err := aliases.resolve(probeCandidate, caller, spec)
 			// The private checkout has no repo prefix. Keep native's
 			// returned stem as the graph probe; a first-target fallback
 			// need not have an admitted file to translate.

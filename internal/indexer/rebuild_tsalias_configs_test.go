@@ -206,7 +206,7 @@ func TestRebuildTSAliasConfigsPostParseProbeReplay(t *testing.T) {
 		require.Equal(t, mod.Content, module.Digest)
 		ns, err := openRebuildResolverNamespace(ctx, lease, digest)
 		require.NoError(t, err)
-		stem, err := configs.resolve(ns, caller, spec)
+		stem, err := configs.resolve(ns.probeFile, caller, spec)
 		require.NoError(t, err)
 		require.Equal(t, tsalias.FrozenAliasStem("shared/x"), stem)
 		return nil

@@ -118,7 +118,7 @@ func Register(m *http.ServeMux) {
 			_, err = head.PublishStage(ctx, files)
 			require.NoError(t, err)
 			r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
-			earlyFacts, err := idx.readRebuildEarlyContractFacts(ctx, b.RebuildView(), job, store, census, nil)
+			earlyFacts, err := idx.readRebuildEarlyContractFacts(ctx, b.RebuildView(), job, store, census, nil, false)
 			require.NoError(t, err)
 			idx.extractDIContracts(native)
 			idx.commitContracts(native)

@@ -70,7 +70,7 @@ app.include_router(router, prefix="/api")
 	require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), gomod, 0o600))
 	manifest := rebuildGoManifest{Path: "go.mod"}
 	require.NoError(t, manifest.captureContractDeps(gomod))
-	f, err := idx.readRebuildEarlyContractFacts(ctx, build.RebuildView(), job, store, &census, manifest.DirectDeps)
+	f, err := idx.readRebuildEarlyContractFacts(ctx, build.RebuildView(), job, store, &census, manifest.DirectDeps, false)
 	require.NoError(t, err)
 	_, byLang := idx.buildPerFileContractExtractors()
 	native := contracts.NewRegistry()
@@ -280,7 +280,7 @@ export function register() {
 				require.Len(t, native.All(), 1, "the raw registry hides the mounted registration")
 				require.Equal(t, "first", native.All()[0].Meta["handler_ident"])
 			}
-			f, err := idx.readRebuildEarlyContractFacts(ctx, b.RebuildView(), job, store, &census, nil)
+			f, err := idx.readRebuildEarlyContractFacts(ctx, b.RebuildView(), job, store, &census, nil, false)
 			require.NoError(t, err)
 			idx.commitContracts(native)
 			want := rebuildEarlyContractIDs{raw: "routes.ts"}

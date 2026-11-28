@@ -42,6 +42,7 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 		return err
 	}
 	view := b.RebuildView()
+	r.linkView = view
 	r.proofCache = &rebuildContractReceiptCache{}
 	return b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
 		if err := source(func(c contracts.Contract) error {
@@ -51,6 +52,9 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 		}
 		return records.WithContractSelection(func(s *store_pebble.RebuildContractSelection) error {
 			return records.WithContractOutput(func(add func(store_pebble.RebuildContractBatch) error) error {
+				if err := r.visitHeldOutContractOmissions(ctx, add); err != nil {
+					return err
+				}
 				if err := r.idx.appendRebuildDIContracts(records); err != nil {
 					return err
 				}

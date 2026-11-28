@@ -210,3 +210,10 @@ func RebuildSpringConfigUnknownOmission(repo, file string) RebuildContractOmissi
 	return RebuildContractOmission{RepoPrefix: repo, FilePath: file, Type: contracts.ContractType(graph.EdgeReadsConfig),
 		RecordKey: HeadDigest(sha256.Sum256(keyStrings([]byte("spring config unknown"), repo, file)))}
 }
+
+// RebuildSpringConfigHeldOutOmission covers an F-held reader whose wildcard
+// targets cannot be established without excluded link inputs.
+func RebuildSpringConfigHeldOutOmission(repo, file string) RebuildContractOmission {
+	return RebuildContractOmission{RepoPrefix: repo, FilePath: file, Type: contracts.ContractType(graph.EdgeReadsConfig),
+		RecordKey: HeadDigest(sha256.Sum256(keyStrings([]byte("spring config held out"), repo, file)))}
+}

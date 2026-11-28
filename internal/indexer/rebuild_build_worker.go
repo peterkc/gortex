@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -380,13 +381,13 @@ func buildRebuildStages(
 		var earlyFacts *rebuildEarlyContractFacts
 		var err error
 		if exactCheckout {
-			earlyFacts, err = idx.readRebuildEarlyContractFacts(ctx, private.RebuildView(), job, store, counts.census, rootFact.DirectDeps)
+			earlyFacts, err = idx.readRebuildEarlyContractFacts(ctx, private.RebuildView(), job, store, counts.census, rootFact.DirectDeps, true)
 			if err != nil {
 				return err
 			}
 		}
 
-		if err := runRebuildFrozenMain(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, counts.census, link, req.SkipPlaceholderSources); err != nil {
+		if err := runRebuildFrozenMain(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), private, counts.census, classifications, link, req.SkipPlaceholderSources); err != nil {
 			return err
 		}
 		// Rebuild leaves deferred-language file imports off. Native cold
@@ -447,8 +448,8 @@ func buildRebuildStages(
 		}
 		return nil
 	}
-	// Legacy captures and mixed checkouts keep their private turn witnesses
-	// but offer nothing after FileGraph until the D72 isolation is wired.
+	// Legacy captures keep their private turn witnesses, but do not offer
+	// Relations without an exact checkout and its isolated input cut.
 	if !counts.publishRelations {
 		if err := runMain(); err != nil {
 			return err
@@ -458,7 +459,7 @@ func buildRebuildStages(
 		}
 		return errRebuildBuildIncomplete
 	}
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: counts.census}
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: counts.census, isolate: true}
 	deferred, err := reader.deferredContractLanguages()
 	if err != nil {
 		return err
@@ -470,6 +471,9 @@ func buildRebuildStages(
 		}
 		return reader.withRebuildContractProducer(ctx, private, read, earlyIDs, func(_ iter.Seq2[store_pebble.RebuildContractBatch, error], seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
 			if err := runTail(); err != nil {
+				return err
+			}
+			if err := private.RestoreRebuildDeclarations(ctx); err != nil {
 				return err
 			}
 			relationsDir := filepath.Join(lease, store_pebble.StageRelations.String())
@@ -533,7 +537,21 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 	exactCheckout bool, earlyIDs rebuildEarlyContractIDs, logger *zap.Logger,
 ) error {
 	receipts := counts.census.receipts
-	if err := runRebuildTestFiles(ctx, private, receipts, classifications); err != nil {
+	// Exact checkouts use selected receipts and checked skips. The deferred
+	// file/symbol stamp producers are reachable only on legacy/private fixtures.
+	var skips map[string]rebuildClassificationFact
+	for path, fact := range classifications {
+		if exactCheckout && rebuildHoldsOutCheckedSkip(fact) {
+			if skips == nil {
+				skips = maps.Clone(classifications)
+			}
+			delete(skips, path)
+		}
+	}
+	if skips == nil {
+		skips = classifications
+	}
+	if err := runRebuildTestFiles(ctx, private, receipts, skips); err != nil {
 		return err
 	}
 	if err := runRebuildTestSymbols(ctx, private, receipts); err != nil {
@@ -559,7 +577,7 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 			return err
 		}
 		predecessors := rebuildClonePredecessors{
-			namespace: namespace, modules: cfg.Coverage.IsEnabled("modules"), fileClaims: &counts.claims, contracts: earlyIDs,
+			namespace: namespace, modules: cfg.Coverage.IsEnabled("modules"), isolated: true, fileClaims: &counts.claims, contracts: earlyIDs,
 		}
 		// Native cold detection still banks pre-signed callables when raw
 		// clone extraction is disabled.
@@ -960,7 +978,7 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 		if goFrameMoves != 0 {
 			logger.Info("rebuild GoFrame applied to private build", zap.Uint64("moves", goFrameMoves))
 		}
-		svelteKitAdds, err := resolver.RunRebuildSvelteKitLoad(ctx, private, receipts, selection, rebuildCheckedSkips(classifications))
+		svelteKitAdds, err := resolver.RunRebuildSvelteKitLoad(ctx, private, receipts, selection, rebuildCheckedSkips(skips))
 		if err != nil {
 			return err
 		}
@@ -1009,7 +1027,7 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 		if gdDemotions != 0 {
 			logger.Info("rebuild GDScript receiver gate applied to private build", zap.Uint64("demotions", gdDemotions))
 		}
-		rewriteNpm := rebuildExternalNpmRewrite(ctx, lease, rebuildDigest(req.Witness.FrozenInputs))
+		rewriteNpm := rebuildExternalNpmRewrite(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), counts.census, classifications)
 		externalCalls, err := resolver.RunRebuildExternalCallSynthesis(ctx, private, receipts, req.ExternalCallsEnabled, requestedSelection, selection, rewriteNpm)
 		if err != nil {
 			return err

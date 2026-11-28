@@ -166,6 +166,26 @@ func TestRebuildResolverNamespaceFileProbe(t *testing.T) {
 			require.NotErrorIs(t, err, errRebuildResolverInputDenied)
 		}
 	}
+	// Held-out paths cannot turn denied or unproved namespace answers into misses.
+	census := &rebuildExtractorCensus{admitted: 3, byPath: map[string]string{
+		"exact/Foo.ts": "python", "exact/opaque/leaf.ts": "python", "open/no.ts": "python",
+	}}
+	probe := rebuildLinkCandidateProbe(&n, census, nil)
+	for _, key := range []string{"exact/Foo.ts", "exact/foo.ts"} {
+		got, err := probe(key)
+		require.NoError(t, err)
+		require.False(t, got)
+	}
+	for _, key := range []string{"exact/opaque/leaf.ts", "exact/link/leaf.ts", "open/no.ts"} {
+		got, err := probe(key)
+		require.False(t, got)
+		require.ErrorIs(t, err, errRebuildResolverNamespace)
+		if key == "exact/opaque/leaf.ts" {
+			require.ErrorIs(t, err, errRebuildResolverInputDenied)
+		}
+	}
+	_, err = rebuildLinkCandidateProbe(&n, &rebuildExtractorCensus{admitted: 1}, nil)("exact/Foo.ts")
+	require.ErrorIs(t, err, errRebuildCallerAttribution)
 }
 
 func TestRebuildResolverNamespaceRejectsRows(t *testing.T) {

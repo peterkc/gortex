@@ -77,17 +77,6 @@ func (c *rebuildExtractorCensus) holdsOutLinkInput(path string) (bool, error) {
 	return !rebuildLinkedExtractor(id), nil
 }
 
-// supportsRelationPublication is the temporary D72 full-link-only boundary.
-// No deferred format has a checked link-free proof yet.
-func (c *rebuildExtractorCensus) supportsRelationPublication() bool {
-	for id := range c.byID {
-		if !rebuildLinkedExtractor(id) {
-			return false
-		}
-	}
-	return true
-}
-
 // selectPendingCallers selects a main-link page before starting workers or
 // applying changes. It borrows the page's edges in their original order.
 // This does not filter the candidate source, check endpoints or publish rows.
@@ -249,7 +238,11 @@ func (idx *Indexer) buildRebuildFileStages(
 						facts.Constants[i].FilePath = key
 					}
 				}
-				if err := private.AddParsedFileSelected("", facts, func(id string) (bool, error) {
+				add := private.AddParsedFileSelected
+				if job.retainFileGraph && !rebuildLinkedExtractor(facts.EffectiveLanguage) {
+					add = private.AddRebuildDeferredFile
+				}
+				if err := add("", facts, func(id string) (bool, error) {
 					return keep(id, ordinal)
 				}); err != nil {
 					return err
@@ -271,7 +264,13 @@ func (idx *Indexer) buildRebuildFileStages(
 			continue
 		}
 		idx.applyRepoPrefix([]*graph.Node{n}, nil)
-		private.AddNode(n)
+		if job.retainFileGraph && rebuildHoldsOutCheckedSkip(job.classifications[key]) {
+			if err := private.AddRebuildHeldSkip(n); err != nil {
+				return counts, err
+			}
+		} else {
+			private.AddNode(n)
+		}
 	}
 	graphDir := filepath.Join(job.workDir, store_pebble.StageFileGraph.String())
 	if err := os.Mkdir(graphDir, 0o700); err != nil {
@@ -281,7 +280,7 @@ func (idx *Indexer) buildRebuildFileStages(
 	if err != nil {
 		return counts, err
 	}
-	if job.retainFileGraph && census.supportsRelationPublication() {
+	if job.retainFileGraph {
 		// The owner consumes these names during send. Retain only when
 		// there is a later relation seal to consume the private base.
 		counts.fileGraphBase, err = private.RetainFileGraph(ctx, fileGraph)
@@ -292,6 +291,12 @@ func (idx *Indexer) buildRebuildFileStages(
 	}
 	if err := send(fileGraph); err != nil {
 		return counts, err
+	}
+	if counts.publishRelations {
+		if err := private.IsolateRebuildLinks(ctx); err != nil {
+			return counts, err
+		}
+		census.receipts = idx.rebuildSelectedDataflowReceipts(ctx, job, store, &census, private)
 	}
 	counts.census = &census
 	return counts, nil

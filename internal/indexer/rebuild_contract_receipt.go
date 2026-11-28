@@ -20,6 +20,8 @@ type rebuildContractReceiptReader struct {
 	store      rebuildParseStore
 	census     *rebuildExtractorCensus
 	proofCache *rebuildContractReceiptCache
+	isolate    bool
+	linkView   store_pebble.RebuildView
 }
 
 type rebuildContractReceiptCache struct {
@@ -28,7 +30,38 @@ type rebuildContractReceiptCache struct {
 	facts *contracts.FileFacts
 }
 
+func (r rebuildContractReceiptReader) holdsOut(path string) (bool, error) {
+	if !r.isolate {
+		return false, nil
+	}
+	return r.census.holdsOutLinkInput(path)
+}
+
+func (r rebuildContractReceiptReader) requireSelected(path string) error {
+	held, err := r.holdsOut(path)
+	if err != nil {
+		return err
+	}
+	if held {
+		return fmt.Errorf("%w: held-out contract receipt %q", graph.ErrContractProjectionStale, path)
+	}
+	return nil
+}
+
 func (r rebuildContractReceiptReader) load(ctx context.Context, input rebuildInput) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
+	if err := r.requireSelected(input.Path); err != nil {
+		return store_pebble.ParseFacts{}, nil, err
+	}
+	base, facts, err := r.loadRaw(ctx, input)
+	if err == nil && r.isolate {
+		base, err = r.linkView.SelectRebuildLinkFacts(ctx, base)
+	}
+	return base, facts, err
+}
+
+// loadRaw is the checked immutable receipt decode. Held-out inputs may use it
+// only in the separate omission inventory, never in a link-facing reducer.
+func (r rebuildContractReceiptReader) loadRaw(ctx context.Context, input rebuildInput) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
 	if err := ctx.Err(); err != nil {
 		return store_pebble.ParseFacts{}, nil, err
 	}
@@ -53,8 +86,16 @@ func (r rebuildContractReceiptReader) load(ctx context.Context, input rebuildInp
 func (r rebuildContractReceiptReader) visitFilesAtParseCut(ctx context.Context, view store_pebble.RebuildView,
 	visit func(path string, records []contracts.Contract, facts *contracts.FileFacts) error,
 ) error {
+	r.linkView = view
 	constants := rebuildEndpointConstants{ctx: ctx, view: view}
 	for _, input := range r.job.inputs {
+		held, err := r.holdsOut(input.Path)
+		if err != nil {
+			return err
+		}
+		if held {
+			continue
+		}
 		_, facts, err := r.load(ctx, input)
 		if err != nil {
 			return err
@@ -151,6 +192,9 @@ func (r rebuildContractReceiptReader) forGraphPath(ctx context.Context, file str
 		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: no admitted contract receipt for %q", graph.ErrContractProjectionStale, file)
 	}
 	if err := ctx.Err(); err != nil {
+		return store_pebble.ParseFacts{}, nil, err
+	}
+	if err := r.requireSelected(path); err != nil {
 		return store_pebble.ParseFacts{}, nil, err
 	}
 	if cache := r.proofCache; cache != nil && cache.path == file && cache.facts != nil {

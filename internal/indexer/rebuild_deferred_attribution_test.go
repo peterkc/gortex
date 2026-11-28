@@ -118,7 +118,7 @@ func TestRebuildDeferredAttribution(t *testing.T) {
 				require.Equal(t, []*graph.Edge{wantRaw}, selectedLen, "recording-path lookup admitted the deferred row as Go")
 			}
 
-			require.NoError(t, runRebuildFrozenMain(ctx, lease, rebuildDigest{}, build, &census, link, false))
+			require.NoError(t, runRebuildFrozenMain(ctx, lease, rebuildDigest{}, build, &census, nil, link, false))
 			decl, err := view.Node(ctx, rebuildDeferredProbePath+"::Deferred")
 			require.NoError(t, err)
 			require.NotNil(t, decl, "the deferred declaration must survive both arms")

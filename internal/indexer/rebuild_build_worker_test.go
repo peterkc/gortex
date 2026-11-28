@@ -895,6 +895,7 @@ func TestRebuildBuildViewRefusal(t *testing.T) {
 		{"external recording path", fmt.Errorf("%w: %w", store_pebble.ErrRebuildView, resolver.ErrRebuildGoExternalRecordingPath), resolver.ErrRebuildGoExternalRecordingPath, 35},
 		{"contract IDs", fmt.Errorf("%w: compare early and late", errRebuildContractIDs), errRebuildContractIDs, 103},
 		{"contract projection stale", fmt.Errorf("%w: changed owner", graph.ErrContractProjectionStale), graph.ErrContractProjectionStale, 104},
+		{"restore collision", fmt.Errorf("%w: held node occupied", store_pebble.ErrRebuildLinkIsolation), store_pebble.ErrRebuildLinkIsolation, 105},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var reply, acks bytes.Buffer
@@ -1061,8 +1062,8 @@ func TestRebuildExternalCallSynthesisWireRefusal(t *testing.T) {
 
 func TestRunRebuildCheckoutExternalCallSynthesis(t *testing.T) {
 	root, src := rebuildInputFixture(t)
-	// Main binds the Go terminal but leaves Python deferred. The Python
-	// caller sorts first and could change the language of the shared package.
+	// The earlier Python caller can elect the shared package in full native.
+	// F holds it out before electing the enabled supported creator.
 	for name, data := range map[string]string{
 		"go.mod": "module example.org/checkout\n\nrequire acme.tools v1.0.0\n",
 		"a.py":   "from acme import tools\n\ndef run():\n    tools.fetch()\n",
@@ -1110,36 +1111,37 @@ func TestRunRebuildCheckoutExternalCallSynthesis(t *testing.T) {
 					_, err := h.PublishStage(ctx, offer)
 					return err
 				})
-			require.ErrorIs(t, err, ErrRebuildWorker)
-			if tc.enabled {
-				require.ErrorIs(t, err, store_pebble.ErrRebuildExternalCallSynthesis)
-				require.ErrorContains(t, err, `uncertain retained external-call package creator: "external-call::dep::acme.tools"`)
-			} else {
-				require.ErrorIs(t, err, errRebuildBuildIncomplete)
-			}
-			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, stages)
+			require.NoError(t, err)
+			wantStages := store_pebble.CoreStages()
+			require.Equal(t, wantStages[:], stages)
 			s := h.OpenSnapshot()
 			defer func() { require.NoError(t, s.Close()) }()
-			require.NoError(t, s.RequireStage(store_pebble.StageFileGraph))
+			require.NoError(t, s.RequireStage(store_pebble.StageSearch))
 			require.NotNil(t, s.GetNode("a.py::run"))
 			require.NotNil(t, s.GetNode("z.go::Run"))
-			require.Nil(t, s.GetNode("external-call::dep::acme.tools"))
-			var pending *store_pebble.ErrStagePending
-			require.ErrorAs(t, s.RequireStage(store_pebble.StageRelations), &pending)
+			pkg := s.GetNode("external-call::dep::acme.tools")
+			if tc.enabled {
+				require.NotNil(t, pkg)
+				require.Equal(t, "go", pkg.Language)
+			} else {
+				require.Nil(t, pkg)
+			}
 		})
 	}
 }
 
 func TestRunRebuildCheckout(t *testing.T) {
 	for _, tc := range []struct {
-		name                               string
-		mismatch, denied, omitJSONRecipe   bool
-		captureRefusal, sealRefusal, mixed bool
+		name                                                       string
+		mismatch, denied, omitJSONRecipe                           bool
+		captureRefusal, sealRefusal, mixed, deferredOnly, skipOnly bool
 	}{
 		{name: "verified checkout builds all six stages"},
 		{name: "capture refusal keeps file graph", captureRefusal: true},
 		{name: "seal refusal keeps relations", sealRefusal: true},
-		{name: "mixed checkout stays at file graph", mixed: true},
+		{name: "mixed checkout isolates links", mixed: true},
+		{name: "deferred-only checkout isolates links", deferredOnly: true},
+		{name: "deferred checked skip alone labels all later stages", skipOnly: true},
 		{name: "supplied input root differs", mismatch: true},
 		{name: "denied link input keeps file graph", denied: true},
 		{name: "missing JSON recipe refuses before manifest", denied: true, omitJSONRecipe: true},
@@ -1151,12 +1153,19 @@ func TestRunRebuildCheckout(t *testing.T) {
 			const mod = "module example.org/widgets\n"
 			const contractID = "env::REBUILDWIRETOKEN"
 			require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), []byte(mod), 0o600))
-			require.NoError(t, os.WriteFile(filepath.Join(root, "sample.go"), []byte("package p\nimport \"os\"\nfunc Frozen() { _ = os.Getenv(\"REBUILDWIRETOKEN\") }\n"), 0o600))
+			if !tc.deferredOnly {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "sample.go"), []byte("package p\nimport \"os\"\nfunc Frozen() { _ = os.Getenv(\"REBUILDWIRETOKEN\") }\n"), 0o600))
+			}
 			require.NoError(t, os.WriteFile(filepath.Join(root, "large.go"), []byte(strings.Repeat("x", 129)), 0o600))
 			require.NoError(t, os.Mkdir(filepath.Join(root, "excluded"), 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(root, "excluded", "secret.go"), []byte("package hidden"), 0o600))
-			if tc.mixed {
-				require.NoError(t, os.WriteFile(filepath.Join(root, "deferred.py"), []byte("def Deferred():\n    pass\n"), 0o600))
+			hasDeferredReceipt := tc.mixed || tc.deferredOnly
+			partial := hasDeferredReceipt || tc.skipOnly
+			if hasDeferredReceipt {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "test_deferred.py"), []byte("def test_deferred():\n    pass\n"), 0o600))
+			}
+			if partial {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "test_large.py"), []byte(strings.Repeat("x", 129)), 0o600))
 			}
 			if tc.denied {
 				writeRebuildTSAliasFixtureFile(t, root, "caller.ts", `import "@lib/x"`)
@@ -1213,10 +1222,17 @@ func TestRunRebuildCheckout(t *testing.T) {
 					// inputs to the next cut; the published predecessor stays intact.
 					switch offer.Witness.Stage {
 					case store_pebble.StageFileGraph:
-						if tc.mixed {
-							retained, err := filepath.Glob(filepath.Join(filepath.Dir(offer.Dir), "working", "pending", "file-graph-base-*"))
+						if partial {
+							retained, err := filepath.Glob(filepath.Join(filepath.Dir(offer.Dir), "working", "pending", "file-graph-base-*", "*.sst"))
 							require.NoError(t, err)
-							require.Empty(t, retained, "the incomplete route has no Relations consumer")
+							require.NotEmpty(t, retained, "mixed Relations must reuse the complete FileGraph predecessor")
+							raw := h.OpenSnapshot()
+							if hasDeferredReceipt {
+								require.NotNil(t, raw.GetNode("test_deferred.py::test_deferred"))
+							}
+							require.NotNil(t, raw.GetNode("test_large.py"))
+							require.Zero(t, raw.EdgeCount())
+							require.NoError(t, raw.Close())
 						}
 						if tc.captureRefusal {
 							saved, err := os.ReadDir(req.ParseDir)
@@ -1225,7 +1241,15 @@ func TestRunRebuildCheckout(t *testing.T) {
 							require.NoError(t, os.Remove(filepath.Join(req.ParseDir, saved[0].Name())))
 						}
 					case store_pebble.StageRelations:
-						require.Equal(t, &store_pebble.RelationCoverage{}, offer.Witness.Relations)
+						if partial {
+							require.Equal(t, &store_pebble.RelationCoverage{DeferredLanguages: []string{"python"}}, offer.Witness.Relations)
+							var missing *store_pebble.ErrLinksNotAvailable
+							require.ErrorAs(t, offer.Witness.RequireRelationCoverage([]string{"python"}), &missing)
+							require.Equal(t, []string{"python"}, missing.Languages)
+							require.NoError(t, offer.Witness.RequireRelationCoverage([]string{"go"}))
+						} else {
+							require.Equal(t, &store_pebble.RelationCoverage{}, offer.Witness.Relations)
+						}
 						pinnedRelations = h.OpenSnapshot()
 						t.Cleanup(func() { require.NoError(t, pinnedRelations.Close()) })
 						if tc.sealRefusal {
@@ -1239,6 +1263,9 @@ func TestRunRebuildCheckout(t *testing.T) {
 						}
 					case store_pebble.StageContracts, store_pebble.StageDerived, store_pebble.StageSearch:
 						require.Equal(t, &store_pebble.ContractCoverage{}, offer.Witness.Contracts)
+						if partial {
+							require.Equal(t, &store_pebble.RelationCoverage{DeferredLanguages: []string{"python"}}, offer.Witness.Relations)
+						}
 					}
 					return nil
 				})
@@ -1274,10 +1301,12 @@ func TestRunRebuildCheckout(t *testing.T) {
 			case tc.sealRefusal:
 				wantRefusal = store_pebble.ErrContractsSeal
 				wantStages = append(wantStages, store_pebble.StageRelations)
-			case tc.mixed:
-				wantRefusal = errRebuildBuildIncomplete
-				wantPaths = []string{"deferred.py", "sample.go"}
 			default:
+				if tc.deferredOnly {
+					wantPaths = []string{"test_deferred.py"}
+				} else if tc.mixed {
+					wantPaths = append(wantPaths, "test_deferred.py")
+				}
 				wantStages = append(wantStages, store_pebble.StageRelations, store_pebble.StageContracts,
 					store_pebble.StageDerived, store_pebble.StageSearch)
 			}
@@ -1296,6 +1325,8 @@ func TestRunRebuildCheckout(t *testing.T) {
 			if last != store_pebble.StageSearch {
 				require.ErrorAs(t, s.RequireStage(store_pebble.StageContracts), &pending)
 				require.Equal(t, last, pending.Published)
+				require.Nil(t, s.GetNode(contractID))
+			} else if tc.deferredOnly {
 				require.Nil(t, s.GetNode(contractID))
 			} else {
 				n := s.GetNode(contractID)
@@ -1332,10 +1363,26 @@ func TestRunRebuildCheckout(t *testing.T) {
 				return nil
 			}))
 			require.Equal(t, wantPaths, paths)
-			if tc.mixed {
-				require.NotNil(t, s.GetNode("deferred.py::Deferred"))
+			if hasDeferredReceipt {
+				file := s.GetNode("test_deferred.py")
+				decl := s.GetNode("test_deferred.py::test_deferred")
+				require.NotNil(t, file)
+				require.NotNil(t, decl)
+				for _, n := range []*graph.Node{file, decl} {
+					require.NotContains(t, n.Meta, "test_runner")
+					require.NotContains(t, n.Meta, "test_role")
+					require.NotContains(t, n.Meta, "is_test_file")
+					require.NotContains(t, n.Meta, "is_test")
+				}
 			}
-			require.NotNil(t, s.GetNode("sample.go::Frozen"))
+			if partial {
+				require.Nil(t, s.GetNode("test_large.py"))
+			}
+			if tc.deferredOnly {
+				require.Nil(t, s.GetNode("sample.go::Frozen"))
+			} else {
+				require.NotNil(t, s.GetNode("sample.go::Frozen"))
+			}
 			stub := s.GetNode("large.go")
 			require.NotNil(t, stub)
 			require.Equal(t, true, stub.Meta["skipped_due_to_size"])

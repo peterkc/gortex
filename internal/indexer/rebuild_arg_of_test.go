@@ -11,6 +11,40 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
+func TestRebuildSelectedReceiptDoesNotOpenHeldFile(t *testing.T) {
+	ctx := t.Context()
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	build, err := store_pebble.OpenBuild(filepath.Join(t.TempDir(), "working"), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, build.Close()) })
+	require.NoError(t, build.IsolateRebuildLinks(ctx))
+	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+	held := rebuildInput{Path: "a.ts", Language: "typescript"}
+	linked := rebuildInput{Path: "z.go", Language: "go"}
+	job := rebuildFileStages{
+		inputs: []rebuildInput{held, linked}, recipes: map[string]rebuildDigest{"go": {1}, "typescript": {2}},
+	}
+	census := &rebuildExtractorCensus{admitted: 2, byPath: map[string]string{held.Path: "vue", linked.Path: "go"}}
+	// There is deliberately no receipt for a.ts. Its suffix would choose the
+	// supported path, but its checked effective extractor excludes it from this replay.
+	facts := store_pebble.ParseFacts{File: graph.FileMetaRow{FilePath: linked.Path}, EffectiveLanguage: "go"}
+	key := linked.parseKey(idx.rebuildExtractorRecipe(job.recipes[linked.Language], linked))
+	require.NoError(t, store.write(key, encodeRebuildTestParseFacts(t, facts)))
+	var paths []string
+	for f, err := range idx.rebuildSelectedDataflowReceipts(ctx, job, store, census, build) {
+		require.NoError(t, err)
+		paths = append(paths, f.File.FilePath)
+	}
+	require.Equal(t, []string{linked.Path}, paths)
+	for _, err := range idx.rebuildDataflowReceipts(ctx, job, store, census) {
+		require.ErrorIs(t, err, errParseEntryCorrupt)
+		require.ErrorContains(t, err, `reload "a.ts"`)
+		return
+	}
+	t.Fatal("the unfiltered replay must refuse the missing receipt")
+}
+
 func TestRebuildArgOfNativeOrder(t *testing.T) {
 	// Lock the oracle to complete param_of key order (rule b). The reverse
 	// native ingest must actually pick a different winner before it can prove

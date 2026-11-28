@@ -126,7 +126,7 @@ func TestRebuildFrozenWorkspaceMembership(t *testing.T) {
 					}
 					edge := graph.Edge{From: caller, To: pending, Kind: graph.EdgeImports, FilePath: caller, Line: 3}
 					build.AddEdge(&edge)
-					err = runRebuildFrozenMain(ctx, lease, digest, build, census, link, bound.SkipPlaceholderSources)
+					err = runRebuildFrozenMain(ctx, lease, digest, build, census, nil, link, bound.SkipPlaceholderSources)
 					if tc.denied {
 						require.ErrorIs(t, err, errRebuildResolverInputDenied)
 						require.ErrorContains(t, err, rebuildPnpmWorkspaceFile)
