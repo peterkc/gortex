@@ -129,37 +129,46 @@ func (s *Snapshot) FullNodesByIDsContext(ctx context.Context, ids []string) (map
 	if len(ids) > graph.ContractProjectionRowLimit {
 		return nil, graph.ErrContractProjectionLimit
 	}
-	nodes, err := s.GetNodesByIDsContext(ctx, ids)
-	if err != nil {
-		s.retainContractRead(err)
-		return nil, err
-	}
-	var types []string
-	for id, n := range nodes {
-		if n.ID != id {
-			err := invalid("full node ID differs from storage key")
-			s.retain(err)
+	nodes := make(map[string]*graph.Node, len(ids))
+	for id := range uniqueNonempty(ids) {
+		n, err := s.projectedContractNode(ctx, id)
+		if err != nil {
+			s.retainContractRead(err)
 			return nil, err
 		}
-		if n.Kind == graph.KindType || n.Kind == graph.KindInterface {
-			if _, exists := n.Meta["shape"]; exists {
-				err := invalid("shape must come from the split contract family")
-				s.retain(err)
-				return nil, err
-			}
-			types = append(types, id)
+		if n != nil {
+			nodes[id] = n
 		}
 	}
-	shapes, err := s.contractShapes(ctx, types)
+	if err := errors.Join(ctx.Err(), s.ReadError()); err != nil {
+		return nil, err
+	}
+	return nodes, nil
+}
+
+func (s *Snapshot) projectedContractNode(ctx context.Context, id string) (*graph.Node, error) {
+	n, err := s.GetNodeContext(ctx, id)
+	if err != nil || n == nil {
+		return n, err
+	}
+	if n.ID != id {
+		return nil, invalid("contract projection node differs from its key")
+	}
+	if n.Kind != graph.KindType && n.Kind != graph.KindInterface {
+		return n, nil
+	}
+	if _, exists := n.Meta["shape"]; exists {
+		return nil, invalid("shape must come from the split contract family")
+	}
+	shape, err := point(s, contractShapeKey(id), decodeContractShape)
 	if err != nil {
 		return nil, err
 	}
-	for id, shape := range shapes {
-		n := nodes[id] // the checked N decoder owns this fresh node and metadata
+	if shape != nil {
 		if n.Meta == nil {
 			n.Meta = make(map[string]any, 1)
 		}
 		n.Meta["shape"] = shape
 	}
-	return nodes, nil
+	return n, nil
 }

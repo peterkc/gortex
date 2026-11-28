@@ -67,8 +67,12 @@ func chargeContractProjection(budget *int) error {
 	return nil
 }
 
-func (s *Snapshot) projectedContractNode(ctx context.Context, id string) (*graph.Node, error) {
-	n, err := s.GetNodeContext(ctx, id)
+// Owner attribution needs only the stored source identity, not its shape.
+func (s *Snapshot) contractOwnerSource(ctx context.Context, id string) (*graph.Node, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	n, err := point(s, pendingNodeKey(id), decodeNodeLight)
 	if err == nil && n != nil && n.ID != id {
 		return nil, invalid("contract projection node differs from its key")
 	}
@@ -200,7 +204,7 @@ func (s *Snapshot) LayerContractRepoProjectionContext(ctx context.Context, repo 
 			return err
 		}
 		return s.visitContractOwnerEdges(ctx, func(e *graph.Edge) error {
-			source, err := s.projectedContractNode(ctx, e.From)
+			source, err := s.contractOwnerSource(ctx, e.From)
 			if err != nil {
 				return err
 			}
@@ -232,7 +236,7 @@ func (s *Snapshot) addContractOwnerRow(ctx context.Context, rows *[]graph.RepoEd
 	if err := chargeContractProjection(budget); err != nil {
 		return err
 	}
-	source, err := s.projectedContractNode(ctx, e.From)
+	source, err := s.contractOwnerSource(ctx, e.From)
 	if err != nil {
 		return err
 	}

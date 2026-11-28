@@ -82,6 +82,12 @@ func TestSnapshotContractProjectionMatchesNative(t *testing.T) {
 	require.Equal(t, nativeSaved.Meta, full[shapeNode.ID].Meta)
 	require.Equal(t, shapeNode, current.GetNode(shapeNode.ID))
 	require.Equal(t, pinned.GetNode(shapeNode.ID), current.GetNode(shapeNode.ID))
+	wantLayer, err := native.LayerContractIDProjectionContext(ctx, []string{shapeNode.ID})
+	require.NoError(t, err)
+	gotLayer, err := current.LayerContractIDProjectionContext(ctx, []string{shapeNode.ID})
+	require.NoError(t, err)
+	require.Equal(t, nativeSaved, wantLayer.SourceNodes[shapeNode.ID])
+	assertSnapshotContractProjection(t, wantLayer, gotLayer)
 
 	for _, tc := range []struct {
 		name string
@@ -91,13 +97,13 @@ func TestSnapshotContractProjectionMatchesNative(t *testing.T) {
 			return r.LoadContractRepoProjectionContext(ctx, repo)
 		}},
 		{"files and off-file owner", func(r graph.ContractFileProjectionReader, _ graph.ContractRepoProjectionReader) (graph.ContractFileProjection, error) {
-			return r.LoadContractFileProjectionContext(ctx, repo, []string{owner.FilePath})
+			return r.LoadContractFileProjectionContext(ctx, repo, []string{owner.FilePath, shapeNode.FilePath})
 		}},
 		{"recording file without nodes", func(r graph.ContractFileProjectionReader, _ graph.ContractRepoProjectionReader) (graph.ContractFileProjection, error) {
 			return r.LoadContractFileProjectionContext(ctx, repo, []string{recorded})
 		}},
 		{"IDs and shared SQL kind", func(r graph.ContractFileProjectionReader, _ graph.ContractRepoProjectionReader) (graph.ContractFileProjection, error) {
-			return r.LoadContractIDProjectionContext(ctx, []string{winner.ID, sqlSource.ID, sqlTarget.ID})
+			return r.LoadContractIDProjectionContext(ctx, []string{winner.ID, sqlSource.ID, sqlTarget.ID, shapeNode.ID})
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
