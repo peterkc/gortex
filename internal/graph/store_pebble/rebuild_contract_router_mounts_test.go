@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -100,4 +101,160 @@ func TestRebuildCheckedRouterMountsMatchNative(t *testing.T) {
 			}))
 		})
 	}
+}
+
+func TestRebuildCheckedRouterMountCensus(t *testing.T) {
+	const repo, workspace = "r", "w"
+	const rawID, joinedID = "http::GET::/items", "http::GET::/api/items"
+	const routeFile, censusFile, foreignFile = "Routes.java", "scan.ts", "foreign.ts"
+	for _, tc := range []struct {
+		name            string
+		enabled, census bool
+		wantReads       []string
+		wantID          string
+	}{
+		{name: "disabled registry with census", census: true, wantID: rawID},
+		{name: "enabled registry without census", enabled: true, wantID: rawID},
+		{name: "local route outside census", enabled: true, census: true, wantReads: []string{routeFile, censusFile}, wantID: joinedID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			b.AddNode(&graph.Node{ID: foreignFile, FilePath: foreignFile, Kind: graph.KindFile, RepoPrefix: "other", WorkspaceID: workspace})
+			if tc.census {
+				b.AddNode(&graph.Node{ID: censusFile, FilePath: censusFile, Kind: graph.KindFile, RepoPrefix: repo, WorkspaceID: workspace})
+			}
+			c := contracts.Contract{
+				ID: rawID, FilePath: routeFile, Line: 2, Type: contracts.ContractHTTP, Role: contracts.RoleProvider,
+				Meta: map[string]any{"framework": "spring", "method": "GET", "path": "/items"},
+			}
+			require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(r *RebuildContractRecords) error {
+				require.NoError(t, r.Add(RebuildContractRecord{Contract: c}))
+				if tc.enabled {
+					// This joined record enables the pass without needing mount evidence.
+					trigger := contracts.RewriteRouterContract(contracts.Contract{
+						ID: "http::GET::/enable", FilePath: routeFile, Line: 1, Type: contracts.ContractHTTP, Role: contracts.RoleProvider,
+						Meta: map[string]any{"framework": "express", "method": "GET", "path": "/enable"},
+					}, "/on")
+					require.NoError(t, r.Add(RebuildContractRecord{Contract: trigger}))
+				}
+				var reads []string
+				missing, err := r.JoinCheckedRouterPrefixes(repo, workspace, func(path string) (*contracts.RouterFacts, error) {
+					reads = append(reads, path)
+					if path == routeFile {
+						return &contracts.RouterFacts{LineCount: 2, Lines: []contracts.RouterLineFacts{{Line: 2, SpringPrefix: "/api"}}}, nil
+					}
+					return nil, nil // The local Spring route does not read this census answer.
+				}, nil)
+				require.NoError(t, err)
+				require.Empty(t, missing)
+				require.Equal(t, tc.wantReads, reads)
+				var got []contracts.Contract
+				require.NoError(t, r.VisitCurrentRepresentatives(func(item RebuildContractRecord) error {
+					if item.Meta["framework"] == "spring" {
+						got = append(got, item.Contract)
+					}
+					return nil
+				}))
+				require.Len(t, got, 1)
+				require.Equal(t, tc.wantID, got[0].ID)
+				return nil
+			}))
+		})
+	}
+}
+
+func TestRebuildCheckedRouterMountRules(t *testing.T) {
+	const routeFile = "route.py"
+	c := contracts.Contract{
+		ID: "http::GET::/items", FilePath: routeFile, Line: 1, Type: contracts.ContractHTTP, Role: contracts.RoleProvider,
+		Meta: map[string]any{"framework": "fastapi/flask", "method": "GET", "path": "/items"},
+	}
+	for _, tc := range []struct {
+		name, want string
+		first      contracts.RouterFacts
+		last       contracts.RouterFacts
+	}{
+		{
+			name: "empty self prefix fills", want: "http::GET::/api/items",
+			first: contracts.RouterFacts{SelfPrefix: map[string]string{"child": ""}},
+			last:  contracts.RouterFacts{SelfPrefix: map[string]string{"child": "/api"}},
+		},
+		{
+			name: "two nonempty prefixes conflict", want: c.ID,
+			first: contracts.RouterFacts{SelfPrefix: map[string]string{"child": "/a"}},
+			last:  contracts.RouterFacts{SelfPrefix: map[string]string{"child": "/b"}},
+		},
+		{
+			name: "first parent and native return order", want: "http::GET::/foo/a/items",
+			first: contracts.RouterFacts{
+				MountPrefix: map[string]string{"child": "/a", "parent": "", "root": "/foo / "},
+				MountParent: map[string]string{"child": "parent", "parent": "root"},
+			},
+			last: contracts.RouterFacts{MountParent: map[string]string{"child": "other"}},
+		},
+		{
+			name: "cycle retains parent self", want: "http::GET::/local/top/parent/a/local/items",
+			first: contracts.RouterFacts{
+				SelfPrefix:  map[string]string{"child": "/local", "parent": "/parent"},
+				MountPrefix: map[string]string{"child": "/a", "parent": "/top"},
+				MountParent: map[string]string{"child": "parent", "parent": "child"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := map[string]contracts.RouterFacts{
+				"a.py":    tc.first,
+				"z.py":    tc.last,
+				routeFile: {LineCount: 1, Lines: []contracts.RouterLineFacts{{Line: 1, Receivers: map[string]string{"fastapi/flask": "child"}}}},
+			}
+			reg := contracts.NewRegistry()
+			reg.Add(c)
+			contracts.JoinRouterPrefixFacts(reg, facts)
+			require.Equal(t, []string{tc.want}, reg.AllIDs())
+			b := newBuild(t, FullProfile)
+			for path := range facts {
+				b.AddNode(&graph.Node{ID: path, FilePath: path, Kind: graph.KindFile})
+			}
+			require.NoError(t, b.WithRebuildContractRecords(t.Context(), func(r *RebuildContractRecords) error {
+				require.NoError(t, r.Add(RebuildContractRecord{Contract: c}))
+				missing, err := r.JoinCheckedRouterPrefixes("", "", func(path string) (*contracts.RouterFacts, error) {
+					f, ok := facts[path]
+					require.True(t, ok, path)
+					return &f, nil
+				}, nil)
+				require.NoError(t, err)
+				require.Empty(t, missing)
+				var got []contracts.Contract
+				require.NoError(t, r.VisitCurrentRepresentatives(func(item RebuildContractRecord) error {
+					got = append(got, item.Contract)
+					return nil
+				}))
+				require.Equal(t, reg.ByID(tc.want), got)
+				return nil
+			}))
+		})
+	}
+}
+
+func TestRebuildRouterMountChainBounds(t *testing.T) {
+	ctx := t.Context()
+	require.NoError(t, checkRebuildRouterMountChain(ctx, goldBufferBytes))
+	err := checkRebuildRouterMountChain(ctx, goldBufferBytes+1)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.ErrorContains(t, err, "router mount chain")
+
+	// Enter the real route lookup with a cancelled chain context, rather
+	// than refusing earlier in JoinCheckedRouterPrefixes's iterator.
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	b := newBuild(t, FullProfile)
+	m := rebuildRouterMounts{records: &RebuildContractRecords{build: b, ctx: cancelled}}
+	c := contracts.Contract{Line: 1, Meta: map[string]any{"framework": "express"}}
+	f := contracts.RouterFacts{
+		LineCount: 1,
+		Lines:     []contracts.RouterLineFacts{{Line: 1, Receivers: map[string]string{"express": "app"}}},
+	}
+	got, err := m.route(c, f)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, got)
 }

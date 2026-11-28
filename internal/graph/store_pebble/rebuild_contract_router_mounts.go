@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -150,19 +151,27 @@ func (m rebuildRouterMounts) read(column byte, key string) (string, bool, error)
 func (m rebuildRouterMounts) merge(f *contracts.RouterFacts) error {
 	for _, column := range []struct {
 		code byte
+		kind contracts.RouterFactKind
 		rows map[string]string
-	}{{'s', f.SelfPrefix}, {'m', f.MountPrefix}, {'a', f.MountParent}, {'n', f.ModulePrefix}, {'c', f.ControllerModule}} {
+	}{
+		{'s', contracts.RouterSelfPrefix, f.SelfPrefix},
+		{'m', contracts.RouterMountPrefix, f.MountPrefix},
+		{'a', contracts.RouterMountParent, f.MountParent},
+		{'n', contracts.RouterModulePrefix, f.ModulePrefix},
+		{'c', contracts.RouterControllerModule, f.ControllerModule},
+	} {
 		code := column.code
 		for key, value := range column.rows {
 			prior, found, err := m.read(code, key)
 			if err != nil {
 				return err
 			}
-			if !found || code == 'n' || code == 's' && prior == "" && value != "" {
+			write, conflict := contracts.RouterFactMerge(column.kind, prior, found, value)
+			if write {
 				if err := m.put(code, key, []byte(value)); err != nil {
 					return err
 				}
-			} else if value != prior && (code == 'm' || code == 's' && value != "" && prior != "") {
+			} else if conflict {
 				if err := m.put(code-'a'+'A', key, nil); err != nil {
 					return err
 				}
@@ -195,7 +204,28 @@ func (m rebuildRouterMounts) route(c contracts.Contract, facts contracts.RouterF
 	value := contracts.RouterPrefixForRoute(c, facts, func(key string) string {
 		return unambiguous('s', key)
 	}, func(key string) string {
-		return m.chain(key, unambiguous, &readErr)
+		if readErr != nil {
+			return ""
+		}
+		var prefix string
+		prefix, readErr = contracts.RouterMountChain(key, func(name string) string {
+			return unambiguous('m', name)
+		}, func(name string) string {
+			return unambiguous('s', name)
+		}, func(name string) (string, bool) {
+			if readErr != nil {
+				return "", false
+			}
+			parent, found, err := m.read('a', name)
+			readErr = err
+			return parent, found
+		}, func(prefix string) error {
+			if readErr != nil {
+				return readErr
+			}
+			return checkRebuildRouterMountChain(m.records.ctx, len(prefix))
+		})
+		return prefix
 	}, func(key string) string {
 		module, found, err := m.read('c', key)
 		if err != nil {
@@ -209,49 +239,12 @@ func (m rebuildRouterMounts) route(c contracts.Contract, facts contracts.RouterF
 	return value, readErr
 }
 
-func (m rebuildRouterMounts) chain(key string, value func(byte, string) string, errp *error) string {
-	r := m.records
-	prefix := append(rebuildContractRecordKey('j'), 'v')
-	defer func() {
-		*errp = errors.Join(*errp, r.build.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
-	}()
-	var suffix string
-	for *errp == nil {
-		if err := r.ctx.Err(); err != nil {
-			*errp = err
-			return ""
-		}
-		_, seen, err := m.read('v', key)
-		if err != nil {
-			*errp = err
-			return ""
-		}
-		if seen {
-			return suffix
-		}
-		if err := m.put('v', key, nil); err != nil {
-			*errp = err
-			return ""
-		}
-		mount := value('m', key)
-		parent, found, err := m.read('a', key)
-		if err != nil {
-			*errp = errors.Join(*errp, err)
-			return ""
-		}
-		self := ""
-		if found {
-			self = value('s', parent)
-		}
-		suffix = contracts.PrependRouterMount(self, mount, suffix)
-		if len(suffix) > goldBufferBytes {
-			*errp = fmt.Errorf("%w: router mount chain", ErrRebuildLinkInputSize)
-			return ""
-		}
-		if !found {
-			return suffix
-		}
-		key = parent
+func checkRebuildRouterMountChain(ctx context.Context, prefixBytes int) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return ""
+	if prefixBytes > goldBufferBytes {
+		return fmt.Errorf("%w: router mount chain", ErrRebuildLinkInputSize)
+	}
+	return nil
 }
