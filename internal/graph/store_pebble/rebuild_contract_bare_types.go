@@ -18,9 +18,13 @@ func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 	defer func() {
 		err = errors.Join(err, r.build.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync))
 	}()
-	var opened bool
+	var opened, uncertain bool
 	fields := [...]string{"request_type", "response_type"}
 	if err := r.VisitRepresentatives(func(item RebuildContractRecord) error {
+		if item.BodyUnproved {
+			uncertain = true
+			return nil
+		}
 		for _, field := range fields {
 			name, _ := item.Meta[field].(string)
 			if name == "" || strings.Contains(name, "::") {
@@ -32,11 +36,14 @@ func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 			opened = true
 		}
 		return nil
-	}); err != nil || !opened {
+	}); err != nil || (!opened && !uncertain) {
 		return err
 	}
 	return r.VisitIDs(func(id string) error {
 		return r.UpdateByID(id, func(item *RebuildContractRecord) (bool, error) {
+			if item.BodyUnproved {
+				return false, nil
+			}
 			// Native revisits the same Meta through ByID, ByRepo, ByFile
 			// and, for a symbol-bound record, BySymbol. A full ID stops
 			// after one upgrade; a short ID can still be an opened name.
@@ -50,6 +57,16 @@ func (r *RebuildContractRecords) UpgradeBareTypeRefs() (err error) {
 					name, _ := item.Meta[field].(string)
 					if name == "" || strings.Contains(name, "::") {
 						break
+					}
+					if uncertain {
+						state, err := rebuildScratchState(r.build.pending, rebuildContractRecordKey('t', name), "invalid contract bare type key")
+						if err != nil {
+							return false, err
+						}
+						if state == 0 {
+							item.BodyUnproved = true
+							return true, nil
+						}
 					}
 					value, err := r.bareTypeID(name, item.RepoPrefix)
 					if err != nil {

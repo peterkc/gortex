@@ -77,3 +77,45 @@ func TestRebuildContractBareTypeRefsMatchNativeBuckets(t *testing.T) {
 		return nil
 	}))
 }
+
+func TestRebuildContractBareTypeUnprovedRepresentatives(t *testing.T) {
+	ctx := t.Context()
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	for _, name := range []string{"Stale", "Proved"} {
+		b.AddNode(&graph.Node{ID: "r/type.go::" + name, Name: name, Kind: graph.KindType})
+	}
+	require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+		for i, item := range []struct {
+			symbol, name string
+			unproved     bool
+		}{
+			{"S", "Stale", true},
+			{"S", "Stale", false},
+			{"S", "Proved", false},
+			{"T", "Proved", false},
+		} {
+			c := contracts.Contract{ID: "http::GET::/route", Role: contracts.RoleProvider, Type: contracts.ContractHTTP,
+				RepoPrefix: "r", FilePath: "r/route.go", SymbolID: item.symbol, Line: i + 1,
+				Meta: map[string]any{"request_type": item.name}}
+			require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c, BodyUnproved: item.unproved}))
+		}
+		require.NoError(t, records.UpgradeBareTypeRefs())
+		var got []store_pebble.RebuildContractRecord
+		require.NoError(t, records.VisitByID("http::GET::/route", func(item store_pebble.RebuildContractRecord) error {
+			got = append(got, item)
+			return nil
+		}))
+		require.Len(t, got, 4)
+		for i := range 2 {
+			require.True(t, got[i].BodyUnproved)
+			require.Equal(t, "Stale", got[i].Meta["request_type"])
+		}
+		for i := 2; i < 4; i++ {
+			require.False(t, got[i].BodyUnproved)
+			require.Equal(t, "r/type.go::Proved", got[i].Meta["request_type"])
+		}
+		return nil
+	}))
+}
