@@ -210,11 +210,9 @@ func rebuildExternalCallKind(kind graph.EdgeKind) bool {
 	return kind == graph.EdgeCalls || kind == graph.EdgeReferences
 }
 
-// Only terminals and unresolved alternatives need a central edge payload.
 // This is a key filter, not the native terminal parser or stdlib policy.
-func rebuildExternalCallTarget(to string) bool {
-	return !strings.HasPrefix(to, "external-call::") && (strings.HasPrefix(to, "dep::") ||
-		graph.IsStdlibStub(to) || strings.HasPrefix(to, "external::") || graph.IsUnresolvedTarget(to))
+func rebuildExternalCallTerminal(to string) bool {
+	return strings.HasPrefix(to, "dep::") || graph.IsStdlibStub(to) || strings.HasPrefix(to, "external::")
 }
 
 // IsRebuildExternalCallRetained reports the extractor languages retained by the link projection.
@@ -309,11 +307,12 @@ func (p *rebuildExternalCallPass) receipts(ctx context.Context, receipts iter.Se
 					return err
 				}
 			}
-			if !rebuildExternalCallTarget(e.To) && !strings.HasPrefix(e.To, "external-call::") {
+			if !rebuildExternalCallTerminal(e.To) && (!deferred || !graph.IsUnresolvedTarget(e.To)) {
 				continue
 			}
-			// Store first raw inputs even when live: a deferred receipt can
-			// have reached a different, non-terminal native successor.
+			// Terminal inputs may supply the first duplicate's winning payload.
+			// Only deferred unresolved receipts can vote via Maybe, including
+			// those whose live successor is already non-terminal.
 			h := append(rebuildExternalCallColumn('h'), key...)
 			value := appendKeyString(nil, lang)
 			if len(h)+len(value)+len(raw) <= rebuildExternalCallRowBytes {
@@ -522,6 +521,11 @@ func (p *rebuildExternalCallPass) live(ctx context.Context, view RebuildView) er
 			if !rebuildExternalCallKind(id.Kind) {
 				continue
 			}
+			// receiptEntrants follows raw recorder keys independently, including
+			// deferred receipts moved to non-terminal successors.
+			if !strings.HasPrefix(id.To, "external-call::") && !rebuildExternalCallTerminal(id.To) && !graph.IsUnresolvedTarget(id.To) {
+				continue
+			}
 			key := it.Key()
 			custody, exact, err := p.custody(key)
 			if err != nil {
@@ -534,17 +538,6 @@ func (p *rebuildExternalCallPass) live(ctx context.Context, view RebuildView) er
 			deferred, err := pendingGet(p.b.pending, append(rebuildExternalCallColumn('u'), rawKey...), copyValue)
 			if err != nil {
 				return err
-			}
-			stationary := strings.HasPrefix(id.To, "external-call::")
-			// Read extractor authority before testing the live target. A raw
-			// deferred call can already point at a non-terminal main result.
-			if !stationary && !rebuildExternalCallTarget(id.To) && len(deferred) == 0 {
-				continue
-			}
-			// Non-terminal moved inputs are handled via their raw receipt in
-			// receiptEntrants; don't decode a live row that cannot vote here.
-			if !stationary && !rebuildExternalCallTarget(id.To) && !bytes.Equal(key, rawKey) {
-				continue
 			}
 			value, err := it.ValueAndErr()
 			if err != nil {

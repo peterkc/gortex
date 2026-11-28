@@ -170,6 +170,7 @@ func TestRebuildExternalCallDeferredMovedReceipt(t *testing.T) {
 	live := *raw
 	live.To = "ordinary"
 	require.NoError(t, b.ApplyLinkReindexes(t.Context(), []graph.EdgeReindex{{Edge: &live, OldTo: raw.To}}))
+	requireRebuildLinkCustody(t, b, &live, rebuildEdgeCustody{raw: pendingEdgeKey(raw)})
 	receipts := testExternalCallReceipts(
 		testExternalCallFacts(raw.FilePath, "custom", []*graph.Node{deferred}, raw),
 		testExternalCallFacts(call.FilePath, "go", []*graph.Node{retained}, call),
@@ -350,6 +351,157 @@ func TestRebuildExternalCallNonVotingRows(t *testing.T) {
 			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
 		})
 	}
+}
+
+func TestRebuildExternalCallRefusalInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		want  string
+		large bool
+	}{
+		{"unproved incumbent", "unproved retained external-call incumbent", false},
+		{"first duplicate oversized", "external-call duplicate receipt", true},
+		{"absent receipt oversized", "external-call receipt input", true},
+		{"voting caller oversized", "external-call caller input", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			n := &graph.Node{ID: "caller", Language: "go"}
+			e := &graph.Edge{From: n.ID, To: "dep::acme.tools::A", FilePath: "m.go", Kind: graph.EdgeCalls}
+			facts := testExternalCallFacts(e.FilePath, n.Language, []*graph.Node{n}, e)
+			switch tc.name {
+			case "unproved incumbent":
+				e.To = testExternalCallPackage
+				facts.Edges = nil
+				b.AddBatch(facts.Nodes, []*graph.Edge{e})
+			case "first duplicate oversized":
+				first := *e
+				first.Meta = map[string]any{"padding": strings.Repeat("x", rebuildExternalCallRowBytes)}
+				facts.Edges = []*graph.Edge{&first, e}
+				b.AddBatch(facts.Nodes, facts.Edges)
+			case "absent receipt oversized":
+				e.Meta = map[string]any{"padding": strings.Repeat("x", rebuildExternalCallRowBytes)}
+				b.AddNode(n)
+			case "voting caller oversized":
+				n.Meta = map[string]any{"padding": strings.Repeat("x", rebuildExternalCallRowBytes)}
+				b.AddBatch(facts.Nodes, facts.Edges)
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			count, err := b.RebuildExternalCallSynthesis(t.Context(), testExternalCallReceipts(facts), testExternalCallRules())
+			require.ErrorIs(t, err, ErrRebuildExternalCallSynthesis)
+			if tc.large {
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+			}
+			require.ErrorContains(t, err, tc.want)
+			require.Zero(t, count)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildExternalCallLiveKeyFilter(t *testing.T) {
+	for _, to := range []string{"ordinary", "dep::acme.tools::A"} {
+		t.Run(to, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			n := &graph.Node{ID: "caller", Language: "go"}
+			e := &graph.Edge{From: n.ID, To: to, FilePath: "m.go", Kind: graph.EdgeCalls}
+			b.AddBatch([]*graph.Node{n}, []*graph.Edge{e})
+			// A malformed stamp makes a custody read observable. Only the
+			// terminal key belongs to the central live election.
+			require.NoError(t, b.pending.Set(rebuildLinkRecorderKey(pendingEdgeKey(e)), []byte{0}, pebble.NoSync))
+			before := rebuildFrameworkCustodyRows(t, b)
+			facts := testExternalCallFacts(e.FilePath, n.Language, []*graph.Node{n}, e)
+			count, err := b.RebuildExternalCallSynthesis(t.Context(), testExternalCallReceipts(facts), testExternalCallRules())
+			if to == "ordinary" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, ErrRebuildExternalCallSynthesis)
+				require.ErrorContains(t, err, "edge custody format")
+			}
+			require.Zero(t, count)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
+}
+
+func TestRebuildExternalCallReceiptPayloadFilter(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	p := rebuildExternalCallPass{b: b, rules: testExternalCallRules()}
+	for _, tc := range []struct {
+		name string
+		lang string
+		to   string
+		want bool
+	}{
+		{"Go unresolved", "go", "unresolved::maybe", false},
+		{"JS unresolved", "javascript", "unresolved::maybe", false},
+		{"TS unresolved", "typescript", "unresolved::maybe", false},
+		{"no extractor", "", "unresolved::maybe", false},
+		{"ordinary deferred", "custom", "ordinary", false},
+		{"ordinary retained", "go", "ordinary", false},
+		{"stationary package", "go", testExternalCallPackage, false},
+		{"deferred unresolved", "custom", "unresolved::maybe", true},
+		{"retained terminal", "go", "dep::acme.tools::A", true},
+		{"deferred terminal", "custom", "external::pkg", true},
+		{"stdlib terminal", "typescript", "repo::stdlib::pkg::A", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &graph.Edge{From: tc.name, To: tc.to, FilePath: tc.lang + ".source", Kind: graph.EdgeCalls}
+			last := *e
+			last.Meta = map[string]any{"marker": "last"}
+			facts := testExternalCallFacts(e.FilePath, tc.lang, nil, e, &last)
+			require.NoError(t, p.receipts(t.Context(), testExternalCallReceipts(facts)))
+			key := pendingEdgeKey(e)
+			for _, column := range []byte{'r', 'j'} {
+				present, err := p.present(append(rebuildExternalCallColumn(column), key...))
+				require.NoError(t, err)
+				require.True(t, present, "receipt identity and duplicate evidence must survive")
+			}
+			h, err := pendingGet(b.pending, append(rebuildExternalCallColumn('h'), key...), copyValue)
+			require.NoError(t, err)
+			if !tc.want {
+				require.Nil(t, h)
+				return
+			}
+			lang, raw, err := readKeyString(h)
+			require.NoError(t, err)
+			require.Equal(t, tc.lang, lang)
+			first, err := decodeEdge(raw)
+			require.NoError(t, err)
+			require.Equal(t, e, first, "must keep the first payload, not the last")
+		})
+	}
+}
+
+func TestRebuildExternalCallDuplicateOutputProof(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	n := &graph.Node{ID: "caller", Language: "go"}
+	first := &graph.Edge{
+		From: n.ID, To: "dep::acme.tools::A", FilePath: "m.go", Kind: graph.EdgeCalls,
+		Meta: map[string]any{"marker": "keep", "go_import": "first"},
+	}
+	last := *first
+	last.Meta = map[string]any{"marker": "keep", "go_import": "last"}
+	facts := testExternalCallFacts(first.FilePath, n.Language, []*graph.Node{n}, first, &last)
+	b.AddBatch(facts.Nodes, facts.Edges)
+	rules := testExternalCallRules()
+	rebind := rules.Rebind
+	rules.Rebind = func(e *graph.Edge, to, lang string) graph.EdgeReindex {
+		delete(e.Meta, "go_import")
+		return rebind(e, to, lang)
+	}
+	count, err := b.RebuildExternalCallSynthesis(t.Context(), testExternalCallReceipts(facts), rules)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, count)
+	want := *first
+	want.To = testExternalCallPackage
+	want.Meta = map[string]any{"marker": "keep"}
+	stored, err := b.pendingEdge(pendingEdgeKey(&want))
+	require.NoError(t, err)
+	require.Equal(t, &want, stored)
+	gone, err := b.pendingEdge(pendingEdgeKey(first))
+	require.NoError(t, err)
+	require.Nil(t, gone)
 }
 
 func TestRebuildExternalCallChunkCaller(t *testing.T) {
