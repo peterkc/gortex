@@ -136,3 +136,68 @@ func TestRebuildContractGraphRowsNativeOwners(t *testing.T) {
 	}
 	require.ElementsMatch(t, wantEdges, actual)
 }
+
+func TestRebuildContractGraphRowsNativeRepoOwners(t *testing.T) {
+	const path, first, last, foreign, symbol = "shared.go", "b-file", "z-file", "a-file", "shared.go::Handle"
+	ctx := t.Context()
+	file := func(id, repo string) *graph.Node {
+		return &graph.Node{ID: id, FilePath: path, RepoPrefix: repo, Kind: graph.KindFile, Language: "go"}
+	}
+	nodes := []*graph.Node{
+		file(last, "one"), file(foreign, "two"), file(first, "one"),
+		{ID: symbol, FilePath: path, RepoPrefix: "two", Kind: graph.KindFunction, Language: "go"},
+	}
+	native := newFTSStore(t)
+	require.NoError(t, native.AddBatchChecked(nodes, nil))
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	b.AddBatch(nodes, nil)
+	record := func(id, repo, source string) contracts.Contract {
+		return contracts.Contract{ID: "env::" + id, Type: contracts.ContractEnv, Role: contracts.RoleConsumer,
+			FilePath: path, RepoPrefix: repo, SymbolID: source}
+	}
+	records := []contracts.Contract{
+		record("A", "one", symbol), // the foreign symbol must not fall back to the local file
+		record("B", "one", ""),
+		record("C", "two", ""),
+		record("D", "two", symbol),
+		record("E", "absent", ""),
+	}
+	wantNodes, wantEdges, missing := contractGraphRows(native, records, true)
+	require.Equal(t, 2, missing)
+	require.Len(t, wantEdges, 3)
+	require.Equal(t, first, wantEdges[0].From)
+	require.Equal(t, foreign, wantEdges[1].From)
+	require.Equal(t, symbol, wantEdges[2].From)
+	stream := func(yield func(contracts.Contract, error) bool) {
+		for _, c := range records {
+			if !yield(c, nil) {
+				return
+			}
+		}
+	}
+	var gotNodes []*graph.Node
+	var gotEdges []*graph.Edge
+	visit := func(_ contracts.Contract, n *graph.Node, edges []*graph.Edge) error {
+		gotNodes = append(gotNodes, n)
+		gotEdges = append(gotEdges, edges...)
+		return nil
+	}
+	view := b.RebuildView()
+	require.ErrorIs(t, visitRebuildContractGraphRows(ctx, view, nil, visit), graph.ErrContractProjectionStale)
+	require.Empty(t, gotNodes)
+	require.Empty(t, gotEdges)
+	require.NoError(t, visitRebuildContractGraphRows(ctx, view, stream, visit))
+	require.Equal(t, wantNodes, gotNodes)
+	require.Equal(t, wantEdges, gotEdges)
+
+	var shapeRefusals int
+	reader := rebuildContractReceiptReader{}
+	for batch, err := range reader.shapeBatches(ctx, view, nil) {
+		shapeRefusals++
+		require.Zero(t, batch)
+		require.ErrorIs(t, err, graph.ErrContractProjectionStale)
+	}
+	require.Equal(t, 1, shapeRefusals)
+}

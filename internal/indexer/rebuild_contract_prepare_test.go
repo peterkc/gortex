@@ -13,7 +13,7 @@ import (
 
 func TestPrepareRebuildContractsChecksActualSeal(t *testing.T) {
 	const path, contractID, privateID, seedID, methodID = "a.go", "env::KEPT", "env::PRIVATE", "dep::example.org/seed", "a.go::Method"
-	for _, mode := range []string{"equal", "private mismatch", "unemitted selected ID", "retained extra seed", "wrong Call status", "legacy catalog"} {
+	for _, mode := range []string{"equal", "private mismatch", "missing selection", "unemitted selected ID", "retained extra seed", "wrong Call status", "legacy catalog"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := t.Context()
 			b, err := store_pebble.OpenBuild(filepath.Join(t.TempDir(), "working"), store_pebble.FullProfile)
@@ -83,8 +83,12 @@ func TestPrepareRebuildContractsChecksActualSeal(t *testing.T) {
 				consumed = true
 				yield(batch, nil)
 			}
+			selection := orderedEarlyContractIDs(selected)
+			if mode == "missing selection" {
+				selection = nil
+			}
 			tables, err := prepareRebuildContracts(ctx, b, t.TempDir(), retained, early, orderedEarlyContractIDs(complete),
-				orderedEarlyContractIDs(selected), batches, store_pebble.ContractCoverage{OmittedRecords: 1}, func(string) string { return "go" })
+				selection, batches, store_pebble.ContractCoverage{OmittedRecords: 1}, func(string) string { return "go" })
 			switch mode {
 			case "equal":
 				require.NoError(t, err)
@@ -98,6 +102,10 @@ func TestPrepareRebuildContractsChecksActualSeal(t *testing.T) {
 				require.ErrorIs(t, err, errRebuildContractIDs)
 				require.ErrorContains(t, err, "compare complete private contract IDs")
 				require.False(t, consumed, "the stage writer must not start on a private mismatch")
+			case "missing selection":
+				require.ErrorIs(t, err, errRebuildContractIDs)
+				require.ErrorContains(t, err, "missing D83 selection")
+				require.False(t, consumed, "missing selection must not start the stage writer")
 			case "unemitted selected ID":
 				require.ErrorIs(t, err, errRebuildContractIDs)
 				require.ErrorContains(t, err, `missing id "env::PRIVATE"`)
