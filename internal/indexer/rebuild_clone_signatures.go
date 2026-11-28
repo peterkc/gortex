@@ -14,54 +14,10 @@ import (
 // the possible native writers left out of the private build.
 type rebuildClonePredecessors struct {
 	namespace *rebuildResolverNamespace
-	modules   bool
-	isolated  bool // F excludes the six unreplayed root module writers, not workspace membership.
 	contracts rebuildEarlyContractIDs
-	// Set only from the file-graph writer for the same immutable receipts.
-	// Standalone clone callers still need the raw collision census.
+	// FileGraph proves raw claims over all receipts before D72 F selects
+	// the clone cohort. Standalone callers still need a raw claim census.
 	fileClaims *store_pebble.RebuildSharedClaimStats
-}
-
-func (p rebuildClonePredecessors) mayReplaceWithRootManifest(id string) bool {
-	if !p.modules || p.isolated {
-		return false
-	}
-	// These six roots from native rootManifests are not replayed. The
-	// worker uses unprefixed graph keys. An opaque name is not absence.
-	switch id {
-	case "pyproject.toml", "requirements.txt", "Cargo.toml", "pom.xml", "composer.json", "composer.lock":
-		return p.mayReadRoot(id)
-	default:
-		return false
-	}
-}
-
-// Omitted module specs are not frozen. A possible manifest read is enough
-// to keep its ecosystem's ID space in scope, even without an exact match.
-func (p rebuildClonePredecessors) mayReplaceWithRootModule(id string) bool {
-	if !p.modules || p.isolated {
-		return false
-	}
-	module, ok := strings.CutPrefix(id, "module::")
-	if !ok {
-		return false
-	}
-	ecosystem, name, ok := strings.Cut(module, ":")
-	if !ok || name == "" {
-		return false
-	}
-	switch ecosystem {
-	case "pypi":
-		return p.mayReadRoot("pyproject.toml") || p.mayReadRoot("requirements.txt")
-	case "cargo":
-		return p.mayReadRoot("Cargo.toml")
-	case "maven":
-		return p.mayReadRoot("pom.xml")
-	case "composer":
-		return p.mayReadRoot("composer.json") || p.mayReadRoot("composer.lock")
-	default:
-		return false
-	}
 }
 
 func (p rebuildClonePredecessors) mayReadRoot(path string) bool {
@@ -140,19 +96,11 @@ func visitRebuildCloneSignatures(ctx context.Context, build *store_pebble.BuildS
 ) (rebuildCloneSignatureCounts, error) {
 	cms := clones.NewCMS(65536, 4)
 	corpus, signed := 0, 0
-	var affected, rootManifests, rootModules, contracts, goModules, processes uint64
+	var affected, contracts, goModules, processes uint64
 	collect := func(row rebuildCloneInput) error {
 		// The checked cohort contains each ID once. Count possible
 		// replacements before the second pass banks or emits any row.
-		manifest := predecessors.mayReplaceWithRootManifest(row.ID)
-		module := predecessors.mayReplaceWithRootModule(row.ID)
 		contract := predecessors.mayReplaceWithContract(row.ID)
-		if manifest {
-			rootManifests++
-		}
-		if module {
-			rootModules++
-		}
 		if contract {
 			contracts++
 		}
@@ -164,7 +112,7 @@ func visitRebuildCloneSignatures(ctx context.Context, build *store_pebble.BuildS
 		if process {
 			processes++
 		}
-		if manifest || module || contract || goModule || process {
+		if contract || goModule || process {
 			affected++
 			return nil
 		}
@@ -183,7 +131,7 @@ func visitRebuildCloneSignatures(ctx context.Context, build *store_pebble.BuildS
 	if prior := predecessors.fileClaims; prior != nil {
 		// None of the accepted shared families is callable, and the early
 		// writer rejects contested shingle sidecars. Still verify the live
-		// clone cohort and every retained shingle against the same receipts.
+		// clone cohort and every retained shingle against the selected receipts.
 		claimStats = prior.RebuildShadowedIDStats
 		err = visitRebuildCloneInputs(ctx, build.RebuildView(), receipts, collect)
 	} else {
@@ -193,8 +141,10 @@ func visitRebuildCloneSignatures(ctx context.Context, build *store_pebble.BuildS
 		return rebuildCloneSignatureCounts{}, err
 	}
 	if affected != 0 {
-		return rebuildCloneSignatureCounts{}, fmt.Errorf("clone predecessor root_manifest=%d root_module=%d contract=%d go_module=%d process=%d: %w",
-			rootManifests, rootModules, contracts, goModules, processes,
+		// Go/JS/TS callable IDs are file-qualified, unlike bare manifest IDs.
+		// Keep the two root fields as zero, as on the old worker path.
+		return rebuildCloneSignatureCounts{}, fmt.Errorf("clone predecessor root_manifest=0 root_module=0 contract=%d go_module=%d process=%d: %w",
+			contracts, goModules, processes,
 			&store_pebble.RebuildUnknownProvenanceError{Count: affected})
 	}
 	counts := rebuildCloneSignatureCounts{Claims: claimStats}

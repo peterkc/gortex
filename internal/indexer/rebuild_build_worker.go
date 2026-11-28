@@ -577,7 +577,7 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 			return err
 		}
 		predecessors := rebuildClonePredecessors{
-			namespace: namespace, modules: cfg.Coverage.IsEnabled("modules"), isolated: true, fileClaims: &counts.claims, contracts: earlyIDs,
+			namespace: namespace, fileClaims: &counts.claims, contracts: earlyIDs,
 		}
 		// Native cold detection still banks pre-signed callables when raw
 		// clone extraction is disabled.

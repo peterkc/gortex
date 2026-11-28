@@ -18,9 +18,9 @@ type rebuildCloneInput struct {
 	Signed                 *clones.Signature
 }
 
-// visitRebuildCloneInputs checks the complete clone cohort on a quiet build.
-// The checked receipt iterator is in literal path order. Use all languages:
-// even a deferred body can change the CMS filter or a whole LSH bucket.
+// visitRebuildCloneInputs checks the clone cohort on a quiet build.
+// The checked receipt iterator is in literal path order. On exact checkouts
+// D72 F excludes deferred bodies before they can affect the CMS or LSH buckets.
 // The caller may stage results, but must discard them on any error.
 func visitRebuildCloneInputs(ctx context.Context, view store_pebble.RebuildView,
 	receipts iter.Seq2[store_pebble.ParseFacts, error], yield func(rebuildCloneInput) error,

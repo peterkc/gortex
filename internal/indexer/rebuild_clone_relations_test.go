@@ -138,11 +138,7 @@ func TestRebuildCloneRelationsNativeParity(t *testing.T) {
 	t.Run("apply", func(t *testing.T) {
 		build, _ := openRebuildTestFileStore(t)
 		receipts := seedRebuildCloneInputReceipts(t, build, facts...)
-		var ns rebuildResolverNamespace
-		require.NoError(t, ns.add(rebuildNamespaceRow{key: "requirements.txt", kind: rebuildNamespaceRegular}))
-		require.NoError(t, ns.add(rebuildNamespaceRow{key: ".", kind: rebuildNamespaceCloseExact}))
-		require.NoError(t, ns.freeze())
-		stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, rebuildClonePredecessors{namespace: &ns, modules: true}, threshold)
+		stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, rebuildClonePredecessors{}, threshold)
 		require.NoError(t, err)
 		require.Equal(t, wantStats, stats)
 		view := build.RebuildView()
@@ -161,58 +157,6 @@ func TestRebuildCloneRelationsNativeParity(t *testing.T) {
 	})
 }
 
-func TestRebuildCloneRootManifestPredecessors(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		kind         rebuildNamespaceKind
-		modules      bool
-		composerLock bool
-		want         uint64
-	}{
-		{name: "regular", kind: rebuildNamespaceRegular, modules: true, want: 1},
-		{name: "two_ids", kind: rebuildNamespaceRegular, modules: true, composerLock: true, want: 2},
-		{name: "opaque", kind: rebuildNamespaceUnsupported, modules: true, want: 1},
-		{name: "absence", modules: true},
-		{name: "directory", kind: rebuildNamespaceDirectory, modules: true},
-		{name: "modules_off", kind: rebuildNamespaceRegular},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var ns rebuildResolverNamespace
-			if tc.kind != rebuildNamespaceUnknown {
-				require.NoError(t, ns.add(rebuildNamespaceRow{key: "requirements.txt", kind: tc.kind}))
-			}
-			if tc.composerLock {
-				require.NoError(t, ns.add(rebuildNamespaceRow{key: "composer.lock", kind: rebuildNamespaceRegular}))
-			}
-			require.NoError(t, ns.add(rebuildNamespaceRow{key: ".", kind: rebuildNamespaceCloseExact}))
-			require.NoError(t, ns.freeze())
-
-			facts := rebuildCloneRelationFixture(t)
-			// A plugin can supply this literal ID for a same-path signed callable.
-			facts[1].Nodes[0].ID = "requirements.txt"
-			facts[2].Nodes[0].ID = "composer.lock"
-			build, _ := openRebuildTestFileStore(t)
-			receipts := seedRebuildCloneInputReceipts(t, build, facts...)
-			predecessors := rebuildClonePredecessors{namespace: &ns, modules: tc.modules}
-			stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, predecessors, 0.82)
-			if tc.want == 0 {
-				require.NoError(t, err)
-				require.EqualValues(t, 2, stats.Direct.Pairs)
-				return
-			}
-			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
-			reply := buildRefusal(err)
-			require.Equal(t, uint8(36), reply.Refusal)
-			require.Equal(t, tc.want, reply.UnknownProvenance)
-			require.Contains(t, reply.Detail, fmt.Sprintf("root_manifest=%d", tc.want))
-			require.Zero(t, stats)
-			requireRebuildTestFileRows(t, build, []*graph.Node{
-				facts[0].Nodes[0], facts[1].Nodes[0], facts[2].Nodes[0], facts[3].Nodes[0],
-			}, nil)
-		})
-	}
-}
-
 func TestRebuildCloneIsolatedNonparsePredecessors(t *testing.T) {
 	var ns rebuildResolverNamespace
 	require.NoError(t, ns.add(rebuildNamespaceRow{key: "requirements.txt", kind: rebuildNamespaceRegular}))
@@ -221,28 +165,35 @@ func TestRebuildCloneIsolatedNonparsePredecessors(t *testing.T) {
 
 	for _, conflict := range []bool{false, true} {
 		t.Run(fmt.Sprintf("go_dependency_conflict=%t", conflict), func(t *testing.T) {
-			// Only the Go and TS signed callables enter the isolated graph.
-			facts := rebuildCloneRelationFixture(t)[1:3]
-			facts[0].Nodes[0].ID = "requirements.txt"
-			facts[1].Nodes[0].ID = "module::pypi:example@1"
+			// The checked root is not a callable. Keep ordinary Go/JS/TS IDs.
+			facts := rebuildCloneRelationFixture(t)[:3]
+			facts[0] = rebuildCloneInputFixture(rebuildCloneInput{
+				ID: "a.js::F", FilePath: "a.js", Language: "javascript", Line: 3,
+				Tokens: 40, Shingles: facts[0].Shingles["a.go::F"],
+			}, "javascript")
 			ids := rebuildEarlyContractIDs{"dep::example.com/lib": "go.mod"}
 			if conflict {
-				facts[1].Nodes[0].ID = "dep::example.com/lib"
+				facts[2].Nodes[0].ID = "dep::example.com/lib"
 			}
 			build, _ := openRebuildTestFileStore(t)
 			receipts := seedRebuildCloneInputReceipts(t, build, facts...)
-			p := rebuildClonePredecessors{namespace: &ns, modules: true, isolated: true, contracts: ids}
+			proof, err := build.ReduceRebuildSharedClaims(t.Context(), rebuildCloneClaimBytes, receipts, nil)
+			require.NoError(t, err)
+			p := rebuildClonePredecessors{namespace: &ns, contracts: ids, fileClaims: &proof}
 			stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, p, 0.82)
 			if conflict {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
 				reply := buildRefusal(err)
+				require.Equal(t, uint8(36), reply.Refusal)
 				require.EqualValues(t, 1, reply.UnknownProvenance)
-				require.Contains(t, reply.Detail, "root_manifest=0 root_module=0 contract=1")
+				require.Contains(t, reply.Detail, "clone predecessor root_manifest=0 root_module=0 contract=1 go_module=0 process=0:")
 				require.Zero(t, stats)
-				requireRebuildTestFileRows(t, build, []*graph.Node{facts[0].Nodes[0], facts[1].Nodes[0]}, nil)
+				requireRebuildTestFileRows(t, build, []*graph.Node{facts[0].Nodes[0], facts[1].Nodes[0], facts[2].Nodes[0]}, nil)
 				return
 			}
 			require.NoError(t, err)
+			require.Equal(t, 1, stats.Signatures.Corpus)
+			require.Equal(t, 1, stats.Signatures.Kept)
 			require.Equal(t, 2, stats.Signatures.Signed)
 			require.EqualValues(t, 1, stats.Direct.Pairs)
 		})
@@ -250,46 +201,25 @@ func TestRebuildCloneIsolatedNonparsePredecessors(t *testing.T) {
 }
 
 func TestRebuildCloneModuleAndContractPredecessors(t *testing.T) {
-	for _, tc := range []struct {
-		name, root string
-		modules    bool
-		count      uint64
-		detail     string
-	}{
-		{"all_domains", "requirements.txt", true, 3, "root_manifest=1 root_module=1 contract=1"},
-		{"checked_root_absent", "pom.xml", true, 1, "root_manifest=0 root_module=0 contract=1"},
-		{"modules_off", "requirements.txt", false, 1, "root_manifest=0 root_module=0 contract=1"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var ns rebuildResolverNamespace
-			require.NoError(t, ns.add(rebuildNamespaceRow{key: tc.root, kind: rebuildNamespaceRegular}))
-			require.NoError(t, ns.add(rebuildNamespaceRow{key: ".", kind: rebuildNamespaceCloseExact}))
-			require.NoError(t, ns.freeze())
-			// Check a raw input too: dropping a body later does not remove it
-			// from the affected population or from the native CMS calculation.
-			raw := rebuildCloneInputFixture(rebuildCloneInput{
-				ID: "http::GET::/app", FilePath: "a.go", Language: "go", Line: 3,
-				Tokens: 40, Shingles: []uint64{1, 3, 5, 7, 11, 13, 17, 19},
-			}, "go")
-			facts := rebuildCloneRelationFixture(t)
-			facts[0] = raw
-			facts[1].Nodes[0].ID = "requirements.txt"
-			facts[2].Nodes[0].ID = "module::pypi:example@1"
-			build, _ := openRebuildTestFileStore(t)
-			receipts := seedRebuildCloneInputReceipts(t, build, facts...)
-			predecessors := rebuildClonePredecessors{namespace: &ns, modules: tc.modules}
-			stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, predecessors, 0.82)
-			require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
-			reply := buildRefusal(err)
-			require.Equal(t, uint8(36), reply.Refusal)
-			require.Equal(t, tc.count, reply.UnknownProvenance)
-			require.Contains(t, reply.Detail, tc.detail)
-			require.Zero(t, stats)
-			requireRebuildTestFileRows(t, build, []*graph.Node{
-				facts[0].Nodes[0], facts[1].Nodes[0], facts[2].Nodes[0], facts[3].Nodes[0],
-			}, nil)
-		})
-	}
+	// Check a raw input too: the proof precedes CMS filtering.
+	facts := rebuildCloneRelationFixture(t)
+	facts[0] = rebuildCloneInputFixture(rebuildCloneInput{
+		ID: "http::GET::/app", FilePath: "a.go", Language: "go", Line: 3,
+		Tokens: 40, Shingles: []uint64{1, 3, 5, 7, 11, 13, 17, 19},
+	}, "go")
+	facts[2].Nodes[0].ID = "module::go:os/exec"
+	build, _ := openRebuildTestFileStore(t)
+	receipts := seedRebuildCloneInputReceipts(t, build, facts...)
+	stats, err := applyRebuildCloneRelations(t.Context(), build, receipts, rebuildClonePredecessors{}, 0.82)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+	reply := buildRefusal(err)
+	require.Equal(t, uint8(36), reply.Refusal)
+	require.EqualValues(t, 2, reply.UnknownProvenance)
+	require.Contains(t, reply.Detail, "clone predecessor root_manifest=0 root_module=0 contract=1 go_module=1 process=0:")
+	require.Zero(t, stats)
+	requireRebuildTestFileRows(t, build, []*graph.Node{
+		facts[0].Nodes[0], facts[1].Nodes[0], facts[2].Nodes[0], facts[3].Nodes[0],
+	}, nil)
 }
 
 func TestRebuildCloneDynamicIDPredecessors(t *testing.T) {
