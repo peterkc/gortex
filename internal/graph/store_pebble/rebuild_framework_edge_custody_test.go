@@ -399,3 +399,60 @@ func RequireRebuildTemporalSyntheticCustody(t *testing.T, b *BuildStore, e *grap
 	t.Helper()
 	requireSyntheticCustody(t, b, map[graph.EdgeIdentity]rebuildEdgeProof{graph.EdgeIdentityFor(e): rebuildProofTemporalSynthetic})
 }
+
+func TestRebuildGoFrameStaleTaggedCallWorkspace(t *testing.T) {
+	const file = "route.go"
+	source := &graph.Node{ID: "route", Kind: graph.KindContract, Language: "go", FilePath: file, WorkspaceID: "local"}
+	handler := &graph.Node{ID: "handler", Kind: graph.KindMethod, Name: "Req", Language: "go", FilePath: file, WorkspaceID: "foreign"}
+	call := &graph.Edge{From: source.ID, To: "unresolved::*.Req", Kind: graph.EdgeCalls, FilePath: file,
+		Meta: map[string]any{"request": "Req"}}
+	rules := RebuildGoFrameRules{
+		Route: func(e *graph.Edge) (string, string, string) {
+			request, _ := e.Meta["request"].(string)
+			return request, "", e.From
+		},
+		Handler: func(n *graph.Node) (string, string, bool) { return n.Name, "", false },
+		Dir:     func(string) string { return "" },
+		Rank: func(n *graph.Node, _, _, workspace, _, _ string, _ bool) int {
+			if n != nil && n.WorkspaceID != workspace {
+				return -1
+			}
+			return 0
+		},
+		Rebind: func(e *graph.Edge, _ string, target *graph.Node) (graph.EdgeReindex, *graph.Edge) {
+			if target == nil || target.ID == e.To {
+				return graph.EdgeReindex{}, nil
+			}
+			next := *e
+			next.To = target.ID
+			return graph.EdgeReindex{Edge: &next, OldTo: e.To}, nil
+		},
+	}
+	for _, localHandler := range []bool{false, true} {
+		b := newBuild(t, FullProfile)
+		candidate := *handler
+		if localHandler {
+			candidate.WorkspaceID = source.WorkspaceID
+		}
+		b.AddBatch([]*graph.Node{source, &candidate}, nil)
+		require.NoError(t, b.putEdgeWithCustody(call, rebuildEdgeCustody{proof: rebuildProofReceiver}))
+		changed := *call
+		changed.Context = "changed under the recorder"
+		raw, err := encodeEdge(&changed)
+		require.NoError(t, err)
+		require.NoError(t, b.pending.Set(pendingEdgeKey(call), raw, pebble.NoSync))
+		_, err = readRebuildEdgeCustody(b.pending, pendingEdgeKey(call))
+		require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+		before := rebuildFrameworkCustodyRows(t, b)
+		facts := ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: file}, Nodes: []*graph.Node{source, &candidate}}
+		receipts := func(yield func(ParseFacts, error) bool) { yield(facts, nil) }
+		moves, err := b.RebuildGoFrame(t.Context(), receipts, rules)
+		if localHandler {
+			require.ErrorIs(t, err, ErrRebuildUnknownProvenance)
+		} else {
+			require.NoError(t, err)
+		}
+		require.Zero(t, moves)
+		require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+	}
+}
