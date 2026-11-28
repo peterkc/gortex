@@ -2,9 +2,11 @@ package store_pebble
 
 import (
 	"bytes"
+	"errors"
 	"path/filepath"
 	"testing"
 
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -271,9 +273,10 @@ func TestRebuildHeldDeclarationAttribution(t *testing.T) {
 	b := newBuild(t, FullProfile)
 	api := &graph.Node{ID: "a.py::API", FilePath: "a.py", Name: "API", Kind: graph.KindConstant, Language: "go", StartLine: 7}
 	other := &graph.Node{ID: "a.py::API()", FilePath: "a.py", Name: "API", Kind: graph.KindFunction}
-	second := &graph.Node{ID: "a.py::API2", FilePath: "a.py", Name: "API", Kind: graph.KindConstant}
+	second := &graph.Node{ID: "a.py::API@2", FilePath: "a.py", Name: "API", Kind: graph.KindConstant}
+	adjacent := &graph.Node{ID: "a.py::API2", FilePath: "a.py", Name: "API2", Kind: graph.KindConstant}
 	require.NoError(t, b.AddRebuildDeferredFile("", ParseFacts{
-		File: graph.FileMetaRow{FilePath: "a.py", NodeCount: 3}, EffectiveLanguage: "python", Nodes: []*graph.Node{api, other, second},
+		File: graph.FileMetaRow{FilePath: "a.py", NodeCount: 4}, EffectiveLanguage: "python", Nodes: []*graph.Node{api, other, second, adjacent},
 	}, func(string) (bool, error) { return true, nil }))
 	ruby := &graph.Node{ID: "b.rb::API", FilePath: "b.rb", Name: "API", Kind: graph.KindFunction}
 	require.NoError(t, b.AddRebuildDeferredFile("", ParseFacts{
@@ -281,8 +284,22 @@ func TestRebuildHeldDeclarationAttribution(t *testing.T) {
 	}, func(string) (bool, error) { return true, nil }))
 	skip := &graph.Node{ID: "skip.py", FilePath: "skip.py", Name: "API", Kind: graph.KindFile, Language: "python"}
 	require.NoError(t, b.AddRebuildHeldSkip(skip))
-	require.NoError(t, b.IsolateRebuildLinks(ctx))
 	view := b.RebuildView()
+	heldIDs := func(name string, kind graph.NodeKind) []string {
+		t.Helper()
+		var ids []string
+		require.NoError(t, view.VisitRebuildHeldNameIDs(ctx, name, kind, func(id string) error {
+			ids = append(ids, id)
+			return nil
+		}))
+		return ids
+	}
+	require.Empty(t, heldIDs("API", graph.KindConstant))
+	require.NoError(t, b.IsolateRebuildLinks(ctx))
+	require.Equal(t, []string{api.ID, second.ID}, heldIDs("API", graph.KindConstant))
+	require.Equal(t, []string{other.ID, ruby.ID}, heldIDs("API", graph.KindFunction))
+	require.Equal(t, []string{adjacent.ID}, heldIDs("API2", graph.KindConstant))
+	require.Empty(t, heldIDs("API", graph.KindFile), "checked skip is not a declaration")
 	file, language, kind, line, err := view.RebuildHeldDeclaration(api.ID)
 	require.NoError(t, err)
 	require.Equal(t, api.FilePath, file)
@@ -308,13 +325,30 @@ func TestRebuildHeldDeclarationAttribution(t *testing.T) {
 	require.Empty(t, languages)
 	languages, err = view.RebuildHeldNameLanguages(ctx, "API2", graph.KindConstant)
 	require.NoError(t, err)
+	require.Equal(t, []string{"python"}, languages)
+	languages, err = view.RebuildHeldNameLanguages(ctx, "API3", graph.KindConstant)
+	require.NoError(t, err)
 	require.Empty(t, languages)
-	for _, n := range []*graph.Node{api, other, second, ruby} {
+	for _, n := range []*graph.Node{api, other, second, adjacent, ruby} {
 		live, err := view.Node(ctx, n.ID)
 		require.NoError(t, err)
 		require.Nil(t, live, "attribution must not expose a link candidate")
 	}
+	stopped := errors.New("stop held ID visit")
+	require.ErrorIs(t, view.VisitRebuildHeldNameIDs(ctx, "API", graph.KindConstant, func(string) error { return stopped }), stopped)
+	bad := keyStrings(rebuildHoldoutKey('m', nil), "Broken", string(graph.KindConstant), "")
+	require.NoError(t, b.pending.Set(bad, []byte("python"), pebble.NoSync))
+	err = view.VisitRebuildHeldNameIDs(ctx, "Broken", graph.KindConstant, func(string) error {
+		t.Fatal("malformed held ID must not enter the callback")
+		return nil
+	})
+	require.ErrorIs(t, err, ErrRebuildView)
+	require.ErrorContains(t, err, "held name attribution key")
+	_, err = view.RebuildHeldNameLanguages(ctx, "Broken", graph.KindConstant)
+	require.ErrorContains(t, err, "held name attribution key")
+	require.NoError(t, b.pending.Delete(bad, pebble.NoSync))
 	require.NoError(t, b.RestoreRebuildDeclarations(ctx))
+	require.Empty(t, heldIDs("API", graph.KindConstant))
 	languages, err = view.RebuildHeldNameLanguages(ctx, "API")
 	require.NoError(t, err)
 	require.Empty(t, languages)

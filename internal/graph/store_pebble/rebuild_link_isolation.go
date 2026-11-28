@@ -17,7 +17,7 @@ var ErrRebuildLinkIsolation = errors.New("pebble rebuild link isolation failed")
 // This private prefix is not a link election input or a serving family.
 // n: elected node bytes with receipt path (empty only for a checked skip).
 // e: exact parsed edge key to owning receipt path. r: saved restore edge bytes.
-// l: effective extractor by held ID. m: exact name/kind/extractor presence.
+// l: effective extractor by held ID. m: exact name/kind/ID to effective extractor.
 // s/w: exact sanctioned native manifest replacement node/edge bytes.
 // o: contract isolation affected scope omissions. p: supported first edge receipt attribution.
 var rebuildHoldoutPrefix = []byte{'g', '!'}
@@ -132,8 +132,8 @@ func (b *BuildStore) removeRebuildHeldLinks(ctx context.Context, coverage bool) 
 			if err != nil {
 				return err
 			}
-			key := keyStrings(rebuildHoldoutKey('m', nil), n.Name, string(n.Kind), language)
-			return b.pending.Set(key, nil, pebble.NoSync)
+			key := keyStrings(rebuildHoldoutKey('m', nil), n.Name, string(n.Kind), n.ID)
+			return b.pending.Set(key, []byte(language), pebble.NoSync)
 		}
 		return nil
 	}); err != nil {
@@ -417,8 +417,8 @@ func (v RebuildView) RebuildHeldNameLanguages(ctx context.Context, name string, 
 		if err != nil {
 			return err
 		}
-		language, rest, err := readKeyString(rest)
-		if err != nil || len(rest) != 0 || kind == "" || language == "" {
+		_, language, err := readRebuildHeldNameID(rest, r.value)
+		if err != nil || kind == "" {
 			return invalid("held name attribution key")
 		}
 		if (len(kinds) == 0 || slices.Contains(kinds, graph.NodeKind(kind))) && !slices.Contains(languages, language) {
@@ -431,4 +431,25 @@ func (v RebuildView) RebuildHeldNameLanguages(ctx context.Context, name string, 
 	}
 	slices.Sort(languages)
 	return languages, nil
+}
+
+// VisitRebuildHeldNameIDs visits only held declaration IDs with this exact
+// name and kind. It cannot provide a linked candidate or its payload.
+func (v RebuildView) VisitRebuildHeldNameIDs(ctx context.Context, name string, kind graph.NodeKind, visit func(string) error) error {
+	prefix := keyStrings(rebuildHoldoutKey('m', nil), name, string(kind))
+	return v.visit(ctx, prefix, func(_ *pebble.Snapshot, r row) error {
+		id, _, err := readRebuildHeldNameID(r.key[len(prefix):], r.value)
+		if err != nil {
+			return err
+		}
+		return visit(id)
+	})
+}
+
+func readRebuildHeldNameID(key, value []byte) (string, string, error) {
+	id, rest, err := readKeyString(key)
+	if err != nil || len(rest) != 0 || id == "" || len(value) == 0 {
+		return "", "", invalid("held name attribution key")
+	}
+	return id, string(value), nil
 }
