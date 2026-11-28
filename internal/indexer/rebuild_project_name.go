@@ -283,7 +283,7 @@ func (req rebuildBuildRequest) projectRecipe(cloneThreshold float64) store_pebbl
 	h := blake3.New()
 	// The tracked set is exactly empty, so no dependency export was read.
 	// Bind that policy alongside the inputs, not an unverified locator.
-	_, _ = h.Write([]byte("gortex/rebuild/project-name/v8\x00tracked-set:0\x00dependency-exports:ABSENT\x00"))
+	_, _ = h.Write([]byte("gortex/rebuild/project-name/v9\x00tracked-set:0\x00dependency-exports:ABSENT\x00"))
 	if req.SkipPlaceholderSources {
 		_, _ = h.Write([]byte{1})
 	} else {

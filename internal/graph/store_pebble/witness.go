@@ -156,6 +156,18 @@ func encodeWitness(w Witness) ([]byte, error) {
 	if (w.Stage == StageContracts && w.Contracts == nil) || (w.Contracts != nil && w.Stage.rank() < StageContracts.rank()) {
 		return nil, invalid("publication contract coverage stage")
 	}
+	var omitted uint64
+	for _, f := range w.Families {
+		if f.Family == familyOmission {
+			if w.Contracts == nil || f.Count == 0 {
+				return nil, invalid("publication contract omission family without coverage or rows")
+			}
+			omitted = f.Count
+		}
+	}
+	if w.Contracts != nil && omitted != w.Contracts.OmittedRecords {
+		return nil, invalid("publication contract omission count differs from sealed rows")
+	}
 	format := witnessFormat
 	if w.FrozenInputs != (HeadDigest{}) {
 		format = witnessInputsFormat

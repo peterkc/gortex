@@ -300,6 +300,15 @@ func TestContractWitnessEncoding(t *testing.T) {
 	w.Relations = &RelationCoverage{DeferredLanguages: []string{"python"}}
 	for _, omissions := range []uint64{0, 2} {
 		w.Contracts = &ContractCoverage{OmittedRecords: omissions}
+		if omissions != 0 {
+			_, err := encodeWitness(w)
+			require.ErrorIs(t, err, errInvalidRecord, "nonzero aggregate without scope rows")
+			w.Families = []FamilyWitness{{Family: familyOmission, Count: omissions, Digest: HeadDigest{1}}}
+			w.Contracts.OmittedRecords--
+			_, err = encodeWitness(w)
+			require.ErrorIs(t, err, errInvalidRecord, "mismatched aggregate")
+			w.Contracts.OmittedRecords++
+		}
 		raw, err := encodeWitness(w)
 		require.NoError(t, err)
 		require.Equal(t, []byte{witnessContractsFormat, byte(omissions), witnessCatalogFormat}, raw[:3])
@@ -331,7 +340,7 @@ func TestContractStageWitnessOrder(t *testing.T) {
 	}
 	old := stageRead(t, h)
 	stage.Witness.Stage = StageContracts
-	stage.Witness.Contracts = &ContractCoverage{OmittedRecords: 1}
+	stage.Witness.Contracts = &ContractCoverage{}
 	base, err := h.PublishStage(ctx, stage)
 	require.NoError(t, err)
 	_, err = h.PublishStage(ctx, stage)

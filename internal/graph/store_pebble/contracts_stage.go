@@ -19,9 +19,22 @@ import (
 // RebuildContractBatch contains final elected native rows, not proposals.
 // Shapes are keyed by full type ID. No ordinary type node is rewritten.
 type RebuildContractBatch struct {
-	Nodes  []*graph.Node
-	Edges  []*graph.Edge
-	Shapes map[string]*contracts.Shape
+	Nodes   []*graph.Node
+	Edges   []*graph.Edge
+	Shapes  map[string]*contracts.Shape
+	Omitted []RebuildContractOmission
+}
+
+// RebuildContractOmission describes one omitted D83 logical record. RepoPrefix
+// is exact (empty is standalone). ID is empty only if the canonical ID is
+// unknown. RecordKey is the producer's stable nonzero digest of the logical
+// record identity, not its payload; siblings can share the same scope and ID.
+type RebuildContractOmission struct {
+	RepoPrefix string
+	FilePath   string
+	Type       contracts.ContractType
+	ID         string
+	RecordKey  HeadDigest
 }
 
 var (
@@ -95,6 +108,43 @@ func decodeContractShape(raw []byte) (*contracts.Shape, error) {
 	return shape, nil
 }
 
+const (
+	contractOmissionFormat      byte = 1
+	maxContractOmissionKeyBytes      = 64 << 10
+)
+
+func contractOmissionKey(o RebuildContractOmission) ([]byte, error) {
+	if o.FilePath == "" || o.Type == "" || o.RecordKey == (HeadDigest{}) ||
+		len(o.RepoPrefix)+len(o.FilePath)+len(o.Type)+len(o.ID) > maxContractOmissionKeyBytes {
+		return nil, invalid("contract omission scope")
+	}
+	key := append(keyStrings([]byte{familyOmission}, o.RepoPrefix, o.FilePath, string(o.Type), o.ID), o.RecordKey[:]...)
+	if len(key) > maxContractOmissionKeyBytes {
+		return nil, invalid("contract omission key too large")
+	}
+	return key, nil
+}
+
+func decodeContractOmission(key, value []byte) (RebuildContractOmission, error) {
+	if len(key) == 0 || key[0] != familyOmission || len(key) > maxContractOmissionKeyBytes ||
+		len(value) != 1 || value[0] != contractOmissionFormat {
+		return RebuildContractOmission{}, invalid("contract omission row format")
+	}
+	var fields [4]string
+	var err error
+	rest := key[1:]
+	for i := range fields {
+		fields[i], rest, err = readKeyString(rest)
+		if err != nil {
+			return RebuildContractOmission{}, err
+		}
+	}
+	if len(rest) != len(HeadDigest{}) || fields[1] == "" || fields[2] == "" || HeadDigest(rest) == (HeadDigest{}) {
+		return RebuildContractOmission{}, invalid("contract omission scope")
+	}
+	return RebuildContractOmission{RepoPrefix: fields[0], FilePath: fields[1], Type: contracts.ContractType(fields[2]), ID: fields[3], RecordKey: HeadDigest(rest)}, nil
+}
+
 // PrepareContracts writes the exact atomic diff against a retained Relations
 // witness. C3 owns native election and coverage selection; it must supply
 // unique, bounded batches and no other graph writes may interleave. The
@@ -153,17 +203,29 @@ func (b *BuildStore) PrepareContracts(ctx context.Context, dir string, base Rela
 	if err := b.writeRows(ctx, &gold, StageContracts); err != nil {
 		return StageTables{}, err
 	}
+	if err := pendingVisit(ctx, b.pending, []byte{familyOmission}, func(r row) error {
+		return gold.add(bytes.Clone(r.key), bytes.Clone(r.value))
+	}); err != nil {
+		return StageTables{}, err
+	}
 	if err := base.addEndpointCounts(ctx, &gold); err != nil {
 		return StageTables{}, err
 	}
 	stream := goldWitness{digest: blake3.New()}
 	paths, err := writeCheckedGoldDiff(ctx, base.cursor(ctx), &gold, goldFileCap-1, func(r row) error {
-		if r.key[0] == familyShape {
+		switch r.key[0] {
+		case familyShape:
 			if _, err := decodeContractShape(r.value); err != nil {
 				return err
 			}
-		} else if err := seal.visit(r); err != nil {
-			return err
+		case familyOmission:
+			if _, err := decodeContractOmission(r.key, r.value); err != nil {
+				return err
+			}
+		default:
+			if err := seal.visit(r); err != nil {
+				return err
+			}
 		}
 		if r.key[0] == familyNode {
 			n, err := decodeNodeLight(r.value)
@@ -252,6 +314,8 @@ func (b *BuildStore) checkContractChange(r row) error {
 		tag, key = 'e', pendingEdgeKey(e)
 	case familyShape:
 		tag, key = 't', r.key
+	case familyOmission:
+		tag, key = 'o', r.key
 	default:
 		return nil
 	}
@@ -363,6 +427,21 @@ func (b *BuildStore) writeContractBatch(ctx context.Context, batch RebuildContra
 			return err
 		}
 		if err := b.pending.Set(key, val, pebble.NoSync); err != nil {
+			return err
+		}
+	}
+	for _, omitted := range batch.Omitted {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		key, err := contractOmissionKey(omitted)
+		if err != nil {
+			return err
+		}
+		if err := b.claimContractRow('o', key); err != nil {
+			return err
+		}
+		if err := b.pending.Set(key, []byte{contractOmissionFormat}, pebble.NoSync); err != nil {
 			return err
 		}
 	}

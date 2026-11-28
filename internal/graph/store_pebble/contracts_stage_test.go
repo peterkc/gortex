@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"iter"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,6 +28,10 @@ func testContractRow() *graph.Node {
 			"status_codes": []int{200, 404}, "empty": []int{}, "nil": []int(nil), "absent": nil,
 			"owner": map[string]string{"name": "a"},
 		}}}
+}
+
+func testContractOmission() RebuildContractOmission {
+	return RebuildContractOmission{RepoPrefix: "old", FilePath: "deferred.py", Type: contracts.ContractHTTP, ID: "http::GET::/deferred", RecordKey: HeadDigest{1}}
 }
 
 func TestContractsStagePublishesExactDiff(t *testing.T) {
@@ -67,8 +72,9 @@ func TestContractsStagePublishesExactDiff(t *testing.T) {
 			provided := &graph.Edge{From: owner.ID, To: contract.ID, Kind: graph.EdgeProvides, FilePath: owner.FilePath, Line: 3, Meta: map[string]any{"contract_meta": map[string]any{"status_codes": []int{200, 404}}}}
 			route := &graph.Edge{From: owner.ID, To: contract.ID, Kind: graph.EdgeHandlesRoute, FilePath: owner.FilePath, Line: 3}
 			omitted := &graph.Edge{From: local.ID, To: contract.ID, Kind: graph.EdgeConsumes, FilePath: owner.FilePath, Line: 4}
+			omission := testContractOmission()
 			tables, err := worker.PrepareContracts(ctx, t.TempDir(), base, contractBatches(
-				RebuildContractBatch{Edges: []*graph.Edge{provided, route, omitted}},
+				RebuildContractBatch{Edges: []*graph.Edge{provided, route, omitted}, Omitted: []RebuildContractOmission{omission}},
 				RebuildContractBatch{Nodes: []*graph.Node{contract, &completedSeed}, Shapes: map[string]*contracts.Shape{shapeNode.ID: shape}},
 			), ContractCoverage{OmittedRecords: 1})
 			require.NoError(t, err)
@@ -90,6 +96,16 @@ func TestContractsStagePublishesExactDiff(t *testing.T) {
 			_, err = head.PublishStage(ctx, tables)
 			require.ErrorIs(t, err, ErrStageOrder)
 			current := stageRead(t, head)
+			key, err := contractOmissionKey(omission)
+			require.NoError(t, err)
+			value, err := point(current, key, copyValue)
+			require.NoError(t, err)
+			record, err := decodeContractOmission(key, value)
+			require.NoError(t, err)
+			require.Equal(t, omission, record)
+			oldValue, err := point(pinned, key, copyValue)
+			require.NoError(t, err)
+			require.Nil(t, oldValue)
 			require.Equal(t, contract, current.GetNode(contract.ID))
 			require.Equal(t, &completedSeed, current.GetNode(seed.ID))
 			require.Equal(t, []*graph.Edge{imp}, current.GetInEdges(seed.ID))
@@ -129,7 +145,7 @@ func TestContractsStagePublishesExactDiff(t *testing.T) {
 }
 
 func TestContractsStageRefusals(t *testing.T) {
-	for _, mode := range []string{"duplicate node", "duplicate edge", "duplicate shape", "collision", "missing endpoint", "missing shape type", "stale predecessor", "corrupt predecessor", "unclaimed node change", "unclaimed edge change", "empty", "only deferred"} {
+	for _, mode := range []string{"duplicate node", "duplicate edge", "duplicate shape", "duplicate omission", "missing omission", "uncounted omission", "collision", "missing endpoint", "missing shape type", "stale predecessor", "corrupt predecessor", "unclaimed node change", "unclaimed edge change", "empty", "only deferred"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := t.Context()
 			worker, head, files, declared, _, _, _ := relationsStageFixture(t, FullProfile)
@@ -164,6 +180,14 @@ func TestContractsStageRefusals(t *testing.T) {
 			case "duplicate shape":
 				batch.Shapes = map[string]*contracts.Shape{owner.ID: shape}
 				again.Shapes = batch.Shapes
+			case "duplicate omission":
+				batch.Omitted = []RebuildContractOmission{testContractOmission()}
+				again.Omitted = batch.Omitted
+				coverage.OmittedRecords = 2
+			case "missing omission":
+				coverage.OmittedRecords = 1
+			case "uncounted omission":
+				batch.Omitted = []RebuildContractOmission{testContractOmission()}
 			case "collision":
 				contract.ID = owner.ID
 			case "missing endpoint":
@@ -180,17 +204,28 @@ func TestContractsStageRefusals(t *testing.T) {
 			case "empty", "only deferred":
 				batch = RebuildContractBatch{}
 				if mode == "only deferred" {
-					coverage.OmittedRecords = 1
+					a := testContractOmission()
+					b := a
+					b.RecordKey = HeadDigest{2}
+					batch.Omitted = []RebuildContractOmission{a, b}
+					coverage.OmittedRecords = 2
 				}
 			}
 			stage, err := worker.PrepareContracts(ctx, t.TempDir(), base, contractBatches(batch, again), coverage)
 			if mode == "empty" || mode == "only deferred" {
 				require.NoError(t, err)
-				require.Empty(t, stage.Files)
+				if mode == "empty" {
+					require.Empty(t, stage.Files)
+				} else {
+					require.NotEmpty(t, stage.Files)
+				}
 				require.Equal(t, &coverage, stage.Witness.Contracts)
 				_, err = head.PublishStage(ctx, stage)
 				require.NoError(t, err)
-				require.NoError(t, stageRead(t, head).RequireStage(StageContracts))
+				current := stageRead(t, head)
+				require.NoError(t, current.RequireStage(StageContracts))
+				require.Equal(t, pinned.NodeCount(), current.NodeCount())
+				require.Equal(t, stage.Witness.Families, relationsSavedWitness(t, current))
 				return
 			}
 			require.ErrorIs(t, err, ErrContractsSeal)
@@ -223,4 +258,26 @@ func TestContractShapeCodec(t *testing.T) {
 		require.Error(t, err)
 	}
 	require.NotEqual(t, contractShapeKey("a\x00b"), contractShapeKey("a"))
+}
+
+func TestContractOmissionCodec(t *testing.T) {
+	o := testContractOmission()
+	for _, id := range []string{"", "http::GET::/a\x00b"} {
+		o.ID = id
+		key, err := contractOmissionKey(o)
+		require.NoError(t, err)
+		value := []byte{contractOmissionFormat}
+		got, err := decodeContractOmission(key, value)
+		require.NoError(t, err)
+		require.Equal(t, o, got)
+		for n := range len(key) {
+			_, err := decodeContractOmission(key[:n], value)
+			require.ErrorIs(t, err, errInvalidRecord)
+		}
+		_, err = decodeContractOmission(key, []byte{0})
+		require.ErrorIs(t, err, errInvalidRecord)
+	}
+	o.FilePath = strings.Repeat("a", maxContractOmissionKeyBytes)
+	_, err := contractOmissionKey(o)
+	require.ErrorIs(t, err, errInvalidRecord)
 }
