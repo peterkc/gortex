@@ -57,11 +57,30 @@ type rebuildExtractorCensus struct {
 	receipts          iter.Seq2[store_pebble.ParseFacts, error]
 }
 
+// rebuildLinkedExtractor applies D71 to the effective receipt ID, not a
+// filename suffix or a language stamped on a node by an embedded parser.
+func rebuildLinkedExtractor(id string) bool {
+	return id == "go" || id == "javascript" || id == "typescript"
+}
+
+// holdsOutLinkInput classifies a literal manifest path from the full checked
+// census. Callers must classify before opening any link-facing receipt.
+func (c *rebuildExtractorCensus) holdsOutLinkInput(path string) (bool, error) {
+	if c == nil || uint64(len(c.byPath)) != c.admitted {
+		return false, fmt.Errorf("%w: incomplete extractor census", errRebuildCallerAttribution)
+	}
+	id := c.byPath[path]
+	if id == "" {
+		return false, fmt.Errorf("%w: no admitted receipt for %q", errRebuildCallerAttribution, path)
+	}
+	return !rebuildLinkedExtractor(id), nil
+}
+
 // supportsRelationPublication is the temporary D72 full-link-only boundary.
 // No deferred format has a checked link-free proof yet.
 func (c *rebuildExtractorCensus) supportsRelationPublication() bool {
 	for id := range c.byID {
-		if !rebuildContractLinkedExtractor(id) {
+		if !rebuildLinkedExtractor(id) {
 			return false
 		}
 	}
@@ -80,11 +99,11 @@ func (c *rebuildExtractorCensus) selectPendingCallers(page []*graph.Edge) ([]*gr
 		if edge == nil {
 			return nil, fmt.Errorf("%w: nil pending edge", errRebuildCallerAttribution)
 		}
-		// JSX uses the javascript extractor; TSX uses typescript.
-		switch c.byPath[c.originByGraphPath[edge.FilePath]] {
-		case "":
+		id := c.byPath[c.originByGraphPath[edge.FilePath]]
+		if id == "" {
 			return nil, fmt.Errorf("%w: no admitted receipt for %q", errRebuildCallerAttribution, edge.FilePath)
-		case "go", "javascript", "typescript":
+		}
+		if rebuildLinkedExtractor(id) {
 			selected = append(selected, edge)
 		}
 	}
