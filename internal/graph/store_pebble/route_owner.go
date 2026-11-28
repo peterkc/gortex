@@ -274,7 +274,9 @@ type routeRecovery struct {
 
 // recover runs before new readers or writers. validate must run the owner's
 // startup integrity check on this exact snapshot. A merely decodable witness
-// is insufficient. It may not return a usable head on a failed check.
+// is insufficient. An integrity failure must wrap errInvalidRecord or
+// ErrNotPublished to authorize fallback; return transient errors unchanged.
+// recover does not return a usable head on a failed check.
 func (o *routeOwner) recover(ctx context.Context, validate func(context.Context, *Snapshot, Witness) error) (routeRecovery, error) {
 	o.catalog.mu.Lock()
 	defer o.catalog.mu.Unlock()

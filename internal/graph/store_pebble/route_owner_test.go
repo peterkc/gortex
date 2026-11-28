@@ -569,7 +569,18 @@ func TestRouteOwnerStartupRestoresOnlyCheckedCheckpoint(t *testing.T) {
 				// manifest filename unparsable to Pebble.
 				require.NoError(t, os.Rename(markers[0], markers[0]+".bad"))
 			}
-			r, err := o.recover(ctx, ownerTestValidator(t))
+			validate := ownerTestValidator(t)
+			var checked []HeadDigest
+			r, err := o.recover(ctx, func(ctx context.Context, snap *Snapshot, w Witness) error {
+				checked = append(checked, w.Version())
+				if err := validate(ctx, snap, w); err != nil {
+					return fmt.Errorf("validate startup families: %w", err)
+				}
+				return nil
+			})
+			if mode == "invalid rows" {
+				require.Equal(t, []HeadDigest{newRow.Publication.Version, oldRow.Publication.Version}, checked)
+			}
 			if mode == "invalid checkpoint" {
 				require.ErrorIs(t, err, errInvalidRecord)
 				require.Nil(t, r.Head)
