@@ -532,7 +532,9 @@ func TestRebuildSvelteKitLoadReceiptAdmission(t *testing.T) {
 				server.ID = "other"
 			}
 			p := rebuildSvelteKitLoad{
-				rebuildCallMoves: rebuildCallMoves{b: b, prefix: rebuildSvelteKitLoadPrefix},
+				rebuildCallMoves: rebuildCallMoves{
+					b: b, prefix: rebuildSvelteKitLoadPrefix, rowBytes: 16 << 20, label: "SvelteKit load", inputRow: "node row",
+				},
 				rules: RebuildSvelteKitLoadRules{
 					ServerDir: func(path string) (string, bool) { return dir, path == file },
 				},
