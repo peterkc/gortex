@@ -449,11 +449,22 @@ func rebuildHeldLanguage(db pebble.Reader, id string) (string, error) {
 // RebuildHeldDeclaration reports raw attribution only, never a candidate
 // payload. A checked skip is not a declaration and returns an empty result.
 func (v RebuildView) RebuildHeldDeclaration(id string) (file, language string, kind graph.NodeKind, startLine int, err error) {
-	err = v.read(context.Background(), func(snap *pebble.Snapshot) error {
+	return v.rebuildHeldPoint(context.Background(), id, false)
+}
+
+// RebuildHeldImportPoint reports only the effective extractor and kind of an
+// exact held graph point, including a checked skip file. It is not a candidate.
+func (v RebuildView) RebuildHeldImportPoint(ctx context.Context, id string) (string, graph.NodeKind, error) {
+	_, language, kind, _, err := v.rebuildHeldPoint(ctx, id, true)
+	return language, kind, err
+}
+
+func (v RebuildView) rebuildHeldPoint(ctx context.Context, id string, includeSkip bool) (file, language string, kind graph.NodeKind, startLine int, err error) {
+	err = v.read(ctx, func(snap *pebble.Snapshot) error {
 		decode := func(raw []byte) (*graph.Node, error) {
 			d := recordCursor{buf: raw}
 			receipt := d.str()
-			if d.err != nil || receipt == "" {
+			if d.err != nil || receipt == "" && !includeSkip {
 				return nil, d.err
 			}
 			return decodeNodeLight(d.buf)

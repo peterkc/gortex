@@ -127,9 +127,10 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 			if e == nil || graph.StructuralEdgeTargetInvalid(e.Kind, e.To) {
 				continue
 			}
-			// X1 option B uses native direct SQLite insertion: the first payload
-			// wins. The in-memory cold-index shadow instead keeps the last one.
-			// Keep the winner's custody and never record evidence for a loser.
+			// Native direct SQLite insertion (INSERT OR IGNORE) keeps the
+			// first payload for an edge key. The in-memory cold-index shadow
+			// keeps the last payload, so it can differ at a repeated key.
+			// Keep the first payload's custody and never record a loser.
 			edgeKey := pendingEdgeKey(e)
 			old, err := b.pendingEdge(edgeKey)
 			if err != nil {

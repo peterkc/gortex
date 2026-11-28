@@ -110,7 +110,7 @@ func TestRebuildExternalNpmRewriteUsesCapturedEdgePath(t *testing.T) {
 	app := rebuildNpmCodecTestRow(t, "app/package.json", `{"dependencies":{"alias":"npm:@demo/real@1"}}`, &left)
 	lease, digest := writeRebuildNpmCodecTestSidecar(t, boundary, root, app)
 	ctx := t.Context()
-	rewrite := rebuildExternalNpmRewrite(ctx, lease, digest, &rebuildExtractorCensus{}, nil)
+	rewrite := rebuildExternalNpmRewrite(ctx, lease, digest, &rebuildExtractorCensus{}, nil, nil)
 	got, err := rewrite("app/caller.ts", "alias/sub")
 	require.NoError(t, err)
 	require.Equal(t, "@demo/real/sub", got)
@@ -124,7 +124,7 @@ func TestRebuildExternalNpmRewriteUsesCapturedEdgePath(t *testing.T) {
 
 	badDigest := digest
 	badDigest[0] ^= 1
-	got, err = rebuildExternalNpmRewrite(ctx, lease, badDigest, &rebuildExtractorCensus{}, nil)("app/caller.ts", "alias/sub")
+	got, err = rebuildExternalNpmRewrite(ctx, lease, badDigest, &rebuildExtractorCensus{}, nil, nil)("app/caller.ts", "alias/sub")
 	require.ErrorIs(t, err, errRebuildInputSidecar)
 	require.Empty(t, got)
 }

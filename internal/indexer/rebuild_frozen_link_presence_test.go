@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"io/fs"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -111,7 +112,7 @@ func TestRebuildFrozenLinkCandidatePresence(t *testing.T) {
 					require.NoError(t, err)
 					ns, manifests, followed, err := openRebuildNpmManifestFacts(ctx, lease, digest)
 					require.NoError(t, err)
-					probe := rebuildLinkCandidateProbe(ns, census, classifications)
+					probe := rebuildObservedCandidateProbe(ns, census, classifications, nil)
 					for _, key := range []string{first, skipped, candidate, supportedSkip} {
 						present, err := ns.probeFile(key)
 						require.NoError(t, err)
@@ -148,13 +149,62 @@ func TestRebuildFrozenLinkCandidatePresence(t *testing.T) {
 					got, err := npm.rewrite(caller, "member")
 					require.NoError(t, err)
 					require.Equal(t, want, got)
-					rewrite := rebuildExternalNpmRewrite(ctx, lease, digest, census, classifications)
+					rewrite := rebuildExternalNpmRewrite(ctx, lease, digest, census, classifications, nil)
 					got, err = rewrite(caller, "member")
 					require.NoError(t, err)
 					require.Equal(t, want, got)
 					got, err = rewrite(caller, "member/keep")
 					require.NoError(t, err)
 					require.Equal(t, "../packages/lib/keep", got)
+					build, _ := openRebuildTestFileStore(t)
+					manifest, err := store_pebble.PrepareManifest(ctx, t.TempDir(), []store_pebble.ManifestFile{{Path: caller, Kind: 'f', Language: "typescript"}}, store_pebble.Witness{
+						Input: store_pebble.HeadDigest{1}, Recipe: store_pebble.HeadDigest{2}, Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile,
+					}, rebuildTestIncarnation)
+					require.NoError(t, err)
+					head, err := store_pebble.OpenHead(filepath.Join(t.TempDir(), "head"), rebuildTestIncarnation, store_pebble.FullProfile)
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, head.Close()) })
+					_, err = head.PublishStage(ctx, manifest)
+					require.NoError(t, err)
+					require.NoError(t, build.AddParsedFile("", store_pebble.ParseFacts{File: graph.FileMetaRow{FilePath: caller, NodeCount: 1}, EffectiveLanguage: "typescript", Nodes: []*graph.Node{{ID: caller, FilePath: caller, Kind: graph.KindFile, Language: "typescript"}}}))
+					files, err := build.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, rebuildTestIncarnation)
+					require.NoError(t, err)
+					base, err := build.RetainFileGraph(ctx, files)
+					require.NoError(t, err)
+					_, err = head.PublishStage(ctx, files)
+					require.NoError(t, err)
+					require.NoError(t, build.IsolateRebuildLinks(ctx))
+					rewrite = rebuildExternalNpmRewrite(ctx, lease, digest, census, classifications, build)
+					got, err = rewrite(caller, "member")
+					require.NoError(t, err)
+					require.Equal(t, want, got)
+					got, err = rewrite(caller, "member/keep")
+					require.NoError(t, err)
+					require.Equal(t, "../packages/lib/keep", got)
+					var deferred []string
+					if mixed {
+						deferred = []string{"json"}
+						_, err := resolveRebuildAffectedCandidate(ctx, build, ns, census, classifications, "not-admitted.ts", "@source", "ts-alias", func(probe func(string) (bool, error)) (string, error) {
+							stem, err := aliases.resolve(probe, caller, "@source")
+							return string(stem), err
+						})
+						require.ErrorIs(t, err, errRebuildCallerAttribution)
+					}
+					require.NoError(t, build.RestoreRebuildDeclarations(ctx))
+					require.NoError(t, build.CheckRebuildIsolationCoverage(deferred))
+					relations, err := build.PrepareRelations(ctx, t.TempDir(), base, nil)
+					require.NoError(t, err)
+					_, err = head.PublishStage(ctx, relations)
+					require.NoError(t, err)
+					snap := head.OpenSnapshot()
+					defer func() { require.NoError(t, snap.Close()) }()
+					if mixed {
+						var unavailable *store_pebble.ErrLinksNotAvailable
+						require.ErrorAs(t, snap.RequireRelationCoverageContext(ctx, []string{"typescript"}, []string{caller}), &unavailable)
+						require.Equal(t, []store_pebble.RebuildIsolationAffectedScope{{FilePath: caller, SupportedLanguage: "typescript", DeferredLanguage: "json", Cause: "npm-candidate", Count: 1}}, unavailable.Affected)
+					} else {
+						require.NoError(t, snap.RequireRelationCoverageContext(ctx, []string{"typescript"}, []string{caller}))
+					}
 					return nil
 				})
 			require.NoError(t, err)

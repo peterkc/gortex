@@ -11,8 +11,34 @@ import (
 // pathAlias receives the module alone and returns a repo-prefixed graph stem.
 // rewriteNpm receives and returns the raw import payload.
 type rebuildJSTSImportInputs struct {
-	pathAlias  func(caller, module string) (string, error)
-	rewriteNpm func(caller, raw string) (string, error)
+	pathAlias     func(caller, module string) (string, error)
+	rewriteNpm    func(caller, raw string) (string, error)
+	heldPoint     func(id string, file bool) (string, error)
+	markIsolation func(caller, spec, targetFile, deferred, cause string) error
+}
+
+// RebuildJSTSSelectedFile finds the native point-tier file for a selected
+// alias stem or relative npm rewrite. It reads the same live graph points.
+func RebuildJSTSSelectedFile(caller, selected, cause string, node func(string) (*graph.Node, error)) (string, error) {
+	stem := selected
+	if cause == "npm-candidate" {
+		module, _ := splitImportSpecSymbol(selected)
+		stem = expandJSTSSpecifier(nil, caller, module)
+	}
+	var inputErr error
+	var file string
+	probeJSTSFile(func(id string) *graph.Node {
+		if inputErr != nil {
+			return nil
+		}
+		var n *graph.Node
+		n, inputErr = node(id)
+		if n != nil && n.Kind == graph.KindFile {
+			file = n.FilePath
+		}
+		return n
+	}, stem)
+	return file, inputErr
 }
 
 // resolveRebuildJSTSImport reads one selected TS/JS import site without editing
@@ -42,6 +68,18 @@ func resolveRebuildJSTSImport(edge *graph.Edge, source *graph.Node, spec string,
 
 	var inputErr error
 	var target *graph.Node
+	var heldLanguage string
+	module, symbol := splitImportSpecSymbol(spec)
+	cause, event := "ts-alias", module
+	if strings.HasPrefix(module, "./") || strings.HasPrefix(module, "../") {
+		cause, event = "held-endpoint", spec
+	}
+	mark := func(targetFile string) error {
+		if heldLanguage == "" || in.markIsolation == nil {
+			return nil
+		}
+		return in.markIsolation(caller, event, targetFile, heldLanguage, cause)
+	}
 	getNode := func(id string) *graph.Node {
 		if inputErr != nil {
 			return nil
@@ -52,7 +90,14 @@ func resolveRebuildJSTSImport(edge *graph.Edge, source *graph.Node, spec string,
 		}
 		var n *graph.Node
 		n, inputErr = node(id)
-		if inputErr != nil || n == nil {
+		if inputErr != nil {
+			return nil
+		}
+		if n == nil {
+			if heldLanguage == "" && in.heldPoint != nil {
+				file := symbol == "" || !strings.HasSuffix(id, "::"+symbol)
+				heldLanguage, inputErr = in.heldPoint(id, file)
+			}
 			return nil
 		}
 		if n.ID != id {
@@ -80,7 +125,10 @@ func resolveRebuildJSTSImport(edge *graph.Edge, source *graph.Node, spec string,
 		return nil, "", inputErr
 	}
 	if id != "" {
-		return target, spec, nil
+		return target, spec, mark(target.FilePath)
+	}
+	if err := mark(""); err != nil {
+		return nil, "", err
 	}
 
 	// Native npm's cold indexer uses the raw FilePath (no From fallback),
@@ -107,12 +155,15 @@ func resolveRebuildJSTSImport(edge *graph.Edge, source *graph.Node, spec string,
 	if !rewritten {
 		return nil, effective, nil
 	}
+	heldLanguage = ""
+	_, symbol = splitImportSpecSymbol(effective)
+	cause, event = "npm-candidate", spec
 	id = resolveJSTSImportTarget(getNode, alias, caller, effective)
 	if inputErr != nil {
 		return nil, "", inputErr
 	}
 	if id == "" {
-		return nil, effective, nil
+		return nil, effective, mark("")
 	}
-	return target, effective, nil
+	return target, effective, mark(target.FilePath)
 }

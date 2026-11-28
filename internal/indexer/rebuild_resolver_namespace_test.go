@@ -170,7 +170,7 @@ func TestRebuildResolverNamespaceFileProbe(t *testing.T) {
 	census := &rebuildExtractorCensus{admitted: 3, byPath: map[string]string{
 		"exact/Foo.ts": "python", "exact/opaque/leaf.ts": "python", "open/no.ts": "python",
 	}}
-	probe := rebuildLinkCandidateProbe(&n, census, nil)
+	probe := rebuildObservedCandidateProbe(&n, census, nil, nil)
 	for _, key := range []string{"exact/Foo.ts", "exact/foo.ts"} {
 		got, err := probe(key)
 		require.NoError(t, err)
@@ -184,7 +184,7 @@ func TestRebuildResolverNamespaceFileProbe(t *testing.T) {
 			require.ErrorIs(t, err, errRebuildResolverInputDenied)
 		}
 	}
-	_, err = rebuildLinkCandidateProbe(&n, &rebuildExtractorCensus{admitted: 1}, nil)("exact/Foo.ts")
+	_, err = rebuildObservedCandidateProbe(&n, &rebuildExtractorCensus{admitted: 1}, nil, nil)("exact/Foo.ts")
 	require.ErrorIs(t, err, errRebuildCallerAttribution)
 }
 

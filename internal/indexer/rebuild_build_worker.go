@@ -1047,7 +1047,7 @@ func (idx *Indexer) runRebuildPrivateTail(ctx context.Context, lease string, pri
 		if gdDemotions != 0 {
 			logger.Info("rebuild GDScript receiver gate applied to private build", zap.Uint64("demotions", gdDemotions))
 		}
-		rewriteNpm := rebuildExternalNpmRewriteWithCoverage(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), counts.census, classifications, private)
+		rewriteNpm := rebuildExternalNpmRewrite(ctx, lease, rebuildDigest(req.Witness.FrozenInputs), counts.census, classifications, private)
 		externalCalls, err := resolver.RunRebuildExternalCallSynthesis(ctx, private, receipts, req.ExternalCallsEnabled, requestedSelection, selection, rewriteNpm)
 		if err != nil {
 			return err

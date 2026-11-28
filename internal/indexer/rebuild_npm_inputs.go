@@ -64,12 +64,6 @@ func newRebuildNpmLookupFromNamespace(ctx context.Context, ns *rebuildResolverNa
 // Only the queried manifest and package paths need filesystem evidence. A
 // configured extractor can supply a recording path with no file at that path.
 func rebuildExternalNpmRewrite(ctx context.Context, lease string, digest rebuildDigest, census *rebuildExtractorCensus,
-	classifications map[string]rebuildClassificationFact,
-) func(string, string) (string, error) {
-	return rebuildExternalNpmRewriteWithCoverage(ctx, lease, digest, census, classifications, nil)
-}
-
-func rebuildExternalNpmRewriteWithCoverage(ctx context.Context, lease string, digest rebuildDigest, census *rebuildExtractorCensus,
 	classifications map[string]rebuildClassificationFact, build *store_pebble.BuildStore,
 ) func(string, string) (string, error) {
 	var npm *rebuildNpmLookup

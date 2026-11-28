@@ -224,23 +224,7 @@ func (idx *Indexer) buildRebuildFileStages(
 	// Qualify every raw claim before any graph row is materialized. The
 	// parse store refuses different bytes at an existing immutable key.
 	// Later passes also use these same checked receipt keys, not the source.
-	trackIsolation := false
-	if job.retainFileGraph {
-		for id := range census.byID {
-			if !rebuildLinkedExtractor(id) {
-				trackIsolation = true
-				break
-			}
-		}
-		if !trackIsolation {
-			for _, fact := range job.classifications {
-				if rebuildHoldsOutCheckedSkip(fact) {
-					trackIsolation = true
-					break
-				}
-			}
-		}
-	}
+	trackIsolation := job.retainFileGraph && rebuildHasHeldInput(&census, job.classifications)
 	receipts := idx.rebuildDataflowReceipts(ctx, job, store, &census)
 	census.receipts = receipts
 	counts.claims, err = private.ReduceRebuildSharedClaims(ctx, rebuildCloneClaimBytes, receipts,

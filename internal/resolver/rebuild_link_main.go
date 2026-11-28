@@ -26,6 +26,10 @@ type RebuildMainInputs struct {
 	// maps a caller path and raw import payload to a new payload. An empty
 	// result with no error means a proved miss. Both are required at use.
 	PathAlias, RewriteNpm func(string, string) (string, error)
+	// HeldImportPoint and MarkImportIsolation observe missed graph points
+	// without adding them to candidate election.
+	HeldImportPoint     func(id string, file bool) (string, error)
+	MarkImportIsolation func(caller, spec, targetFile, deferred, cause string) error
 	// GoOwnership supplies ownership evidence when a Go import needs it.
 	GoOwnership func(GoImportCandidate) (GoPackageOwnershipResult, error)
 	// CheckGoExtern proves empty tracked-module input and a checked root
@@ -65,7 +69,7 @@ func runRebuildMain(ctx context.Context, build *store_pebble.BuildStore, opts st
 	reconcileSources bool, in RebuildMainInputs,
 ) (err error) {
 	imports := rebuildMainImportInputs{
-		jsts:                     rebuildJSTSImportInputs{pathAlias: in.PathAlias, rewriteNpm: in.RewriteNpm},
+		jsts:                     rebuildJSTSImportInputs{pathAlias: in.PathAlias, rewriteNpm: in.RewriteNpm, heldPoint: in.HeldImportPoint, markIsolation: in.MarkImportIsolation},
 		goOwnership:              in.GoOwnership,
 		checkGoExtern:            in.CheckGoExtern,
 		workspaceMembership:      in.WorkspaceMembership,

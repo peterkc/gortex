@@ -1153,7 +1153,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 		name                                                       string
 		mismatch, denied, omitJSONRecipe                           bool
 		captureRefusal, sealRefusal, mixed, deferredOnly, skipOnly bool
-		manifests, modulesOff, aliasAffected                       bool
+		manifests, modulesOff, aliasAffected, lockSkipped          bool
 	}{
 		{name: "verified checkout builds all six stages"},
 		{name: "capture refusal keeps file graph", captureRefusal: true},
@@ -1161,6 +1161,8 @@ func TestRunRebuildCheckout(t *testing.T) {
 		{name: "mixed checkout isolates links", mixed: true},
 		{name: "mixed manifests retain native writers", mixed: true, manifests: true},
 		{name: "mixed manifests modules disabled", mixed: true, manifests: true, modulesOff: true},
+		{name: "mixed checked lock and YAML", mixed: true, manifests: true, lockSkipped: true},
+		{name: "mixed checked lock and YAML modules disabled", mixed: true, manifests: true, lockSkipped: true, modulesOff: true},
 		{name: "mixed alias affected scope", mixed: true, aliasAffected: true},
 		{name: "deferred-only checkout isolates links", deferredOnly: true},
 		{name: "deferred checked skip alone labels all later stages", skipOnly: true},
@@ -1190,17 +1192,25 @@ func TestRunRebuildCheckout(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(root, "test_large.py"), []byte(strings.Repeat("x", 129)), 0o600))
 			}
 			if tc.skipOnly {
-				require.NoError(t, os.WriteFile(filepath.Join(root, "test_document.txt"), []byte(strings.Repeat("x", 96)), 0o600))
+				writeRebuildTSAliasFixtureFile(t, root, "tests/document.txt", strings.Repeat("x", 96))
 			}
 			if tc.aliasAffected {
 				writeRebuildTSAliasFixtureFile(t, root, "caller.ts", `import "@source"`)
-				writeRebuildTSAliasFixtureFile(t, root, "tsconfig.json", `{"compilerOptions":{"paths":{"@source":["first/entry.json","keep/entry.ts"]}}}`)
+				writeRebuildTSAliasFixtureFile(t, root, "tsconfig.json", `{"compilerOptions":{"paths":{"@source":["first/entry.json","keep/entry.ts"],"@same":["Foo.vue"]}}}`)
 				writeRebuildTSAliasFixtureFile(t, root, "first/entry.json", `{}`)
 				writeRebuildTSAliasFixtureFile(t, root, "keep/entry.ts", `export {}`)
+				writeRebuildTSAliasFixtureFile(t, root, "same.ts", `import "@same"`)
+				writeRebuildTSAliasFixtureFile(t, root, "relative.ts", `import "./Foo.vue"`)
+				writeRebuildTSAliasFixtureFile(t, root, "Foo.vue", `<template><div /></template>`)
 			}
 			if tc.manifests {
 				writeRebuildTSAliasFixtureFile(t, root, "package.json", `{"name":"root","workspaces":["tests/*","packages/*"],"dependencies":{"left-pad":"1.3.0"}}`)
-				writeRebuildTSAliasFixtureFile(t, root, "package-lock.json", `{"name":"root","lockfileVersion":2,"packages":{"":{"name":"root"},"node_modules/left-pad":{"version":"1.3.0"}}}`)
+				lock := `{"name":"root","lockfileVersion":2,"packages":{"":{"name":"root"},"node_modules/left-pad":{"version":"1.3.0"}}}`
+				if tc.lockSkipped {
+					lock += strings.Repeat(" ", 129)
+					writeRebuildTSAliasFixtureFile(t, root, "pnpm-lock.yaml", "packages:\n  /pnpm-only@5.0.0:\n")
+				}
+				writeRebuildTSAliasFixtureFile(t, root, "package-lock.json", lock)
 				writeRebuildTSAliasFixtureFile(t, root, testMember, `{"name":"test-member"}`)
 				writeRebuildTSAliasFixtureFile(t, root, regularMember, `{"name":"member"}`)
 			}
@@ -1220,7 +1230,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 			cfg.Coverage.Clones.Threshold = 0.95 // the owner must seal this before dispatch
 			req := rebuildBuildRequest{
 				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
-				Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}, "typescript": {2}, "json": {3}, "python": {4}},
+				Policy: freezeRebuildParsePolicy(root, cfg), Recipes: map[string]rebuildDigest{"go": {1}, "typescript": {2}, "json": {3}, "python": {4}, "vue": {5}, "yaml": {6}},
 				Bounds:  rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 64 << 10},
 				Witness: store_pebble.Witness{Recipe: store_pebble.HeadDigest{2}, Profile: store_pebble.FullProfile, Stage: store_pebble.StageManifest},
 			}
@@ -1254,12 +1264,21 @@ func TestRunRebuildCheckout(t *testing.T) {
 			if tc.skipOnly {
 				wantDeferred = append(wantDeferred, "text")
 			}
+			if tc.aliasAffected {
+				wantDeferred = append(wantDeferred, "vue")
+			}
+			if tc.lockSkipped {
+				wantDeferred = append(wantDeferred, "yaml")
+			}
 			wantCoverage := &store_pebble.RelationCoverage{IsolationChecked: true}
 			if partial {
 				wantCoverage.DeferredLanguages = wantDeferred
 			}
 			if tc.aliasAffected {
-				wantCoverage.IsolationDependencies = []store_pebble.RebuildIsolationDependency{{SupportedLanguage: "typescript", DeferredLanguage: "json"}}
+				wantCoverage.IsolationDependencies = []store_pebble.RebuildIsolationDependency{
+					{SupportedLanguage: "typescript", DeferredLanguage: "json"},
+					{SupportedLanguage: "typescript", DeferredLanguage: "vue"},
+				}
 			}
 			err = idx.runRebuildCheckout(ctx, src, req, excludes.New([]string{"excluded/"}), false,
 				exe, []string{"-test.run=^TestRebuildBuildChildEntry$", "--"}, leases, headDir,
@@ -1289,7 +1308,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 							}
 							require.NotNil(t, raw.GetNode("test_large.py"))
 							if tc.skipOnly {
-								doc := raw.GetNode("test_document.txt")
+								doc := raw.GetNode("tests/document.txt")
 								require.NotNil(t, doc)
 								require.Equal(t, skipReasonLargeDocument, doc.Meta["skip_reason"])
 							}
@@ -1317,7 +1336,15 @@ func TestRunRebuildCheckout(t *testing.T) {
 							var incomplete *store_pebble.ErrLinksNotAvailable
 							require.ErrorAs(t, pinnedRelations.RequireRelationCoverageContext(ctx, []string{"typescript"}, []string{"caller.ts"}), &incomplete)
 							require.Equal(t, []store_pebble.RebuildIsolationAffectedScope{{FilePath: "caller.ts", SupportedLanguage: "typescript", DeferredLanguage: "json", Cause: "ts-alias", Count: 1}}, incomplete.Affected)
-							require.NoError(t, pinnedRelations.RequireRelationCoverageContext(ctx, []string{"typescript"}, []string{"keep/entry.ts"}))
+							for _, want := range []store_pebble.RebuildIsolationAffectedScope{
+								{FilePath: "keep/entry.ts", SupportedLanguage: "typescript", DeferredLanguage: "json", Cause: "ts-alias", Count: 1},
+								{FilePath: "same.ts", SupportedLanguage: "typescript", DeferredLanguage: "vue", Cause: "ts-alias", Count: 1},
+								{FilePath: "relative.ts", SupportedLanguage: "typescript", DeferredLanguage: "vue", Cause: "held-endpoint", Count: 1},
+							} {
+								require.ErrorAs(t, pinnedRelations.RequireRelationCoverageContext(ctx, []string{"typescript"}, []string{want.FilePath}), &incomplete)
+								require.Equal(t, []store_pebble.RebuildIsolationAffectedScope{want}, incomplete.Affected)
+							}
+							require.NoError(t, pinnedRelations.RequireRelationCoverageContext(ctx, []string{"typescript"}, []string{"unrelated.ts"}))
 						}
 						t.Cleanup(func() { require.NoError(t, pinnedRelations.Close()) })
 						if tc.sealRefusal {
@@ -1426,13 +1453,33 @@ func TestRunRebuildCheckout(t *testing.T) {
 				require.Nil(t, pinnedRelations.GetNode(contractID))
 			}
 			if tc.aliasAffected {
-				wantPaths = append(wantPaths, "caller.ts", "first/entry.json", "keep/entry.ts", "tsconfig.json")
+				wantPaths = append(wantPaths, "caller.ts", "first/entry.json", "keep/entry.ts", "tsconfig.json", "same.ts", "relative.ts", "Foo.vue")
 				slices.Sort(wantPaths)
 			}
 			if tc.manifests {
-				wantPaths = append(wantPaths, "package.json", "package-lock.json", testMember, regularMember)
+				manifestPaths := []string{"package.json", testMember, regularMember}
+				if tc.lockSkipped {
+					wantPaths = append(wantPaths, "pnpm-lock.yaml")
+					lock, yaml := s.GetNode("package-lock.json"), s.GetNode("pnpm-lock.yaml")
+					require.NotNil(t, lock)
+					require.NotNil(t, yaml)
+					if tc.modulesOff {
+						require.Equal(t, true, lock.Meta["skipped_due_to_size"])
+						require.Equal(t, 1, yaml.StartLine)
+						require.Nil(t, s.GetNode("module::npm:pnpm-only@5.0.0"))
+					} else {
+						for _, n := range []*graph.Node{lock, yaml} {
+							require.Zero(t, n.StartLine)
+							require.NotContains(t, n.Meta, "skipped_due_to_size")
+						}
+						require.NotNil(t, s.GetNode("module::npm:pnpm-only@5.0.0"))
+					}
+				} else {
+					manifestPaths = append(manifestPaths, "package-lock.json")
+				}
+				wantPaths = append(wantPaths, manifestPaths...)
 				slices.Sort(wantPaths)
-				for _, file := range []string{"package.json", "package-lock.json", testMember, regularMember} {
+				for _, file := range manifestPaths {
 					n := s.GetNode(file)
 					require.NotNil(t, n)
 					if tc.modulesOff || file != testMember {
@@ -1498,7 +1545,7 @@ func TestRunRebuildCheckout(t *testing.T) {
 				require.NotContains(t, skipped.Meta, "is_test_file")
 			}
 			if tc.skipOnly {
-				doc := s.GetNode("test_document.txt")
+				doc := s.GetNode("tests/document.txt")
 				require.NotNil(t, doc)
 				require.Equal(t, skipReasonLargeDocument, doc.Meta["skip_reason"])
 				require.NotContains(t, doc.Meta, "is_test_file")

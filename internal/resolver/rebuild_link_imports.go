@@ -66,18 +66,23 @@ func prepareRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 		spec = effective
 	} else {
 		callerFile := jsTSImportCallerFile(edge)
-		if module, _ := splitImportSpecSymbol(spec); module != "" && isJSTSPath(callerFile) {
+		if module, symbol := splitImportSpecSymbol(spec); module != "" && isJSTSPath(callerFile) {
 			if !strings.HasPrefix(module, "./") && !strings.HasPrefix(module, "../") {
 				return rebuildMainQuery{}, rebuildImportNeeds(edge, spec, "TS path-alias/baseUrl result (before npm rewrite)")
 			}
 			// Native relative expansion never calls the alias callback. Reuse
 			// its exact file and binding probes against the typed working rows.
+			var heldLanguage string
 			id := resolveJSTSImportTarget(func(id string) *graph.Node {
 				if err != nil {
 					return nil
 				}
 				var n *graph.Node
 				n, err = f.view.Node(ctx, id)
+				if err == nil && n == nil && heldLanguage == "" && f.imports.jsts.heldPoint != nil {
+					file := symbol == "" || !strings.HasSuffix(id, "::"+symbol)
+					heldLanguage, err = f.imports.jsts.heldPoint(id, file)
+				}
 				return n
 			}, nil, callerFile, spec)
 			if err != nil {
@@ -94,8 +99,18 @@ func prepareRebuildImport(ctx context.Context, f *rebuildLinkFrontier, edge *gra
 				if rebuildImportNeedsGoOwnership(source, n) {
 					return rebuildMainQuery{}, rebuildImportNeeds(edge, spec, "Go package ownership")
 				}
+				if heldLanguage != "" && f.imports.jsts.markIsolation != nil {
+					if err := f.imports.jsts.markIsolation(callerFile, spec, n.FilePath, heldLanguage, "held-endpoint"); err != nil {
+						return rebuildMainQuery{}, err
+					}
+				}
 				bind(n.ID, n.RepoPrefix)
 				return rebuildMainQuery{}, nil
+			}
+			if heldLanguage != "" && f.imports.jsts.markIsolation != nil {
+				if err := f.imports.jsts.markIsolation(callerFile, spec, "", heldLanguage, "held-endpoint"); err != nil {
+					return rebuildMainQuery{}, err
+				}
 			}
 		}
 		// Unlike the JS/TS point probe, the cold indexer's npm callback uses

@@ -182,14 +182,6 @@ func (n *rebuildResolverNamespace) probeFile(key string) (bool, error) {
 	}
 }
 
-// rebuildLinkCandidateProbe projects only candidate-file presence. Keep the
-// original namespace for independent config, manifest and directory lookups.
-func rebuildLinkCandidateProbe(n *rebuildResolverNamespace, census *rebuildExtractorCensus,
-	classifications map[string]rebuildClassificationFact,
-) func(string) (bool, error) {
-	return rebuildObservedCandidateProbe(n, census, classifications, nil)
-}
-
 // The observation is metadata only; held presence never votes in the selected answer.
 func rebuildObservedCandidateProbe(n *rebuildResolverNamespace, census *rebuildExtractorCensus,
 	classifications map[string]rebuildClassificationFact, held func(string),

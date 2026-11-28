@@ -86,12 +86,26 @@ func runRebuildFrozenMain(ctx context.Context, lease string, digest rebuildDiges
 	}
 	var workspaceMembers map[string]struct{} // nil until one checked lookup builds the membership index
 	view := build.RebuildView()
+	var heldImportPoint func(string, bool) (string, error)
+	if rebuildHasHeldInput(census, classifications) {
+		heldImportPoint = func(id string, file bool) (string, error) {
+			language, kind, err := view.RebuildHeldImportPoint(ctx, id)
+			if file && kind != graph.KindFile {
+				return "", err
+			}
+			return language, err
+		}
+	}
 	opts.ScratchParent = lease
 	return resolver.RunRebuildMain(ctx, build, opts, resolver.RebuildMainInputs{
 		SelectCallers:            census.selectPendingCallers,
 		Receipts:                 census.receipts,
 		DependencyContractsReady: dependencyContractsReady,
 		SkipPlaceholderSources:   skipPlaceholderSources,
+		HeldImportPoint:          heldImportPoint,
+		MarkImportIsolation: func(caller, spec, targetFile, deferred, cause string) error {
+			return markRebuildImportIsolation(ctx, build, census, caller, spec, targetFile, deferred, cause)
+		},
 		PathAlias: func(file, spec string) (string, error) {
 			caller, err := rawPath(file)
 			if err != nil {
