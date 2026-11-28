@@ -25,6 +25,11 @@ type Payload struct{ ID string }
 func Serve(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, Payload{ID: "p"})
 }
+
+func Literal(w http.ResponseWriter, r *http.Request) {
+	WriteJSON(w, http.StatusCreated, Payload{ID: "p"})
+	WriteJSON(w, http.StatusOK, "ok")
+}
 `)
 	path := filepath.Join(root, file)
 	require.NoError(t, os.WriteFile(path, src, 0o600))
@@ -75,6 +80,15 @@ func Serve(w http.ResponseWriter, r *http.Request) {
 	require.Equal(t, parses, parser.ParseCount())
 
 	b.AddNode(&graph.Node{ID: file + "::Added", Name: "Payload", Kind: graph.KindType, Language: "go", FilePath: file})
+	b.AddNode(&graph.Node{ID: file + "::string", Name: "string", Kind: graph.KindType, Language: "go", FilePath: file})
+	literal, err := view.Node(ctx, file+"::Literal")
+	require.NoError(t, err)
+	require.NotNil(t, literal)
+	literalBody, err := reader.providerBody(ctx, view, literal)
+	require.NoError(t, err)
+	require.Equal(t, "string", literalBody.AST["response_type"])
+	require.Empty(t, literalBody.ASTTypeLookups)
+
 	_, err = reader.providerBody(ctx, view, handler)
 	require.ErrorIs(t, err, errRebuildContractBodyUnproved)
 	moved := *handler

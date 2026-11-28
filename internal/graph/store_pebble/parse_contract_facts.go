@@ -15,7 +15,7 @@ import (
 // ContractParseFactsFormat is part of the rebuild extractor recipe. The
 // receipt embeds unmodified v2 bytes. Decoding the base has
 // v2 semantics (including present-empty slices decoding as nil).
-const ContractParseFactsFormat byte = 4
+const ContractParseFactsFormat byte = 5
 
 // EncodeContractParseFacts builds the rebuild contract receipt.
 // The outer parse-store envelope owns the
@@ -414,6 +414,7 @@ func readFactShape(d *recordCursor) *contracts.Shape {
 func writeFactHandler(e *contractFactsEncoder, h contracts.HandlerFacts) {
 	writeFactMeta(e, h.Regex, 0)
 	writeFactMeta(e, h.AST, 0)
+	writeFactMap(e, h.ASTTypeLookups, writeFactString)
 	writeFactMap(e, h.Bindings, func(e *contractFactsEncoder, b contracts.Binding) {
 		e.strings(string(b.Kind), b.TypeID, b.CallExpr, b.RawExpr, string(b.Origin))
 		e.boolean(b.Repeated)
@@ -424,8 +425,9 @@ func writeFactHandler(e *contractFactsEncoder, h contracts.HandlerFacts) {
 
 func readFactHandler(d *recordCursor) contracts.HandlerFacts {
 	return contracts.HandlerFacts{
-		Regex: readFactMeta(d, 0),
-		AST:   readFactMeta(d, 0),
+		Regex:          readFactMeta(d, 0),
+		AST:            readFactMeta(d, 0),
+		ASTTypeLookups: readFactMap(d, (*recordCursor).str),
 		Bindings: readFactMap(d, func(d *recordCursor) contracts.Binding {
 			return contracts.Binding{
 				Kind:     contracts.BindingKind(d.str()),

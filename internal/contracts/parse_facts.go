@@ -109,9 +109,10 @@ func CheckFileFactTree(filePath string, src []byte, tree *parser.ParseTree, exts
 // HandlerFacts holds separate regex writes and AST writes so replay preserves
 // native overwrite, merge and deletion behavior. Binding lookups remain local.
 type HandlerFacts struct {
-	Regex    map[string]any
-	AST      map[string]any
-	Bindings map[string]Binding
+	Regex          map[string]any
+	AST            map[string]any
+	Bindings       map[string]Binding
+	ASTTypeLookups map[string]string // exact normalized local name to native answer
 }
 
 // CaptureFileHandlerFacts derives detached facts with the same first-line,
@@ -192,7 +193,18 @@ func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []s
 		}
 		if bf != nil {
 			c.Meta = f.AST
-			applyProviderFacts(&c, nodes, bf)
+			f.ASTTypeLookups = make(map[string]string)
+			applyProviderFactsWithLookup(&c, bf, func(name string) string {
+				answer := resolveTypeInFile(name, nodes)
+				name = strings.TrimSpace(strings.TrimPrefix(name, "*"))
+				if i := strings.LastIndex(name, "."); i >= 0 {
+					name = name[i+1:]
+				}
+				if name != "" {
+					f.ASTTypeLookups[name] = answer
+				}
+				return answer
+			})
 			f.Bindings = maps.Clone(bf.bindings)
 		}
 		out[n.ID] = f

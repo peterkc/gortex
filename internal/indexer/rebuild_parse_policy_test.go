@@ -109,7 +109,7 @@ func TestRebuildContractRecipeVersions(t *testing.T) {
 	cFile := rebuildInput{Path: "x.c", Language: "c"}
 	goFile := rebuildInput{Path: "x.go", Language: "go"}
 	beforeHeader := idx.rebuildExtractorRecipe(base, header)
-	require.Equal(t, "04a917f856acbe5f91c014dc51a5436fef8bb34ab0d17afeda240261b28c8a03", hex.EncodeToString(beforeHeader[:]))
+	require.Equal(t, "e0e37dacca8393b358f0f0ae3d5a88890d34058bf64262d81d70bea99556c29c", hex.EncodeToString(beforeHeader[:]))
 	require.NotEqual(t, beforeHeader, idx.rebuildExtractorRecipe(rebuildDigest{2}, header))
 	beforeC := idx.rebuildExtractorRecipe(base, cFile)
 	beforeGo := idx.rebuildExtractorRecipe(base, goFile)

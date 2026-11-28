@@ -32,7 +32,7 @@ func (r rebuildContractReceiptReader) providerBody(ctx context.Context, view sto
 		// record that site-specific answer.
 		return contracts.HandlerFacts{}, fmt.Errorf("%w: handler %q has no declaration start line", errRebuildContractBodyUnproved, handler.ID)
 	}
-	refs := handlerBodyTypeValues(body)
+	refs := handlerBodyRegexTypeValues(body)
 	local := make(map[string]string)
 	// A bare captured name with no matching parse declaration may turn
 	// into a symbol ID if a linked type appears under that name.
@@ -59,6 +59,20 @@ func (r rebuildContractReceiptReader) providerBody(ctx context.Context, view sto
 			// when that lookup already had a physical declaration.
 			delete(local, n.Name)
 		}
+	}
+	// AST facts record actual local queries. A primitive literal is not a
+	// query even when its spelling names a declaration.
+	for name, answer := range body.ASTTypeLookups {
+		if answer == name {
+			answer = ""
+			for _, n := range base.Nodes {
+				if (n.Kind == graph.KindType || n.Kind == graph.KindInterface) && n.Name == name && n.ID == name {
+					answer = name
+					break
+				}
+			}
+		}
+		local[name] = answer
 	}
 	if len(local) == 0 {
 		return body, nil
@@ -89,20 +103,14 @@ func (r rebuildContractReceiptReader) providerBody(ctx context.Context, view sto
 	return body, nil
 }
 
-func handlerBodyTypeValues(body contracts.HandlerFacts) map[string]struct{} {
+func handlerBodyRegexTypeValues(body contracts.HandlerFacts) map[string]struct{} {
 	refs := make(map[string]struct{})
-	add := func(v any) {
-		if ref, ok := v.(string); ok && ref != "" {
-			refs[ref] = struct{}{}
+	for _, key := range []string{"request_type", "response_type"} {
+		if _, overwritten := body.AST[key]; overwritten {
+			continue
 		}
-	}
-	for _, meta := range [...]map[string]any{body.Regex, body.AST} {
-		add(meta["request_type"])
-		add(meta["response_type"])
-		if rows, ok := meta["response_envelope"].([]map[string]any); ok {
-			for _, row := range rows {
-				add(row["type"])
-			}
+		if ref, ok := body.Regex[key].(string); ok && ref != "" {
+			refs[ref] = struct{}{}
 		}
 	}
 	return refs
@@ -113,6 +121,5 @@ func handlerBodyTypeValues(body contracts.HandlerFacts) map[string]struct{} {
 func bindRebuildProviderRecord(c *contracts.Contract, handlerID string, body contracts.HandlerFacts) {
 	c.SymbolID = handlerID
 	body.EnrichProvider(c)
-	delete(c.Meta, "handler_ident")
-	delete(c.Meta, "handler_trail")
+	removeRebuildHandlerHints(c)
 }
