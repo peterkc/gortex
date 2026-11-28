@@ -31,10 +31,6 @@ func (r rebuildContractReceiptReader) handlerPass() *rebuildHandlerPass {
 		winners: make(map[[4]string]*graph.Node), bodies: make(map[string]rebuildHandlerBodyAnswer)}
 }
 
-func (r rebuildContractReceiptReader) providerHandler(ctx context.Context, view store_pebble.RebuildView, c contracts.Contract) (*graph.Node, error) {
-	return r.handlerPass().providerHandler(ctx, view, c)
-}
-
 // providerHandler selects a handler for a frozen Registry.All representative.
 // A nil winner leaves registration ownership intact.
 func (p *rebuildHandlerPass) providerHandler(ctx context.Context, view store_pebble.RebuildView, c contracts.Contract) (*graph.Node, error) {

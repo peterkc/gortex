@@ -62,7 +62,7 @@ func TestRebuildProviderHandlerCandidateParity(t *testing.T) {
 			}
 			c := contracts.Contract{ID: "http::route", Type: contracts.ContractHTTP, Role: contracts.RoleProvider, RepoPrefix: tt.repo, FilePath: tt.file,
 				Meta: map[string]any{"handler_trail": tt.trail, "handler_ident": tt.fallback}}
-			got, err := reader.providerHandler(ctx, b.RebuildView(), c)
+			got, err := reader.handlerPass().providerHandler(ctx, b.RebuildView(), c)
 			require.NoError(t, err)
 			if tt.want == "" {
 				require.Nil(t, native)
@@ -126,20 +126,20 @@ func TestRebuildProviderHandlerCheckedLaravelClass(t *testing.T) {
 	require.Len(t, pass.winners, 1)
 	b.AddNode(&graph.Node{ID: "other.php::OrderController", Name: "OrderController", Kind: graph.KindType, FilePath: "other.php",
 		Language: "php", Meta: map[string]any{"scope_ns": "Acme"}})
-	got, err = reader.providerHandler(ctx, b.RebuildView(), route)
+	got, err = reader.handlerPass().providerHandler(ctx, b.RebuildView(), route)
 	require.NoError(t, err)
 	require.Nil(t, got, "ambiguous controller does not fall back to a namesake action")
 	route.Line++
-	got, err = reader.providerHandler(ctx, b.RebuildView(), route)
+	got, err = reader.handlerPass().providerHandler(ctx, b.RebuildView(), route)
 	require.ErrorIs(t, err, graph.ErrContractProjectionStale)
 	require.Nil(t, got)
 	route.Line--
 	foreign := route
 	foreign.FilePath = "not-admitted.php"
-	_, err = reader.providerHandler(ctx, b.RebuildView(), foreign)
+	_, err = reader.handlerPass().providerHandler(ctx, b.RebuildView(), foreign)
 	require.ErrorContains(t, err, "no admitted handler registration")
 	reader.store.dir = t.TempDir()
-	_, err = reader.providerHandler(ctx, b.RebuildView(), route)
+	_, err = reader.handlerPass().providerHandler(ctx, b.RebuildView(), route)
 	require.ErrorIs(t, err, errParseEntryCorrupt)
 }
 

@@ -30,6 +30,10 @@ func Literal(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, Payload{ID: "p"})
 	WriteJSON(w, http.StatusOK, "ok")
 }
+
+func Missing(w http.ResponseWriter, r *http.Request) {
+	WriteJSON(w, http.StatusCreated, ExternalPayload{})
+}
 `)
 	path := filepath.Join(root, file)
 	require.NoError(t, os.WriteFile(path, src, 0o600))
@@ -70,7 +74,7 @@ func Literal(w http.ResponseWriter, r *http.Request) {
 	require.Equal(t, route.Line, want[0].Line)
 	require.NoError(t, os.Remove(path))
 	parses := parser.ParseCount()
-	handler, err := reader.providerHandler(ctx, view, route)
+	handler, err := reader.handlerPass().providerHandler(ctx, view, route)
 	require.NoError(t, err)
 	require.NotNil(t, handler)
 	body, err := reader.providerBody(ctx, view, handler)
@@ -88,6 +92,16 @@ func Literal(w http.ResponseWriter, r *http.Request) {
 	require.NoError(t, err)
 	require.Equal(t, "string", literalBody.AST["response_type"])
 	require.Empty(t, literalBody.ASTTypeLookups)
+
+	missing, err := view.Node(ctx, file+"::Missing")
+	require.NoError(t, err)
+	require.NotNil(t, missing)
+	missingBody, err := reader.providerBody(ctx, view, missing)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"ExternalPayload": "ExternalPayload"}, missingBody.ASTTypeLookups)
+	b.AddNode(&graph.Node{ID: file + "::ExternalPayload", Name: "ExternalPayload", Kind: graph.KindType, Language: "go", FilePath: file})
+	_, err = reader.providerBody(ctx, view, missing)
+	require.ErrorIs(t, err, errRebuildContractBodyUnproved)
 
 	_, err = reader.providerBody(ctx, view, handler)
 	require.ErrorIs(t, err, errRebuildContractBodyUnproved)
@@ -191,7 +205,7 @@ def ambiguous() -> Meta:
 	require.Len(t, want, 1)
 	require.Equal(t, file+"::Payload", want[0].Meta["response_type"])
 	require.NoError(t, os.Remove(path))
-	handler, err := reader.providerHandler(ctx, view, route)
+	handler, err := reader.handlerPass().providerHandler(ctx, view, route)
 	require.NoError(t, err)
 	require.NotNil(t, handler)
 	body, err := reader.providerBody(ctx, view, handler)
@@ -265,9 +279,16 @@ def ambiguous() -> Meta:
 		stationary := first
 		stationary.SymbolID = "stationary"
 		stationary.Meta = nil
+		oracle := contracts.NewRegistry()
 		for _, c := range []contracts.Contract{first, second, consumer, foreign, otherFile, stationary} {
+			oracle.Add(cloneContractRecords([]contracts.Contract{c})[0])
 			require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c}))
 		}
+		require.NoError(t, os.WriteFile(path, src, 0o600))
+		idx.resolveProviderHandlers(oracle)
+		require.NoError(t, os.Remove(path))
+		want := oracle.ByID(route.ID)
+		require.Len(t, want, 6)
 		require.NoError(t, reader.bindRebuildProviderHandlers(ctx, view, records))
 		var got []store_pebble.RebuildContractRecord
 		require.NoError(t, records.VisitByID(route.ID, func(item store_pebble.RebuildContractRecord) error {
@@ -280,8 +301,19 @@ def ambiguous() -> Meta:
 			require.True(t, got[i].BodyUnproved)
 			require.NotContains(t, got[i].Meta, "handler_trail")
 		}
-		for i, want := range []contracts.Contract{consumer, foreign, otherFile, stationary} {
-			require.Equal(t, store_pebble.RebuildContractRecord{Contract: want}, got[i+2])
+		for i, item := range got {
+			if item.BodyUnproved {
+				// The site-dependent fallback body is deliberately omitted;
+				// all registration fields and the elected symbol still match.
+				expected, actual := want[i], item.Contract
+				expected.Meta, actual.Meta = nil, nil
+				require.Equal(t, expected, actual)
+				continue
+			}
+			require.Equal(t, store_pebble.RebuildContractRecord{Contract: want[i]}, item)
+		}
+		for i, stationary := range []contracts.Contract{consumer, foreign, otherFile, stationary} {
+			require.Equal(t, store_pebble.RebuildContractRecord{Contract: stationary}, got[i+2])
 		}
 		return nil
 	}))

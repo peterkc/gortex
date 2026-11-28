@@ -65,12 +65,6 @@ func (r rebuildContractReceiptReader) providerBody(ctx context.Context, view sto
 	for name, answer := range body.ASTTypeLookups {
 		if answer == name {
 			answer = ""
-			for _, n := range base.Nodes {
-				if (n.Kind == graph.KindType || n.Kind == graph.KindInterface) && n.Name == name && n.ID == name {
-					answer = name
-					break
-				}
-			}
 		}
 		local[name] = answer
 	}
