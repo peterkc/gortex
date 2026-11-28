@@ -55,7 +55,7 @@ class Service {}
 	census := &rebuildExtractorCensus{byPath: map[string]string{}, originByGraphPath: map[string]string{}}
 	var manifestFiles []store_pebble.ManifestFile
 	var bean *graph.Edge
-	var alternate *graph.Node
+	var alternate, consumer *graph.Node
 	native := contracts.NewRegistry()
 	for _, src := range sources {
 		raw := []byte(src.text)
@@ -85,6 +85,9 @@ class Service {}
 			if node.Kind == graph.KindMethod && node.Name == "alternate" {
 				alternate = node
 			}
+			if node.Kind == graph.KindMethod && enclosingClassID(node) == javaFile+"::Client" {
+				consumer = node
+			}
 		}
 	}
 	require.NotNil(t, bean)
@@ -102,6 +105,43 @@ class Service {}
 	require.NoError(t, err)
 	_, err = head.PublishStage(ctx, files)
 	require.NoError(t, err)
+
+	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
+	view := b.RebuildView()
+	keep, err := r.proveSpringBeanFactory(ctx, view, bean)
+	require.NoError(t, err)
+	require.True(t, keep)
+	changedBean := *bean
+	changedBean.Origin = graph.OriginASTInferred
+	if changedBean.Origin == bean.Origin {
+		changedBean.Origin = graph.OriginASTResolved
+	}
+	keep, err = r.proveSpringBeanFactory(ctx, view, &changedBean)
+	require.NoError(t, err)
+	require.False(t, keep, "an exact DI projection alone does not prove the current Spring factory rule")
+	require.NotNil(t, consumer)
+	ref, _ := springBeanFromEdge(bean)
+	call := springBeanCall(javaFile+"::Client", ref)
+	keep, err = r.proveSpringBeanConsumer(ctx, view, consumer.ID, call)
+	require.NoError(t, err)
+	require.True(t, keep)
+	changedMethod := *consumer
+	changedMethod.Meta = map[string]any{"params_src": "Service other", "receiver": "Client"}
+	b.AddNode(&changedMethod)
+	keep, err = r.proveSpringBeanConsumer(ctx, view, consumer.ID, call)
+	require.NoError(t, err)
+	require.False(t, keep)
+	b.AddNode(consumer)
+	class, err := view.Node(ctx, call.From)
+	require.NoError(t, err)
+	require.NotNil(t, class)
+	wrong := *class
+	wrong.Kind = graph.KindVariable
+	b.AddNode(&wrong)
+	keep, err = r.proveSpringBeanConsumer(ctx, view, consumer.ID, call)
+	require.NoError(t, err)
+	require.False(t, keep)
+	b.AddNode(class)
 
 	// Model the quiet linked cut with a DI sibling not present in parse facts.
 	// The canonical native DI ID is still backed by Bean.make, so an ID-only
@@ -170,7 +210,6 @@ class Service {}
 	for _, src := range sources {
 		require.NoError(t, os.Remove(filepath.Join(root, src.file)))
 	}
-	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
 	parsedBefore := parser.ParseCount()
 	var stage store_pebble.StageTables
 	_, err = r.withRebuildContractSources(ctx, b, t.TempDir(), rebuildGoManifest{Path: "go.mod"}, 1, func(read func(func(contracts.Contract) error) error) error {
