@@ -821,6 +821,15 @@ func TestRebuildBuildStageSequence(t *testing.T) {
 			require.ErrorContains(t, err, "unexpected contract coverage at "+stage.String())
 		})
 	}
+	for i := 3; i < len(stages); i++ {
+		stage := stages[i]
+		t.Run("missing relation coverage at "+stage.String(), func(t *testing.T) {
+			bad := slices.Clone(frames[:i+1])
+			bad[i].Witness.Relations = nil
+			err := check(t, bad, i, i, 0, errRebuildBuildWire)
+			require.ErrorContains(t, err, "unexpected relation coverage at "+stage.String())
+		})
+	}
 	t.Run("publisher refuses contracts", func(t *testing.T) {
 		_ = check(t, frames, 4, 3, store_pebble.StageContracts, store_pebble.ErrStaleBase)
 	})
