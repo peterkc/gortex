@@ -168,10 +168,10 @@ func (c *routeCatalog) switchHead(ctx context.Context, checkout, incarnation str
 		if old.Profile != prior.profile {
 			return ErrStaleBase
 		}
-		if w.Stage < old.Stage {
+		if w.Stage.rank() < old.Stage.rank() {
 			return ErrStageOrder
 		}
-		if !w.CoversRelationsAtLeast(old) {
+		if !w.CoversRelationsAtLeast(old) || (old.Contracts != nil && w.Contracts == nil) {
 			return ErrCoverageRegression
 		}
 	}

@@ -128,7 +128,7 @@ func (h *Head) publish(ctx context.Context, tables StageTables, delta bool) (Hea
 		if prior.Stage != 0 && (tables.Witness.Version() != prior.Version() || tables.Witness.FrozenInputs != prior.FrozenInputs) {
 			return zero, fmt.Errorf("%w: stage belongs to a different version", ErrStaleBase)
 		}
-		if tables.Witness.Stage != prior.Stage+1 {
+		if !followsStage(tables.Witness.Stage, prior.Stage) {
 			return zero, fmt.Errorf("%w: got %s after %s", ErrStageOrder, tables.Witness.Stage, prior.Stage)
 		}
 	}
@@ -147,6 +147,12 @@ func (h *Head) publish(ctx context.Context, tables StageTables, delta bool) (Hea
 		}
 	}
 
+	if prior.Contracts != nil {
+		next := tables.Witness.Contracts
+		if next == nil || (!delta && *next != *prior.Contracts) {
+			return zero, invalid("publication contract coverage changed")
+		}
+	}
 	if !delta && tables.Witness.Stage == StageDerived {
 		if len(tables.Witness.Unsupported) == 0 || len(tables.Files) != 0 || !slices.Equal(tables.Witness.Families, prior.Families) {
 			return zero, invalid("D64 derived stage must only declare unsupported families")
@@ -194,6 +200,17 @@ func (h *Head) publish(ctx context.Context, tables StageTables, delta bool) (Hea
 		return zero, err
 	}
 	return blake3.Sum256(raw), nil
+}
+
+func followsStage(next, prior Stage) bool {
+	switch {
+	case next == StageContracts:
+		return prior == StageRelations
+	case prior == StageContracts:
+		return next == StageDerived
+	default:
+		return next == prior+1
+	}
 }
 
 // CoversRelationsAtLeast compares proved coverage in validated witnesses.

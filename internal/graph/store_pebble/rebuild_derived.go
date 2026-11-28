@@ -24,19 +24,32 @@ var d64Unsupported = [...]UnsupportedFamily{
 	{"releases", "D64"},
 }
 
-// PrepareDeferredDerived advances only the witness. It does not build an
-// analysis family or change any relation rows or coverage labels.
-func PrepareDeferredDerived(dir string, relations StageTables) (StageTables, error) {
-	if !filepath.IsAbs(dir) || relations.Witness.Stage != StageRelations || relations.Incarnation == "" {
-		return StageTables{}, invalid("derived needs its relations witness and stage directory")
+func deferredFamilies(contractsBuilt bool) []UnsupportedFamily {
+	if !contractsBuilt {
+		return d64Unsupported[:]
 	}
-	w := relations.Witness
+	return slices.DeleteFunc(slices.Clone(d64Unsupported[:]), func(f UnsupportedFamily) bool {
+		return f.Family == "contracts"
+	})
+}
+
+// PrepareDeferredDerived advances only the witness. The predecessor is
+// Contracts, or Relations on the legacy path without contract storage.
+func PrepareDeferredDerived(dir string, prior StageTables) (StageTables, error) {
+	w := prior.Witness
+	if !filepath.IsAbs(dir) || prior.Incarnation == "" || (w.Stage != StageContracts && w.Stage != StageRelations) {
+		return StageTables{}, invalid("derived needs its predecessor witness and stage directory")
+	}
 	raw, err := encodeWitness(w)
 	if err != nil {
 		return StageTables{}, err
 	}
 	w.Stage = StageDerived
 	w.Families = slices.Clone(w.Families)
-	w.Unsupported = slices.Clone(d64Unsupported[:])
-	return StageTables{Dir: dir, Incarnation: relations.Incarnation, Base: blake3.Sum256(raw), Witness: w}, nil
+	w.Unsupported = slices.Clone(deferredFamilies(w.Contracts != nil))
+	if w.Contracts != nil {
+		coverage := *w.Contracts
+		w.Contracts = &coverage
+	}
+	return StageTables{Dir: dir, Incarnation: prior.Incarnation, Base: blake3.Sum256(raw), Witness: w}, nil
 }

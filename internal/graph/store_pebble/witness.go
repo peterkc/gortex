@@ -20,6 +20,8 @@ const (
 	StageRelations
 	StageDerived
 	StageSearch
+	// Append wire values; old ordinals are part of the witness and worker wire.
+	StageContracts
 )
 
 func (s Stage) String() string {
@@ -30,12 +32,26 @@ func (s Stage) String() string {
 		return "file_graph"
 	case StageRelations:
 		return "relations"
+	case StageContracts:
+		return "contracts"
 	case StageDerived:
 		return "derived"
 	case StageSearch:
 		return "search"
 	default:
 		return "unpublished"
+	}
+}
+
+// rank is publication order, independent of the persisted stage number.
+func (s Stage) rank() int {
+	switch s {
+	case StageContracts:
+		return int(StageRelations) + 1
+	case StageDerived, StageSearch:
+		return int(s) + 1
+	default:
+		return int(s)
 	}
 }
 
@@ -70,6 +86,12 @@ type RelationCoverage struct {
 	DeferredLanguages []string
 }
 
+// ContractCoverage declares the D83 omissions among logical contract records.
+// A zero count is complete, including when no records were found.
+type ContractCoverage struct {
+	OmittedRecords uint64
+}
+
 type HeadDigest [32]byte
 
 type FamilyWitness struct {
@@ -89,6 +111,7 @@ type Witness struct {
 	Stage               Stage
 	Families            []FamilyWitness     // ascending, unique family tags
 	Relations           *RelationCoverage   // nil before relations or in legacy witnesses
+	Contracts           *ContractCoverage   // nil before contracts or in legacy witnesses
 	Unsupported         []UnsupportedFamily // exact D64 declarations from derived onward
 
 	PlatformCatalogRevision uint32 // zero in legacy publications
@@ -122,12 +145,16 @@ const (
 	witnessGitPolicyFormat byte = 4
 	witnessD64Format       byte = 5
 	witnessCatalogFormat   byte = 6
+	witnessContractsFormat byte = 7
 )
 
 func encodeWitness(w Witness) ([]byte, error) {
-	if w.Stage < StageManifest || w.Stage > StageSearch ||
+	if w.Stage < StageManifest || w.Stage > StageContracts ||
 		(w.Profile != DefaultProfile && w.Profile != FullProfile) || w.Input == (HeadDigest{}) || w.Recipe == (HeadDigest{}) {
 		return nil, invalid("publication witness identity")
+	}
+	if (w.Stage == StageContracts && w.Contracts == nil) || (w.Contracts != nil && w.Stage.rank() < StageContracts.rank()) {
+		return nil, invalid("publication contract coverage stage")
 	}
 	format := witnessFormat
 	if w.FrozenInputs != (HeadDigest{}) {
@@ -146,7 +173,7 @@ func encodeWitness(w Witness) ([]byte, error) {
 		format = witnessGitPolicyFormat
 	}
 	if len(w.Unsupported) != 0 {
-		if w.Stage < StageDerived || !slices.Equal(w.Unsupported, d64Unsupported[:]) {
+		if w.Stage.rank() < StageDerived.rank() || !slices.Equal(w.Unsupported, deferredFamilies(w.Contracts != nil)) {
 			return nil, invalid("publication D64 unsupported families")
 		}
 		format = witnessD64Format
@@ -154,8 +181,11 @@ func encodeWitness(w Witness) ([]byte, error) {
 	// Format 6 prefixes the revision to the existing layout. This keeps each
 	// older layout's rules for optional fields intact.
 	var b []byte
+	if w.Contracts != nil {
+		b = binary.AppendUvarint([]byte{witnessContractsFormat}, w.Contracts.OmittedRecords)
+	}
 	if w.PlatformCatalogRevision != 0 {
-		b = binary.BigEndian.AppendUint32([]byte{witnessCatalogFormat}, w.PlatformCatalogRevision)
+		b = binary.BigEndian.AppendUint32(append(b, witnessCatalogFormat), w.PlatformCatalogRevision)
 	}
 	b = append(b, format, byte(w.Stage))
 	b = appendMetaString(b, string(w.Profile))
@@ -212,6 +242,15 @@ func encodeWitness(w Witness) ([]byte, error) {
 
 func decodeWitness(encodedWitness []byte) (Witness, error) {
 	raw := encodedWitness
+	var contracts *ContractCoverage
+	if len(raw) != 0 && raw[0] == witnessContractsFormat {
+		omitted, n := binary.Uvarint(raw[1:])
+		if n <= 0 {
+			return Witness{}, invalid("publication omitted contract count")
+		}
+		contracts = &ContractCoverage{OmittedRecords: omitted}
+		raw = raw[1+n:]
+	}
 	var revision uint32
 	if len(raw) >= 5 && raw[0] == witnessCatalogFormat {
 		revision = binary.BigEndian.Uint32(raw[1:5])
@@ -221,7 +260,7 @@ func decodeWitness(encodedWitness []byte) (Witness, error) {
 		return Witness{}, invalid("publication witness format")
 	}
 	d := recordCursor{buf: raw[2:]}
-	w := Witness{Stage: Stage(raw[1]), Profile: Profile(d.str()), PlatformCatalogRevision: revision}
+	w := Witness{Stage: Stage(raw[1]), Profile: Profile(d.str()), Contracts: contracts, PlatformCatalogRevision: revision}
 	if d.err != nil || len(d.buf) < 96 {
 		return Witness{}, invalid("truncated publication witness identity")
 	}
@@ -290,7 +329,7 @@ func decodeWitness(encodedWitness []byte) (Witness, error) {
 		}
 	}
 	if raw[0] == witnessD64Format {
-		for range d64Unsupported {
+		for range len(deferredFamilies(w.Contracts != nil)) {
 			f := UnsupportedFamily{Family: d.str(), Reason: d.str()}
 			if d.err != nil {
 				return Witness{}, d.err
@@ -322,7 +361,7 @@ func (s *Snapshot) RequireStage(need Stage) error {
 	if err != nil {
 		return err
 	}
-	if w.Stage < need {
+	if w.Stage.rank() < need.rank() || (need == StageContracts && w.Contracts == nil) {
 		return &ErrStagePending{Need: need, Published: w.Stage}
 	}
 	return nil

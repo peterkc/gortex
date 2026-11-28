@@ -274,3 +274,87 @@ func TestStageWitnessRejectsMalformedValue(t *testing.T) {
 	_, err = decodeWitness(append(bytes.Clone(raw), 0))
 	require.ErrorIs(t, err, errInvalidRecord)
 }
+
+func TestContractWitnessEncoding(t *testing.T) {
+	w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Profile: FullProfile, Stage: StageDerived,
+		Unsupported: d64Unsupported[:]}
+	old, err := encodeWitness(w)
+	require.NoError(t, err)
+	require.Equal(t, []byte{5, 4}, old[:2])
+	got, err := decodeWitness(old)
+	require.NoError(t, err)
+	require.Equal(t, w, got)
+	w.Stage = StageSearch
+	old, err = encodeWitness(w)
+	require.NoError(t, err)
+	require.Equal(t, []byte{5, 5}, old[:2])
+	got, err = decodeWitness(old)
+	require.NoError(t, err)
+	require.Equal(t, w, got)
+	old[1] = byte(StageContracts)
+	_, err = decodeWitness(old)
+	require.ErrorIs(t, err, errInvalidRecord, "a legacy layout cannot declare contracts")
+
+	w.Stage, w.Unsupported = StageContracts, nil
+	w.PlatformCatalogRevision = 7
+	w.Relations = &RelationCoverage{DeferredLanguages: []string{"python"}}
+	for _, omissions := range []uint64{0, 2} {
+		w.Contracts = &ContractCoverage{OmittedRecords: omissions}
+		raw, err := encodeWitness(w)
+		require.NoError(t, err)
+		require.Equal(t, []byte{witnessContractsFormat, byte(omissions), witnessCatalogFormat}, raw[:3])
+		got, err := decodeWitness(raw)
+		require.NoError(t, err)
+		require.Equal(t, w, got)
+		for n := range len(raw) {
+			_, err := decodeWitness(raw[:n])
+			require.ErrorIs(t, err, errInvalidRecord)
+		}
+		_, err = decodeWitness(append(bytes.Clone(raw[:2]), raw...))
+		require.ErrorIs(t, err, errInvalidRecord, "the contract coverage envelope cannot be nested")
+	}
+}
+
+func TestContractStageWitnessOrder(t *testing.T) {
+	ctx := t.Context()
+	const inc = testHeadIncarnation
+	h, err := OpenHead(filepath.Join(t.TempDir(), "head"), inc, FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, h.Close()) })
+	stage := StageTables{Incarnation: inc, Dir: t.TempDir(), Witness: Witness{
+		Input: HeadDigest{1}, Recipe: HeadDigest{2}, Stage: StageManifest, Profile: FullProfile,
+	}}
+	for _, label := range []Stage{StageManifest, StageFileGraph, StageRelations} {
+		stage.Witness.Stage = label
+		stage.Base, err = h.PublishStage(ctx, stage)
+		require.NoError(t, err)
+	}
+	old := stageRead(t, h)
+	stage.Witness.Stage = StageContracts
+	stage.Witness.Contracts = &ContractCoverage{OmittedRecords: 1}
+	base, err := h.PublishStage(ctx, stage)
+	require.NoError(t, err)
+	_, err = h.PublishStage(ctx, stage)
+	require.ErrorIs(t, err, ErrStageOrder)
+	require.ErrorAs(t, old.RequireStage(StageContracts), new(*ErrStagePending))
+	cur := stageRead(t, h)
+	require.NoError(t, cur.RequireStage(StageContracts))
+	require.ErrorAs(t, cur.RequireStage(StageDerived), new(*ErrStagePending))
+
+	derived, err := PrepareDeferredDerived(t.TempDir(), stage)
+	require.NoError(t, err)
+	require.Equal(t, base, derived.Base)
+	require.Equal(t, stage.Witness.Contracts, derived.Witness.Contracts)
+	require.Len(t, derived.Witness.Unsupported, len(d64Unsupported)-1)
+	for _, f := range derived.Witness.Unsupported {
+		require.NotEqual(t, "contracts", f.Family)
+	}
+	derived.Witness.Contracts.OmittedRecords++
+	_, err = h.PublishStage(ctx, derived)
+	require.ErrorIs(t, err, errInvalidRecord)
+	derived.Witness.Contracts.OmittedRecords--
+	_, err = h.PublishStage(ctx, derived)
+	require.NoError(t, err)
+	require.NoError(t, stageRead(t, h).RequireStage(StageDerived))
+	require.ErrorAs(t, cur.RequireStage(StageDerived), new(*ErrStagePending))
+}
