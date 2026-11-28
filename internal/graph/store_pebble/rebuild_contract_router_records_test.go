@@ -62,8 +62,9 @@ func testRebuildRouterRecordMovesMatchCheckedRegistry(t *testing.T, rootMove boo
 	want, missing := contracts.JoinRebuildRouterPrefixFacts(reg, files, nil)
 	require.Empty(t, missing)
 	require.Equal(t, wantFiles, want)
-	// / < /api/x < /x: the clear drops the root move, restores the two
-	// stationary rows, then the later /x move appends after them.
+	// With rootMove, the clear drops the root move (/ < /api/x < /x).
+	// In both cases it restores the two stationary rows, then the /x move
+	// appends after them.
 	require.Equal(t, []contracts.Contract{
 		input[3].Contract, input[4].Contract, contracts.RewriteRouterContract(input[0].Contract, "/api"),
 	}, reg.ByID(intermediate))

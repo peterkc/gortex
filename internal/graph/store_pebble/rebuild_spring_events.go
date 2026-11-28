@@ -530,7 +530,9 @@ func (p *rebuildSpringEventPass) proveMoves(ctx context.Context) error {
 			}
 			direct, err := p.present(p.key('l', root, e.To))
 			if err != nil || direct {
-				return err // A direct listener, if present, remains the first match.
+				// Either the direct listener is the first match, or the
+				// last receipt drops it and the native guard stays off.
+				return err
 			}
 		}
 		_, first, err := p.listeners(ctx, root, 'T')

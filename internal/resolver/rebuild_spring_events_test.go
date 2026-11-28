@@ -580,6 +580,48 @@ func TestRebuildSpringEventsUnprovedSoleInheritedListener(t *testing.T) {
 	require.Equal(t, before, rebuildEventSavedRows(t, b))
 }
 
+func TestRebuildSpringEventsMixedSoleDirectListener(t *testing.T) {
+	for _, listenerLast := range []bool{true, false} {
+		name := "listener first"
+		if listenerLast {
+			name = "listener last"
+		}
+		t.Run(name, func(t *testing.T) {
+			pub := springRebuildNode("publish", "")
+			listener := springRebuildNode("A", "Event")
+			nonListener := springRebuildNode("A", "")
+			call := springRebuildCall(pub.ID, listener.ID, "Event", 10)
+			b := openRebuildGRPCBuild(t, rebuildEventFacts(springRebuildFile, "java", []*graph.Node{pub, listener}, call))
+			before := rebuildEventSavedRows(t, b)
+			raw := []*graph.Node{pub, listener, nonListener}
+			wantResolved := 0
+			if listenerLast {
+				raw[1], raw[2] = raw[2], raw[1]
+				wantResolved = 1
+			}
+			receipt := rebuildEventFacts(springRebuildFile, "java", raw, call)
+			native := rebuildGRPCNative(t, receipt)
+			nativeBefore := rebuildEventSQLiteRows(native)
+			require.Equal(t, wantResolved, ResolveSpringEventCalls(native))
+			want := rebuildEventSQLiteRows(native)
+			require.Equal(t, nativeBefore, want)
+			require.Equal(t, []*graph.Edge{call}, want.edges)
+
+			stats, err := RunRebuildSpringEvents(t.Context(), b, rebuildGRPCReceipts(receipt), springRebuildSelection(t, b))
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildSpringEventStats{Stubs: 1, Resolved: 1}, stats)
+			after := rebuildEventSavedRows(t, b)
+			require.Equal(t, before, after)
+			// Node upserts are outside the event pass: when the non-listener
+			// wins in native, its node differs, but the Call stays unchanged.
+			require.Equal(t, want.edges, after.edges)
+			if listenerLast {
+				require.Equal(t, want.nodes, after.nodes)
+			}
+		})
+	}
+}
+
 func TestRebuildSpringEventsMixedSoleInheritedListener(t *testing.T) {
 	pub := springRebuildNode("publish", "")
 	listener := springRebuildNode("A", "Base")

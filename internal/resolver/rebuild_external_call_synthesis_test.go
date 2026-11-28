@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 	"testing"
 
@@ -503,6 +504,20 @@ func TestRebuildExternalCallPythonImportedName(t *testing.T) {
 	}
 }
 
+// A lookup that can match must survive both projection and the store's
+// name, qualified-name or file-directory probe.
+func requireRebuildExternalIndexedCoverage(t *testing.T, e *graph.Edge, n *graph.Node) {
+	t.Helper()
+	if !rebuildExternalIndexedLookup(e, n) {
+		return
+	}
+	projected, names, quals, directory := rebuildExternalIndexedEdge(e)
+	require.NotNil(t, projected)
+	require.True(t, rebuildExternalIndexedLookup(projected, n), "projection lost lookup evidence")
+	require.True(t, slices.Contains(names, n.Name) || slices.Contains(quals, n.QualName) || directory && n.Kind == graph.KindFile,
+		"lookup match missing from indexed probes: edge %s, node %s", e.To, n.ID)
+}
+
 func TestRebuildExternalCallReadPromotion(t *testing.T) {
 	for _, tc := range []struct {
 		kind graph.NodeKind
@@ -520,6 +535,7 @@ func TestRebuildExternalCallReadPromotion(t *testing.T) {
 			n := &graph.Node{ID: "external::acme.tools", Kind: tc.kind, Name: "fetch", QualName: "acme.tools"}
 			e := &graph.Edge{From: "a.custom::run", Kind: graph.EdgeReads, To: tc.to, FilePath: "a.custom"}
 			require.Equal(t, tc.want, rebuildExternalIndexedLookup(e, n))
+			requireRebuildExternalIndexedCoverage(t, e, n)
 		})
 	}
 }
@@ -587,6 +603,7 @@ func TestRebuildExternalCallReadNonCallable(t *testing.T) {
 			require.False(t, rebuildExternalIndexedLookup(e, n))
 			e.Kind = graph.EdgeCalls
 			require.True(t, rebuildExternalIndexedLookup(e, n), "the value-callee role is otherwise eligible")
+			requireRebuildExternalIndexedCoverage(t, e, n)
 		})
 	}
 	t.Run("PHP type", func(t *testing.T) {
@@ -596,6 +613,7 @@ func TestRebuildExternalCallReadNonCallable(t *testing.T) {
 		require.False(t, rebuildExternalIndexedLookup(e, n))
 		e.Kind = graph.EdgeReferences
 		require.True(t, rebuildExternalIndexedLookup(e, n), "the PHP name role is otherwise eligible")
+		requireRebuildExternalIndexedCoverage(t, e, n)
 	})
 }
 
@@ -633,6 +651,8 @@ func TestRebuildExternalCallPHPIndexedMetadata(t *testing.T) {
 					nodes = append(nodes, owner)
 					edges = append(edges, companion)
 				}
+				require.Equal(t, match, rebuildExternalIndexedLookup(claim, decl))
+				requireRebuildExternalIndexedCoverage(t, claim, decl)
 				retained := &graph.Edge{From: goCaller.ID, Kind: graph.EdgeCalls, To: terminal, FilePath: goCaller.FilePath}
 				facts := []store_pebble.ParseFacts{
 					rebuildEventFacts(goCaller.FilePath, goCaller.Language, []*graph.Node{goCaller}, retained),
@@ -679,6 +699,8 @@ func TestRebuildExternalCallIndexedKeys(t *testing.T) {
 		{name: "Python imported attribute", file: "a.py", target: "extern::acme.tools::fetch", names: []string{"fetch", "tools"}},
 		{name: "import declaration and directory", target: "import::acme.tools::fetch", names: []string{"fetch"},
 			quals: []string{"acme.tools::fetch", "acme.tools"}, directory: true},
+		{name: "empty import spec", target: "import::", quals: []string{"", ""}, directory: true},
+		{name: "empty extern leaf", target: "extern::acme.tools::", names: []string{""}},
 		{name: "Lua-owned import", file: "a.lua", target: "import::acme.tools::fetch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -688,6 +710,31 @@ func TestRebuildExternalCallIndexedKeys(t *testing.T) {
 			require.Equal(t, tc.names, names)
 			require.Equal(t, tc.quals, quals)
 			require.Equal(t, tc.directory, directory)
+		})
+	}
+}
+
+func TestRebuildExternalCallIndexedCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		name, file, target string
+		node               graph.Node
+	}{
+		{"bare", "a.py", "fetch", graph.Node{Kind: graph.KindFunction, Name: "fetch"}},
+		{"selector", "a.py", "*.fetch", graph.Node{Kind: graph.KindMethod, Name: "fetch"}},
+		{"extern leaf", "a.py", "extern::acme.tools::fetch", graph.Node{Kind: graph.KindType, Name: "fetch"}},
+		{"empty extern leaf", "a.py", "extern::acme.tools::", graph.Node{Kind: graph.KindFunction}},
+		{"Python imported attribute", "a.py", "extern::acme.tools::alias", graph.Node{Kind: graph.KindFunction, Name: "tools", FilePath: "acme.py"}},
+		{"import full qualname", "a.py", "import::acme.tools::fetch", graph.Node{Kind: graph.KindType, Name: "other", QualName: "acme.tools::fetch"}},
+		{"import path qualname", "a.py", "import::acme.tools::fetch", graph.Node{Kind: graph.KindType, Name: "other", QualName: "acme.tools"}},
+		{"import leaf", "a.py", "import::acme.tools::fetch", graph.Node{Kind: graph.KindType, Name: "fetch"}},
+		{"import directory", "a.py", "import::acme/tools::fetch", graph.Node{Kind: graph.KindFile, Name: "other.py", FilePath: "acme/tools/other.py"}},
+		{"empty import qualname", "a.py", "import::", graph.Node{Kind: graph.KindType, Name: "other"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.node.ID = "external::fixture.tools"
+			e := &graph.Edge{From: "a.py::run", Kind: graph.EdgeCalls, To: "unresolved::" + tc.target, FilePath: tc.file}
+			require.True(t, rebuildExternalIndexedLookup(e, &tc.node), "fixture must exercise a lookup match")
+			requireRebuildExternalIndexedCoverage(t, e, &tc.node)
 		})
 	}
 }

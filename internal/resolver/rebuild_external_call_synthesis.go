@@ -149,10 +149,12 @@ func rebuildExternalIndexedEdge(raw *graph.Edge) (e *graph.Edge, names, quals []
 	name := graph.UnresolvedName(raw.To)
 	// Main does not bind a resolved target. The gRPC and Python relative
 	// import branches leave the key for their dedicated passes, and the
-	// latter only changes Imports, not a Call or Reference. Native Vue
-	// template import binding normally targets file::symbol IDs (including
-	// basename-matched component declarations), not package terminals.
-	// Arbitrary configured-extractor IDs are not proved by that spelling.
+	// latter only changes Imports, not a Call or Reference.
+	// Vue template References can bind through imports to file::local,
+	// file::default, file::<basename> or a basename-matched Vue component.
+	// The indexed lookup uses the template name, not these import bindings;
+	// a terminal-shaped configured-extractor ID can therefore miss a vote
+	// and produce a different result from native without a refusal.
 	if name == "" || strings.HasPrefix(name, "grpc::") || strings.HasPrefix(name, "pyrel::") {
 		return nil, nil, nil, false
 	}
