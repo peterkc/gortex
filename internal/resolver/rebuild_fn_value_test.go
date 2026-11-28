@@ -263,7 +263,7 @@ func TestRebuildFnValueSettledPredecessor(t *testing.T) {
 	require.Equal(t, rebuildEventSQLiteRows(native), before)
 }
 
-func TestRebuildFnValueSQLiteOracleNamedLookups(t *testing.T) {
+func TestRebuildFnValueSQLiteOracleGateTiers(t *testing.T) {
 	const file, remote = "site.ts", "other.ts"
 	for _, tc := range []struct {
 		name, receiver string
@@ -290,8 +290,16 @@ func TestRebuildFnValueSQLiteOracleNamedLookups(t *testing.T) {
 			if tc.proto {
 				target.Meta = map[string]any{"prototype": true}
 			}
+			nodes := []*graph.Node{target}
+			if tc.member && tc.skip {
+				// The global fallback must be ambiguous; only Owner's member can win.
+				other := rebuildFnValueTestNode("other-target", target.Name, remote)
+				other.Kind = graph.KindMethod
+				other.Meta = map[string]any{"receiver": "Other"}
+				nodes = append(nodes, other)
+			}
 			site := rebuildEventFacts(file, caller.Language, []*graph.Node{caller}, call)
-			decls := rebuildEventFacts(remote, target.Language, []*graph.Node{target})
+			decls := rebuildEventFacts(remote, target.Language, nodes)
 			build, native := openRebuildEventStores(t, site, decls)
 			require.Equal(t, 1, ResolveFnValueCallbacks(native))
 			want := rebuildEventSQLiteRows(native)
