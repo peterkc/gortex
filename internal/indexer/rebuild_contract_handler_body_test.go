@@ -10,6 +10,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 func TestRebuildProviderBodyCheckedReplay(t *testing.T) {
@@ -106,6 +107,7 @@ def ambiguous() -> Meta:
 	require.NoError(t, os.WriteFile(path, src, 0o600))
 	native := graph.New()
 	idx := newTestIndexer(native)
+	idx.registry.Register(languages.NewPythonExtractor())
 	idx.SetRootPath(root)
 	t.Cleanup(idx.Close)
 	// Use distinct nested declaration IDs, as a scoped extractor can do.
@@ -118,7 +120,10 @@ def ambiguous() -> Meta:
 		{ID: file + "::ambiguous", Kind: graph.KindFunction, Name: "ambiguous", StartLine: 15, EndLine: 16},
 		{ID: file + "::no_line", Kind: graph.KindFunction, Name: "no_line"},
 	}
-	facts := &contracts.FileFacts{Shapes: make(map[string]*contracts.Shape)}
+	// The native router census includes Python mount-only files, even
+	// when there is no local route. Save the checked empty answer.
+	router := contracts.RouterFileFacts(file, src)
+	facts := &contracts.FileFacts{Shapes: make(map[string]*contracts.Shape), Router: &router}
 	for _, n := range nodes {
 		n.FilePath, n.Language = file, "python"
 		if n.Kind == graph.KindType {
