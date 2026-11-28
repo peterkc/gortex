@@ -118,30 +118,31 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 			}
 		}
 		for _, e := range f.Edges {
-			// Native parse insertion keeps the first payload for each edge key.
-			// Do not replace its custody or record evidence for a losing row.
-			if e != nil {
-				old, err := b.pendingEdge(pendingEdgeKey(e))
-				if err != nil {
-					return err
-				}
-				if old != nil {
-					continue
-				}
+			if e == nil || graph.StructuralEdgeTargetInvalid(e.Kind, e.To) {
+				continue
+			}
+			// X1 option B uses native direct SQLite insertion: the first payload
+			// wins. The in-memory cold-index shadow instead keeps the last one.
+			// Keep the winner's custody and never record evidence for a loser.
+			edgeKey := pendingEdgeKey(e)
+			old, err := b.pendingEdge(edgeKey)
+			if err != nil {
+				return err
+			}
+			if old != nil {
+				continue
 			}
 			var custody rebuildEdgeCustody
-			if repo == "" && f.EffectiveLanguage == "go" && e != nil && e.FilePath == pathkey.Normalize(f.File.FilePath) && rebuildGoDataflowReceiptSource(e) {
+			if repo == "" && f.EffectiveLanguage == "go" && e.FilePath == pathkey.Normalize(f.File.FilePath) && rebuildGoDataflowReceiptSource(e) {
 				custody.proof = rebuildProofGoDataflowSource
 			}
-			if err := b.addEdgeWithCustody(e, custody); err != nil {
+			if err := b.writePendingEdge(e, custody, false); err != nil {
 				return err
 			}
 			if deferred {
-				if e != nil && !graph.StructuralEdgeTargetInvalid(e.Kind, e.To) {
-					key := rebuildHoldoutKey('e', pendingEdgeKey(e))
-					if err := b.pending.Set(key, []byte(f.File.FilePath), pebble.NoSync); err != nil {
-						return err
-					}
+				key := rebuildHoldoutKey('e', edgeKey)
+				if err := b.pending.Set(key, []byte(f.File.FilePath), pebble.NoSync); err != nil {
+					return err
 				}
 				continue
 			}
