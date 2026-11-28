@@ -802,11 +802,18 @@ func TestRebuildBuildStageSequence(t *testing.T) {
 		extra := append(slices.Clone(frames), frames[5])
 		_ = check(t, extra, 6, 6, 0, store_pebble.ErrStageOrder)
 	})
-	t.Run("contracts coverage missing", func(t *testing.T) {
-		bad := slices.Clone(frames[:4])
-		bad[3].Witness.Contracts = nil
-		_ = check(t, bad, 3, 3, 0, errRebuildBuildWire)
-	})
+	for i, stage := range stages {
+		t.Run("wrong contract coverage at "+stage.String(), func(t *testing.T) {
+			bad := slices.Clone(frames[:i+1])
+			if i < 3 {
+				bad[i].Witness.Contracts = &store_pebble.ContractCoverage{}
+			} else {
+				bad[i].Witness.Contracts = nil
+			}
+			err := check(t, bad, i, i, 0, errRebuildBuildWire)
+			require.ErrorContains(t, err, "unexpected contract coverage at "+stage.String())
+		})
+	}
 	t.Run("publisher refuses contracts", func(t *testing.T) {
 		_ = check(t, frames, 4, 3, store_pebble.StageContracts, store_pebble.ErrStaleBase)
 	})
