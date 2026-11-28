@@ -14,6 +14,17 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
 
+func TestRebuildContractShapeBatchesRejectNilStream(t *testing.T) {
+	var shapeRefusals int
+	reader := rebuildContractReceiptReader{}
+	for batch, err := range reader.shapeBatches(t.Context(), store_pebble.RebuildView{}, nil) {
+		shapeRefusals++
+		require.Zero(t, batch)
+		require.ErrorIs(t, err, graph.ErrContractProjectionStale)
+	}
+	require.Equal(t, 1, shapeRefusals)
+}
+
 func TestRebuildContractShapeBatchesFromCheckedReceipts(t *testing.T) {
 	const path = "schema.go"
 	ctx, root := t.Context(), t.TempDir()

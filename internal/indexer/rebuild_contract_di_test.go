@@ -88,7 +88,7 @@ func TestRebuildSpringBeanCallsNativePairs(t *testing.T) {
 func TestRebuildSpringBeanCallInputBounds(t *testing.T) {
 	const repo = "repo"
 	padding := strings.Repeat("x", 16<<20)
-	for _, mode := range []string{"irrelevant_method", "non_bean_Provides", "method", "bean_Provides"} {
+	for _, mode := range []string{"irrelevant_method", "non_bean_Provides", "foreign_bean_Provides", "method", "bean_Provides"} {
 		t.Run(mode, func(t *testing.T) {
 			b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
 			require.NoError(t, err)
@@ -111,6 +111,23 @@ func TestRebuildSpringBeanCallInputBounds(t *testing.T) {
 				other.Line++
 				other.Meta = map[string]any{graph.MetaDIBinding: graph.DIBindingUseClass, graph.MetaDIProvidesFor: "Service", "padding": padding}
 				b.AddEdge(&other)
+			case "foreign_bean_Provides":
+				const foreignPath = "other/Source.java"
+				foreign := *source
+				foreign.ID, foreign.FilePath, foreign.RepoPrefix = foreignPath+"::Source", foreignPath, "other"
+				b.AddNode(&foreign)
+				b.AddEdge(&graph.Edge{
+					From:     foreign.ID,
+					To:       foreignPath + "::Source.bean",
+					Kind:     graph.EdgeProvides,
+					FilePath: foreignPath,
+					Line:     2,
+					Meta: map[string]any{
+						graph.MetaDIBinding:     graph.DIBindingBean,
+						graph.MetaDIProvidesFor: "Service",
+						"padding":               padding,
+					},
+				})
 			case "method":
 				method.Meta["padding"] = padding
 			case "bean_Provides":
@@ -128,9 +145,14 @@ func TestRebuildSpringBeanCallInputBounds(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			require.Len(t, got, 1)
-			require.Equal(t, path+"::Client", got[0].From)
-			require.Equal(t, "Service", got[0].Meta["bean_of"])
+			require.Equal(t, []*graph.Edge{{
+				From:     path + "::Client",
+				To:       path + "::Source.bean",
+				Kind:     graph.EdgeCalls,
+				FilePath: path,
+				Line:     1,
+				Meta:     map[string]any{"via": "spring.Bean", "bean_of": "Service"},
+			}}, got)
 		})
 	}
 }

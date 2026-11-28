@@ -191,13 +191,4 @@ func TestRebuildContractGraphRowsNativeRepoOwners(t *testing.T) {
 	require.NoError(t, visitRebuildContractGraphRows(ctx, view, stream, visit))
 	require.Equal(t, wantNodes, gotNodes)
 	require.Equal(t, wantEdges, gotEdges)
-
-	var shapeRefusals int
-	reader := rebuildContractReceiptReader{}
-	for batch, err := range reader.shapeBatches(ctx, view, nil) {
-		shapeRefusals++
-		require.Zero(t, batch)
-		require.ErrorIs(t, err, graph.ErrContractProjectionStale)
-	}
-	require.Equal(t, 1, shapeRefusals)
 }

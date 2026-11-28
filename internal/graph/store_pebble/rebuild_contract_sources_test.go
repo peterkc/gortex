@@ -170,6 +170,49 @@ func TestRebuildContractSourcesLostRunRefuses(t *testing.T) {
 	require.Empty(t, left)
 }
 
+func TestRebuildContractSourcesReadErrorStaysLatched(t *testing.T) {
+	failure := errors.New("test source visitor failed")
+	var secondErr error
+	var visitedAgain bool
+	stats, err := WithRebuildContractSources(t.Context(), t.TempDir(), 1,
+		func(add func(contracts.Contract) error) error {
+			return add(contracts.Contract{ID: "env::TOKEN"})
+		},
+		func(read func(func(contracts.Contract) error) error) error {
+			require.ErrorIs(t, read(func(contracts.Contract) error { return failure }), failure)
+			secondErr = read(func(contracts.Contract) error {
+				visitedAgain = true
+				return nil
+			})
+			return nil // the source scope must still report the first error
+		})
+	require.ErrorIs(t, err, failure)
+	require.ErrorIs(t, secondErr, failure)
+	require.False(t, visitedAgain)
+	require.Zero(t, stats)
+}
+
+func TestRebuildContractSourcesRejectInactiveCallbacks(t *testing.T) {
+	var add func(contracts.Contract) error
+	var read func(func(contracts.Contract) error) error
+	_, err := WithRebuildContractSources(t.Context(), t.TempDir(), 1,
+		func(collect func(contracts.Contract) error) error {
+			add = collect
+			return nil
+		},
+		func(visit func(func(contracts.Contract) error) error) error {
+			err := add(contracts.Contract{ID: "env::LATE"})
+			require.ErrorIs(t, err, errInvalidRecord)
+			require.ErrorContains(t, err, "contract source collector is no longer active")
+			read = visit
+			return nil
+		})
+	require.NoError(t, err)
+	err = read(func(contracts.Contract) error { return nil })
+	require.ErrorIs(t, err, errInvalidRecord)
+	require.ErrorContains(t, err, "inactive contract source reader")
+}
+
 func TestRebuildContractSourceRunFailures(t *testing.T) {
 	for _, mode := range []string{"final write", "replay", "empty", "tail"} {
 		t.Run(mode, func(t *testing.T) {
