@@ -385,6 +385,43 @@ func contractOwnerEndpoint(c contracts.Contract, files map[contractFileOwnerKey]
 	return files[contractFileOwnerKey{c.RepoPrefix, c.FilePath}]
 }
 
+// contractGraphNode writes the selected record for one full contract ID.
+func contractGraphNode(c contracts.Contract, hasOwner bool) *graph.Node {
+	return &graph.Node{
+		ID: c.ID, Kind: graph.KindContract, Name: c.ID, FilePath: c.FilePath, Language: "contract",
+		RepoPrefix: c.RepoPrefix, WorkspaceID: c.EffectiveWorkspace(), ProjectID: c.EffectiveProject(),
+		Meta: map[string]any{
+			"type": string(c.Type), "role": string(c.Role), "symbol_id": c.SymbolID,
+			"line": c.Line, "confidence": c.Confidence, "contract_meta": c.Meta,
+			"contract_owner_record": hasOwner,
+		},
+	}
+}
+
+// appendContractGraphEdges emits ownership for one record, not just the node's winner.
+func appendContractGraphEdges(edges []*graph.Edge, c contracts.Contract, ownerID string) []*graph.Edge {
+	if ownerID == "" {
+		return edges
+	}
+	kind := graph.EdgeProvides
+	if c.Role == contracts.RoleConsumer {
+		kind = graph.EdgeConsumes
+	}
+	edges = append(edges, &graph.Edge{
+		From: ownerID, To: c.ID, Kind: kind, FilePath: c.FilePath, Line: c.Line, Meta: contractOwnerEdgeMeta(c),
+	})
+	// File ownership does not make a symbol-less provider a route handler.
+	if c.SymbolID != "" && c.Role == contracts.RoleProvider && isRouteContractType(c.Type) {
+		meta := contractOwnerEdgeMeta(c)
+		meta["contract_type"] = string(c.Type)
+		edges = append(edges, &graph.Edge{
+			From: c.SymbolID, To: c.ID, Kind: graph.EdgeHandlesRoute,
+			FilePath: c.FilePath, Line: c.Line, Meta: meta,
+		})
+	}
+	return edges
+}
+
 // contractGraphRows is the common persistence emitter. Dependency identities
 // are seeded before resolution; completed cold and incremental passes both
 // persist their records and ownership here. No extraction work moves here.
@@ -419,35 +456,9 @@ func contractGraphRows(store graph.Store, all []contracts.Contract, includeDepen
 		}
 		// Only the ID's first record writes its node.
 		if i == 0 || all[i-1].ID != c.ID {
-			nodes = append(nodes, &graph.Node{
-				ID: c.ID, Kind: graph.KindContract, Name: c.ID, FilePath: c.FilePath, Language: "contract",
-				RepoPrefix: c.RepoPrefix, WorkspaceID: c.EffectiveWorkspace(), ProjectID: c.EffectiveProject(),
-				Meta: map[string]any{
-					"type": string(c.Type), "role": string(c.Role), "symbol_id": c.SymbolID,
-					"line": c.Line, "confidence": c.Confidence, "contract_meta": c.Meta,
-					"contract_owner_record": ownerID != "",
-				},
-			})
+			nodes = append(nodes, contractGraphNode(c, ownerID != ""))
 		}
-		if ownerID == "" {
-			continue
-		}
-		kind := graph.EdgeProvides
-		if c.Role == contracts.RoleConsumer {
-			kind = graph.EdgeConsumes
-		}
-		edges = append(edges, &graph.Edge{
-			From: ownerID, To: c.ID, Kind: kind, FilePath: c.FilePath, Line: c.Line, Meta: contractOwnerEdgeMeta(c),
-		})
-		// File ownership does not make a symbol-less provider a route handler.
-		if c.SymbolID != "" && c.Role == contracts.RoleProvider && isRouteContractType(c.Type) {
-			meta := contractOwnerEdgeMeta(c)
-			meta["contract_type"] = string(c.Type)
-			edges = append(edges, &graph.Edge{
-				From: c.SymbolID, To: c.ID, Kind: graph.EdgeHandlesRoute,
-				FilePath: c.FilePath, Line: c.Line, Meta: meta,
-			})
-		}
+		edges = appendContractGraphEdges(edges, c, ownerID)
 	}
 	return nodes, edges, missingSourceOwners
 }

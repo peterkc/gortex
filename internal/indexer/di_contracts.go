@@ -58,31 +58,33 @@ func (idx *Indexer) extractDIContracts(reg *contracts.Registry) {
 	reg.AddAllScoped(discovered, idx.repoPrefix, idx.workspaceID, idx.projectID)
 }
 
+type springBeanRef struct {
+	methodID string
+	typeName string
+	filePath string
+	line     int
+}
+
+func springBeanFromEdge(e *graph.Edge) (springBeanRef, bool) {
+	if e.Kind != graph.EdgeProvides || e.Meta == nil {
+		return springBeanRef{}, false
+	}
+	if b, _ := e.Meta[graph.MetaDIBinding].(string); b != graph.DIBindingBean {
+		return springBeanRef{}, false
+	}
+	rt, _ := e.Meta[graph.MetaDIProvidesFor].(string)
+	if rt == "" {
+		return springBeanRef{}, false
+	}
+	return springBeanRef{methodID: e.To, typeName: rt, filePath: e.FilePath, line: e.Line}, true
+}
+
 func (idx *Indexer) linkSpringBeansFromEdges(repoEdges []*graph.Edge) {
-	type beanRef struct {
-		methodID string
-		typeName string
-		filePath string
-		line     int
-	}
-	var beans []beanRef
-
-	collectBean := func(e *graph.Edge) {
-		if e.Kind != graph.EdgeProvides || e.Meta == nil {
-			return
-		}
-		if b, _ := e.Meta[graph.MetaDIBinding].(string); b != graph.DIBindingBean {
-			return
-		}
-		rt, _ := e.Meta[graph.MetaDIProvidesFor].(string)
-		if rt == "" {
-			return
-		}
-		beans = append(beans, beanRef{methodID: e.To, typeName: rt, filePath: e.FilePath, line: e.Line})
-	}
-
+	var beans []springBeanRef
 	for _, e := range repoEdges {
-		collectBean(e)
+		if bean, ok := springBeanFromEdge(e); ok {
+			beans = append(beans, bean)
+		}
 	}
 	if len(beans) == 0 {
 		return
@@ -130,21 +132,25 @@ func (idx *Indexer) linkSpringBeansFromEdges(repoEdges []*graph.Edge) {
 				continue
 			}
 			linked[key] = struct{}{}
-			links = append(links, &graph.Edge{
-				From:     cls,
-				To:       b.methodID,
-				Kind:     graph.EdgeCalls,
-				FilePath: b.filePath,
-				Line:     b.line,
-				Meta: map[string]any{
-					"via":     "spring.Bean",
-					"bean_of": b.typeName,
-				},
-			})
+			links = append(links, springBeanCall(cls, b))
 		}
 	}
 	if len(links) > 0 {
 		idx.graph.AddBatch(nil, links)
+	}
+}
+
+func springBeanCall(cls string, bean springBeanRef) *graph.Edge {
+	return &graph.Edge{
+		From:     cls,
+		To:       bean.methodID,
+		Kind:     graph.EdgeCalls,
+		FilePath: bean.filePath,
+		Line:     bean.line,
+		Meta: map[string]any{
+			"via":     "spring.Bean",
+			"bean_of": bean.typeName,
+		},
 	}
 }
 
