@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/zzet/gortex/internal/graph"
@@ -175,6 +176,46 @@ func (b *BuildStore) holdRebuildEdge(r row) error {
 		}
 	}
 	return nil
+}
+
+// SelectRebuildLinkFacts removes claims on held-out winners from a fresh
+// supported receipt. The caller owns the decoded slices and uses this only
+// while the private cut is open. Holdout keys are immutable during the cut.
+func (b *BuildStore) SelectRebuildLinkFacts(ctx context.Context, f ParseFacts) (ParseFacts, error) {
+	anyHeld, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildHoldoutKey('n', nil))
+	if err != nil || !anyHeld {
+		return f, err
+	}
+	seen := make(map[string]bool)
+	held := func(id string) bool {
+		if dropped, ok := seen[id]; ok {
+			return dropped
+		}
+		if err != nil {
+			return false
+		}
+		if err = ctx.Err(); err != nil {
+			return false
+		}
+		var dropped bool
+		dropped, err = pendingGet(b.pending, rebuildHoldoutKey('n', pendingNodeKey(id)), fnPointerPresent)
+		seen[id] = dropped
+		return dropped
+	}
+	f.Nodes = slices.DeleteFunc(f.Nodes, func(n *graph.Node) bool { return held(n.ID) })
+	f.Edges = slices.DeleteFunc(f.Edges, func(e *graph.Edge) bool { return held(e.From) || held(e.To) })
+	f.Constants = slices.DeleteFunc(f.Constants, func(c graph.ConstantValueRow) bool { return held(c.NodeID) })
+	f.Symbols = slices.DeleteFunc(f.Symbols, func(s graph.SymbolFTSItem) bool { return held(s.NodeID) })
+	for id := range f.Shingles {
+		if held(id) {
+			delete(f.Shingles, id)
+		}
+	}
+	if err != nil {
+		return ParseFacts{}, fmt.Errorf("%w: select supported receipt %q: %w", ErrRebuildLinkIsolation, f.File.FilePath, err)
+	}
+	f.File.NodeCount = len(f.Nodes)
+	return f, nil
 }
 
 // RestoreRebuildDeclarations closes the private cut after all resolver and C3

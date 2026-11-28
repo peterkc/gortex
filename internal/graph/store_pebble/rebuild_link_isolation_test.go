@@ -111,6 +111,19 @@ func TestRebuildLinkIsolationPreservesRawWinner(t *testing.T) {
 	var linkedIDs []string
 	require.NoError(t, view.VisitNodes(ctx, func(n *graph.Node) error { linkedIDs = append(linkedIDs, n.ID); return nil }))
 	require.Equal(t, []string{g.ID}, linkedIDs)
+	linkCopy, err := b.SelectRebuildLinkFacts(ctx, ParseFacts{
+		File: facts[1].File, Nodes: []*graph.Node{loser, g}, Edges: []*graph.Edge{ref, evidence},
+		Constants: []graph.ConstantValueRow{{NodeID: loser.ID}, {NodeID: g.ID}},
+		Shingles:  map[string][]uint64{loser.ID: {10}, g.ID: {22}},
+		Symbols:   []graph.SymbolFTSItem{{NodeID: loser.ID}, {NodeID: g.ID}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []*graph.Node{g}, linkCopy.Nodes)
+	require.Equal(t, 1, linkCopy.File.NodeCount)
+	require.Empty(t, linkCopy.Edges)
+	require.Equal(t, []graph.ConstantValueRow{{NodeID: g.ID}}, linkCopy.Constants)
+	require.Equal(t, map[string][]uint64{g.ID: {22}}, linkCopy.Shingles)
+	require.Equal(t, []graph.SymbolFTSItem{{NodeID: g.ID}}, linkCopy.Symbols)
 	for _, prefix := range [][]byte{
 		{familyEdge}, keyStrings([]byte{familyFile}, py), keyStrings([]byte{familyFile}, rb), keyStrings([]byte{familyFile}, skip.FilePath),
 		keyStrings([]byte{familyRepo}, "", win.ID), pendingSymbolKey(win.ID), parsedConstantKey(parent.ID), shingleKey("", parent.ID),
