@@ -20,7 +20,6 @@ type rebuildContractReceiptReader struct {
 	store                  rebuildParseStore
 	census                 *rebuildExtractorCensus
 	proofCache             *rebuildContractReceiptCache
-	isolate                bool
 	linkView               store_pebble.RebuildView
 	markIsolationAffected  func(file string, kind contracts.ContractType, language string) error
 	visitIsolationAffected func(func(store_pebble.RebuildContractBatch) error) error
@@ -33,8 +32,9 @@ type rebuildContractReceiptCache struct {
 }
 
 func (r rebuildContractReceiptReader) holdsOut(path string) (bool, error) {
-	if !r.isolate {
-		return false, nil
+	isolated, err := r.linkView.RebuildLinksIsolated()
+	if err != nil || !isolated {
+		return false, err
 	}
 	return r.census.holdsOutLinkInput(path)
 }
@@ -54,8 +54,12 @@ func (r rebuildContractReceiptReader) load(ctx context.Context, input rebuildInp
 	if err := r.requireSelected(input.Path); err != nil {
 		return store_pebble.ParseFacts{}, nil, err
 	}
+	isolated, err := r.linkView.RebuildLinksIsolated()
+	if err != nil {
+		return store_pebble.ParseFacts{}, nil, err
+	}
 	base, facts, err := r.loadRaw(ctx, input)
-	if err == nil && r.isolate {
+	if err == nil && isolated {
 		base, err = r.linkView.SelectRebuildLinkFacts(ctx, base)
 	}
 	return base, facts, err
@@ -285,6 +289,7 @@ func springRawNode(base store_pebble.ParseFacts, n *graph.Node) *graph.Node {
 func (r rebuildContractReceiptReader) visitSpringConfig(ctx context.Context, view store_pebble.RebuildView, records *store_pebble.RebuildContractRecords,
 	yield func(store_pebble.RebuildContractBatch) error,
 ) error {
+	r.linkView = view
 	scope := contracts.SpringConfigScope{RepoRoot: r.idx.rootPath, RepoPrefix: r.idx.repoPrefix, WorkspaceID: r.idx.workspaceID}
 	var lastReader string
 	var readerProved bool

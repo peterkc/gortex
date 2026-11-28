@@ -90,6 +90,7 @@ func (r rebuildContractReceiptReader) proveSpringBeanFactory(ctx context.Context
 	if err != nil || factory == nil || factory.FilePath != bean.FilePath || factory.Kind != graph.KindMethod || r.extractorOf(factory.FilePath) != "java" {
 		return false, err
 	}
+	r.linkView = view
 	base, raw, err := r.springRawDeclaration(ctx, factory)
 	if err != nil || raw == nil {
 		return false, err
@@ -107,6 +108,7 @@ func (r rebuildContractReceiptReader) proveSpringBeanConsumer(ctx context.Contex
 	if err != nil || method == nil || r.extractorOf(method.FilePath) != "java" {
 		return false, err
 	}
+	r.linkView = view
 	base, raw, err := r.springRawDeclaration(ctx, method)
 	if err != nil || raw == nil {
 		return false, err

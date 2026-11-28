@@ -17,13 +17,13 @@ func TestRebuildEarlyContractIDsNativeCuts(t *testing.T) {
 	nativeGraph := graph.New()
 	idx := newTestIndexer(nativeGraph)
 	idx.SetRootPath(root)
-	idx.registry.Register(languages.NewPythonExtractor())
+	idx.registry.Register(languages.NewTypeScriptExtractor())
 	t.Cleanup(idx.Close)
 	build, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, build.Close()) })
 	store := rebuildParseStore{dir: t.TempDir(), limit: 16 << 20}
-	job := rebuildFileStages{recipes: map[string]rebuildDigest{"go": {1}, "python": {2}}}
+	job := rebuildFileStages{recipes: map[string]rebuildDigest{"go": {1}, "typescript": {2}}}
 	census := rebuildExtractorCensus{byPath: make(map[string]string), originByGraphPath: make(map[string]string)}
 
 	type sourceFile struct {
@@ -33,16 +33,12 @@ func TestRebuildEarlyContractIDsNativeCuts(t *testing.T) {
 		{path: "routes.go", language: "go", body: "package app\nfunc Register(r Router) { r.GET(Route, Handle) }\n"},
 		{path: "constants.go", language: "go", body: "package app\nconst Route = \"/items\"\n"},
 		{path: "goframe.go", language: "go", body: "package app\ntype CreateReq struct { g.Meta `path:\"/goframe\" method:\"POST\"` }\n"},
-		{path: "users.py", language: "python", body: `from fastapi import APIRouter
-router = APIRouter(prefix="/users")
-@router.get("/{id}")
-def get_user(id: int):
-    return id
-`},
-		{path: "main.py", language: "python", body: `from fastapi import FastAPI
-from users import router
-app = FastAPI()
-app.include_router(router, prefix="/api")
+		{path: "users.ts", language: "typescript", body: `import express from 'express';
+const app = express();
+const router = express.Router();
+function user(req, res) {}
+router.get("/users", user);
+app.use("/api", router);
 `},
 	}
 	for i := range files {
@@ -59,6 +55,7 @@ app.include_router(router, prefix="/api")
 		recipe := idx.rebuildExtractorRecipe(job.recipes[input.Language], input)
 		require.NoError(t, store.write(input.parseKey(recipe), payload))
 		job.inputs = append(job.inputs, input)
+		census.admitted++
 		census.byPath[f.path] = parsed.EffectiveLanguage
 		census.originByGraphPath[f.path] = f.path
 		require.NoError(t, build.AddParsedFile("", parsed))
@@ -70,7 +67,8 @@ app.include_router(router, prefix="/api")
 	require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), gomod, 0o600))
 	manifest := rebuildGoManifest{Path: "go.mod"}
 	require.NoError(t, manifest.captureContractDeps(gomod))
-	f, err := idx.readRebuildEarlyContractFacts(ctx, build.RebuildView(), job, store, &census, manifest.DirectDeps, false)
+	require.NoError(t, build.IsolateRebuildLinks(ctx))
+	f, err := idx.readRebuildEarlyContractFacts(ctx, build.RebuildView(), job, store, &census, manifest.DirectDeps, nil)
 	require.NoError(t, err)
 	_, byLang := idx.buildPerFileContractExtractors()
 	native := contracts.NewRegistry()
@@ -133,7 +131,7 @@ app.include_router(router, prefix="/api")
 		"dep::example.com/lib":       "go.mod",
 		"di::Token":                  "routes.go",
 		"http::GET::/items":          "routes.go",
-		"http::GET::/api/users/{p1}": "users.py",
+		"http::GET::/api/users": "users.ts",
 	}, want)
 	got, err := f.finish(ctx, build.RebuildView(), "", "", "")
 	require.NoError(t, err)
@@ -142,8 +140,8 @@ app.include_router(router, prefix="/api")
 	for id := range want {
 		require.True(t, p.mayReplaceWithContract(id), id)
 	}
-	require.False(t, p.mayReplaceWithContract("http::GET::/{p1}"))
-	row, err := build.RebuildView().Node(ctx, "http::GET::/api/users/{p1}")
+	require.False(t, p.mayReplaceWithContract("http::GET::/users"))
+	row, err := build.RebuildView().Node(ctx, "http::GET::/api/users")
 	require.NoError(t, err)
 	require.Nil(t, row)
 
@@ -280,7 +278,7 @@ export function register() {
 				require.Len(t, native.All(), 1, "the raw registry hides the mounted registration")
 				require.Equal(t, "first", native.All()[0].Meta["handler_ident"])
 			}
-			f, err := idx.readRebuildEarlyContractFacts(ctx, b.RebuildView(), job, store, &census, nil, false)
+			f, err := idx.readRebuildEarlyContractFacts(ctx, b.RebuildView(), job, store, &census, nil, nil)
 			require.NoError(t, err)
 			idx.commitContracts(native)
 			want := rebuildEarlyContractIDs{raw: "routes.ts"}

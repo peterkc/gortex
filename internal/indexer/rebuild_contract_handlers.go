@@ -35,6 +35,7 @@ func (r rebuildContractReceiptReader) handlerPass() *rebuildHandlerPass {
 // A nil winner leaves registration ownership intact.
 func (p *rebuildHandlerPass) providerHandler(ctx context.Context, view store_pebble.RebuildView, c contracts.Contract) (*graph.Node, error) {
 	r := p.reader
+	r.linkView = view
 	trail, fallback, class := contracts.ProviderHandlerHints(c)
 	if trail == "" && fallback == "" {
 		return nil, ctx.Err()

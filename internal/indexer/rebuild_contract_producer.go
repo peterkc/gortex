@@ -37,12 +37,12 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 	if source == nil || early == nil || use == nil {
 		return fmt.Errorf("%w: missing contract producer input", errRebuildContractIDs)
 	}
+	view := b.RebuildView()
+	r.linkView = view
 	deferred, err := r.deferredContractLanguages()
 	if err != nil {
 		return err
 	}
-	view := b.RebuildView()
-	r.linkView = view
 	r.proofCache = &rebuildContractReceiptCache{}
 	return b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
 		if err := source(func(c contracts.Contract) error {
@@ -207,6 +207,7 @@ func (r rebuildContractReceiptReader) selectRebuildShapeRefs(ctx context.Context
 	records *store_pebble.RebuildContractRecords, selection *store_pebble.RebuildContractSelection,
 	add func(store_pebble.RebuildContractBatch) error,
 ) error {
+	r.linkView = view
 	if err := records.WithOrderedRepresentatives(func(read func(func(store_pebble.RebuildContractRecord) error) error) error {
 		return read(func(item store_pebble.RebuildContractRecord) error {
 			c := item.Contract
@@ -243,10 +244,14 @@ func (r rebuildContractReceiptReader) selectRebuildShapeRefs(ctx context.Context
 	}); err != nil {
 		return err
 	}
+	isolated, err := view.RebuildLinksIsolated()
+	if err != nil {
+		return err
+	}
 	return records.VisitRepresentatives(func(item store_pebble.RebuildContractRecord) error {
 		for _, id := range slices.Sorted(maps.Keys(rebuildShapeRefs(item.Contract))) {
 			o := rebuildContractRecordOmission(item.Contract)
-			if r.isolate {
+			if isolated {
 				file, language, err := heldShapeFile(view, id)
 				if err != nil {
 					return err

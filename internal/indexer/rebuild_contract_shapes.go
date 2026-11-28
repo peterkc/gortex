@@ -54,6 +54,7 @@ func (r rebuildContractReceiptReader) shapeBatches(ctx context.Context, view sto
 // A new replay starts without cached evidence. The parse-store lease owns
 // the checked receipt bytes for the duration of a replay.
 func (r rebuildContractReceiptReader) shapeLookup(ctx context.Context, view store_pebble.RebuildView) func(id string) (*contracts.Shape, error) {
+	r.linkView = view
 	var path string
 	var declarations map[string]*graph.Node
 	var shapes map[string]*contracts.Shape

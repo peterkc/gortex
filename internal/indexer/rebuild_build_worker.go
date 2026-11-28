@@ -376,12 +376,15 @@ func buildRebuildStages(
 	if exactCheckout && !rootDepFact {
 		return fmt.Errorf("%w: manifest row %q not covered", errRebuildGoEvidence, "go.mod")
 	}
+	markIsolationAffected := func(file string, kind contracts.ContractType, language string) error {
+		return private.MarkRebuildContractIsolationAffected(ctx, idx.repoPrefix, file, kind, language)
+	}
 	var earlyIDs rebuildEarlyContractIDs
 	runMain := func() error {
 		var earlyFacts *rebuildEarlyContractFacts
 		var err error
 		if exactCheckout {
-			earlyFacts, err = idx.readRebuildEarlyContractFacts(ctx, private.RebuildView(), job, store, counts.census, rootFact.DirectDeps, true)
+			earlyFacts, err = idx.readRebuildEarlyContractFacts(ctx, private.RebuildView(), job, store, counts.census, rootFact.DirectDeps, markIsolationAffected)
 			if err != nil {
 				return err
 			}
@@ -459,7 +462,12 @@ func buildRebuildStages(
 		}
 		return errRebuildBuildIncomplete
 	}
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: counts.census, isolate: true}
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: counts.census, linkView: private.RebuildView(),
+		markIsolationAffected: markIsolationAffected,
+		visitIsolationAffected: func(yield func(store_pebble.RebuildContractBatch) error) error {
+			return private.VisitRebuildContractIsolationAffected(ctx, yield)
+		},
+	}
 	deferred, err := reader.deferredContractLanguages()
 	if err != nil {
 		return err

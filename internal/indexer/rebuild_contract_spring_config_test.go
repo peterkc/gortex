@@ -153,7 +153,7 @@ func TestRebuildSpringConfigCheckedSkipSeals(t *testing.T) {
 			if isolate {
 				require.NoError(t, b.IsolateRebuildLinks(ctx))
 			}
-			r := rebuildContractReceiptReader{idx: idx, isolate: isolate, job: rebuildFileStages{classifications: map[string]rebuildClassificationFact{config: fact}},
+			r := rebuildContractReceiptReader{idx: idx, linkView: b.RebuildView(), job: rebuildFileStages{classifications: map[string]rebuildClassificationFact{config: fact}},
 				census: &rebuildExtractorCensus{admitted: 1, byPath: map[string]string{goFile: "go"}, originByGraphPath: map[string]string{goFile: goFile, config: config}}}
 			want := store_pebble.RebuildSpringConfigUnknownOmission("", config)
 			var tables store_pebble.StageTables
@@ -165,12 +165,12 @@ func TestRebuildSpringConfigCheckedSkipSeals(t *testing.T) {
 						omitted = append(omitted, batch.Omitted...)
 					}
 					require.Equal(t, []store_pebble.RebuildContractOmission{want}, omitted)
+					langs, err := r.deferredContractLanguages()
+					require.NoError(t, err)
 					if isolate {
 						require.NoError(t, b.RestoreRebuildDeclarations(ctx))
 					}
 					relations, err := b.PrepareRelations(ctx, t.TempDir(), fileBase, r.extractorOf)
-					require.NoError(t, err)
-					langs, err := r.deferredContractLanguages()
 					require.NoError(t, err)
 					relations.Witness.Relations = &store_pebble.RelationCoverage{DeferredLanguages: langs}
 					base, err := b.RetainRelations(ctx, fileBase, relations)

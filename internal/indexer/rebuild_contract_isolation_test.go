@@ -139,12 +139,16 @@ func Read() { _ = os.Getenv("SHARED") }
 	require.NoError(t, err)
 	require.NoError(t, b.IsolateRebuildLinks(ctx))
 	view := b.RebuildView()
-	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census, isolate: true, linkView: view}
+	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census, linkView: view}
+	unbound := r
+	unbound.linkView = store_pebble.RebuildView{}
+	_, _, err = unbound.forGraphPath(ctx, goFile)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildLinkIsolation)
 	parsedBefore := parser.ParseCount()
 	// Even a missing held-out receipt cannot reach early/late link readers.
 	// A separate checked inventory must, however, refuse that same miss.
 	require.NoError(t, os.Remove(store.entry(heldKey)))
-	earlyFacts, err := idx.readRebuildEarlyContractFacts(ctx, view, job, store, census, nil, true)
+	earlyFacts, err := idx.readRebuildEarlyContractFacts(ctx, view, job, store, census, nil, nil)
 	require.NoError(t, err)
 	early, err := earlyFacts.finish(ctx, view, "", "", "")
 	require.NoError(t, err)

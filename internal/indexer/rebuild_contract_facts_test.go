@@ -492,7 +492,7 @@ app.include_router(router, prefix="`
 				// The production census knows a skip's graph key but has no receipt.
 				origins[tc.skipPath] = tc.skipPath
 			}
-			reader := rebuildContractReceiptReader{idx: idx, job: job, store: store,
+			reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: build.RebuildView(),
 				census: &rebuildExtractorCensus{byPath: map[string]string{input.Path: input.Language}, originByGraphPath: origins}}
 			wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
 			require.NoError(t, err)
@@ -629,7 +629,7 @@ func TestRebuildEarlyContractReceiptRefusals(t *testing.T) {
 				build.AddNode(&graph.Node{ID: "remote:repo~unpublishable"})
 				view = build.RebuildView()
 			}
-			got, err := idx.readRebuildEarlyContractFacts(ctx, view, job, store, &census, nil, false)
+			got, err := idx.readRebuildEarlyContractFacts(ctx, view, job, store, &census, nil, nil)
 			require.Nil(t, got)
 			if mode == "constant view" {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildView)

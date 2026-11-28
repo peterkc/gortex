@@ -32,9 +32,9 @@ type rebuildEarlyContractFacts struct {
 // sidecar, not from a graph that main has changed.
 func (idx *Indexer) readRebuildEarlyContractFacts(ctx context.Context, view store_pebble.RebuildView,
 	job rebuildFileStages, store rebuildParseStore, census *rebuildExtractorCensus,
-	rootDeps []string, isolate bool,
+	rootDeps []string, markIsolationAffected func(string, contracts.ContractType, string) error,
 ) (*rebuildEarlyContractFacts, error) {
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census, isolate: isolate, linkView: view}
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census, linkView: view, markIsolationAffected: markIsolationAffected}
 	out := &rebuildEarlyContractFacts{registry: contracts.NewRegistry(), receipts: reader, routers: make(map[string]contracts.RouterFacts)}
 	if err := reader.visitFilesAtParseCut(ctx, view, func(path string, records []contracts.Contract, facts *contracts.FileFacts) error {
 		out.registry.AddAllScoped(records, idx.repoPrefix, idx.workspaceID, idx.projectID)

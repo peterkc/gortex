@@ -32,7 +32,11 @@ func (r rebuildContractReceiptReader) deferredContractLanguages() ([]string, err
 			deferred[id] = struct{}{}
 		}
 	}
-	if r.isolate {
+	isolated, err := r.linkView.RebuildLinksIsolated()
+	if err != nil {
+		return nil, err
+	}
+	if isolated {
 		for _, fact := range r.job.classifications {
 			if rebuildHoldsOutCheckedSkip(fact) {
 				deferred[fact.Language] = struct{}{}
@@ -90,6 +94,7 @@ func (r rebuildContractReceiptReader) selectRebuildContractRecord(ctx context.Co
 		// on the deferred link turn. Do not promote its registration owner.
 		return false, nil
 	}
+	r.linkView = view
 	base, facts, err := r.forLinkedDeclaration(ctx, n)
 	if err != nil {
 		return false, err

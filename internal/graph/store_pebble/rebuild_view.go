@@ -37,6 +37,16 @@ type RebuildView struct {
 // RebuildView returns the typed read surface without changing graph.Store reads.
 func (b *BuildStore) RebuildView() RebuildView { return RebuildView{build: b} }
 
+// RebuildLinksIsolated reads the current private cut, not caller intent.
+func (v RebuildView) RebuildLinksIsolated() (bool, error) {
+	if v.build == nil {
+		return false, fmt.Errorf("%w: missing private rebuild view", ErrRebuildLinkIsolation)
+	}
+	v.build.mu.Lock()
+	defer v.build.mu.Unlock()
+	return v.build.rebuildLinksIsolated, v.build.first
+}
+
 // SelectRebuildLinkFacts limits a detached base receipt to the private F cut.
 func (v RebuildView) SelectRebuildLinkFacts(ctx context.Context, f ParseFacts) (ParseFacts, error) {
 	return v.build.SelectRebuildLinkFacts(ctx, f)

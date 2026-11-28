@@ -31,7 +31,10 @@ func TestRebuildContractReceiptForLinkedDeclaration(t *testing.T) {
 	key := input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input))
 	require.NoError(t, store.write(key, wire))
 	require.NoError(t, os.Remove(name))
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store,
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: b.RebuildView(),
 		census: &rebuildExtractorCensus{byPath: map[string]string{path: "go"}, originByGraphPath: map[string]string{path: path}}}
 	var matched int
 	for _, n := range base.Nodes {

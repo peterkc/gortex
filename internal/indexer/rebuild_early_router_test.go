@@ -270,7 +270,7 @@ func TestRebuildLateRouterOverlap(t *testing.T) {
 	}
 	require.Equal(t, "http::GET::/x", raw[0].ID)
 	require.Equal(t, "http::GET::/api/x", raw[1].ID)
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census, linkView: build.RebuildView()}
 	require.NoError(t, build.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
 		for _, c := range raw {
 			require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c}))

@@ -42,7 +42,7 @@ func TestRebuildContractAffectedUsesHeldScopeNotCandidates(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
 	marks := 0
-	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, isolate: true, linkView: view,
+	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: view,
 		census: &rebuildExtractorCensus{admitted: 2, byPath: map[string]string{source: "go", models: "python"}, originByGraphPath: map[string]string{source: source, models: models}},
 		markIsolationAffected: func(path string, kind contracts.ContractType, language string) error {
 			require.Equal(t, source, path)

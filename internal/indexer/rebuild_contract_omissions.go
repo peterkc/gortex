@@ -30,8 +30,9 @@ func (r rebuildContractReceiptReader) checkedSpringConfigSizeSkip(repo, file str
 // It must not resolve endpoint questions, elect registry/DI/config winners,
 // run native late transforms or expose these receipts to any link reader.
 func (r rebuildContractReceiptReader) visitHeldOutContractOmissions(ctx context.Context, yield func(store_pebble.RebuildContractBatch) error) error {
-	if !r.isolate {
-		return nil
+	isolated, err := r.linkView.RebuildLinksIsolated()
+	if err != nil || !isolated {
+		return err
 	}
 	scope := contracts.SpringConfigScope{RepoPrefix: r.idx.repoPrefix, WorkspaceID: r.idx.workspaceID}
 	for _, path := range slices.Sorted(maps.Keys(r.job.classifications)) {
