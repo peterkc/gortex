@@ -12,6 +12,8 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+func ignoreGDScriptGateEvidence(*graph.Node, bool) (bool, bool) { return false, false }
+
 func TestRebuildGDScriptReceiverGateProof(t *testing.T) {
 	for _, mode := range []string{"refresh", "unrelated large node", "same key stale payload", "row too large"} {
 		t.Run(mode, func(t *testing.T) {
@@ -51,6 +53,9 @@ func TestRebuildGDScriptReceiverGateProof(t *testing.T) {
 				e.Meta[graph.MetaSpeculative] = true
 				return true, nil
 			}
+			prepare := func(_, _ iter.Seq2[*graph.Node, error]) (RebuildGDScriptReceiverDemoter, error) {
+				return demote, nil
+			}
 			var n uint64
 			switch mode {
 			case "same key stale payload":
@@ -70,9 +75,7 @@ func TestRebuildGDScriptReceiverGateProof(t *testing.T) {
 				return
 			case "row too large":
 				firstBefore, lastBefore := read(key), read(lastKey)
-				n, err = b.RebuildGDScriptReceiverGate(t.Context(), func(_, _ iter.Seq2[*graph.Node, error]) (RebuildGDScriptReceiverDemoter, error) {
-					return demote, nil
-				})
+				n, err = b.RebuildGDScriptReceiverGate(t.Context(), ignoreGDScriptGateEvidence, prepare)
 				require.ErrorIs(t, err, ErrRebuildGDScriptReceiverGate)
 				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
 				require.Zero(t, n)
@@ -80,9 +83,7 @@ func TestRebuildGDScriptReceiverGateProof(t *testing.T) {
 				require.Equal(t, lastBefore, read(lastKey))
 			default:
 				oldProof := read(rebuildLinkRecorderKey(key))
-				n, err = b.RebuildGDScriptReceiverGate(t.Context(), func(_, _ iter.Seq2[*graph.Node, error]) (RebuildGDScriptReceiverDemoter, error) {
-					return demote, nil
-				})
+				n, err = b.RebuildGDScriptReceiverGate(t.Context(), ignoreGDScriptGateEvidence, prepare)
 				require.NoError(t, err)
 				require.EqualValues(t, 2, n)
 				gotProof, err := readRebuildEdgeCustody(b.pending, key)
@@ -175,7 +176,7 @@ func TestRebuildGDScriptReceiverGateIdentityGuards(t *testing.T) {
 				return
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
-			n, err := b.RebuildGDScriptReceiverGate(t.Context(), prepare)
+			n, err := b.RebuildGDScriptReceiverGate(t.Context(), ignoreGDScriptGateEvidence, prepare)
 			require.ErrorIs(t, err, ErrRebuildGDScriptReceiverGate)
 			require.ErrorContains(t, err, want)
 			require.Zero(t, n)
@@ -196,4 +197,39 @@ func TestRebuildFrameworkGateNodeStopsAtWitness(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, 1, count)
+}
+
+func TestRebuildGDScriptReceiverGateNodeCaps(t *testing.T) {
+	const target, lookup = "owner.gd::apply", "other.gd::check"
+	for _, mode := range []string{"resolved target", "demoter lookup"} {
+		t.Run(mode, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			owner := &graph.Node{ID: target, Kind: graph.KindMethod, FilePath: "owner.gd", Language: "gdscript"}
+			other := &graph.Node{ID: lookup, Kind: graph.KindMethod, FilePath: "other.gd", Language: "gdscript"}
+			large := owner
+			if mode == "demoter lookup" {
+				large = other
+			}
+			large.Meta = map[string]any{"doc": strings.Repeat("x", rebuildFrameworkGateRowBytes)}
+			edge := &graph.Edge{From: "caller", To: target, Kind: graph.EdgeCalls, Line: 1, FilePath: "caller.gd"}
+			b.AddBatch([]*graph.Node{owner, other}, []*graph.Edge{edge})
+			before := rebuildFrameworkCustodyRows(t, b)
+			prepare := func(_, _ iter.Seq2[*graph.Node, error]) (RebuildGDScriptReceiverDemoter, error) {
+				return func(e *graph.Edge, get func(string) (*graph.Node, error)) (bool, error) {
+					if mode == "demoter lookup" {
+						if _, err := get(lookup); err != nil {
+							return false, err
+						}
+					}
+					e.Origin = graph.OriginSpeculative
+					return true, nil
+				}, nil
+			}
+			n, err := b.RebuildGDScriptReceiverGate(t.Context(), ignoreGDScriptGateEvidence, prepare)
+			require.ErrorIs(t, err, ErrRebuildGDScriptReceiverGate)
+			require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+			require.Zero(t, n)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+		})
+	}
 }

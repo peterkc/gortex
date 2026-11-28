@@ -166,3 +166,28 @@ func TestRebuildGDScriptReceiverGateSkipsUnusedEvidenceBudget(t *testing.T) {
 		}
 	}
 }
+
+func TestRebuildGDScriptGateCandidate(t *testing.T) {
+	for _, tc := range []struct {
+		kind     graph.NodeKind
+		language string
+		classes  bool
+		full     bool
+		want     bool
+	}{
+		{graph.KindType, "gdscript", true, true, true},
+		{graph.KindType, "go", true, true, false},
+		{graph.KindFile, "gdscript", false, false, true},
+		{graph.KindType, "godot_project", false, true, true},
+		{graph.KindVariable, "gdscript", false, true, true},
+		{graph.KindType, "gdscript", false, true, false},
+		{graph.KindFunction, "gdscript", false, true, false},
+		{graph.KindVariable, "go", false, true, false},
+	} {
+		full, ok := rebuildGDScriptGateCandidate(&graph.Node{Kind: tc.kind, Language: tc.language}, tc.classes)
+		require.Equal(t, tc.want, ok)
+		if ok {
+			require.Equal(t, tc.full, full)
+		}
+	}
+}

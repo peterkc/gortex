@@ -21,7 +21,10 @@ type RebuildGDScriptReceiverDemoter func(*graph.Edge, func(string) (*graph.Node,
 
 // RebuildGDScriptReceiverGate plans same-key refreshes from settled rows, not
 // from parse receipts. prepare may return a nil demoter when no classes exist.
-func (b *BuildStore) RebuildGDScriptReceiverGate(ctx context.Context, prepare func(classes, scripts iter.Seq2[*graph.Node, error]) (RebuildGDScriptReceiverDemoter, error)) (count uint64, err error) {
+func (b *BuildStore) RebuildGDScriptReceiverGate(ctx context.Context,
+	classify func(*graph.Node, bool) (full, candidate bool),
+	prepare func(classes, scripts iter.Seq2[*graph.Node, error]) (RebuildGDScriptReceiverDemoter, error),
+) (count uint64, err error) {
 	defer func() {
 		if err != nil {
 			count = 0
@@ -38,7 +41,7 @@ func (b *BuildStore) RebuildGDScriptReceiverGate(ctx context.Context, prepare fu
 			return invalid("GDScript receiver scratch occupied")
 		}
 		defer func() { err = errors.Join(err, b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync)) }()
-		demote, err := prepare(b.rebuildGDScriptGateNodes(ctx, true), b.rebuildGDScriptGateNodes(ctx, false))
+		demote, err := prepare(b.rebuildGDScriptGateNodes(ctx, classify, true), b.rebuildGDScriptGateNodes(ctx, classify, false))
 		if err != nil || demote == nil {
 			return err
 		}
@@ -58,7 +61,7 @@ func checkRebuildGDScriptGateRow(key, value []byte) error {
 	return nil
 }
 
-func (b *BuildStore) rebuildGDScriptGateNodes(ctx context.Context, classes bool) iter.Seq2[*graph.Node, error] {
+func (b *BuildStore) rebuildGDScriptGateNodes(ctx context.Context, classify func(*graph.Node, bool) (full, candidate bool), classes bool) iter.Seq2[*graph.Node, error] {
 	return func(yield func(*graph.Node, error) bool) {
 		stop := errors.New("stop GDScript receiver node scan")
 		err := pendingVisit(ctx, b.pending, []byte{familyNode}, func(r row) error {
@@ -66,13 +69,11 @@ func (b *BuildStore) rebuildGDScriptGateNodes(ctx context.Context, classes bool)
 			if err != nil {
 				return err
 			}
-			// The class pass is the only one needed when native has no classes.
-			switch {
-			case !classes && n.Kind == graph.KindFile && n.Language == "gdscript":
-				// File elections read only the light fields.
-			case classes && n.Kind == graph.KindType && n.Language == "gdscript",
-				!classes && n.Kind == graph.KindType && n.Language == "godot_project",
-				!classes && n.Kind == graph.KindVariable && n.Language == "gdscript":
+			full, candidate := classify(n, classes)
+			if !candidate {
+				return nil
+			}
+			if full {
 				if err := checkRebuildGDScriptGateRow(r.key, r.value); err != nil {
 					return err
 				}
@@ -80,8 +81,6 @@ func (b *BuildStore) rebuildGDScriptGateNodes(ctx context.Context, classes bool)
 				if err != nil {
 					return err
 				}
-			default:
-				return nil
 			}
 			if !yield(n, nil) {
 				return stop

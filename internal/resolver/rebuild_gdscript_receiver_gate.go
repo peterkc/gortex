@@ -32,7 +32,19 @@ func RunRebuildGDScriptReceiverGate(ctx context.Context, b *store_pebble.BuildSt
 	if !active {
 		return 0, nil
 	}
-	return b.RebuildGDScriptReceiverGate(ctx, prepareRebuildGDScriptReceiverGate)
+	return b.RebuildGDScriptReceiverGate(ctx, rebuildGDScriptGateCandidate, prepareRebuildGDScriptReceiverGate)
+}
+
+// Class scanning is independent of script evidence. Script files need only
+// identity and path; declarations read the native metadata in the full row.
+func rebuildGDScriptGateCandidate(n *graph.Node, classes bool) (full, candidate bool) {
+	if classes {
+		return true, gdClassDeclCandidate(n)
+	}
+	if isGDScriptFile(n) {
+		return false, true
+	}
+	return true, gdAutoloadDeclCandidate(n) || gdPreloadAliasDeclCandidate(n)
 }
 
 const rebuildGDScriptGateEvidenceBytes = 16 << 20
