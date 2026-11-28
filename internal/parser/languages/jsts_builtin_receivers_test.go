@@ -48,7 +48,7 @@ func TestJSTS_BuiltinReceiverEvidence(t *testing.T) {
 		{"escape", "javascript", `const \u0041rray = X; [].slice();`, "unknown", ""},
 		{"syntax_error", "javascript", `[].slice(); const broken = ;`, "unknown", ""},
 		{"not_yet_visible", "javascript", `xs.slice(); const xs = [];`, "shadowed", ""},
-		{"outside_block", "javascript", `{ const xs = []; } xs.slice();`, "shadowed", ""},
+		{"outside_block", "javascript", `{ const xs = []; } xs.slice();`, "unknown", ""},
 		{"bigint", "javascript", `(1n).toFixed(0);`, "user", ""},
 		{"template", "javascript", "`hello ${x}`.slice();", "instance", "string"},
 		{"export_const", "javascript", `export const xs = []; xs.slice();`, "instance", "array"},
@@ -65,6 +65,15 @@ func TestJSTS_BuiltinReceiverEvidence(t *testing.T) {
 		{"alias_annotation", "typescript", `type Items = string[]; let xs: Items; xs.slice();`, "unknown", ""},
 		{"namespace_root", "typescript", `namespace Array.Custom {} Array.from(xs);`, "shadowed", ""},
 		{"loop_value", "javascript", `for (const x of xs) { x.slice(); }`, "unknown", ""},
+		{"sibling_parameters", "typescript", `function f(xs: string[]) {} function g(xs: string[]) { xs.slice(); }`, "instance", "array"},
+		{"sibling_builtins", "javascript", `function f(Array) {} Array.from(xs);`, "static", "array"},
+		{"inner_binding", "typescript", `const xs = []; function f(xs: string) { xs.slice(); }`, "instance", "string"},
+		{"outside_inner_binding", "javascript", `const xs = []; function f(xs) {} xs.slice();`, "instance", "array"},
+		{"type_signature_parameter", "typescript", `type Fn = (Array: number) => void; Array.from(xs);`, "static", "array"},
+		{"type_signature_unrelated_value", "typescript", `interface Fn { (xs: string): void; } function f(xs: string[]) { xs.slice(); }`, "instance", "array"},
+		{"duplicate_in_scope", "javascript", `var xs; var xs = []; xs.slice();`, "shadowed", ""},
+		{"inner_tdz", "javascript", `const xs = []; { xs.slice(); const xs = []; }`, "shadowed", ""},
+		{"local_constructor_outside_scope", "javascript", `function f() { class Map {} } new Map().get(x);`, "instance", "map"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := []byte(tc.src)
