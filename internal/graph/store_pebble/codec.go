@@ -23,6 +23,10 @@ const (
 
 // Keep field order fixed. New layouts require a new format byte.
 func encodeNode(n *graph.Node) ([]byte, error) {
+	return encodeNodeRecord(n, appendMetadata)
+}
+
+func encodeNodeRecord(n *graph.Node, appendMeta func([]byte, map[string]any) ([]byte, error)) ([]byte, error) {
 	b := []byte{nodeFormat}
 	for _, s := range []string{n.ID, string(n.Kind), n.Name, n.QualName, n.FilePath} {
 		b = appendMetaString(b, s)
@@ -43,10 +47,14 @@ func encodeNode(n *graph.Node) ([]byte, error) {
 		}
 	}
 	b = appendBytes(b, stamp)
-	return appendMetadata(b, n.Meta)
+	return appendMeta(b, n.Meta)
 }
 
 func encodeEdge(e *graph.Edge) ([]byte, error) {
+	return encodeEdgeRecord(e, appendMetadata)
+}
+
+func encodeEdgeRecord(e *graph.Edge, appendMeta func([]byte, map[string]any) ([]byte, error)) ([]byte, error) {
 	if math.IsNaN(e.Confidence) || math.IsInf(e.Confidence, 0) {
 		return nil, invalid("non-finite edge confidence")
 	}
@@ -65,7 +73,7 @@ func encodeEdge(e *graph.Edge) ([]byte, error) {
 	}
 	b = appendBool(b, e.NameOnly)
 	b = appendBool(b, e.Provisional)
-	return appendMetadata(b, e.Meta)
+	return appendMeta(b, e.Meta)
 }
 
 func appendBytes(b, v []byte) []byte {
@@ -233,6 +241,12 @@ func (d *recordCursor) metadata() map[string]any {
 	raw := d.bytes()
 	if d.err != nil {
 		return nil
+	}
+	if len(raw) >= 2 && raw[0] == metaFlatMagic0 && raw[1] == contractRowMetaVersion {
+		meta := recordCursor{buf: raw[2:]}
+		m := readFactMeta(&meta, 0)
+		d.err = meta.finish()
+		return m
 	}
 	m, err := decodeMetaFast(raw)
 	if err != nil {

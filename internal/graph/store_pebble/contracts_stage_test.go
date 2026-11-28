@@ -1,0 +1,226 @@
+package store_pebble
+
+import (
+	"bytes"
+	"iter"
+	"os"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/contracts"
+	"github.com/zzet/gortex/internal/graph"
+)
+
+func contractBatches(batches ...RebuildContractBatch) iter.Seq2[RebuildContractBatch, error] {
+	return func(yield func(RebuildContractBatch, error) bool) {
+		for _, batch := range batches {
+			if !yield(batch, nil) {
+				return
+			}
+		}
+	}
+}
+
+func testContractRow() *graph.Node {
+	return &graph.Node{ID: "http::GET::/a", Kind: graph.KindContract, Name: "http::GET::/a", Language: "contract", FilePath: "old.go",
+		Meta: map[string]any{"type": "http", "role": "provider", "contract_owner_record": true, "contract_meta": map[string]any{
+			"status_codes": []int{200, 404}, "empty": []int{}, "nil": []int(nil), "absent": nil,
+			"owner": map[string]string{"name": "a"},
+		}}}
+}
+
+func TestContractsStagePublishesExactDiff(t *testing.T) {
+	for _, profile := range []Profile{DefaultProfile, FullProfile} {
+		t.Run(string(profile), func(t *testing.T) {
+			ctx := t.Context()
+			worker, head, files, declared, raw, _, _ := relationsStageFixture(t, profile)
+			// Change the FileGraph node's secondary keys during Relations, so
+			// the retained predecessor has both new rows and tombstones.
+			owner := *declared
+			owner.Kind, owner.Name = graph.KindFunction, "Handler"
+			worker.AddNode(&owner)
+			shapeNode := &graph.Node{ID: "old.go::T", Kind: graph.KindType, Name: "T", FilePath: "old.go", RepoPrefix: "old", Language: "go", Meta: map[string]any{"ordinary": true}}
+			local := &graph.Node{ID: "old.go::local", Kind: graph.KindLocal, Name: "local", FilePath: "old.go", RepoPrefix: "old"}
+			seed := &graph.Node{ID: "dep::example.org/pkg", Kind: graph.KindContract, Name: "dep::example.org/pkg", FilePath: "go.mod", Language: "contract",
+				Meta: map[string]any{"type": "dependency", "role": "consumer"}}
+			parseContract := &graph.Node{ID: "route::goframe::GET::/a", Kind: graph.KindContract, Name: "GET /a", Language: "go", FilePath: "old.go"}
+			imp := &graph.Edge{From: owner.ID, To: seed.ID, Kind: graph.EdgeImports, FilePath: owner.FilePath, Line: 1}
+			worker.AddBatch([]*graph.Node{shapeNode, local, seed, parseContract}, []*graph.Edge{imp})
+			goReturn := &graph.Edge{From: owner.ID, To: "external::error", Kind: graph.EdgeReturns, FilePath: owner.FilePath, Line: 2, Origin: graph.OriginASTInferred}
+			worker.AddEdge(goReturn)
+			require.NoError(t, worker.recordExternalReceipt(ParseFacts{EffectiveLanguage: "go", File: graph.FileMetaRow{FilePath: owner.FilePath}}, goReturn))
+			relations, err := worker.PrepareRelations(ctx, t.TempDir(), files, nil)
+			require.NoError(t, err)
+			base, err := worker.RetainRelations(ctx, files, relations)
+			require.NoError(t, err)
+			relationDigest, err := head.PublishStage(ctx, relations)
+			require.NoError(t, err)
+			pinned := stageRead(t, head)
+			oldRows := relationsSavedRows(t, pinned)
+			oldShapeNode, err := point(pinned, pendingNodeKey(shapeNode.ID), copyValue)
+			require.NoError(t, err)
+			beforeBytes := pinned.RepoMemoryEstimate("old").NodeBytes
+			shape := &contracts.Shape{Kind: "struct", Fields: []contracts.ShapeField{{Name: "Z", Type: "int", Required: true}, {Name: "A", Type: "[]string", Repeated: true}}, Notes: []string{}}
+			contract := testContractRow()
+			completedSeed := *seed
+			completedSeed.Meta = map[string]any{"type": "dependency", "role": "consumer", "contract_meta": map[string]any{"version": "v1.2.3"}}
+			provided := &graph.Edge{From: owner.ID, To: contract.ID, Kind: graph.EdgeProvides, FilePath: owner.FilePath, Line: 3, Meta: map[string]any{"contract_meta": map[string]any{"status_codes": []int{200, 404}}}}
+			route := &graph.Edge{From: owner.ID, To: contract.ID, Kind: graph.EdgeHandlesRoute, FilePath: owner.FilePath, Line: 3}
+			omitted := &graph.Edge{From: local.ID, To: contract.ID, Kind: graph.EdgeConsumes, FilePath: owner.FilePath, Line: 4}
+			tables, err := worker.PrepareContracts(ctx, t.TempDir(), base, contractBatches(
+				RebuildContractBatch{Edges: []*graph.Edge{provided, route, omitted}},
+				RebuildContractBatch{Nodes: []*graph.Node{contract, &completedSeed}, Shapes: map[string]*contracts.Shape{shapeNode.ID: shape}},
+			), ContractCoverage{OmittedRecords: 1})
+			require.NoError(t, err)
+			require.Equal(t, relationDigest, tables.Base)
+			require.Equal(t, StageContracts, tables.Witness.Stage)
+			var ids []string
+			require.NoError(t, worker.VisitPreparedContractIDs(ctx, tables, func(id string) error { ids = append(ids, id); return nil }))
+			require.Equal(t, []string{seed.ID, contract.ID}, ids)
+			bad := tables
+			bad.Base = HeadDigest{99}
+			_, err = head.PublishStage(ctx, bad)
+			require.ErrorIs(t, err, ErrStaleBase)
+			bad = tables
+			bad.Incarnation = testReplacementIncarnation
+			_, err = head.PublishStage(ctx, bad)
+			require.ErrorIs(t, err, ErrStaleBase)
+			_, err = head.PublishStage(ctx, tables)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, tables)
+			require.ErrorIs(t, err, ErrStageOrder)
+			current := stageRead(t, head)
+			require.Equal(t, contract, current.GetNode(contract.ID))
+			require.Equal(t, &completedSeed, current.GetNode(seed.ID))
+			require.Equal(t, []*graph.Edge{imp}, current.GetInEdges(seed.ID))
+			require.Equal(t, 1, current.count("external import endpoints"))
+			require.Contains(t, current.GetOutEdges(owner.ID), raw)
+			require.Contains(t, current.GetInEdges(contract.ID), provided)
+			require.Contains(t, current.GetInEdges(contract.ID), route)
+			require.Equal(t, []*graph.Node{contract}, current.FindNodesByName(contract.Name))
+			if profile == FullProfile {
+				require.Contains(t, current.GetInEdges(contract.ID), omitted)
+				require.Equal(t, 3, current.count("in total", contract.ID))
+			} else {
+				require.NotContains(t, current.GetInEdges(contract.ID), omitted)
+				require.Equal(t, 2, current.count("in total", contract.ID))
+			}
+			savedShape, err := point(current, contractShapeKey(shapeNode.ID), decodeContractShape)
+			require.NoError(t, err)
+			require.Equal(t, shape, savedShape)
+			newShapeNode, err := point(current, pendingNodeKey(shapeNode.ID), copyValue)
+			require.NoError(t, err)
+			require.Equal(t, oldShapeNode, newShapeNode)
+			shapeBytes, err := encodeContractShape(shape)
+			require.NoError(t, err)
+			require.Equal(t, beforeBytes+uint64(len(shapeBytes)), current.RepoMemoryEstimate("old").NodeBytes)
+			require.Equal(t, pinned.NodeCount()+1, current.NodeCount())
+			require.Equal(t, tables.Witness.Families, relationsSavedWitness(t, current))
+			require.NoError(t, current.ReadError())
+			require.Equal(t, oldRows, relationsSavedRows(t, pinned))
+			require.Nil(t, pinned.GetNode(contract.ID))
+			require.Equal(t, seed, pinned.GetNode(seed.ID))
+			require.ErrorAs(t, pinned.RequireStage(StageContracts), new(*ErrStagePending))
+			oldShape, err := point(pinned, contractShapeKey(shapeNode.ID), decodeContractShape)
+			require.NoError(t, err)
+			require.Nil(t, oldShape)
+		})
+	}
+}
+
+func TestContractsStageRefusals(t *testing.T) {
+	for _, mode := range []string{"duplicate node", "duplicate edge", "duplicate shape", "collision", "missing endpoint", "missing shape type", "stale predecessor", "corrupt predecessor", "unclaimed node change", "unclaimed edge change", "empty", "only deferred"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			worker, head, files, declared, _, _, _ := relationsStageFixture(t, FullProfile)
+			owner := *declared
+			owner.Kind = graph.KindType
+			worker.AddNode(&owner)
+			relations, err := worker.PrepareRelations(ctx, t.TempDir(), files, nil)
+			require.NoError(t, err)
+			if mode == "stale predecessor" {
+				relations.Base = HeadDigest{9}
+				_, err := worker.RetainRelations(ctx, files, relations)
+				require.ErrorIs(t, err, ErrStaleBase)
+				return
+			}
+			base, err := worker.RetainRelations(ctx, files, relations)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, relations)
+			require.NoError(t, err)
+			pinned := stageRead(t, head)
+			oldRows := relationsSavedRows(t, pinned)
+			contract := testContractRow()
+			e := &graph.Edge{From: owner.ID, To: contract.ID, Kind: graph.EdgeProvides, FilePath: owner.FilePath}
+			batch := RebuildContractBatch{Nodes: []*graph.Node{contract}, Edges: []*graph.Edge{e}}
+			shape := &contracts.Shape{Kind: "struct"}
+			var again RebuildContractBatch
+			var coverage ContractCoverage
+			switch mode {
+			case "duplicate node":
+				again.Nodes = []*graph.Node{contract}
+			case "duplicate edge":
+				again.Edges = []*graph.Edge{e}
+			case "duplicate shape":
+				batch.Shapes = map[string]*contracts.Shape{owner.ID: shape}
+				again.Shapes = batch.Shapes
+			case "collision":
+				contract.ID = owner.ID
+			case "missing endpoint":
+				e.To = "external::unproved"
+			case "missing shape type":
+				batch.Shapes = map[string]*contracts.Shape{"absent": shape}
+			case "unclaimed node change":
+				worker.AddNode(&graph.Node{ID: owner.ID, Name: "changed", Kind: graph.KindType})
+			case "unclaimed edge change":
+				worker.AddEdge(&graph.Edge{From: owner.ID, To: owner.ID, Kind: graph.EdgeImports})
+			case "corrupt predecessor":
+				require.NotEmpty(t, base.paths)
+				require.NoError(t, os.Remove(base.paths[0]))
+			case "empty", "only deferred":
+				batch = RebuildContractBatch{}
+				if mode == "only deferred" {
+					coverage.OmittedRecords = 1
+				}
+			}
+			stage, err := worker.PrepareContracts(ctx, t.TempDir(), base, contractBatches(batch, again), coverage)
+			if mode == "empty" || mode == "only deferred" {
+				require.NoError(t, err)
+				require.Empty(t, stage.Files)
+				require.Equal(t, &coverage, stage.Witness.Contracts)
+				_, err = head.PublishStage(ctx, stage)
+				require.NoError(t, err)
+				require.NoError(t, stageRead(t, head).RequireStage(StageContracts))
+				return
+			}
+			require.ErrorIs(t, err, ErrContractsSeal)
+			if mode == "collision" {
+				var collision *ContractIDCollisionError
+				require.ErrorAs(t, err, &collision)
+				require.Equal(t, owner.ID, collision.ID)
+				require.Equal(t, 1, collision.Count)
+			}
+			require.Empty(t, stage)
+			require.Equal(t, oldRows, relationsSavedRows(t, stageRead(t, head)))
+			require.ErrorAs(t, stageRead(t, head).RequireStage(StageContracts), new(*ErrStagePending))
+		})
+	}
+}
+
+func TestContractShapeCodec(t *testing.T) {
+	for _, fields := range [][]contracts.ShapeField{nil, {}, {{Name: "A", Type: "int", Comment: "wire", JSONTag: "a", Required: true, Repeated: true}}} {
+		shape := &contracts.Shape{Kind: "struct", Fields: fields, Notes: []string{"note"}}
+		raw, err := encodeContractShape(shape)
+		require.NoError(t, err)
+		got, err := decodeContractShape(raw)
+		require.NoError(t, err)
+		require.Equal(t, shape, got)
+		for n := range len(raw) {
+			_, err := decodeContractShape(raw[:n])
+			require.Error(t, err)
+		}
+		_, err = decodeContractShape(append(bytes.Clone(raw), 0))
+		require.Error(t, err)
+	}
+	require.NotEqual(t, contractShapeKey("a\x00b"), contractShapeKey("a"))
+}

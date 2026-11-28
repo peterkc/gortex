@@ -228,6 +228,13 @@ type goldBaseCursor interface {
 func writeGoldDiff(
 	ctx context.Context, old goldBaseCursor, rows *sortedRuns, maxTables int,
 	visit func(row) error, finish func(context.Context) error,
+) ([]string, error) {
+	return writeCheckedGoldDiff(ctx, old, rows, maxTables, visit, finish, nil)
+}
+
+func writeCheckedGoldDiff(
+	ctx context.Context, old goldBaseCursor, rows *sortedRuns, maxTables int,
+	visit func(row) error, finish func(context.Context) error, change func(row) error,
 ) (paths []string, err error) {
 	var w *sstable.Writer
 	closeTable := func() error {
@@ -247,6 +254,18 @@ func writeGoldDiff(
 	write := func(key, value []byte, remove bool) error {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if change != nil {
+			if remove {
+				var err error
+				value, err = old.ValueAndErr()
+				if err != nil {
+					return err
+				}
+			}
+			if err := change(row{key, value}); err != nil {
+				return err
+			}
 		}
 		if w == nil || w.Raw().EstimatedSize() >= goldBufferBytes {
 			if err := closeTable(); err != nil {

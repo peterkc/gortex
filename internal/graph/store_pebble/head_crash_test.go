@@ -18,6 +18,7 @@ import (
 	"github.com/cockroachdb/pebble/v2/vfs"
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/blake3"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -346,4 +347,82 @@ func (f *headCrashFile) Write(p []byte) (int, error) {
 		f.fs.beforeManifestWrite()
 	}
 	return f.File.Write(p)
+}
+
+// Kill the same head owner at both atomic ingest boundaries, this time
+// with a graph delta and a split contract shape in the same offer.
+func TestHeadContractsPublicationCrash(t *testing.T) {
+	for _, phase := range []string{"during", "after"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx := t.Context()
+			lease := t.TempDir()
+			headDir := filepath.Join(lease, "head")
+			h, err := OpenHead(headDir, testHeadIncarnation, FullProfile)
+			require.NoError(t, err)
+			w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Stage: StageManifest, Profile: FullProfile}
+			manifest, err := PrepareManifest(ctx, t.TempDir(), []ManifestFile{{Path: "a.go", Language: "go", Kind: 'f'}}, w, testHeadIncarnation)
+			require.NoError(t, err)
+			_, err = h.PublishStage(ctx, manifest)
+			require.NoError(t, err)
+			b, err := OpenBuild(filepath.Join(t.TempDir(), "build"), FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, b.Close()) })
+			n := &graph.Node{ID: "Type", Name: "Type", Kind: graph.KindType, FilePath: "a.go", Language: "go"}
+			require.NoError(t, b.AddParsedFile("", ParseFacts{
+				Nodes: []*graph.Node{n}, File: graph.FileMetaRow{FilePath: "a.go", NodeCount: 1},
+			}))
+			fg, err := b.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, manifest.Incarnation)
+			require.NoError(t, err)
+			files, err := b.RetainFileGraph(ctx, fg)
+			require.NoError(t, err)
+			_, err = h.PublishStage(ctx, fg)
+			require.NoError(t, err)
+			relations, err := b.PrepareRelations(ctx, t.TempDir(), files, nil)
+			require.NoError(t, err)
+			base, err := b.RetainRelations(ctx, files, relations)
+			require.NoError(t, err)
+			_, err = h.PublishStage(ctx, relations)
+			require.NoError(t, err)
+			_, old, err := h.ReconcilePublication(nil)
+			require.NoError(t, err)
+			contract := testContractRow()
+			shape := &contracts.Shape{Kind: "struct"}
+			edge := &graph.Edge{From: n.ID, To: contract.ID, Kind: graph.EdgeProvides, FilePath: "a.go", Line: 1}
+			stage, err := b.PrepareContracts(ctx, t.TempDir(), base, contractBatches(RebuildContractBatch{
+				Nodes:  []*graph.Node{contract},
+				Edges:  []*graph.Edge{edge},
+				Shapes: map[string]*contracts.Shape{n.ID: shape},
+			}), ContractCoverage{})
+			require.NoError(t, err)
+			require.NoError(t, h.Close())
+			request, err := json.Marshal(stage)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(lease, "stage.json"), request, 0o600))
+			killHeadCrashChild(t, lease, phase)
+			h, err = OpenHead(headDir, testHeadIncarnation, FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, h.Close()) })
+			w, _, err = h.ReconcilePublication(&old)
+			require.NoError(t, err)
+			view := stageRead(t, h)
+			gotShape, err := point(view, contractShapeKey(n.ID), decodeContractShape)
+			require.NoError(t, err)
+			require.Equal(t, n, view.GetNode(n.ID))
+			if phase == "during" {
+				require.Equal(t, relations.Witness, w)
+				require.Nil(t, view.GetNode(contract.ID))
+				require.Empty(t, view.GetInEdges(contract.ID))
+				require.Nil(t, gotShape)
+				require.ErrorAs(t, view.RequireStage(StageContracts), new(*ErrStagePending))
+			} else {
+				require.Equal(t, stage.Witness, w)
+				require.Equal(t, contract, view.GetNode(contract.ID))
+				require.Equal(t, []*graph.Edge{edge}, view.GetInEdges(contract.ID))
+				require.Equal(t, shape, gotShape)
+				require.NoError(t, view.RequireStage(StageContracts))
+			}
+			require.Equal(t, w.Families, relationsSavedWitness(t, view))
+			require.NoError(t, view.ReadError())
+		})
+	}
 }

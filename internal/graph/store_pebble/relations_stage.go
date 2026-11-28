@@ -51,9 +51,17 @@ func (b *BuildStore) RetainFileGraph(ctx context.Context, stage StageTables) (ba
 	if !slices.ContainsFunc(w.Families, func(f FamilyWitness) bool { return f.Family == familyManifest }) {
 		return FileGraphBase{}, invalid("file-graph witness lacks the manifest family")
 	}
-	dir, err := os.MkdirTemp(filepath.Join(b.scratchParent, "pending"), "file-graph-base-")
+	paths, err := b.retainStageFiles(ctx, stage, "file-graph")
 	if err != nil {
 		return FileGraphBase{}, err
+	}
+	return FileGraphBase{build: b, paths: paths, witness: w, digest: blake3.Sum256(raw), incarnation: stage.Incarnation}, nil
+}
+
+func (b *BuildStore) retainStageFiles(ctx context.Context, stage StageTables, label string) (_ []string, err error) {
+	dir, err := os.MkdirTemp(filepath.Join(b.scratchParent, "pending"), label+"-base-")
+	if err != nil {
+		return nil, err
 	}
 	defer func() {
 		if err != nil {
@@ -63,28 +71,28 @@ func (b *BuildStore) RetainFileGraph(ctx context.Context, stage StageTables) (ba
 	paths := make([]string, 0, len(stage.Files))
 	for _, name := range stage.Files {
 		if err := ctx.Err(); err != nil {
-			return FileGraphBase{}, err
+			return nil, err
 		}
 		if name != filepath.Base(name) || filepath.Ext(name) != ".sst" {
-			return FileGraphBase{}, invalid("file-graph table name")
+			return nil, invalid("retained stage table name")
 		}
 		from, to := filepath.Join(stage.Dir, name), filepath.Join(dir, name)
 		info, err := os.Lstat(from)
 		if err != nil {
-			return FileGraphBase{}, err
+			return nil, err
 		}
 		if !info.Mode().IsRegular() {
-			return FileGraphBase{}, invalid("file-graph table is not a regular file")
+			return nil, invalid("retained stage table is not a regular file")
 		}
 		if err := os.Link(from, to); err != nil {
-			return FileGraphBase{}, err
+			return nil, err
 		}
 		paths = append(paths, to)
 	}
 	if err := ctx.Err(); err != nil {
-		return FileGraphBase{}, err
+		return nil, err
 	}
-	return FileGraphBase{build: b, paths: paths, witness: w, digest: blake3.Sum256(raw), incarnation: stage.Incarnation}, nil
+	return paths, nil
 }
 
 // ErrRelationsSeal marks a refused relations stage. Causes such as the table
@@ -340,6 +348,8 @@ type fileGraphCursor struct {
 	iter     sstable.Iterator
 	row      row
 	last     []byte
+	delta    bool
+	deleted  bool
 	err      error
 }
 
@@ -370,9 +380,11 @@ func (c *fileGraphCursor) Next() bool {
 		first := c.iter == nil
 		if first {
 			if len(c.paths) == 0 {
-				c.witness.flush()
-				if !slices.Equal(c.witness.families, c.expected) {
-					c.err = invalid("retained file-graph rows differ from their witness")
+				if !c.delta {
+					c.witness.flush()
+					if !slices.Equal(c.witness.families, c.expected) {
+						c.err = invalid("retained file-graph rows differ from their witness")
+					}
 				}
 				return false
 			}
@@ -412,8 +424,13 @@ func (c *fileGraphCursor) readRow(first bool) bool {
 		c.err = invalid("retained file-graph keys are not strictly ordered")
 		return false
 	}
-	if key[0] == familyManifest || key[0] == familyWitness {
-		c.err = invalid("retained file graph includes a non-data row")
+	if key[0] == familyManifest || key[0] == familyWitness || (c.delta && key[0] == familyFileMeta) {
+		c.err = invalid("retained stage changes an immutable family")
+		return false
+	}
+	c.deleted = kv.K.Kind() == sstable.InternalKeyKindDelete
+	if kv.K.Kind() != sstable.InternalKeyKindSet && !(c.delta && c.deleted) {
+		c.err = invalid("retained stage point kind")
 		return false
 	}
 	value, _, err := kv.Value(nil)
@@ -423,6 +440,8 @@ func (c *fileGraphCursor) readRow(first bool) bool {
 	}
 	c.last = append(c.last[:0], key...)
 	c.row = row{key, value}
-	c.witness.add(c.row)
+	if !c.delta {
+		c.witness.add(c.row)
+	}
 	return true
 }

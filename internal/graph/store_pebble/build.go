@@ -18,18 +18,20 @@ import (
 // It is not a storage choice for a running daemon. Only the build owner may
 // publish, after all mutation calls have returned.
 type BuildStore struct {
-	pending       *pebble.DB
-	db            *pebble.DB
-	options       *pebble.Options
-	scratchParent string
-	profile       Profile
-	mu            sync.Mutex
-	published     bool
-	first         error
-	readErr       error
-	cleanupErr    error
-	resolveMu     sync.Mutex
-	v3NodeWrites  uint64 // protected by mu; edge moves do not change it
+	pending          *pebble.DB
+	db               *pebble.DB
+	options          *pebble.Options
+	scratchParent    string
+	profile          Profile
+	mu               sync.Mutex
+	published        bool
+	first            error
+	readErr          error
+	cleanupErr       error
+	resolveMu        sync.Mutex
+	v3NodeWrites     uint64 // protected by mu; edge moves do not change it
+	contractsStarted bool
+	contractsSealed  HeadDigest
 }
 
 var _ graph.Store = (*BuildStore)(nil)
@@ -348,6 +350,11 @@ func (b *BuildStore) writeRows(ctx context.Context, gold *sortedRuns, stage Stag
 		return addCounts(countKey("edges"), countKey("repo edges", repo), countKey("edge kind", kind))
 	}); err != nil {
 		return err
+	}
+	if stage == StageContracts {
+		if err := b.writeContractShapes(ctx, gold); err != nil {
+			return err
+		}
 	}
 	revisions, err := pendingGet(b.pending, revisionKey, decodeCount)
 	if err != nil {

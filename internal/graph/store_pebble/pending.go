@@ -117,6 +117,10 @@ func (b *BuildStore) writeNode(n *graph.Node) error {
 	if err != nil {
 		return err
 	}
+	return b.writeNodeRecord(n, prev, value)
+}
+
+func (b *BuildStore) writeNodeRecord(n, prev *graph.Node, value []byte) error {
 	batch := b.pending.NewBatch()
 	defer batch.Close()
 	if prev != nil {
@@ -183,6 +187,10 @@ func (b *BuildStore) writePendingEdge(e *graph.Edge, custody rebuildEdgeCustody,
 	if err != nil {
 		return err
 	}
+	return b.writeEdgeRecord(e, key, raw, custody, clearRecorder)
+}
+
+func (b *BuildStore) writeEdgeRecord(e *graph.Edge, key, raw []byte, custody rebuildEdgeCustody, clearRecorder bool) error {
 	recorder, err := custody.encode(raw)
 	if err != nil {
 		return err

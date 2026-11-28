@@ -16,6 +16,7 @@ const (
 	familyEdge     byte = 'E'
 	familyCount    byte = 'C'
 	familySymbol   byte = 'S'
+	familyShape    byte = 'T'
 	familyFileMeta byte = 'A'
 	familyWitness  byte = 'W'
 )
