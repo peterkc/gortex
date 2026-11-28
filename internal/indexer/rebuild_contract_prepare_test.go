@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 )
@@ -61,6 +62,9 @@ func TestPrepareRebuildContractsChecksActualSeal(t *testing.T) {
 				Nodes: []*graph.Node{{ID: contractID, Kind: graph.KindContract, Name: contractID, Language: "contract", FilePath: path}},
 				Edges: []*graph.Edge{{From: path, To: methodID, Kind: graph.EdgeCalls, FilePath: path, Line: 1,
 					Meta: map[string]any{"via": "spring.Bean", "bean_of": "Example"}}},
+				Omitted: []store_pebble.RebuildContractOmission{{
+					FilePath: path, ID: privateID, Type: contracts.ContractEnv, RecordKey: store_pebble.HeadDigest{1},
+				}},
 			}
 			switch mode {
 			case "private mismatch":
