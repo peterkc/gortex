@@ -190,11 +190,11 @@ func (idx *Indexer) buildRebuildFileStages(
 	// Do not retain receipt payloads or read the source again. Each key below
 	// borrows the path from the admitted inputs bounded by rebuildRequestBytes.
 	census := rebuildExtractorCensus{
-		admitted:          manifest.Witness.Families[0].Count,
-		byPath:            make(map[string]string, len(job.inputs)),
-		byID:              make(map[string]uint64),
+		admitted:            manifest.Witness.Families[0].Count,
+		byPath:              make(map[string]string, len(job.inputs)),
+		byID:                make(map[string]uint64),
 		heldCloneByLanguage: make(map[string]uint64),
-		originByGraphPath: origins,
+		originByGraphPath:   origins,
 	}
 	for _, input := range job.inputs {
 		facts, reused, err := idx.loadRebuildFile(ctx, src, store, input, job.recipes[input.Language], job.bounds)

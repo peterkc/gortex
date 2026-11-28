@@ -323,7 +323,11 @@ func visitIsolationTable(ctx context.Context, options *pebble.Options, path stri
 		return err
 	}
 	defer func() { err = errors.Join(err, table.Close()) }()
-	if table.Properties.NumRangeDeletions != 0 {
+	props, err := table.ReadPropertiesBlock(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if props.NumRangeDeletions != 0 {
 		return invalid("publication stage uses range deletion")
 	}
 	prefix := []byte{familyIsolation}

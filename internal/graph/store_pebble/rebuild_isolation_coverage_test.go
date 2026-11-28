@@ -26,7 +26,7 @@ func TestRebuildIsolationCoverageStages(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, worker.AddParsedFile("", ParseFacts{
 		Nodes: []*graph.Node{{ID: "a.go::F", Name: "F", Kind: graph.KindFunction, FilePath: "a.go", Language: "go"}},
-		File: graph.FileMetaRow{FilePath: "a.go", Size: len(routeTestSource), ContentHash: fmt.Sprintf("%x", blake3.Sum256([]byte(routeTestSource))), NodeCount: 1},
+		File:  graph.FileMetaRow{FilePath: "a.go", Size: len(routeTestSource), ContentHash: fmt.Sprintf("%x", blake3.Sum256([]byte(routeTestSource))), NodeCount: 1},
 	}))
 	fileGraph, err := worker.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, testHeadIncarnation)
 	require.NoError(t, err)
