@@ -66,7 +66,7 @@ func ownerTestStages(t *testing.T, source string, stop Stage, deferred []string)
 	t.Cleanup(func() { require.NoError(t, worker.Close()) })
 	require.NoError(t, worker.AddParsedFile("", ParseFacts{
 		Nodes: []*graph.Node{{ID: "a.go::F", Name: "F", Kind: graph.KindFunction, FilePath: "a.go", Language: "go"}},
-		File: graph.FileMetaRow{FilePath: "a.go", Size: len(source), ContentHash: fmt.Sprintf("%x", blake3.Sum256([]byte(source))), NodeCount: 1},
+		File:  graph.FileMetaRow{FilePath: "a.go", Size: len(source), ContentHash: fmt.Sprintf("%x", blake3.Sum256([]byte(source))), NodeCount: 1},
 	}))
 	files, err := worker.PrepareFileGraph(ctx, t.TempDir(), manifest.Witness, manifest.Incarnation)
 	require.NoError(t, err)
