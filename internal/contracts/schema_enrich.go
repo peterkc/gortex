@@ -467,13 +467,9 @@ func pathParamsFromTemplate(path string) []string {
 // unchanged when nothing matches — a later module-wide pass can
 // upgrade it using the import graph.
 func resolveTypeInFile(name string, fileNodes []*graph.Node) string {
-	name = strings.TrimSpace(strings.TrimPrefix(name, "*"))
-	if name == "" {
+	name, lookup := typeLookupName(name)
+	if !lookup {
 		return ""
-	}
-	// Drop package qualifier for in-file lookup: "common.Foo" -> "Foo".
-	if idx := strings.LastIndex(name, "."); idx >= 0 {
-		name = name[idx+1:]
 	}
 	// Also accept KindInterface — TypeScript / Java / Kotlin model
 	// type definitions as `interface Foo {}`, which gets emitted as
@@ -488,6 +484,18 @@ func resolveTypeInFile(name string, fileNodes []*graph.Node) string {
 		}
 	}
 	return name // bare name; upgraded later
+}
+
+func typeLookupName(name string) (string, bool) {
+	name = strings.TrimSpace(strings.TrimPrefix(name, "*"))
+	if name == "" {
+		return "", false
+	}
+	// Drop package qualifier for in-file lookup: "common.Foo" -> "Foo".
+	if idx := strings.LastIndex(name, "."); idx >= 0 {
+		name = name[idx+1:]
+	}
+	return name, true
 }
 
 func uniqStrings(in []string) []string {
