@@ -262,3 +262,46 @@ func TestRebuildFnValueSettledPredecessor(t *testing.T) {
 	require.Equal(t, before, rebuildEventSavedRows(t, b))
 	require.Equal(t, rebuildEventSQLiteRows(native), before)
 }
+
+func TestRebuildFnValueSQLiteOracleNamedLookups(t *testing.T) {
+	const file, remote = "site.ts", "other.ts"
+	for _, tc := range []struct {
+		name, receiver string
+		member, proto  bool
+		skip           bool
+		confidence     float64
+		origin         string
+	}{
+		{name: "self member", receiver: "<self>", member: true, confidence: 0.85, origin: graph.OriginASTResolved},
+		{name: "skip unique member", receiver: "Owner", member: true, skip: true, confidence: 0.5, origin: graph.OriginASTInferred},
+		{name: "skip global", skip: true, confidence: 0.5, origin: graph.OriginASTInferred},
+		{name: "skip prototype", proto: true, skip: true, confidence: 0.5, origin: graph.OriginASTInferred},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := rebuildFnValueTestNode("caller", "register", file)
+			caller.Meta = map[string]any{"receiver": "Owner"}
+			call := rebuildFnValueTestSite(caller, "target", 1)
+			call.Meta["fn_ref_recv_hint"], call.Meta["skip_gate"] = tc.receiver, tc.skip
+			target := rebuildFnValueTestNode("target", "target", remote)
+			if tc.member {
+				target.Kind = graph.KindMethod
+				target.Meta = map[string]any{"receiver": "Owner"}
+			}
+			if tc.proto {
+				target.Meta = map[string]any{"prototype": true}
+			}
+			site := rebuildEventFacts(file, caller.Language, []*graph.Node{caller}, call)
+			decls := rebuildEventFacts(remote, target.Language, []*graph.Node{target})
+			build, native := openRebuildEventStores(t, site, decls)
+			require.Equal(t, 1, ResolveFnValueCallbacks(native))
+			want := rebuildEventSQLiteRows(native)
+			require.Contains(t, want.edges, fnValueRegistration(call, "target", target.ID, tc.confidence, tc.origin, 1))
+			for _, expected := range []uint64{1, 0} {
+				count, err := RunRebuildFnValueCallbacks(t.Context(), build, rebuildGRPCReceipts(site, decls), rebuildFnValueTestSelection(t))
+				require.NoError(t, err)
+				require.Equal(t, expected, count)
+				require.Equal(t, want, rebuildEventSavedRows(t, build))
+			}
+		})
+	}
+}

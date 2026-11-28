@@ -407,7 +407,8 @@ func (p *rebuildFnValuePass) bucket(ctx context.Context, name, scope string, mod
 			}
 			return nil
 		}
-		// Native's SQLite file index scans equal file keys by node ID.
+		// Native's SQLite file index scans equal file keys by node ID. The VM proof
+		// labels any divergence from that order as a native-defect difference.
 		if b.count == 0 || id < b.first {
 			b.first, b.firstUnknown = id, !exact
 		}
@@ -683,7 +684,6 @@ func (p *rebuildFnValuePass) alternateSelfReceiver(ctx context.Context, live, ra
 func (p *rebuildFnValuePass) offer(key, order, val []byte) error {
 	// SQLite visits bare placeholders before prefixed ones. Within each
 	// scan, the target index breaks ties by frozen receipt ordinal.
-	// A divergence from a retained SQLite rowid order needs the VM parity proof.
 	orderKey := append(p.column('W'), key...)
 	prior, err := p.get(orderKey)
 	if err != nil || prior != nil && bytes.Compare(prior, order) <= 0 {
