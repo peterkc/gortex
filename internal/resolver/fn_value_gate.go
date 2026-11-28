@@ -168,20 +168,22 @@ func resolveFnValueCandidates(g graph.Store, candidates []*graph.Edge, prior *Fn
 			targets = appendTarget(nil, id)
 			return len(targets)
 		}
-		conf, origin, _ := chooseFnValueTargets(recvHint, ungated, skipGate,
-			func(recv string) int { return one(resolveMemberByTypeMemo(g, recv, name, nameMemo)) },
-			func(recv string) int {
+		conf, origin, _ := chooseFnValueTargets(recvHint, ungated, skipGate, graph.FnValueLookups{
+			UniqueMember: func(recv string) int {
+				return one(resolveMemberByTypeMemo(g, recv, name, nameMemo))
+			},
+			Members: func(recv string) int {
 				targets = resolveMembersByTypeMemo(g, recv, name, nameMemo)
 				return len(targets)
 			},
-			func() int {
+			SelfMembers: func() int {
 				targets = resolveFnValueSelfMembersMemo(g, edge.From, name, nameMemo)
 				return len(targets)
 			},
-			func() int { return one(sameFileTarget(edge.FilePath, name)) },
-			func() int { return one(resolveUniqueFnValueMemo(g, name, nameMemo)) },
-			func() int { return one(resolveFnValueCrossModuleMemo(g, name, nameMemo)) },
-		)
+			SameFile:  func() int { return one(sameFileTarget(edge.FilePath, name)) },
+			Global:    func() int { return one(resolveUniqueFnValueMemo(g, name, nameMemo)) },
+			CrossFile: func() int { return one(resolveFnValueCrossModuleMemo(g, name, nameMemo)) },
+		})
 		for _, target := range targets {
 			if target == "" || target == edge.From {
 				continue
@@ -204,36 +206,34 @@ func resolveFnValueCandidates(g graph.Store, candidates []*graph.Edge, prior *Fn
 }
 
 // chooseFnValueTargets owns the callback gate's lookup order and output tier.
-// Each lookup selects its own candidates and returns their count.
-func chooseFnValueTargets(recvHint string, ungated, skipGate bool, uniqueMember, members func(string) int,
-	selfMembers, sameFile, global, crossFile func() int,
-) (conf float64, origin string, count int) {
+// It returns the final lookup's count: that lookup owns the selected candidates.
+func chooseFnValueTargets(recvHint string, ungated, skipGate bool, lookups graph.FnValueLookups) (conf float64, origin string, count int) {
 	conf, origin = 0.6, graph.OriginASTInferred
 	switch {
 	case skipGate:
 		if recvHint != "" {
-			count = uniqueMember(recvHint)
+			count = lookups.UniqueMember(recvHint)
 		}
 		if count == 0 {
-			count = global()
+			count = lookups.Global()
 		}
 		conf = 0.5
 	case recvHint == "<self>":
-		if count = selfMembers(); count > 0 {
+		if count = lookups.SelfMembers(); count > 0 {
 			conf, origin = 0.85, graph.OriginASTResolved
 		} else {
-			count = sameFile()
+			count = lookups.SameFile()
 		}
 	case recvHint != "":
-		if count = members(recvHint); count > 0 {
+		if count = lookups.Members(recvHint); count > 0 {
 			conf, origin = 0.85, graph.OriginASTResolved
 		} else if ungated {
-			count, conf = crossFile(), 0.45
+			count, conf = lookups.CrossFile(), 0.45
 		}
 	default:
-		count = sameFile()
+		count = lookups.SameFile()
 		if count == 0 && ungated {
-			count, conf = crossFile(), 0.45
+			count, conf = lookups.CrossFile(), 0.45
 		}
 	}
 	// An overload set is genuinely ambiguous and rides the inferred tier.

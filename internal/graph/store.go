@@ -1555,6 +1555,18 @@ type LightEdgeScanner interface {
 	AllEdgesLight(kinds ...EdgeKind) []*Edge
 }
 
+// FnValueLookups supplies the callback gate's named candidate lookups. Each
+// selects its own candidates and returns their count. The gate returns the
+// count of the last lookup called, whose candidates are the selected ones.
+type FnValueLookups struct {
+	UniqueMember func(string) int
+	Members      func(string) int
+	SelfMembers  func() int
+	SameFile     func() int
+	Global       func() int
+	CrossFile    func() int
+}
+
 // FnValuePlaceholderScanner is an optional store capability: a scan restricted
 // to the fn-value gate's placeholder namespace (FnValuePlaceholderMarker, both
 // the bare `unresolved::fnvalue::<name>` and the multi-repo

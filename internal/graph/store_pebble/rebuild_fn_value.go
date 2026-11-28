@@ -29,7 +29,7 @@ type RebuildFnValueRules struct {
 	Prototype    func(*graph.Node) bool
 	LocalLinkage func(*graph.Node) bool
 	Registration func(*graph.Edge, string, string, float64, string, int) *graph.Edge
-	Choose       func(string, bool, bool, func(string) int, func(string) int, func() int, func() int, func() int, func() int) (float64, string, int)
+	Choose       func(string, bool, bool, graph.FnValueLookups) (float64, string, int)
 }
 
 type rebuildFnValuePass struct {
@@ -511,14 +511,14 @@ func (p *rebuildFnValuePass) plan(ctx context.Context, e *graph.Edge, raw bool, 
 		}
 		return choose(recv, fnValueMember)
 	}
-	confidence, origin, count := p.rules.Choose(site.Receiver, site.Ungated, site.SkipGate,
-		func(recv string) int { return choose(recv, fnValueUniqueMember) },
-		func(recv string) int { return choose(recv, fnValueMember) },
-		self,
-		func() int { return choose(e.FilePath, fnValueSameFile) },
-		func() int { return choose("", fnValueGlobal) },
-		func() int { return choose("", fnValueCrossFile) },
-	)
+	confidence, origin, count := p.rules.Choose(site.Receiver, site.Ungated, site.SkipGate, graph.FnValueLookups{
+		UniqueMember: func(recv string) int { return choose(recv, fnValueUniqueMember) },
+		Members:      func(recv string) int { return choose(recv, fnValueMember) },
+		SelfMembers:  self,
+		SameFile:     func() int { return choose(e.FilePath, fnValueSameFile) },
+		Global:       func() int { return choose("", fnValueGlobal) },
+		CrossFile:    func() int { return choose("", fnValueCrossFile) },
+	})
 	if err != nil || count == 0 {
 		return uncertain, err
 	}
