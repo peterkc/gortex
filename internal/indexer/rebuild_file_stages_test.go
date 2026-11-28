@@ -71,30 +71,9 @@ func TestRebuildFileStagesRetainFrozenFactsAcrossEdit(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, private.Close()) })
 			counts, err := idx.buildRebuildFileStages(ctx, src, store, private, job, func(tables store_pebble.StageTables) error {
-				var retained []string
-				if tables.Witness.Stage == store_pebble.StageFileGraph {
-					require.NotEmpty(t, tables.Files)
-					dirs, err := filepath.Glob(filepath.Join(job.workDir, "working", "pending", "file-graph-base-*"))
-					require.NoError(t, err)
-					require.Len(t, dirs, 1)
-					for _, name := range tables.Files {
-						original, err := os.Stat(filepath.Join(tables.Dir, name))
-						require.NoError(t, err)
-						link := filepath.Join(dirs[0], name)
-						info, err := os.Stat(link)
-						require.NoError(t, err)
-						require.True(t, os.SameFile(original, info), "retain the sealed inode before publication")
-						retained = append(retained, link)
-					}
-				}
 				_, err := h.PublishStage(ctx, tables)
 				if err != nil {
 					return err
-				}
-				for i, link := range retained {
-					_, err := os.Stat(filepath.Join(tables.Dir, tables.Files[i]))
-					require.ErrorIs(t, err, os.ErrNotExist, "ingest consumes the outward name")
-					require.FileExists(t, link)
 				}
 				stages = append(stages, tables.Witness.Stage)
 				if tables.Witness.Stage == store_pebble.StageManifest {
@@ -114,7 +93,6 @@ func TestRebuildFileStagesRetainFrozenFactsAcrossEdit(t *testing.T) {
 			if !precache {
 				require.ErrorIs(t, err, ErrBuildInputChanged)
 				require.Zero(t, counts.reused)
-				require.Zero(t, counts.fileGraphBase)
 				selected, selectErr := counts.census.selectPendingCallers([]*graph.Edge{{FilePath: "a.go"}})
 				require.ErrorIs(t, selectErr, errRebuildCallerAttribution)
 				require.Nil(t, selected)
@@ -125,10 +103,12 @@ func TestRebuildFileStagesRetainFrozenFactsAcrossEdit(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.EqualValues(t, 1, counts.reused)
-			require.NotZero(t, counts.fileGraphBase)
 			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, stages)
 			require.Len(t, s.FindNodesByName("Frozen"), 2)
 			require.Empty(t, s.FindNodesByName("Edited"))
+			scratch, err := filepath.Glob(filepath.Join(job.workDir, "working", "pending", "file-graph-base-*"))
+			require.NoError(t, err)
+			require.Empty(t, scratch, "no Relations consumer needs retained FileGraph files")
 		})
 	}
 }
