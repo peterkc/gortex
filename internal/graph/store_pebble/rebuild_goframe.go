@@ -271,7 +271,8 @@ func (p *rebuildGoFrame) record(ctx context.Context, receipts iter.Seq2[ParseFac
 }
 
 // recordCall retains the first payload at a relevant raw key. A later receipt
-// can disprove its route role, but cannot replace that payload or its position.
+// with another route role marks the claim unproved, which refuses a move;
+// it cannot replace the first payload or its position.
 func (p *rebuildGoFrame) recordCall(e *graph.Edge) error {
 	raw := pendingEdgeKey(e)
 	claimKey := append(p.column('r'), raw...)

@@ -65,3 +65,28 @@ func TestRebuildCSharpIfaceDispatchProvedCallProducer(t *testing.T) {
 		require.Equal(t, &out, got)
 	}
 }
+
+func TestRebuildCSharpIfaceDispatchReplayOversizedParentCandidate(t *testing.T) {
+	b := newBuild(t, FullProfile)
+	child := &graph.Node{ID: "impl", Name: "Foo", Kind: graph.KindType, Language: "csharp"}
+	parent := &graph.Node{ID: "iface", Name: "IFoo", Kind: graph.KindInterface, Language: "csharp",
+		Meta: map[string]any{"padding": strings.Repeat("x", rebuildCSharpIfaceRowBytes)}}
+	b.AddBatch([]*graph.Node{child, parent}, nil)
+	candidate := func(n *graph.Node, repo string) bool {
+		return n.RepoPrefix == repo && n.Language == "csharp" && n.Kind == graph.KindInterface
+	}
+	p := rebuildCSharpIface{
+		rebuildCallMoves: rebuildCallMoves{b: b, rowBytes: rebuildCSharpIfaceRowBytes},
+		rules:            RebuildCSharpIfaceRules{Candidate: candidate},
+		replay:           true,
+	}
+	// The live-only parent is optional in replay, but still needs to vote.
+	var visited []string
+	err := p.resolveParents(t.Context(), child.ID, parent.Name, func(id string, exact bool) error {
+		require.False(t, exact)
+		visited = append(visited, id)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{parent.ID}, visited)
+}
