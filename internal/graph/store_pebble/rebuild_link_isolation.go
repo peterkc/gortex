@@ -14,16 +14,17 @@ import (
 // ErrRebuildLinkIsolation marks a refused private holdout or restoration.
 var ErrRebuildLinkIsolation = errors.New("pebble rebuild link isolation failed")
 
-// This private prefix is never read by a link producer or written to a stage.
+// This private prefix is not a link election input or a serving family.
 // n: elected node bytes with receipt path (empty only for a checked skip).
 // e: exact parsed edge key to owning receipt path. r: saved restore edge bytes.
+// l: effective extractor by held ID. m: exact name/kind/extractor presence.
 var rebuildHoldoutPrefix = []byte{'g', '!'}
 
 func rebuildHoldoutKey(col byte, key []byte) []byte {
 	return append([]byte{'g', '!', col}, key...)
 }
 
-func (b *BuildStore) captureRebuildHeldNode(id, receipt string) error {
+func (b *BuildStore) captureRebuildHeldNode(id, receipt, language string) error {
 	key := pendingNodeKey(id)
 	raw, err := pendingGet(b.pending, key, copyValue)
 	if err != nil {
@@ -32,7 +33,10 @@ func (b *BuildStore) captureRebuildHeldNode(id, receipt string) error {
 	if raw == nil {
 		return invalid("held node missing from file graph")
 	}
-	return b.pending.Set(rebuildHoldoutKey('n', key), append(appendMetaString(nil, receipt), raw...), pebble.NoSync)
+	if err := b.pending.Set(rebuildHoldoutKey('n', key), append(appendMetaString(nil, receipt), raw...), pebble.NoSync); err != nil {
+		return err
+	}
+	return b.pending.Set(rebuildHoldoutKey('l', key), []byte(language), pebble.NoSync)
 }
 
 // AddRebuildHeldSkip keeps a checked deferred skip in FileGraph only. Skip
@@ -52,7 +56,7 @@ func (b *BuildStore) AddRebuildHeldSkip(n *graph.Node) error {
 		if err := b.writeNode(n); err != nil {
 			return err
 		}
-		return b.captureRebuildHeldNode(n.ID, "")
+		return b.captureRebuildHeldNode(n.ID, "", n.Language)
 	})
 }
 
@@ -95,7 +99,7 @@ func (b *BuildStore) isolateRebuildLinks(ctx context.Context) error {
 	if err != nil || !held {
 		return err
 	}
-	if err := b.visitRebuildHeldNodes(ctx, func(n *graph.Node, _ string, raw []byte) error {
+	if err := b.visitRebuildHeldNodes(ctx, func(n *graph.Node, receipt string, raw []byte) error {
 		match, err := pendingGet(b.pending, pendingNodeKey(n.ID), func(value []byte) (bool, error) {
 			return bytes.Equal(value, raw), nil
 		})
@@ -104,6 +108,14 @@ func (b *BuildStore) isolateRebuildLinks(ctx context.Context) error {
 		}
 		if !match {
 			return fmt.Errorf("held raw node %q differs from receipt capture", n.ID)
+		}
+		language, err := rebuildHeldLanguage(b.pending, n.ID)
+		if err != nil {
+			return err
+		}
+		if receipt != "" && n.Name != "" {
+			key := keyStrings(rebuildHoldoutKey('m', nil), n.Name, string(n.Kind), language)
+			return b.pending.Set(key, nil, pebble.NoSync)
 		}
 		return nil
 	}); err != nil {
@@ -279,4 +291,74 @@ func (b *BuildStore) restoreRebuildDeclarations(ctx context.Context) error {
 		return err
 	}
 	return b.pending.DeleteRange(rebuildHoldoutPrefix, prefixEnd(rebuildHoldoutPrefix), pebble.NoSync)
+}
+
+// rebuildHeldLanguage reads the winning receipt's effective extractor, not
+// the declaration's language tag (which can name another language).
+func rebuildHeldLanguage(db pebble.Reader, id string) (string, error) {
+	language, err := pendingGet(db, rebuildHoldoutKey('l', pendingNodeKey(id)), func(raw []byte) (string, error) {
+		return string(raw), nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if language == "" {
+		return "", invalid("held node has no effective extractor")
+	}
+	return language, nil
+}
+
+// RebuildHeldDeclaration reports raw attribution only, never a candidate
+// payload. A checked skip is not a declaration and returns an empty result.
+func (v RebuildView) RebuildHeldDeclaration(id string) (file, language string, kind graph.NodeKind, startLine int, err error) {
+	err = v.read(context.Background(), func(snap *pebble.Snapshot) error {
+		decode := func(raw []byte) (*graph.Node, error) {
+			d := recordCursor{buf: raw}
+			receipt := d.str()
+			if d.err != nil || receipt == "" {
+				return nil, d.err
+			}
+			return decodeNodeLight(d.buf)
+		}
+		n, err := pendingGet(snap, rebuildHoldoutKey('n', pendingNodeKey(id)), decode)
+		if err != nil || n == nil {
+			return err
+		}
+		if n.ID != id {
+			return invalid("held node key differs from capture")
+		}
+		language, err = rebuildHeldLanguage(snap, id)
+		if err != nil {
+			return err
+		}
+		file, kind, startLine = n.FilePath, n.Kind, n.StartLine
+		return nil
+	})
+	return file, language, kind, startLine, err
+}
+
+// RebuildHeldNameLanguages reports the effective extractors that may change
+// an exact-name answer. These rows cannot supply values or enter election.
+func (v RebuildView) RebuildHeldNameLanguages(ctx context.Context, name string, kinds ...graph.NodeKind) ([]string, error) {
+	var languages []string
+	prefix := keyStrings(rebuildHoldoutKey('m', nil), name)
+	err := v.visit(ctx, prefix, func(_ *pebble.Snapshot, r row) error {
+		kind, rest, err := readKeyString(r.key[len(prefix):])
+		if err != nil {
+			return err
+		}
+		language, rest, err := readKeyString(rest)
+		if err != nil || len(rest) != 0 || kind == "" || language == "" {
+			return invalid("held name attribution key")
+		}
+		if (len(kinds) == 0 || slices.Contains(kinds, graph.NodeKind(kind))) && !slices.Contains(languages, language) {
+			languages = append(languages, language)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(languages)
+	return languages, nil
 }

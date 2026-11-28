@@ -242,3 +242,60 @@ func TestRebuildLinkIsolationSupportedOnlyUnchanged(t *testing.T) {
 	require.NoError(t, b.RestoreRebuildDeclarations(ctx))
 	require.Equal(t, before, all())
 }
+
+func TestRebuildHeldDeclarationAttribution(t *testing.T) {
+	ctx := t.Context()
+	b := newBuild(t, FullProfile)
+	api := &graph.Node{ID: "a.py::API", FilePath: "a.py", Name: "API", Kind: graph.KindConstant, Language: "go", StartLine: 7}
+	other := &graph.Node{ID: "a.py::API()", FilePath: "a.py", Name: "API", Kind: graph.KindFunction}
+	second := &graph.Node{ID: "a.py::API2", FilePath: "a.py", Name: "API", Kind: graph.KindConstant}
+	require.NoError(t, b.AddRebuildDeferredFile("", ParseFacts{
+		File: graph.FileMetaRow{FilePath: "a.py", NodeCount: 3}, EffectiveLanguage: "python", Nodes: []*graph.Node{api, other, second},
+	}, func(string) (bool, error) { return true, nil }))
+	ruby := &graph.Node{ID: "b.rb::API", FilePath: "b.rb", Name: "API", Kind: graph.KindFunction}
+	require.NoError(t, b.AddRebuildDeferredFile("", ParseFacts{
+		File: graph.FileMetaRow{FilePath: "b.rb", NodeCount: 1}, EffectiveLanguage: "ruby", Nodes: []*graph.Node{ruby},
+	}, func(string) (bool, error) { return true, nil }))
+	skip := &graph.Node{ID: "skip.py", FilePath: "skip.py", Name: "API", Kind: graph.KindFile, Language: "python"}
+	require.NoError(t, b.AddRebuildHeldSkip(skip))
+	require.NoError(t, b.IsolateRebuildLinks(ctx))
+	view := b.RebuildView()
+	file, language, kind, line, err := view.RebuildHeldDeclaration(api.ID)
+	require.NoError(t, err)
+	require.Equal(t, api.FilePath, file)
+	require.Equal(t, "python", language, "effective receipt, not language tag")
+	require.Equal(t, api.Kind, kind)
+	require.Equal(t, api.StartLine, line)
+	for _, id := range []string{skip.ID, "missing"} {
+		file, language, kind, line, err := view.RebuildHeldDeclaration(id)
+		require.NoError(t, err)
+		require.Empty(t, file)
+		require.Empty(t, language)
+		require.Empty(t, kind)
+		require.Zero(t, line)
+	}
+	languages, err := view.RebuildHeldNameLanguages(ctx, "API", graph.KindConstant)
+	require.NoError(t, err)
+	require.Equal(t, []string{"python"}, languages)
+	languages, err = view.RebuildHeldNameLanguages(ctx, "API", graph.KindFunction)
+	require.NoError(t, err)
+	require.Equal(t, []string{"python", "ruby"}, languages)
+	languages, err = view.RebuildHeldNameLanguages(ctx, "API", graph.KindFile)
+	require.NoError(t, err)
+	require.Empty(t, languages)
+	languages, err = view.RebuildHeldNameLanguages(ctx, "API2", graph.KindConstant)
+	require.NoError(t, err)
+	require.Empty(t, languages)
+	for _, n := range []*graph.Node{api, other, second, ruby} {
+		live, err := view.Node(ctx, n.ID)
+		require.NoError(t, err)
+		require.Nil(t, live, "attribution must not expose a link candidate")
+	}
+	require.NoError(t, b.RestoreRebuildDeclarations(ctx))
+	languages, err = view.RebuildHeldNameLanguages(ctx, "API")
+	require.NoError(t, err)
+	require.Empty(t, languages)
+	file, _, _, _, err = view.RebuildHeldDeclaration(api.ID)
+	require.NoError(t, err)
+	require.Empty(t, file)
+}

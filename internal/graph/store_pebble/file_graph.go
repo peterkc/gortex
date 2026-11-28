@@ -112,7 +112,7 @@ func (b *BuildStore) addParsedFile(repo string, f ParseFacts, keep func(string) 
 				return err
 			}
 			if deferred {
-				if err := b.captureRebuildHeldNode(n.ID, f.File.FilePath); err != nil {
+				if err := b.captureRebuildHeldNode(n.ID, f.File.FilePath, f.EffectiveLanguage); err != nil {
 					return err
 				}
 			}
