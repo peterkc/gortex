@@ -34,12 +34,12 @@ func TestRebuildSpringConfigUsesCheckedReceipt(t *testing.T) {
 	wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
 	require.NoError(t, err)
 	require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: &rebuildExtractorCensus{
-		byPath: map[string]string{file: "yaml"}, originByGraphPath: map[string]string{file: file},
-	}}
 	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: b.RebuildView(), census: &rebuildExtractorCensus{
+		byPath: map[string]string{file: "yaml"}, originByGraphPath: map[string]string{file: file},
+	}}
 	require.NoError(t, b.AddParsedFile("", parsed))
 	require.NoError(t, os.Remove(sourcePath))
 	parses := parser.ParseCount()
@@ -82,7 +82,7 @@ func TestRebuildSpringConfigLabelsSkippedConfigFile(t *testing.T) {
 				{ID: javaFile + "::Bean", FilePath: javaFile, Kind: graph.KindType, Language: "java", StartLine: 1,
 					Meta: map[string]any{"spring_config_keys": []string{"service.*"}}},
 			}, nil)
-			reader := rebuildContractReceiptReader{idx: idx, census: &rebuildExtractorCensus{
+			reader := rebuildContractReceiptReader{idx: idx, linkView: b.RebuildView(), census: &rebuildExtractorCensus{
 				byPath: map[string]string{javaFile: "java"}, originByGraphPath: map[string]string{javaFile: javaFile},
 			}}
 			var want []store_pebble.RebuildContractOmission
@@ -260,7 +260,7 @@ func TestRebuildSpringConfigWrapperRefusesUnprovedEdges(t *testing.T) {
 			job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{lang: {1}}}
 			store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 			require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[lang], input)), wire))
-			r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: &rebuildExtractorCensus{byPath: map[string]string{file: lang}, originByGraphPath: map[string]string{file: file}}}
+			r := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: b.RebuildView(), census: &rebuildExtractorCensus{byPath: map[string]string{file: lang}, originByGraphPath: map[string]string{file: file}}}
 			b.AddBatch(parsed.Nodes, nil)
 			b.AddNode(target)
 			var edges []*graph.Edge

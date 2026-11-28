@@ -84,7 +84,7 @@ app.use("/api", router);
 	}
 	idx.extractGoModContracts(native)
 	nativeRecords = append(nativeRecords, native.ByFile("go.mod")...)
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: &census}
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: &census, linkView: build.RebuildView()}
 	var replayed []contracts.Contract
 	require.NoError(t, os.Remove(filepath.Join(root, "go.mod")))
 	stats, err := store_pebble.WithRebuildContractSources(ctx, t.TempDir(), 1,

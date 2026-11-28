@@ -94,7 +94,6 @@ func (r rebuildContractReceiptReader) selectRebuildContractRecord(ctx context.Co
 		// on the deferred link turn. Do not promote its registration owner.
 		return false, nil
 	}
-	r.linkView = view
 	base, facts, err := r.forLinkedDeclaration(ctx, n)
 	if err != nil {
 		return false, err

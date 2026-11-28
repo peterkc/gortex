@@ -19,7 +19,6 @@ var errRebuildContractBodyUnproved = errors.New("rebuild contract body is unprov
 // Capture used the accepted file's declaration range and its first match for
 // each local type name. Refuse if the linked file cannot prove those inputs.
 func (r rebuildContractReceiptReader) providerBody(ctx context.Context, view store_pebble.RebuildView, handler *graph.Node) (contracts.HandlerFacts, error) {
-	r.linkView = view
 	base, facts, err := r.forLinkedDeclaration(ctx, handler)
 	if err != nil {
 		return contracts.HandlerFacts{}, err

@@ -99,7 +99,7 @@ func TestSelectRebuildContractRecordProofGuards(t *testing.T) {
 	job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{"java": {1}}}
 	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 	require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
-	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: &rebuildExtractorCensus{byPath: map[string]string{file: "java"}, originByGraphPath: map[string]string{file: file}}}
+	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: b.RebuildView(), census: &rebuildExtractorCensus{byPath: map[string]string{file: "java"}, originByGraphPath: map[string]string{file: file}}}
 	b.AddNode(owner)
 	view := b.RebuildView()
 	selectRecord := func(c contracts.Contract) (bool, error) {

@@ -58,11 +58,11 @@ func Qualified(w http.ResponseWriter, r *http.Request) {
 	wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
 	require.NoError(t, err)
 	require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store,
-		census: &rebuildExtractorCensus{byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file}}}
 	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: b.RebuildView(),
+		census: &rebuildExtractorCensus{byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file}}}
 	require.NoError(t, b.AddParsedFile("", parsed))
 	view := b.RebuildView()
 	route := contracts.Contract{ID: "http::POST::/items/{id}", Type: contracts.ContractHTTP, Role: contracts.RoleProvider,
@@ -193,11 +193,11 @@ func TestRebuildProviderBodyEmptyLookupName(t *testing.T) {
 			wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
 			require.NoError(t, err)
 			require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
-			reader := rebuildContractReceiptReader{idx: idx, job: job, store: store,
-				census: &rebuildExtractorCensus{byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file}}}
 			b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, b.Close()) })
+			reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: b.RebuildView(),
+				census: &rebuildExtractorCensus{byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file}}}
 			require.NoError(t, b.AddParsedFile("", parsed))
 			view := b.RebuildView()
 			got, err := reader.providerBody(ctx, view, handler)
@@ -271,11 +271,11 @@ def ambiguous() -> Meta:
 	wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
 	require.NoError(t, err)
 	require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store,
-		census: &rebuildExtractorCensus{byPath: map[string]string{file: "python"}, originByGraphPath: map[string]string{file: file}}}
 	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: b.RebuildView(),
+		census: &rebuildExtractorCensus{byPath: map[string]string{file: "python"}, originByGraphPath: map[string]string{file: file}}}
 	require.NoError(t, b.AddParsedFile("", parsed))
 	view := b.RebuildView()
 	route := contracts.Contract{ID: "http::GET::/items", Type: contracts.ContractHTTP, Role: contracts.RoleProvider,

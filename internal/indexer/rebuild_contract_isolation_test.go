@@ -144,6 +144,10 @@ func Read() { _ = os.Getenv("SHARED") }
 	unbound.linkView = store_pebble.RebuildView{}
 	_, _, err = unbound.forGraphPath(ctx, goFile)
 	require.ErrorIs(t, err, store_pebble.ErrRebuildLinkIsolation)
+	require.ErrorIs(t, unbound.visitFilesAtParseCut(ctx, view, func(string, []contracts.Contract, *contracts.FileFacts) error {
+		t.Fatal("parse-cut reader must not adopt a different view")
+		return nil
+	}), store_pebble.ErrRebuildLinkIsolation)
 	parsedBefore := parser.ParseCount()
 	// Even a missing held-out receipt cannot reach early/late link readers.
 	// A separate checked inventory must, however, refuse that same miss.

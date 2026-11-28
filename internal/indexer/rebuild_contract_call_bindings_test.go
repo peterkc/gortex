@@ -85,11 +85,11 @@ func Other() {
 	require.NoError(t, err)
 	key := input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input))
 	require.NoError(t, store.write(key, wire))
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store,
-		census: &rebuildExtractorCensus{byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file}}}
 	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: b.RebuildView(),
+		census: &rebuildExtractorCensus{byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file}}}
 	require.NoError(t, b.AddParsedFile("", parsed))
 	require.NoError(t, os.Remove(path))
 	parses := parser.ParseCount()
@@ -200,7 +200,7 @@ func TestRebuildCallReturnBindingsDeclarationGuards(t *testing.T) {
 			key := input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input))
 			require.NoError(t, store.write(key, wire))
 			b.AddNode(&live)
-			r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
+			r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census, linkView: b.RebuildView()}
 			require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
 				item := store_pebble.RebuildContractRecord{Contract: c, BodyUnproved: mode == "size-skipped"}
 				require.NoError(t, records.Add(item))

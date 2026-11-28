@@ -92,7 +92,6 @@ func (r rebuildContractReceiptReader) loadRaw(ctx context.Context, input rebuild
 func (r rebuildContractReceiptReader) visitFilesAtParseCut(ctx context.Context, view store_pebble.RebuildView,
 	visit func(path string, records []contracts.Contract, facts *contracts.FileFacts) error,
 ) error {
-	r.linkView = view
 	constants := rebuildEndpointConstants{ctx: ctx, view: view}
 	for _, input := range r.job.inputs {
 		held, err := r.holdsOut(input.Path)
@@ -292,7 +291,6 @@ func springRawNode(base store_pebble.ParseFacts, n *graph.Node) *graph.Node {
 func (r rebuildContractReceiptReader) visitSpringConfig(ctx context.Context, view store_pebble.RebuildView, records *store_pebble.RebuildContractRecords,
 	yield func(store_pebble.RebuildContractBatch) error,
 ) error {
-	r.linkView = view
 	scope := contracts.SpringConfigScope{RepoRoot: r.idx.rootPath, RepoPrefix: r.idx.repoPrefix, WorkspaceID: r.idx.workspaceID}
 	var lastReader string
 	var readerProved bool

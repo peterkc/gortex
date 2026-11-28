@@ -86,7 +86,6 @@ func (r rebuildContractReceiptReader) rebuildCallReturnBody(ctx context.Context,
 	if detectLangFromPath(handler.FilePath) != "go" || (handler.Kind != graph.KindFunction && handler.Kind != graph.KindMethod) {
 		return empty, fmt.Errorf("%w: no checked Go binding source for %q", graph.ErrContractProjectionStale, symbol)
 	}
-	r.linkView = view
 	base, facts, err := r.forLinkedDeclaration(ctx, handler)
 	if err != nil {
 		return empty, err

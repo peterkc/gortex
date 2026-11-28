@@ -99,11 +99,11 @@ func TestRebuildProviderHandlerCheckedLaravelClass(t *testing.T) {
 	job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{"go": {1}}}
 	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
 	require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
-	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store,
-		census: &rebuildExtractorCensus{byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file}}}
 	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: b.RebuildView(),
+		census: &rebuildExtractorCensus{byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file}}}
 	const want = "app/Orders.php::OrderController.index"
 	for _, row := range []struct{ file, ns string }{{"app/Orders.php", "Acme"}, {"routes/Orders.php", "Other"}} {
 		id := row.file + "::OrderController"

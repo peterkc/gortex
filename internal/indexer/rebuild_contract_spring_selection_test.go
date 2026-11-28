@@ -106,7 +106,7 @@ class Service {}
 	_, err = head.PublishStage(ctx, files)
 	require.NoError(t, err)
 
-	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
+	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census, linkView: b.RebuildView()}
 	view := b.RebuildView()
 	keep, err := r.proveSpringBeanFactory(ctx, view, bean)
 	require.NoError(t, err)
@@ -158,7 +158,9 @@ class Service {}
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, withoutClass.Close()) })
 	withoutClass.AddNode(consumer)
-	keep, err = r.proveSpringBeanConsumer(ctx, withoutClass.RebuildView(), consumer.ID, call)
+	withoutClassReader := r
+	withoutClassReader.linkView = withoutClass.RebuildView()
+	keep, err = withoutClassReader.proveSpringBeanConsumer(ctx, withoutClassReader.linkView, consumer.ID, call)
 	require.NoError(t, err)
 	require.False(t, keep, "class is missing")
 

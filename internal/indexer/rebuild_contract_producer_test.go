@@ -117,7 +117,7 @@ func Register(m *http.ServeMux) {
 			require.NoError(t, err)
 			_, err = head.PublishStage(ctx, files)
 			require.NoError(t, err)
-			r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
+			r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census, linkView: b.RebuildView()}
 			earlyFacts, err := idx.readRebuildEarlyContractFacts(ctx, b.RebuildView(), job, store, census, nil, nil)
 			require.NoError(t, err)
 			idx.extractDIContracts(native)
@@ -295,7 +295,7 @@ func TestRebuildContractUnprovedShapeRefLabelsTypeFile(t *testing.T) {
 	wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
 	require.NoError(t, err)
 	require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
-	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: &rebuildExtractorCensus{
+	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, linkView: b.RebuildView(), census: &rebuildExtractorCensus{
 		byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file},
 	}}
 	require.NoError(t, b.AddParsedFile("", parsed))

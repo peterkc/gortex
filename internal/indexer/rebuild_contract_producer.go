@@ -207,7 +207,6 @@ func (r rebuildContractReceiptReader) selectRebuildShapeRefs(ctx context.Context
 	records *store_pebble.RebuildContractRecords, selection *store_pebble.RebuildContractSelection,
 	add func(store_pebble.RebuildContractBatch) error,
 ) error {
-	r.linkView = view
 	if err := records.WithOrderedRepresentatives(func(read func(func(store_pebble.RebuildContractRecord) error) error) error {
 		return read(func(item store_pebble.RebuildContractRecord) error {
 			c := item.Contract
