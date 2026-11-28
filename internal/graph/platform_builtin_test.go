@@ -111,3 +111,12 @@ func TestPlatformCatalogLegacyV1Pinned(t *testing.T) {
 		})
 	}
 }
+
+func TestLookupPlatformCallRejectsLegacyPythonCandidate(t *testing.T) {
+	const revision = PlatformCatalogRevision
+	_, ok := LookupPlatformCandidate(revision, "py", "append")
+	require.True(t, ok, "the name must exist in the legacy catalog")
+	entry, status := LookupPlatformCall(revision, "py", "append", BuiltinReceiverHint{})
+	require.Zero(t, entry)
+	require.Empty(t, status)
+}

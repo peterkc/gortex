@@ -622,6 +622,11 @@ func relationsStageFixture(t *testing.T, profile Profile) (*BuildStore, *Head, F
 
 func relationsStageFixtureRevision(t *testing.T, profile Profile, revision uint32) (*BuildStore, *Head, FileGraphBase, *graph.Node, *graph.Edge, ManifestFile, graph.FileMetaRow) {
 	t.Helper()
+	return relationsStageFixtureFile(t, profile, revision, "old.go", "go")
+}
+
+func relationsStageFixtureFile(t *testing.T, profile Profile, revision uint32, path, language string) (*BuildStore, *Head, FileGraphBase, *graph.Node, *graph.Edge, ManifestFile, graph.FileMetaRow) {
+	t.Helper()
 	ctx := t.Context()
 	dir := t.TempDir()
 	worker, err := OpenBuild(filepath.Join(dir, "working"), profile)
@@ -630,13 +635,13 @@ func relationsStageFixtureRevision(t *testing.T, profile Profile, revision uint3
 	head, err := OpenHead(filepath.Join(dir, "head"), testHeadIncarnation, profile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, head.Close()) })
-	file := ManifestFile{Path: "old.go", Language: "go", Size: 17, Kind: 'f', Content: HeadDigest{3}, Extractor: HeadDigest{4}}
+	file := ManifestFile{Path: path, Language: language, Size: 17, Kind: 'f', Content: HeadDigest{3}, Extractor: HeadDigest{4}}
 	w := Witness{Input: HeadDigest{1}, Recipe: HeadDigest{2}, Profile: profile, Stage: StageManifest, PlatformCatalogRevision: revision}
 	manifest, err := PrepareManifest(ctx, t.TempDir(), []ManifestFile{file}, w, testHeadIncarnation)
 	require.NoError(t, err)
 	_, err = head.PublishStage(ctx, manifest)
 	require.NoError(t, err)
-	declared := &graph.Node{ID: "old.go::OldName", Name: "OldName", QualName: "old.OldName", Kind: graph.KindImport, RepoPrefix: "old", FilePath: file.Path, Language: "go"}
+	declared := &graph.Node{ID: path + "::OldName", Name: "OldName", QualName: "old.OldName", Kind: graph.KindImport, RepoPrefix: "old", FilePath: file.Path, Language: language}
 	raw := &graph.Edge{From: declared.ID, To: "unresolved::Raw", Kind: graph.EdgeCalls, FilePath: file.Path, Line: 2}
 	receipt := graph.FileMetaRow{FilePath: file.Path, Size: 17, ContentHash: "content", NodeCount: 1, Errors: "[1:7]"}
 	require.NoError(t, worker.AddParsedFile(declared.RepoPrefix, ParseFacts{Nodes: []*graph.Node{declared}, Edges: []*graph.Edge{raw}, File: receipt}))

@@ -286,6 +286,7 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 			require.Equal(t, []store_pebble.Stage{store_pebble.StageManifest, store_pebble.StageFileGraph}, sent)
 			if tc.badCallStatus {
 				require.Len(t, applied, 1, "the private clone pass must finish before settlement")
+				require.ErrorContains(t, err, "settle platform calls:")
 				require.ErrorContains(t, err, "link_status outside a builtin Call")
 				return
 			}

@@ -919,7 +919,7 @@ func buildRebuildStages(
 	if err := private.SettleRebuildPlatformCalls(ctx, func(p string) string {
 		return counts.census.byPath[counts.census.originByGraphPath[p]]
 	}); err != nil {
-		return err
+		return fmt.Errorf("settle platform calls: %w", err)
 	}
 	if exactCheckout {
 		if err := private.EndRebuildContractOverlay(ctx); err != nil {

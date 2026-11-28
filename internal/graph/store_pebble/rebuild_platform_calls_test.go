@@ -145,10 +145,10 @@ func TestRebuildPlatformWebRelationsWithoutSentinels(t *testing.T) {
 		t.Run(tc.language, func(t *testing.T) {
 			ctx := t.Context()
 			const revision = graph.PlatformCatalogRevision
-			worker, head, base, owner, raw, file, _ := relationsStageFixtureRevision(t, FullProfile, revision)
+			worker, head, base, owner, raw, file, _ := relationsStageFixtureFile(t, FullProfile, revision, "old."+tc.short, tc.language)
 			worker.AddNode(&graph.Node{ID: file.Path, FilePath: file.Path, Name: file.Path, Kind: graph.KindFile, Language: tc.language, RepoPrefix: owner.RepoPrefix})
 			extractor := func(p string) string {
-				if p == file.Path {
+				if strings.HasSuffix(p, "."+tc.short) {
 					return tc.language
 				}
 				return ""
@@ -185,10 +185,15 @@ func TestRebuildPlatformWebRelationsWithoutSentinels(t *testing.T) {
 func TestRebuildPlatformWebCallRefusals(t *testing.T) {
 	ctx := t.Context()
 	const revision = graph.PlatformCatalogRevision
-	worker, _, _, owner, raw, file, _ := relationsStageFixtureRevision(t, FullProfile, revision)
+	worker, _, _, owner, raw, file, _ := relationsStageFixtureFile(t, FullProfile, revision, "old.js", "javascript")
 	worker.AddNode(&graph.Node{ID: file.Path, FilePath: file.Path, Name: file.Path, Kind: graph.KindFile, Language: "javascript", RepoPrefix: owner.RepoPrefix})
 	worker.AddNode(&graph.Node{ID: "other.js", FilePath: "other.js", Name: "other.js", Kind: graph.KindFile, Language: "javascript", RepoPrefix: "other"})
-	js := func(string) string { return "javascript" }
+	js := func(p string) string {
+		if strings.HasSuffix(p, ".js") {
+			return "javascript"
+		}
+		return ""
+	}
 	call := *raw
 	call.To = "old::builtin::js::array/string::slice"
 	call.Meta = map[string]any{graph.MetaLinkStatus: string(graph.LinkStatusProbablePlatform)}
