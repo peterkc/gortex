@@ -15,14 +15,15 @@ import (
 // The caller keeps only the facts it needs from each receipt. The manifest
 // inputs are already sorted by literal path by buildRebuildFileStages.
 type rebuildContractReceiptReader struct {
-	idx                   *Indexer
-	job                   rebuildFileStages
-	store                 rebuildParseStore
-	census                *rebuildExtractorCensus
-	proofCache            *rebuildContractReceiptCache
-	isolate               bool
-	linkView              store_pebble.RebuildView
-	markIsolationAffected func(file string, kind contracts.ContractType, language string) error
+	idx                    *Indexer
+	job                    rebuildFileStages
+	store                  rebuildParseStore
+	census                 *rebuildExtractorCensus
+	proofCache             *rebuildContractReceiptCache
+	isolate                bool
+	linkView               store_pebble.RebuildView
+	markIsolationAffected  func(file string, kind contracts.ContractType, language string) error
+	visitIsolationAffected func(func(store_pebble.RebuildContractBatch) error) error
 }
 
 type rebuildContractReceiptCache struct {

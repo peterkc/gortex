@@ -103,6 +103,9 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 				}
 				err := r.visitSpringConfig(ctx, view, records, add)
 				*r.proofCache = rebuildContractReceiptCache{}
+				if err == nil && r.visitIsolationAffected != nil {
+					err = r.visitIsolationAffected(add)
+				}
 				return err
 			}, func(batches iter.Seq2[store_pebble.RebuildContractBatch, error], coverage store_pebble.ContractCoverage) error {
 				active, attempted := true, false
