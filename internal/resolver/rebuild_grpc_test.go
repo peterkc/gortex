@@ -569,6 +569,7 @@ func TestRebuildGRPCEarlyContractFallback(t *testing.T) {
 			}
 			want := rebuildGRPCNativeCalls(t, native, tc.want)
 			b, receipts := openRebuildGRPCFixture(t, facts)
+			require.NoError(t, b.BeginRebuildContractOverlay(t.Context(), tc.ids))
 			selection := AllFrameworkSynthesizers().WithRebuildEarlyContractIDs(tc.ids)
 			selection, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 			require.NoError(t, err)
@@ -576,6 +577,7 @@ func TestRebuildGRPCEarlyContractFallback(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, uint64(tc.want), s.Resolved)
 			require.Equal(t, want, rebuildGRPCSavedCalls(t, b))
+			require.NoError(t, b.EndRebuildContractOverlay(t.Context()))
 			n, err := b.RebuildView().Node(t.Context(), contract)
 			require.NoError(t, err)
 			require.Nil(t, n)

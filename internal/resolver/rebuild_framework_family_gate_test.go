@@ -71,7 +71,7 @@ func TestRebuildFrameworkFamilyGateColdCensus(t *testing.T) {
 			)
 			selection := AllFrameworkSynthesizers()
 			if tc.replaced {
-				selection = selection.WithRebuildEarlyContractIDs(map[string]string{other.ID: other.FilePath})
+				require.NoError(t, b.BeginRebuildContractOverlay(t.Context(), map[string]string{other.ID: other.FilePath}))
 				require.NoError(t, native.AddBatchChecked([]*graph.Node{{
 					ID: other.ID, Name: other.Name, Kind: graph.KindContract, FilePath: other.FilePath, Language: "contract",
 				}}, nil))
@@ -81,6 +81,9 @@ func TestRebuildFrameworkFamilyGateColdCensus(t *testing.T) {
 			got, err := FreezeRebuildFrameworkFamilyGate(t.Context(), b.RebuildView(), selection)
 			require.NoError(t, err)
 			require.Equal(t, want, got)
+			if tc.replaced {
+				require.NoError(t, b.EndRebuildContractOverlay(t.Context()))
+			}
 		})
 	}
 }

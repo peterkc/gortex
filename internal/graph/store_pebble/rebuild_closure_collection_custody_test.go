@@ -60,7 +60,7 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 				}
 				before := rebuildFrameworkCustodyRows(t, b)
 				boundary := func(_, _ *graph.Node) bool { return true }
-				stats, err := b.RebuildClosureCollection(t.Context(), nil, receipts, 8, boundary, setStateProofOutput, closureTestApple)
+				stats, err := b.RebuildClosureCollection(t.Context(), receipts, 8, boundary, setStateProofOutput, closureTestApple)
 				var refusal *RebuildUnknownProvenanceError
 				require.ErrorIs(t, err, ErrRebuildClosureCollection)
 				require.ErrorAs(t, err, &refusal)
@@ -70,7 +70,7 @@ func TestRebuildClosureCollectionCountsAffectedOutputs(t *testing.T) {
 				}, refusal)
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
-				stats, err = b.RebuildClosureCollection(t.Context(), nil, exact, 8, boundary, setStateProofOutput, closureTestApple)
+				stats, err = b.RebuildClosureCollection(t.Context(), exact, 8, boundary, setStateProofOutput, closureTestApple)
 				require.NoError(t, err)
 				require.EqualValues(t, 2, stats.Edges)
 			})
@@ -112,7 +112,7 @@ func TestRebuildClosureCollectionIgnoresOversizedRolesWithoutNewCall(t *testing.
 			}
 			boundary := func(d, r *graph.Node) bool { return d.WorkspaceID == r.WorkspaceID }
 			before := rebuildFrameworkCustodyRows(t, b)
-			stats, err := b.RebuildClosureCollection(t.Context(), nil, noReceipts, 1, boundary, setStateProofOutput, closureTestApple)
+			stats, err := b.RebuildClosureCollection(t.Context(), noReceipts, 1, boundary, setStateProofOutput, closureTestApple)
 			require.NoError(t, err)
 			require.Zero(t, stats)
 			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
@@ -167,7 +167,7 @@ func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
 				}
 			}
 			before := rebuildFrameworkCustodyRows(t, b)
-			stats, err := b.RebuildClosureCollection(t.Context(), nil, receipts, cap, boundary, makeCall, isApple)
+			stats, err := b.RebuildClosureCollection(t.Context(), receipts, cap, boundary, makeCall, isApple)
 			require.ErrorIs(t, err, ErrRebuildClosureCollection)
 			require.ErrorContains(t, err, want)
 			if mode != "scratch occupied" {
@@ -205,7 +205,7 @@ func TestRebuildClosureCollectionInstalledCustody(t *testing.T) {
 	// A large callable without either closure role is not an input.
 	b.AddNode(&graph.Node{ID: "unrelated", Kind: graph.KindMethod, FilePath: file, Language: "go",
 		Meta: map[string]any{"padding": strings.Repeat("x", 16<<20)}})
-	stats, err := b.RebuildClosureCollection(t.Context(), nil, receipts, 8,
+	stats, err := b.RebuildClosureCollection(t.Context(), receipts, 8,
 		func(d, r *graph.Node) bool { return d.WorkspaceID == r.WorkspaceID }, makeCall, closureTestApple)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, stats.Edges)

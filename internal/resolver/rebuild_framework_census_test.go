@@ -212,7 +212,7 @@ func TestRebuildFrameworkCensusContractOverlay(t *testing.T) {
 	require.True(t, before.allows(SynthObserverChannel))
 
 	require.NoError(t, b.BeginRebuildContractOverlay(ctx, map[string]string{dispatcher.ID: "settings.rb"}))
-	// No selection mask: the captured graph itself must lack the dispatcher.
+	// The overlaid dispatcher no longer contributes an Observer role.
 	during, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selection)
 	require.NoError(t, err)
 	require.False(t, during.allows(SynthObserverChannel))

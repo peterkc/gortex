@@ -1,6 +1,7 @@
 package store_pebble
 
 import (
+	"crypto/sha256"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -113,4 +114,128 @@ func TestRebuildContractOverlayCannotSeal(t *testing.T) {
 		t.Fatal("active overlay reached contract batch iteration")
 	}, ContractCoverage{})
 	require.ErrorIs(t, err, ErrRebuildContractOverlay)
+}
+
+func TestRebuildContractOverlayRefusesInvalidState(t *testing.T) {
+	const id, file = "env::OVERLAY", "settings.rb"
+	ids := map[string]string{id: file}
+	for _, tc := range []struct {
+		name, detail string
+		setup        func(*testing.T, *BuildStore)
+		run          func(*testing.T, *BuildStore) error
+	}{
+		{
+			name: "nil ids", detail: "missing ids",
+			run: func(t *testing.T, b *BuildStore) error {
+				return b.BeginRebuildContractOverlay(t.Context(), nil)
+			},
+		},
+		{
+			name: "already active", detail: "active overlay",
+			setup: func(t *testing.T, b *BuildStore) {
+				require.NoError(t, b.BeginRebuildContractOverlay(t.Context(), ids))
+			},
+		},
+		{
+			name: "contracts started", detail: "started contracts stage",
+			setup: func(_ *testing.T, b *BuildStore) {
+				b.contractsStarted = true
+			},
+		},
+		{
+			name: "undo range occupied", detail: "undo range occupied",
+			setup: func(t *testing.T, b *BuildStore) {
+				require.NoError(t, b.pending.Set(rebuildContractUndoPrefix, nil, pebble.NoSync))
+			},
+		},
+		{
+			name: "empty id", detail: "invalid contract id",
+			run: func(t *testing.T, b *BuildStore) error {
+				return b.BeginRebuildContractOverlay(t.Context(), map[string]string{"": file})
+			},
+		},
+		{
+			name: "proxy id", detail: "invalid contract id",
+			run: func(t *testing.T, b *BuildStore) error {
+				return b.BeginRebuildContractOverlay(t.Context(), map[string]string{"remote:repo~proxy": file})
+			},
+		},
+		{
+			name: "displaced identity", detail: "displaced node identity",
+			setup: func(t *testing.T, b *BuildStore) {
+				wrong, err := encodeNode(&graph.Node{ID: "different", Kind: graph.KindVariable, FilePath: file})
+				require.NoError(t, err)
+				require.NoError(t, b.pending.Set(pendingNodeKey(id), wrong, pebble.NoSync))
+			},
+		},
+		{
+			name: "not active", detail: "no active overlay",
+			run: func(t *testing.T, b *BuildStore) error {
+				return b.EndRebuildContractOverlay(t.Context())
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := openContractOverlayFixture(t)
+			if tc.setup != nil {
+				tc.setup(t, b)
+			}
+			before := contractOverlayBytes(t, b)
+			var err error
+			if tc.run != nil {
+				err = tc.run(t, b)
+			} else {
+				err = b.BeginRebuildContractOverlay(t.Context(), ids)
+			}
+			require.ErrorIs(t, err, ErrRebuildContractOverlay)
+			require.ErrorContains(t, err, tc.detail)
+			require.Equal(t, before, contractOverlayBytes(t, b))
+		})
+	}
+}
+
+func TestRebuildContractOverlayRefusesInvalidUndo(t *testing.T) {
+	for _, tc := range []struct {
+		name, key string
+		value     []byte
+	}{
+		{name: "empty restore key", value: make([]byte, sha256.Size)},
+		{name: "short digest", key: "short", value: make([]byte, sha256.Size-1)},
+		{name: "invalid presence", key: "presence", value: make([]byte, sha256.Size+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := openContractOverlayFixture(t)
+			ctx := t.Context()
+			require.NoError(t, b.BeginRebuildContractOverlay(ctx, map[string]string{"env::OVERLAY": "settings.rb"}))
+			key := append(append([]byte(nil), rebuildContractUndoPrefix...), tc.key...)
+			require.NoError(t, b.pending.Set(key, tc.value, pebble.NoSync))
+			before := contractOverlayBytes(t, b)
+			err := b.EndRebuildContractOverlay(ctx)
+			require.ErrorIs(t, err, ErrRebuildContractOverlay)
+			require.ErrorContains(t, err, "invalid undo row")
+			require.Equal(t, before, contractOverlayBytes(t, b))
+		})
+	}
+}
+
+func TestRebuildContractOverlayCannotSealSearch(t *testing.T) {
+	b := openContractOverlayFixture(t)
+	ctx := t.Context()
+	require.NoError(t, b.BeginRebuildContractOverlay(ctx, map[string]string{"env::OVERLAY": "settings.rb"}))
+	w := Witness{
+		Stage:       StageDerived,
+		Profile:     b.profile,
+		Input:       HeadDigest{1},
+		Recipe:      HeadDigest{2},
+		Unsupported: deferredFamilies(false),
+	}
+	before := contractOverlayBytes(t, b)
+	tables, err := b.PrepareSearch(ctx, t.TempDir(), w, testHeadIncarnation, func(*graph.Node) (string, bool) {
+		t.Fatal("active overlay reached the search renderer")
+		return "", false
+	})
+	require.ErrorIs(t, err, ErrSearchSeal)
+	require.ErrorIs(t, err, ErrRebuildContractOverlay)
+	require.Equal(t, StageTables{}, tables)
+	require.Equal(t, before, contractOverlayBytes(t, b))
 }

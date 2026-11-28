@@ -177,9 +177,6 @@ func (p *rebuildGRPC) names(ctx context.Context, snap *pebble.Snapshot, name str
 		if err != nil {
 			return err
 		}
-		if _, replaced := p.contractIDs[id]; replaced {
-			return nil
-		}
 		n, err := p.node(snap, id)
 		if err != nil {
 			return err
@@ -249,20 +246,15 @@ func rebuildGRPCDir(path string) string {
 
 func (p *rebuildGRPC) registeredType(ctx context.Context, snap *pebble.Snapshot, impl, source string) (string, error) {
 	var repo, dir, nearby string
-	if file, isContract := p.contractIDs[source]; isContract {
-		// B2 contracts have the empty repo prefix.
-		dir = rebuildGRPCDir(file)
-	} else {
-		n, err := p.node(snap, source)
-		if err != nil {
-			return "", err
-		}
-		if n != nil {
-			repo, dir = n.RepoPrefix, rebuildGRPCDir(n.FilePath)
-		}
+	n, err := p.node(snap, source)
+	if err != nil {
+		return "", err
+	}
+	if n != nil {
+		repo, dir = n.RepoPrefix, rebuildGRPCDir(n.FilePath)
 	}
 	var all, local rebuildGRPCChoice
-	err := p.names(ctx, snap, impl, graph.KindType, func(n *graph.Node) error {
+	err = p.names(ctx, snap, impl, graph.KindType, func(n *graph.Node) error {
 		all.add(n.ID)
 		if dir != "" && rebuildGRPCDir(n.FilePath) == dir && (nearby == "" || n.ID < nearby) {
 			// SQLite NodesByKinds is ordered by ID, even with the native cache.
@@ -289,9 +281,6 @@ func (p *rebuildGRPC) handlers(ctx context.Context, snap *pebble.Snapshot, servi
 	var all, local rebuildGRPCChoice
 	members := func(id string) error {
 		return p.incoming(ctx, snap, id, graph.EdgeMemberOf, func(id string) error {
-			if _, replaced := p.contractIDs[id]; replaced {
-				return nil
-			}
 			n, err := p.node(snap, id)
 			if err != nil || n == nil || n.Kind != graph.KindMethod || n.Name != method {
 				return err
@@ -324,14 +313,6 @@ func (p *rebuildGRPC) handlers(ctx context.Context, snap *pebble.Snapshot, servi
 	} else {
 		err = p.names(ctx, snap, service+"Server", graph.KindInterface, func(n *graph.Node) error {
 			return p.incoming(ctx, snap, n.ID, graph.EdgeImplements, func(id string) error {
-				// Native checks existence and Name, not Kind. A contract's
-				// name is its exact ID (including on a replaced primary key).
-				if _, isContract := p.contractIDs[id]; isContract {
-					if strings.HasPrefix(id, "Unimplemented") {
-						return nil
-					}
-					return members(id)
-				}
 				n, err := p.node(snap, id)
 				if err != nil || n == nil || strings.HasPrefix(n.Name, "Unimplemented") {
 					return err
@@ -505,14 +486,12 @@ func (p *rebuildGRPC) reduce(ctx context.Context, rebind func(e *graph.Edge, ser
 		}
 		service, method := rebuildGRPCStub(e)
 		var repo string
-		if _, isContract := p.contractIDs[e.From]; !isContract {
-			caller, err := p.node(snap, e.From)
-			if err != nil {
-				return err
-			}
-			if caller != nil {
-				repo = caller.RepoPrefix
-			}
+		caller, err := p.node(snap, e.From)
+		if err != nil {
+			return err
+		}
+		if caller != nil {
+			repo = caller.RepoPrefix
 		}
 		handler, origin, err := p.election(ctx, snap, service, method, repo)
 		if err != nil {

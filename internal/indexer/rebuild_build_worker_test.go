@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/clones"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
@@ -312,6 +313,106 @@ func TestRebuildBuildPrivateCloneTail(t *testing.T) {
 			require.EqualValues(t, 38, fields["claim_scratch_bytes"])
 		})
 	}
+}
+
+func TestRebuildBuildContractOverlayFrameworkRead(t *testing.T) {
+	const file, lang, dispatcher = "roles.swift", "swift", "env::DISPATCH"
+	for _, tc := range []struct {
+		name, contractID string
+		closureRuns      int
+	}{
+		{name: "unrelated contract", contractID: "env::OTHER", closureRuns: 1},
+		{name: "contract replaces dispatcher", contractID: dispatcher},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			root, src := rebuildInputFixture(t)
+			lease := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(root, file), []byte("// cached closure roles\n"), 0o600))
+			input, _, err := readRebuildInput(ctx, src, file, lang, 1024)
+			require.NoError(t, err)
+			inputs := []rebuildInput{input}
+			inputRoot, err := rebuildInputRoot(inputs)
+			require.NoError(t, err)
+			raw, err := hex.DecodeString(inputRoot)
+			require.NoError(t, err)
+			sidecar, err := writeRebuildInputSidecar(ctx, lease, func(emit func(rebuildSidecarRow) error) error {
+				if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceRegularFact, Path: []byte(file)}); err != nil {
+					return err
+				}
+				if err := emit(rebuildSidecarRow{Kind: rebuildNamespaceCloseExactFact, Path: []byte(".")}); err != nil {
+					return err
+				}
+				return emit(rebuildGoManifestSidecarRow(rebuildGoManifest{Path: "go.mod"}))
+			})
+			require.NoError(t, err)
+			cfg := config.Default().Index
+			off := false
+			cfg.Coverage.Modules.Enabled, cfg.Coverage.Clones.Enabled = &off, &off
+			cfg.FrameworkSynthesizers = &[]string{resolver.SynthClosureCollection}
+			req := rebuildBuildRequest{
+				Root: root, ParseDir: t.TempDir(), ParseLimit: 1 << 20, Incarnation: rebuildTestIncarnation,
+				BaseRecipe: store_pebble.HeadDigest{1}, ProvidersOff: true, Recipes: map[string]rebuildDigest{lang: {1}},
+				Policy: freezeRebuildParsePolicy(root, cfg), Bounds: rebuildTransformBounds{CaptureBytes: 1024, FileBytes: 1024},
+				Witness: store_pebble.Witness{
+					Stage: store_pebble.StageManifest, Profile: store_pebble.FullProfile, Input: store_pebble.HeadDigest(raw),
+					FrozenInputs: store_pebble.HeadDigest(sidecar), PlatformCatalogRevision: graph.PlatformCatalogRevision,
+				},
+			}
+			req.Witness.Recipe = req.projectRecipe(cfg.Coverage.ClonesThreshold())
+			registrar := file + "::register"
+			nodes := []*graph.Node{
+				{ID: dispatcher, Name: "dispatch", Kind: graph.KindMethod, FilePath: file, Language: lang,
+					Meta: map[string]any{"cc_dispatch_field": "handlers"}},
+				{ID: registrar, Name: "register", Kind: graph.KindMethod, FilePath: file, Language: lang,
+					Meta: map[string]any{"cc_append_field": "handlers"}},
+			}
+			base := store_pebble.ParseFacts{
+				Nodes: nodes, EffectiveLanguage: lang, File: graph.FileMetaRow{FilePath: file, NodeCount: len(nodes)},
+			}
+			handler := contracts.HandlerFacts{Regex: map[string]any{}, AST: map[string]any{}}
+			facts := &contracts.FileFacts{
+				Records: []contracts.Contract{{
+					ID: tc.contractID, Type: contracts.ContractEnv, Role: contracts.RoleConsumer, FilePath: file, Meta: map[string]any{},
+				}},
+				Shapes:   make(map[string]*contracts.Shape),
+				Handlers: map[string]contracts.HandlerFacts{dispatcher: handler, registrar: handler},
+			}
+			payload, err := store_pebble.EncodeContractParseFacts(base, facts)
+			require.NoError(t, err)
+			idx := &Indexer{config: cfg}
+			idx.installRebuildParsePolicy(req.Policy)
+			store := rebuildParseStore{dir: req.ParseDir, limit: req.ParseLimit}
+			require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(req.Recipes[lang], input)), payload))
+			require.NoError(t, writeRebuildBuildRequest(ctx, lease, req, cfg, inputs))
+			core, logs := observer.New(zap.InfoLevel)
+			err = buildRebuildStages(ctx, lease, zap.New(core), store_pebble.OpenBuild, rebuildTestLinkOptions(t), func(store_pebble.StageTables) error {
+				return nil
+			})
+			require.ErrorIs(t, err, errRebuildBuildIncomplete)
+			applied := logs.FilterMessage("rebuild closure collection applied to private build").All()
+			require.Len(t, applied, tc.closureRuns)
+			if tc.closureRuns != 0 {
+				require.EqualValues(t, 1, applied[0].ContextMap()["edges"])
+			}
+		})
+	}
+}
+
+func TestRebuildContractOverlayWireRefusal(t *testing.T) {
+	refusal := buildRefusal(fmt.Errorf("changed scratch: %w", store_pebble.ErrRebuildContractOverlay))
+	require.Equal(t, uint8(101), refusal.Refusal)
+	var reply, acks bytes.Buffer
+	require.NoError(t, writeRebuildBuildReply(&reply, refusal))
+	err := receiveRebuildStages(t.Context(), t.TempDir(), rebuildBuildRequest{}, &reply, &acks,
+		func(context.Context, store_pebble.StageTables) error {
+			t.Fatal("overlay refusal cannot publish")
+			return nil
+		})
+	require.ErrorIs(t, err, ErrRebuildWorker)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildContractOverlay)
+	require.ErrorContains(t, err, "changed scratch")
+	require.Empty(t, acks.Bytes())
 }
 
 func TestRebuildBuildChildEntry(t *testing.T) {

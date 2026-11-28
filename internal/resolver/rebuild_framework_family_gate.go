@@ -15,7 +15,7 @@ func FreezeRebuildFrameworkFamilyGate(ctx context.Context, view store_pebble.Reb
 		return false, nil
 	}
 	markers := make(map[string]int)
-	err := selection.visitRebuildFrameworkCensusNodes(ctx, view, func(n *graph.Node) error {
+	err := view.VisitFrameworkGateNodes(ctx, func(n *graph.Node) error {
 		recordFrameworkNodeCandidates(markers, n, frameworkLanguageFamily(n.Language))
 		return nil
 	})

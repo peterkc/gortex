@@ -49,6 +49,9 @@ func (b *BuildStore) PrepareSearch(
 
 	// Never mix preliminary tokens with the final search corpus.
 	if err := b.withWrites(func() error {
+		if b.contractOverlay {
+			return ErrRebuildContractOverlay
+		}
 		prefix := []byte{familySymbol}
 		return b.pending.DeleteRange(prefix, prefixEnd(prefix), pebble.NoSync)
 	}); err != nil {

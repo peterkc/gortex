@@ -424,7 +424,7 @@ func TestRebuildClosureCollectionContractOverlayMasksRole(t *testing.T) {
 			}
 			require.Equal(t, tc.want, ResolveClosureCollectionCalls(native))
 			require.NoError(t, b.BeginRebuildContractOverlay(t.Context(), tc.ids))
-			// Do not supply the older selection mask. The store must hide the role.
+			// The overlaid dispatcher no longer contributes a closure role.
 			selection := rebuildClosureCollectionSelection(t)
 			selection, err := FreezeRebuildFrameworkSelection(t.Context(), b.RebuildView(), selection)
 			require.NoError(t, err)
