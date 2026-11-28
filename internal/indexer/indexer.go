@@ -8773,10 +8773,9 @@ var responseHelperCallRe = regexp.MustCompile(
 //	*PostgresTuckStore.Update ✓  (contains "tuck")
 //	*EmailSources.Update     ✗  (no "tucks")
 //
-// The hint may itself be the receiver variable (`h` in `h.Update(...)`)
-// when the call has only two segments; in that case any same-repo
-// method named `Update` passes — but the upstream `len(matches) != 1`
-// check still demands uniqueness, which is the real guard.
+// For a two-segment call such as `h.Update(...)`, the hint is the receiver
+// variable. Matching the hint narrows the candidates; the return-type vote
+// requires all usable signatures to agree, not a unique method.
 func receiverMatchesHint(n *graph.Node, hint string) bool {
 	if hint == "" {
 		return true
