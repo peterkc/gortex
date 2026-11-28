@@ -433,8 +433,7 @@ func (p *rebuildRails) plan(ctx context.Context) error {
 				return err
 			}
 		}
-		if !sourceSeen || differentQuery != 0 ||
-			len(claim) <= 1 || claim[0] != rebuildScratchExact || !bytes.Equal(claim[1:], old) {
+		if !sourceSeen || len(claim) <= 1 || claim[0] != rebuildScratchExact || !bytes.Equal(claim[1:], old) {
 			refused.add(graph.EdgeIdentityFor(e), bytes.Clone(old))
 			return nil
 		}
