@@ -233,8 +233,7 @@ func JoinRouterPrefixes(reg *Registry, scanFiles []string, srcFor func(filePath 
 		paths[path] = true
 	}
 	for _, c := range reg.All() {
-		fw, _ := c.Meta["framework"].(string)
-		if c.Type == ContractHTTP && routePrefixFrameworks[fw] {
+		if RouterContractSource(c) {
 			paths[c.FilePath] = true
 		}
 	}
@@ -594,6 +593,19 @@ func JoinRouterPrefixFacts(reg *Registry, facts map[string]RouterFacts) {
 	}
 }
 
+// routerSharedKey selects the key that can read project-wide router facts.
+// Local-only frameworks have no shared key.
+func routerSharedKey(framework string, f RouterFacts, line RouterLineFacts) (key string, shared bool) {
+	switch framework {
+	case "fastapi/flask", "flask", "express", "gin/echo/chi", "fiber", "vapor", "axum", "actix":
+		return line.Receivers[framework], true
+	case "nestjs":
+		return f.ControllerClass, true
+	default:
+		return "", false
+	}
+}
+
 // prefixForRoute computes the full joined prefix (mount chain + the
 // route's own router self-prefix, or NestJS controller prefix) to
 // prepend to a single route contract's declared path. Returns "" when
@@ -609,9 +621,10 @@ func prefixForRoute(
 ) string {
 	f := facts[c.FilePath]
 	line := f.lineFacts(c.Line)
+	sharedKey, _ := routerSharedKey(framework, f, line)
 	switch framework {
 	case "fastapi/flask", "flask", "express":
-		varName := line.Receivers[framework]
+		varName := sharedKey
 		if varName == "" {
 			return ""
 		}
@@ -627,7 +640,7 @@ func prefixForRoute(
 		// gin RouterGroup / Vapor route-group chain: the route's group var
 		// carries its own .Group / .grouped prefix, parents contribute theirs
 		// via the mount chain.
-		varName := line.Receivers[framework]
+		varName := sharedKey
 		mount, self := "", ""
 		if varName != "" {
 			mount = chainPrefix(varName, map[string]bool{})
@@ -651,7 +664,7 @@ func prefixForRoute(
 		return joinPaths(mount, self)
 	case "axum":
 		// axum: the route's router var is mounted under a .nest prefix.
-		varName := line.Receivers[framework]
+		varName := sharedKey
 		if varName == "" {
 			return ""
 		}
@@ -661,7 +674,7 @@ func prefixForRoute(
 		// web::scope(...) prefix (possibly in another file). Single-file
 		// inline scopes are already joined by the extractor, so this only
 		// adds the cross-file scope-config mount prefix.
-		fnName := line.Receivers[framework]
+		fnName := sharedKey
 		if fnName == "" {
 			return ""
 		}
@@ -673,7 +686,7 @@ func prefixForRoute(
 		// RouterModule mount path of the controller's module (if any).
 		ctrlPrefix := line.NestPrefix
 		if len(nestModulePrefix) > 0 {
-			if mp := nestModulePrefix[f.ControllerClass]; mp != "" {
+			if mp := nestModulePrefix[sharedKey]; mp != "" {
 				return joinPaths(mp, ctrlPrefix)
 			}
 		}
