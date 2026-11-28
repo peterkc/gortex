@@ -11,7 +11,7 @@ import (
 type contractReturnLookup func(name string) (typeID string, repeated bool, err error)
 
 // planContractResponse traces an unresolved response_expr. It accepts a bare
-// identifier or an older helper call with that identifier as the third argument.
+// identifier or a JSON response helper call with that identifier as its third argument.
 func planContractResponse(c contracts.Contract, lookup contractReturnLookup) (string, bool, error) {
 	if rt, _ := c.Meta["response_type"].(string); rt == "" {
 		if name := contractResponseVarName(c); name != "" {

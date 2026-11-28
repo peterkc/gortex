@@ -8968,7 +8968,7 @@ func contractBindingKeyFor(c contracts.Contract, name string) contractBindingKey
 }
 
 // contractResponseVarName extracts the response identifier from a bare
-// expression or the third argument of an older full JSON helper call.
+// expression or the third argument of a JSON response helper call.
 func contractResponseVarName(c contracts.Contract) string {
 	respExpr, _ := c.Meta["response_expr"].(string)
 	switch {
