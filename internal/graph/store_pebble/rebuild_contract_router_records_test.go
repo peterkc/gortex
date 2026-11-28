@@ -9,6 +9,16 @@ import (
 )
 
 func TestRebuildRouterRecordMovesMatchCheckedRegistry(t *testing.T) {
+	t.Run("one incoming source", func(t *testing.T) {
+		testRebuildRouterRecordMovesMatchCheckedRegistry(t, false)
+	})
+	t.Run("two incoming sources", func(t *testing.T) {
+		testRebuildRouterRecordMovesMatchCheckedRegistry(t, true)
+	})
+}
+
+func testRebuildRouterRecordMovesMatchCheckedRegistry(t *testing.T, rootMove bool) {
+	t.Helper()
 	b, err := OpenBuild(t.TempDir(), FullProfile)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
@@ -27,7 +37,9 @@ func TestRebuildRouterRecordMovesMatchCheckedRegistry(t *testing.T) {
 		{Contract: record(intermediate, "/api/x", "other.py", 1)},
 		{Contract: record(intermediate, "/api/x", "other.py", 2), BodyUnproved: true},
 		{Contract: record(intermediate, "/api/x", "other.py", 3)},
-		{Contract: record("http::GET::/", "/", "root.py", 1)},
+	}
+	if rootMove {
+		input = append(input, RebuildContractRecord{Contract: record("http::GET::/", "/", "root.py", 1)})
 	}
 	reg := contracts.NewRegistry()
 	for _, item := range input {
@@ -39,12 +51,17 @@ func TestRebuildRouterRecordMovesMatchCheckedRegistry(t *testing.T) {
 	files := map[string]contracts.RouterFacts{
 		"routes.py": {LineCount: 2, Lines: []contracts.RouterLineFacts{receivers(1, "a"), receivers(2, "h")}},
 		"other.py":  {LineCount: 3, Lines: []contracts.RouterLineFacts{receivers(1, "b"), {Line: 2}}},
-		"root.py":   {LineCount: 1, Lines: []contracts.RouterLineFacts{receivers(1, "r")}},
-		"mount.py":  {MountPrefix: map[string]string{"a": "/api", "h": "/local", "b": "/v2", "r": "/api/x"}},
+		"mount.py":  {MountPrefix: map[string]string{"a": "/api", "h": "/local", "b": "/v2"}},
+	}
+	wantFiles := []string{"other.py", "routes.py"}
+	if rootMove {
+		files["root.py"] = contracts.RouterFacts{LineCount: 1, Lines: []contracts.RouterLineFacts{receivers(1, "r")}}
+		files["mount.py"].MountPrefix["r"] = "/api/x"
+		wantFiles = []string{"other.py", "root.py", "routes.py"}
 	}
 	want, missing := contracts.JoinRebuildRouterPrefixFacts(reg, files, nil)
 	require.Empty(t, missing)
-	require.Equal(t, []string{"other.py", "root.py", "routes.py"}, want)
+	require.Equal(t, wantFiles, want)
 	// / < /api/x < /x: the clear drops the root move, restores the two
 	// stationary rows, then the later /x move appends after them.
 	require.Equal(t, []contracts.Contract{

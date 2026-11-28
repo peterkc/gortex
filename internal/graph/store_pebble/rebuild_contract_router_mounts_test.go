@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -107,6 +108,7 @@ func TestRebuildCheckedRouterMountCensus(t *testing.T) {
 	const repo, workspace = "r", "w"
 	const rawID, joinedID = "http::GET::/items", "http::GET::/api/items"
 	const routeFile, censusFile, foreignFile = "Routes.java", "scan.ts", "foreign.ts"
+	const otherWorkspaceFile = "other-workspace.ts"
 	for _, tc := range []struct {
 		name            string
 		enabled, census bool
@@ -120,6 +122,7 @@ func TestRebuildCheckedRouterMountCensus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newBuild(t, FullProfile)
 			b.AddNode(&graph.Node{ID: foreignFile, FilePath: foreignFile, Kind: graph.KindFile, RepoPrefix: "other", WorkspaceID: workspace})
+			b.AddNode(&graph.Node{ID: otherWorkspaceFile, FilePath: otherWorkspaceFile, Kind: graph.KindFile, RepoPrefix: repo, WorkspaceID: "other"})
 			if tc.census {
 				b.AddNode(&graph.Node{ID: censusFile, FilePath: censusFile, Kind: graph.KindFile, RepoPrefix: repo, WorkspaceID: workspace})
 			}
@@ -264,5 +267,17 @@ func TestRebuildRouterMountChainBounds(t *testing.T) {
 	}
 	got, err := m.route(c, f)
 	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, got)
+
+	// Both stored mounts fit on their own. Their joined prefix is over the
+	// bound, so this also checks the route callback passes its actual size.
+	m.records.ctx = ctx
+	part := []byte("/" + strings.Repeat("x", goldBufferBytes/2))
+	require.NoError(t, m.put('m', "app", part))
+	require.NoError(t, m.put('m', "parent", part))
+	require.NoError(t, m.put('a', "app", []byte("parent")))
+	got, err = m.route(c, f)
+	require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+	require.ErrorContains(t, err, "router mount chain")
 	require.Empty(t, got)
 }
