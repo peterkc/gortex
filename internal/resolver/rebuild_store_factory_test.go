@@ -359,6 +359,64 @@ func TestRebuildStoreDispatchReceiptOnlyCaller(t *testing.T) {
 	}
 }
 
+func TestRebuildStoreDispatchReceiptOnlyCallerAnchor(t *testing.T) {
+	const file, lang, reset = "caller.ts", "typescript", "unresolved::*.reset"
+	caller := rebuildEventNode(file, "submit", lang, "caller")
+	for _, stage := range []struct {
+		name   string
+		action func(file, workspace string) *graph.Node
+		call   *graph.Edge
+		native func(graph.Store) int
+		run    func(
+			context.Context, *store_pebble.BuildStore, iter.Seq2[store_pebble.ParseFacts, error], FrameworkSynthesizerSelection,
+		) (store_pebble.RebuildStoreFactoryStats, error)
+	}{
+		{
+			name:   SynthStoreFactory,
+			action: rebuildStoreFactoryAction,
+			call:   rebuildStoreFactoryMarker(file, caller.ID, "unresolved::reset", "reset"),
+			native: ResolveStoreFactoryCalls,
+			run:    RunRebuildStoreFactory,
+		},
+		{
+			name: SynthVuexDispatch,
+			action: func(file, workspace string) *graph.Node {
+				n := rebuildVuexTestNode(file, "action", "", "reset", "action", graph.KindFunction)
+				n.WorkspaceID = workspace
+				return n
+			},
+			call:   rebuildVuexTestCall(caller.ID, "unresolved::reset", file, "reset", "action", 9),
+			native: ResolveVuexDispatchCalls,
+			run:    RunRebuildVuexDispatch,
+		},
+	} {
+		t.Run(stage.name, func(t *testing.T) {
+			// Globally there are two actions and no file winner. The caller
+			// exists only in the receipts, and its workspace has neither action.
+			first := rebuildEventFacts("first.ts", lang, []*graph.Node{stage.action("first.ts", "first")})
+			second := rebuildEventFacts("second.ts", lang, []*graph.Node{stage.action("second.ts", "second")})
+			live := rebuildEventFacts(file, lang, nil, stage.call)
+			receipt := rebuildEventFacts(file, lang, []*graph.Node{caller}, stage.call)
+			b := openRebuildGRPCBuild(t, first, second, live)
+			native := openRebuildTemporalOracle(t, first, second, receipt)
+			selection, err := NewFrameworkSynthesizerSelection([]string{stage.name})
+			require.NoError(t, err)
+
+			require.Zero(t, stage.native(native))
+			want := rebuildEventSQLiteRows(native).edges
+			require.Len(t, want, 1)
+			moved := graph.EdgeIdentityFor(stage.call)
+			moved.To = reset
+			require.Equal(t, moved, graph.EdgeIdentityFor(want[0]))
+
+			stats, err := stage.run(t.Context(), b, rebuildGRPCReceipts(first, second, receipt), selection)
+			require.NoError(t, err)
+			require.Equal(t, store_pebble.RebuildStoreFactoryStats{Stubs: 1, Moves: 1}, stats)
+			require.Equal(t, want, rebuildEventSavedRows(t, b).edges)
+		})
+	}
+}
+
 func TestRebuildStoreFactoryRefusesUnprovedMove(t *testing.T) {
 	const callerFile, storeFile = "caller.ts", "store.ts"
 	caller := rebuildEventNode(callerFile, "call", "typescript", "workspace")
