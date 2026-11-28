@@ -122,6 +122,136 @@ func ownerTestPublish(t *testing.T, b *routeBuild, stages []StageTables) {
 	}
 }
 
+func TestRouteOwnerBeginRefusesStaleOrOccupiedBase(t *testing.T) {
+	ctx := t.Context()
+	o := ownerTestInit(t)
+	manifest := ownerTestManifest(t, routeTestSource)
+	fresh := ownerTestRow(t, o)
+	request := manifest.Witness
+	request.Profile = DefaultProfile
+	b, err := o.begin(ctx, routeTestOldLease, nil, request)
+	require.ErrorIs(t, err, ErrStaleBase, "profile mismatch")
+	require.Nil(t, b)
+	require.NoDirExists(t, o.locator(routeTestOldLease).Directory)
+	require.Equal(t, fresh, ownerTestRow(t, o))
+
+	// An existing directory is not a catalog reservation and is never reused.
+	occupied := o.locator(ownerThirdLease).Directory
+	require.NoError(t, os.Mkdir(occupied, 0o700))
+	marker := filepath.Join(occupied, "keep")
+	require.NoError(t, os.WriteFile(marker, []byte("keep"), 0o600))
+	b, err = o.begin(ctx, ownerThirdLease, nil, manifest.Witness)
+	require.ErrorIs(t, err, ErrStaleBase, "occupied lease directory")
+	require.Nil(t, b)
+	require.FileExists(t, marker)
+	require.Equal(t, fresh, ownerTestRow(t, o))
+
+	other, err := OpenHead(o.locator(ownerFourthLease).Directory, o.incarnation, o.profile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, other.Close()) })
+	_, err = other.PublishStage(ctx, ownerTestManifest(t, routeTestSource+"// unrelated\n"))
+	require.NoError(t, err)
+	b, err = o.begin(ctx, routeTestOldLease, other, manifest.Witness)
+	require.ErrorIs(t, err, ErrStaleBase, "prior without a serving locator")
+	require.Nil(t, b)
+	require.Equal(t, fresh, ownerTestRow(t, o))
+
+	serving, err := o.begin(ctx, routeTestOldLease, nil, manifest.Witness)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, serving.head.Close()) })
+	reserved := ownerTestRow(t, o)
+	b, err = o.begin(ctx, routeTestNewLease, nil, manifest.Witness)
+	require.ErrorIs(t, err, ErrStaleBase, "another candidate is already registered")
+	require.Nil(t, b)
+	require.NoDirExists(t, o.locator(routeTestNewLease).Directory)
+	require.Equal(t, reserved, ownerTestRow(t, o))
+
+	ownerTestPublish(t, serving, []StageTables{manifest})
+	selected := ownerTestRow(t, o)
+	b, err = o.begin(ctx, routeTestNewLease, nil, manifest.Witness)
+	require.ErrorIs(t, err, ErrStaleBase, "serving locator without its prior handle")
+	require.Nil(t, b)
+	require.Equal(t, selected, ownerTestRow(t, o))
+	b, err = o.begin(ctx, routeTestNewLease, other, manifest.Witness)
+	require.ErrorIs(t, err, ErrStaleBase, "prior handle from an unrelated directory")
+	require.Nil(t, b)
+	require.NoDirExists(t, o.locator(routeTestNewLease).Directory)
+	require.Equal(t, selected, ownerTestRow(t, o))
+}
+
+func TestRouteOwnerPublishStageFencesSupersededWorker(t *testing.T) {
+	ctx := t.Context()
+	o := ownerTestInit(t)
+	stages := ownerTestStages(t, routeTestSource, StageFileGraph, nil)
+	old, err := o.begin(ctx, routeTestOldLease, nil, stages[0].Witness)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, old.head.Close()) })
+	ownerTestPublish(t, old, stages[:1])
+	selected := ownerTestRow(t, o)
+	next, err := o.begin(ctx, routeTestNewLease, old.head, ownerTestManifest(t, routeTestSource+"// replacement\n").Witness)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if next.head != nil {
+			require.NoError(t, next.head.Close())
+		}
+	})
+	reserved := ownerTestRow(t, o)
+	require.ErrorIs(t, old.publishStage(ctx, stages[1]), ErrStaleBase)
+	require.Equal(t, selected.Publication, ownerTestWitness(t, old.head, stages[0].Witness))
+	require.Equal(t, reserved, ownerTestRow(t, o))
+
+	// The same FileGraph offer is admissible once there is no replacement.
+	failure := errors.New("replacement failed before first publication")
+	require.ErrorIs(t, next.failBuild(ctx, failure), failure)
+	require.Equal(t, selected, ownerTestRow(t, o))
+	ownerTestPublish(t, old, stages[1:])
+}
+
+func TestRouteOwnerPublishStageRequiresContractCoverageInOrder(t *testing.T) {
+	ctx := t.Context()
+	o := ownerTestInit(t)
+	stages := ownerTestStages(t, routeTestSource, StageSearch, nil)
+	b, err := o.begin(ctx, routeTestOldLease, nil, stages[0].Witness)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.head.Close()) })
+	for i, tables := range stages[:3] {
+		before := ownerTestRow(t, o)
+		early := tables
+		early.Witness.Contracts = &ContractCoverage{}
+		require.ErrorContains(t, b.publishStage(ctx, early), "publication contract coverage stage", tables.Witness.Stage)
+		require.Equal(t, before, ownerTestRow(t, o))
+		if i == 0 {
+			require.ErrorIs(t, stageRead(t, b.head).RequireStage(StageManifest), ErrNotPublished)
+		} else {
+			require.Equal(t, before.Publication, ownerTestWitness(t, b.head, stages[i-1].Witness))
+		}
+		ownerTestPublish(t, b, []StageTables{tables})
+	}
+	before := ownerTestRow(t, o)
+	contracts := stages[3]
+	contracts.Witness.Contracts = nil
+	require.ErrorIs(t, b.publishStage(ctx, contracts), ErrStageOrder, "contracts without coverage")
+	legacy, err := PrepareDeferredDerived(t.TempDir(), stages[2])
+	require.NoError(t, err)
+	require.ErrorIs(t, b.publishStage(ctx, legacy), ErrStageOrder, "derived without coverage")
+	require.Equal(t, before.Publication, ownerTestWitness(t, b.head, stages[2].Witness))
+	require.Equal(t, before, ownerTestRow(t, o))
+
+	// The low-level Head supports legacy stages. Advance it directly so only
+	// missing coverage, not the Head's base or stage checks, can reject Search.
+	base, err := b.head.PublishStage(ctx, legacy)
+	require.NoError(t, err)
+	search := stages[5]
+	search.Base = base
+	search.Witness.Contracts = nil
+	search.Witness.Unsupported = legacy.Witness.Unsupported
+	require.ErrorIs(t, b.publishStage(ctx, search), ErrStageOrder, "search without coverage")
+	ownerTestWitness(t, b.head, legacy.Witness)
+	require.Equal(t, before, ownerTestRow(t, o))
+	_, err = b.head.PublishStage(ctx, search)
+	require.NoError(t, err, "the legacy Search offer is otherwise admissible")
+}
+
 func TestRouteOwnerReplacementAndNoChange(t *testing.T) {
 	ctx := t.Context()
 	o := ownerTestInit(t)
@@ -136,6 +266,10 @@ func TestRouteOwnerReplacementAndNoChange(t *testing.T) {
 	wrong := oldStages[0]
 	wrong.Witness.Input[0] ^= 1
 	require.ErrorIs(t, old.publishStage(ctx, wrong), ErrStaleBase)
+	wrong = oldStages[0]
+	wrong.Witness.FrozenInputs[0] ^= 1
+	require.Equal(t, old.requested.Version(), wrong.Witness.Version())
+	require.ErrorIs(t, old.publishStage(ctx, wrong), ErrStaleBase, "frozen inputs must match even at the same version")
 	require.ErrorIs(t, stageRead(t, old.head).RequireStage(StageManifest), ErrNotPublished)
 	require.Equal(t, reserved, ownerTestRow(t, o))
 	ownerTestPublish(t, old, oldStages[:1])
@@ -579,6 +713,21 @@ func TestRouteOwnerEditIngestRecovery(t *testing.T) {
 				require.ErrorIs(t, o.publishDelta(ctx, b.head, bad), ErrStaleBase)
 				require.Equal(t, saved, ownerTestRow(t, o))
 				if phase == "ordinary" {
+					candidate, err := o.begin(ctx, routeTestNewLease, b.head, newWitness)
+					require.NoError(t, err)
+					t.Cleanup(func() {
+						if candidate.head != nil {
+							require.NoError(t, candidate.head.Close())
+						}
+					})
+					reserved := ownerTestRow(t, o)
+					require.ErrorIs(t, o.publishDelta(ctx, b.head, delta), ErrStaleBase, "registered candidate fences a valid edit delta")
+					require.Equal(t, reserved, ownerTestRow(t, o))
+					require.Equal(t, saved.Publication.WitnessDigest, ownerTestWitness(t, b.head, oldWitness).WitnessDigest)
+					failed := errors.New("candidate failed before publication")
+					require.ErrorIs(t, candidate.failBuild(ctx, failed), failed)
+					require.Equal(t, saved, ownerTestRow(t, o))
+
 					pinned := b.head.OpenSnapshot()
 					defer func() { require.NoError(t, pinned.Close()) }()
 					require.NoError(t, o.publishDelta(ctx, b.head, delta))
