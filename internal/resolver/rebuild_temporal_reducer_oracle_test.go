@@ -50,6 +50,17 @@ func TestRebuildTemporalRegistrationNodeInputCaps(t *testing.T) {
 	}
 }
 
+func TestRebuildTemporalSingleRegistrationCallerCap(t *testing.T) {
+	const file = "wf/register.go"
+	caller := &graph.Node{ID: file + "::setup", Name: "setup", Kind: graph.KindFunction, FilePath: file, Language: "go",
+		Meta: map[string]any{"padding": strings.Repeat("x", 16<<20)}}
+	target := &graph.Node{ID: file + "::Charge", Name: "Charge", Kind: graph.KindFunction, FilePath: file, Language: "go"}
+	register := &graph.Edge{From: caller.ID, To: "unresolved::RegisterActivity", Kind: graph.EdgeCalls, FilePath: file, Line: 10,
+		Meta: map[string]any{"via": "temporal.register", "temporal_kind": "activity", "temporal_name": target.Name}}
+	facts := rebuildEventFacts(file, "go", []*graph.Node{caller, target}, register)
+	checkRebuildTemporalNodeCap(t, true, facts)
+}
+
 func TestRebuildTemporalJavaNodeInputCaps(t *testing.T) {
 	const file, implFile = "java/OrderAPI.java", "java/OrderImpl.java"
 	for _, role := range []string{"interface", "implementor", "unrelated"} {
@@ -87,46 +98,42 @@ func TestRebuildTemporalJavaNodeInputCaps(t *testing.T) {
 
 func TestRebuildTemporalWrapperNodeInputCaps(t *testing.T) {
 	const file = "wf/wrapper.go"
-	id := func(hop int) string { return fmt.Sprintf("%s::Wrap%02d", file, hop) }
-	for _, role := range []string{"wrapper", "wrapper parameter", "forwarded parameter", "unrelated"} {
+	for _, role := range []string{"wrapper", "wrapper parameter", "forwarded parameter", "duplicate", "unrelated"} {
 		t.Run(role, func(t *testing.T) {
-			// A forwarded parameter at hop 16 is consumed in the last
-			// allowed sweep, so deleting that check cannot be masked by
-			// the next round's wrapper-parameter check.
-			seed := rebuildTemporalOracleStub(file, id(0), "activityName")
-			seed.Meta["temporal_name_param"] = "activityName"
-			other := &graph.Node{ID: file + "::Other", Name: "Other", Kind: graph.KindFunction, FilePath: file, Language: "go"}
-			nodes := []*graph.Node{other}
-			edges := []*graph.Edge{seed}
-			hops := 1
-			if role == "forwarded parameter" {
-				hops = 16
-			}
-			large := other
-			for hop := 0; hop <= hops; hop++ {
-				wrapper := &graph.Node{ID: id(hop), Name: fmt.Sprintf("Wrap%02d", hop), Kind: graph.KindFunction, Language: "go", FilePath: file}
-				param := rebuildTemporalOracleWrapperParam(file, wrapper.ID, 0)
-				nodes = append(nodes, wrapper, param)
-				if hop == 0 && role == "wrapper" {
-					large = wrapper
-				}
-				if (hop == 0 && role == "wrapper parameter") || (hop == hops && role == "forwarded parameter") {
-					large = param
-				}
-				if hop > 0 {
-					edges = append(edges, &graph.Edge{From: wrapper.ID, To: id(hop - 1), Kind: graph.EdgeCalls, FilePath: file, Line: 20 + hop,
-						Meta: map[string]any{"arg_names": []string{"activityName"}}})
-				}
-			}
+			wrapper := &graph.Node{ID: file + "::Wrap", Name: "Wrap", Kind: graph.KindFunction, Language: "go", FilePath: file}
+			caller := &graph.Node{ID: file + "::Caller", Name: "Caller", Kind: graph.KindFunction, Language: "go", FilePath: file}
+			other := &graph.Node{ID: file + "::Other", Name: "Other", Kind: graph.KindFunction, Language: "go", FilePath: file}
+			param := rebuildTemporalOracleWrapperParam(file, wrapper.ID, 0)
+			forward := rebuildTemporalOracleWrapperParam(file, caller.ID, 0)
+			large := map[string]*graph.Node{
+				"wrapper":             wrapper,
+				"wrapper parameter":   param,
+				"forwarded parameter": forward,
+				"duplicate":           forward,
+				"unrelated":           other,
+			}[role]
 			if large.Meta == nil {
 				large.Meta = map[string]any{}
 			}
 			large.Meta["padding"] = strings.Repeat("x", 16<<20)
-			facts := rebuildEventFacts(file, "go", nodes, edges...)
-			native, stats := checkRebuildTemporalNodeCap(t, role != "unrelated", facts)
-			if role == "unrelated" {
+			seed := rebuildTemporalOracleStub(file, wrapper.ID, "activityName")
+			seed.Meta["temporal_name_param"] = "activityName"
+			call := &graph.Edge{From: caller.ID, To: wrapper.ID, Kind: graph.EdgeCalls, FilePath: file, Line: 21,
+				Meta: map[string]any{"arg_names": []string{"activityName"}}}
+			// No one calls Caller, so its parameter is never a seed for a new stub.
+			edges := []*graph.Edge{seed, call}
+			if role == "duplicate" {
+				edges = append(edges, rebuildTemporalOracleStub(file, caller.ID, "activityName"))
+			}
+			facts := rebuildEventFacts(file, "go", []*graph.Node{wrapper, caller, other, param, forward}, edges...)
+			native, stats := checkRebuildTemporalNodeCap(t, role != "duplicate" && role != "unrelated", facts)
+			switch role {
+			case "duplicate":
+				require.Zero(t, stats.Wrappers)
+				require.False(t, native.EdgeExists(caller.ID, seed.To, graph.EdgeCalls, file, call.Line))
+			case "unrelated":
 				require.EqualValues(t, 1, stats.Wrappers)
-				require.True(t, native.EdgeExists(id(1), seed.To, graph.EdgeCalls, file, 21))
+				require.True(t, native.EdgeExists(caller.ID, seed.To, graph.EdgeCalls, file, call.Line))
 			}
 		})
 	}

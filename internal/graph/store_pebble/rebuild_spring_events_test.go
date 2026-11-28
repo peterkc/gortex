@@ -14,7 +14,7 @@ func TestRebuildSpringEventsRejectsSharedArcReceipt(t *testing.T) {
 	listener := &graph.Node{ID: "listen", Kind: graph.KindMethod, Name: "listen", FilePath: file, Language: "java"}
 	original := &graph.Edge{From: "Child", To: "unresolved::Base", Kind: graph.EdgeExtends, FilePath: file, Line: 1}
 	call := &graph.Edge{From: "publish", To: "unresolved::old", Kind: graph.EdgeCalls, FilePath: file, Line: 2}
-	for _, shared := range []bool{false, true} {
+	for _, mode := range []string{"unique receipt", "shared receipt", "Swift/ObjC producer"} {
 		b, receipts := seedSyntheticCustody(t, ParseFacts{
 			EffectiveLanguage: "java",
 			File:              graph.FileMetaRow{FilePath: file},
@@ -23,12 +23,18 @@ func TestRebuildSpringEventsRejectsSharedArcReceipt(t *testing.T) {
 		b.AddEdge(call)
 		primary, other := *original, *original
 		primary.To, other.To = "Base", "Other"
+		if mode == "Swift/ObjC producer" {
+			primary.Kind, primary.FilePath = graph.EdgeImplements, "Child.swift"
+		}
 		require.NoError(t, b.withWrites(func() error {
+			if mode == "Swift/ObjC producer" {
+				return b.addEdgeWithCustody(&primary, rebuildEdgeCustody{proof: rebuildProofSwiftObjC})
+			}
 			custody := rebuildEdgeCustody{raw: pendingEdgeKey(original)}
 			if err := b.addEdgeWithCustody(&primary, custody); err != nil {
 				return err
 			}
-			if shared {
+			if mode == "shared receipt" {
 				return b.addEdgeWithCustody(&other, custody)
 			}
 			return nil
@@ -36,7 +42,10 @@ func TestRebuildSpringEventsRejectsSharedArcReceipt(t *testing.T) {
 		before := rebuildFrameworkCustodyRows(t, b)
 		stats, err := b.RebuildSpringEvents(t.Context(), func(yield func(ParseFacts, error) bool) {
 			for facts, err := range receipts {
-				facts.Edges = []*graph.Edge{original, call}
+				facts.Edges = []*graph.Edge{call}
+				if mode != "Swift/ObjC producer" {
+					facts.Edges = append(facts.Edges, original)
+				}
 				if !yield(facts, err) {
 					return
 				}
@@ -54,7 +63,7 @@ func TestRebuildSpringEventsRejectsSharedArcReceipt(t *testing.T) {
 			},
 			Fanout: func(*graph.Edge, string, string) *graph.Edge { return nil },
 		})
-		if shared {
+		if mode == "shared receipt" {
 			var refused *RebuildUnknownProvenanceError
 			require.ErrorAs(t, err, &refused)
 			want := graph.EdgeIdentityFor(call)
@@ -66,6 +75,11 @@ func TestRebuildSpringEventsRejectsSharedArcReceipt(t *testing.T) {
 		}
 		require.NoError(t, err)
 		require.Equal(t, RebuildSpringEventStats{Stubs: 1, Resolved: 1, Moves: 1}, stats)
+		want := *call
+		want.To = listener.ID
+		live, err := b.pendingEdge(pendingEdgeKey(&want))
+		require.NoError(t, err)
+		require.Equal(t, &want, live)
 	}
 }
 

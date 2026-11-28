@@ -145,9 +145,6 @@ func (p *rebuildTemporal) stageWrapperCall(call *graph.Edge, id, kind, wrapperNa
 	fwd := ""
 	if pn != nil && pn.Kind == graph.KindParam {
 		if _, ok := metaIntValue(pn.Meta["position"]); ok {
-			if err := p.s.CheckNodeInput(p.ctx, pn.ID); err != nil {
-				return err
-			}
 			fwd = name
 		}
 	}
@@ -283,6 +280,12 @@ func (p *rebuildTemporal) queueWrapper(trigger, stub *graph.Edge, wrapperID stri
 	}); err != nil || duplicate {
 		return false, err
 	}
+	fwd, _ := stub.Meta["temporal_name_param"].(string)
+	if fwd != "" {
+		if err := p.s.CheckNodeInput(p.ctx, trigger.From+"#param:"+fwd); err != nil {
+			return false, err
+		}
+	}
 	// The seed's parameter and declaration matter only for a new stub.
 	param, _, err := p.s.Get(p.ctx, 'W', wrapperID, "param")
 	if err != nil {
@@ -317,7 +320,6 @@ func (p *rebuildTemporal) queueWrapper(trigger, stub *graph.Edge, wrapperID stri
 		return false, err
 	}
 	wrapperName, _ := stub.Meta["temporal_via_wrapper"].(string)
-	fwd, _ := stub.Meta["temporal_name_param"].(string)
 	err = p.s.Put(p.ctx, 'B', "", slices.Concat([]string{ordinal}, key, []string{kind, name, wrapperName, fwd})...)
 	return err == nil, err
 }

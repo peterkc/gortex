@@ -121,7 +121,7 @@ func TestRebuildClosureCollectionIgnoresOversizedRolesWithoutNewCall(t *testing.
 }
 
 func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
-	for _, mode := range []string{"fanout", "nil receipts", "nil boundary", "nil builder", "nil Apple predicate", "scratch occupied", "input row", "proposal row"} {
+	for _, mode := range []string{"fanout", "nil receipts", "nil boundary", "nil builder", "nil Apple predicate", "scratch occupied", "dispatch row", "registrar row", "proposal row"} {
 		t.Run(mode, func(t *testing.T) {
 			dispatch, register := closureProofPair("one", "listeners")
 			facts := setStateProofFacts([]*graph.Node{dispatch, register})
@@ -148,11 +148,14 @@ func TestRebuildClosureCollectionInvalidInputsAndRows(t *testing.T) {
 			case "scratch occupied":
 				want = "closure collection scratch range occupied"
 				require.NoError(t, b.pending.Set(rebuildClosureKey('z'), []byte("sentinel"), pebble.NoSync))
-			case "input row":
+			case "dispatch row", "registrar row":
 				want = "closure collection input row"
-				large := *dispatch
-				large.Meta = map[string]any{"cc_dispatch_field": "listeners", "padding": strings.Repeat("x", 16<<20)}
-				raw, err := encodeNode(&large)
+				large := dispatch
+				if mode == "registrar row" {
+					large = register
+				}
+				large.Meta["padding"] = strings.Repeat("x", 16<<20)
+				raw, err := encodeNode(large)
 				require.NoError(t, err)
 				require.NoError(t, b.pending.Set(pendingNodeKey(large.ID), raw, pebble.NoSync))
 			case "proposal row":
