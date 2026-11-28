@@ -462,10 +462,13 @@ func buildRebuildStages(
 		}
 		return errRebuildBuildIncomplete
 	}
+	var isolationAffected uint64
 	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: counts.census, linkView: private.RebuildView(),
 		markIsolationAffected: markIsolationAffected,
 		visitIsolationAffected: func(yield func(store_pebble.RebuildContractBatch) error) error {
-			return private.VisitRebuildContractIsolationAffected(ctx, yield)
+			count, err := private.VisitRebuildContractIsolationAffected(ctx, yield)
+			isolationAffected = count
+			return err
 		},
 	}
 	deferred, err := reader.deferredContractLanguages()
@@ -515,7 +518,8 @@ func buildRebuildStages(
 	}
 	logger.Info("rebuild contract source capture",
 		zap.Int("records", stats.Records), zap.Int("peak_batch_bytes", stats.PeakBatchBytes),
-		zap.Int("spill_runs", stats.SpillRuns), zap.Int64("spill_bytes", stats.SpillBytes))
+		zap.Int("spill_runs", stats.SpillRuns), zap.Int64("spill_bytes", stats.SpillBytes),
+		zap.Uint64("isolation_affected_omissions", isolationAffected))
 	if err := send(contractTables); err != nil {
 		return err
 	}

@@ -18,6 +18,8 @@ func Value() int { return http.StatusCreated }
 func Bare() int { return UNKNOWN }
 func Member() int { return unknown.Field }
 func Local() int { return local.Constant }
+func BlankArg(x int) { Sink(x._) }
+func BlankValue(x int) int { return x._ }
 `))
 	require.NoError(t, err)
 	t.Cleanup(parsed.ReleaseTree)
@@ -34,6 +36,10 @@ func Local() int { return local.Constant }
 		{"bare value", "unresolved::UNKNOWN", graph.EdgeValueFlow, 5, "", true},
 		{"relative import value", "unresolved::extern::./util::Constant", graph.EdgeValueFlow, 7, "", true},
 		{"selector value", "unresolved::*.Field", graph.EdgeValueFlow, 6, "", true},
+		{"blank selector argument", "unresolved::*._", graph.EdgeArgOf, 8, "", true},
+		{"blank selector value", "unresolved::*._", graph.EdgeValueFlow, 9, "", true},
+		{"bare blank argument", "unresolved::*._", graph.EdgeArgOf, 8, "bare blank", false},
+		{"bare blank value", "unresolved::*._", graph.EdgeValueFlow, 9, "bare blank", false},
 		{"wrong origin", source, graph.EdgeArgOf, 3, "origin", false},
 		{"wrong path", source, graph.EdgeArgOf, 3, "path", false},
 		{"foreign extractor", source, graph.EdgeArgOf, 3, "extractor", false},
@@ -66,6 +72,9 @@ func Local() int { return local.Constant }
 				edge.FilePath = "other.go"
 			case "extractor":
 				facts.EffectiveLanguage = "typescript"
+			case "bare blank":
+				// Change only the source; the remaining edge fields come from Go extraction.
+				edge.From = "unresolved::_"
 			}
 			// Give the source receipt its own manifest and FileGraph, not a
 			// file-meta mutation after the retained predecessor.

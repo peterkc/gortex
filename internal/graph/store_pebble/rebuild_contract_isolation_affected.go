@@ -40,14 +40,21 @@ func (b *BuildStore) MarkRebuildContractIsolationAffected(ctx context.Context, r
 }
 
 // VisitRebuildContractIsolationAffected feeds the detached contract output
-// before its freeze. Restore clears these scratch rows with the held graph.
-func (b *BuildStore) VisitRebuildContractIsolationAffected(ctx context.Context, yield func(RebuildContractBatch) error) error {
+// before its freeze. It counts unique rows accepted by yield, even on error.
+// Restore clears these scratch rows with the held graph.
+func (b *BuildStore) VisitRebuildContractIsolationAffected(ctx context.Context, yield func(RebuildContractBatch) error) (uint64, error) {
 	prefix := rebuildHoldoutKey('o', nil)
-	return b.RebuildView().visit(ctx, prefix, func(_ *pebble.Snapshot, r row) error {
+	var count uint64
+	err := b.RebuildView().visit(ctx, prefix, func(_ *pebble.Snapshot, r row) error {
 		o, err := decodeContractOmission(r.key[len(prefix):], r.value)
 		if err != nil {
 			return err
 		}
-		return yield(RebuildContractBatch{Omitted: []RebuildContractOmission{o}})
+		if err := yield(RebuildContractBatch{Omitted: []RebuildContractOmission{o}}); err != nil {
+			return err
+		}
+		count++
+		return nil
 	})
+	return count, err
 }

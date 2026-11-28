@@ -136,7 +136,8 @@ def ReadHeld(): pass
 			return b.MarkRebuildContractIsolationAffected(ctx, "", file, kind, language)
 		},
 		visitIsolationAffected: func(yield func(store_pebble.RebuildContractBatch) error) error {
-			return b.VisitRebuildContractIsolationAffected(ctx, yield)
+			_, err := b.VisitRebuildContractIsolationAffected(ctx, yield)
+			return err
 		},
 	}
 	f, err := idx.readRebuildEarlyContractFacts(ctx, view, job, store, census, nil, nil)
