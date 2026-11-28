@@ -35,7 +35,7 @@ func TestSnapshotContractShapesAndCoverage(t *testing.T) {
 	current := stageRead(t, head)
 
 	ids := []string{typeNode.ID, otherType.ID}
-	var capability contracts.SnapshotReader = pinned
+	capability := pinned
 	_, err = capability.ContractCoverageContext(ctx, contracts.ReadScope{}, false)
 	require.ErrorAs(t, err, new(*ErrStagePending))
 	shapes, err := capability.ContractShapesContext(ctx, ids)
@@ -133,4 +133,28 @@ func TestSnapshotContractsLegacyDerivedIsPending(t *testing.T) {
 	var pending *ErrStagePending
 	require.ErrorAs(t, err, &pending)
 	require.Equal(t, &ErrStagePending{Need: StageContracts, Published: StageDerived}, pending)
+}
+
+func TestSnapshotContractBatchLimits(t *testing.T) {
+	ctx := t.Context()
+	worker, head, files, _, _, _, _ := relationsStageFixture(t, FullProfile)
+	relations, err := worker.PrepareRelations(ctx, t.TempDir(), files, nil)
+	require.NoError(t, err)
+	base, err := worker.RetainRelations(ctx, files, relations)
+	require.NoError(t, err)
+	_, err = head.PublishStage(ctx, relations)
+	require.NoError(t, err)
+	stage, err := worker.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), ContractCoverage{})
+	require.NoError(t, err)
+	_, err = head.PublishStage(ctx, stage)
+	require.NoError(t, err)
+	s := stageRead(t, head)
+	ids := make([]string, graph.ContractProjectionRowLimit+1)
+	shapes, err := s.ContractShapesContext(ctx, ids)
+	require.ErrorIs(t, err, graph.ErrContractProjectionLimit)
+	require.Nil(t, shapes)
+	nodes, err := s.FullNodesByIDsContext(ctx, ids)
+	require.ErrorIs(t, err, graph.ErrContractProjectionLimit)
+	require.Nil(t, nodes)
+	require.NoError(t, s.ReadError())
 }

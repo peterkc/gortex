@@ -218,3 +218,138 @@ func TestSnapshotContractProjectionBuiltEmpty(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, got)
 }
+
+func TestSnapshotContractProjectionEmptyPathAndExplicitOwnerRepo(t *testing.T) {
+	ctx := t.Context()
+	worker, head, files, owner, _, _, _ := relationsStageFixture(t, FullProfile)
+	foreign := &graph.Node{ID: "env::FOREIGN", RepoPrefix: "other", Kind: graph.KindContract, Language: "contract"}
+	edge := &graph.Edge{From: owner.ID, To: foreign.ID, Kind: graph.EdgeProvides, Meta: map[string]any{"contract_owner_repo_prefix": "other"}}
+	worker.AddBatch([]*graph.Node{foreign}, []*graph.Edge{edge})
+	relations, err := worker.PrepareRelations(ctx, t.TempDir(), files, nil)
+	require.NoError(t, err)
+	base, err := worker.RetainRelations(ctx, files, relations)
+	require.NoError(t, err)
+	_, err = head.PublishStage(ctx, relations)
+	require.NoError(t, err)
+	stage, err := worker.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), ContractCoverage{})
+	require.NoError(t, err)
+	_, err = head.PublishStage(ctx, stage)
+	require.NoError(t, err)
+	s := stageRead(t, head)
+	native, err := store_sqlite.Open(filepath.Join(t.TempDir(), "native.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, native.Close()) })
+	require.NoError(t, native.AddBatchChecked([]*graph.Node{owner, foreign}, []*graph.Edge{edge}))
+	want, err := native.LayerContractFileProjectionContext(ctx, "old", []string{""})
+	require.NoError(t, err)
+	got, err := s.LayerContractFileProjectionContext(ctx, "old", []string{""})
+	require.NoError(t, err)
+	assertSnapshotContractProjection(t, want, got)
+	require.Empty(t, got.FileNodes)
+	require.Empty(t, got.OwnerRows)
+	want, err = native.LayerContractRepoProjectionContext(ctx, "old")
+	require.NoError(t, err)
+	got, err = s.LayerContractRepoProjectionContext(ctx, "old")
+	require.NoError(t, err)
+	assertSnapshotContractProjection(t, want, got)
+	require.Empty(t, got.OwnerRows)
+}
+
+func TestSnapshotContractProjectionRejectsMalformedIndexes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{"node ID", "contract projection node differs from its key"},
+		{"repo counter", "contract projection repository counter key"},
+		{"file index", "contract projection file index differs from its node"},
+		{"incoming index", "contract projection adjacency differs from its edge"},
+		{"outgoing index", "contract projection adjacency differs from its edge"},
+		{"node kind index", "contract projection kind index differs from its node"},
+		{"edge kind missing", "contract projection kind index missing its edge"},
+		{"edge kind identity", "contract projection kind index differs from its edge"},
+		{"full node ID", "contract projection node differs from its key"},
+		{"legacy shape", "shape must come from the split contract family"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			worker, head, files, owner, _, _, _ := relationsStageFixture(t, FullProfile)
+			relations, err := worker.PrepareRelations(ctx, t.TempDir(), files, nil)
+			require.NoError(t, err)
+			base, err := worker.RetainRelations(ctx, files, relations)
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, relations)
+			require.NoError(t, err)
+			stage, err := worker.PrepareContracts(ctx, t.TempDir(), base, contractBatches(), ContractCoverage{})
+			require.NoError(t, err)
+			_, err = head.PublishStage(ctx, stage)
+			require.NoError(t, err)
+			var key, value []byte
+			e := &graph.Edge{From: owner.ID, To: owner.ID, Kind: graph.EdgeProvides, FilePath: owner.FilePath, Line: 1}
+			id := edgeIdentity(e)
+			edgeBytes, err := encodeEdge(e)
+			require.NoError(t, err)
+			switch tc.name {
+			case "node ID", "full node ID":
+				key = pendingNodeKey("forged")
+				value, err = encodeNode(owner)
+			case "repo counter":
+				key = append(countKey("repo"), 0)
+				value = encodeCount(1)
+			case "file index":
+				key = keyStrings([]byte{familyFile}, owner.RepoPrefix, owner.FilePath, "forged")
+				value = []byte(owner.ID)
+			case "incoming index":
+				key = append(keyStrings([]byte{familyEdge, edgeIn}, owner.ID, string(e.Kind)), id[:]...)
+				key[len(key)-1] ^= 1
+				value = edgeBytes
+			case "outgoing index":
+				key = append(appendKeyLine(keyStrings([]byte{familyEdge, edgeOutKind}, owner.ID, string(e.Kind)), e.Line), id[:]...)
+				key[len(key)-1] ^= 1
+				value = edgeBytes
+			case "node kind index":
+				key = keyStrings([]byte{familyNodeKind}, string(graph.KindContract), owner.ID)
+				value = []byte(owner.ID)
+			case "edge kind missing", "edge kind identity":
+				key = append(appendKeyLine(keyStrings([]byte{familyEdge, edgeKind}, string(e.Kind), e.From), e.Line), id[:]...)
+				value = outEdgeKey(e, id)
+				if tc.name == "edge kind identity" {
+					key[len(key)-1] ^= 1
+					require.NoError(t, head.db.Set(value, edgeBytes, pebble.Sync))
+				}
+			case "legacy shape":
+				key = pendingNodeKey(owner.ID)
+				bad := *owner
+				bad.Kind = graph.KindType
+				bad.Meta = map[string]any{"shape": &contracts.Shape{Kind: "struct"}}
+				value, err = encodeNode(&bad)
+			}
+			require.NoError(t, err)
+			require.NoError(t, head.db.Set(key, value, pebble.Sync))
+			s := stageRead(t, head)
+			var p graph.ContractFileProjection
+			switch tc.name {
+			case "node ID":
+				p, err = s.LayerContractIDProjectionContext(ctx, []string{"forged"})
+			case "full node ID", "legacy shape":
+				id := owner.ID
+				if tc.name == "full node ID" {
+					id = "forged"
+				}
+				var nodes map[string]*graph.Node
+				nodes, err = s.FullNodesByIDsContext(ctx, []string{id})
+				require.Nil(t, nodes)
+			case "repo counter", "file index":
+				p, err = s.LayerContractFileProjectionContext(ctx, owner.RepoPrefix, []string{owner.FilePath})
+			case "incoming index", "outgoing index":
+				p, err = s.LayerContractIDProjectionContext(ctx, []string{owner.ID})
+			default:
+				p, err = s.LayerContractRepoProjectionContext(ctx, owner.RepoPrefix)
+			}
+			require.ErrorIs(t, err, errInvalidRecord)
+			require.ErrorContains(t, err, tc.want)
+			require.Zero(t, p)
+			require.ErrorContains(t, s.ReadError(), tc.want)
+		})
+	}
+}

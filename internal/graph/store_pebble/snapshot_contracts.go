@@ -9,8 +9,6 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-var _ contracts.SnapshotReader = (*Snapshot)(nil)
-
 func (s *Snapshot) contractReadWitness(ctx context.Context) (Witness, error) {
 	if err := ctx.Err(); err != nil {
 		return Witness{}, err
@@ -31,6 +29,9 @@ func (s *Snapshot) contractReadWitness(ctx context.Context) (Witness, error) {
 	return w, nil
 }
 
+// ContractCoverageContext reports partial coverage for a positive answer.
+// Set requireComplete for absence and count answers; a matching omission
+// then returns ErrContractCoverageIncomplete, not a usable answer.
 func (s *Snapshot) ContractCoverageContext(ctx context.Context, scope contracts.ReadScope, requireComplete bool) (bool, error) {
 	w, err := s.contractReadWitness(ctx)
 	if err != nil {

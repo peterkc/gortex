@@ -19,9 +19,9 @@ var (
 
 var contractOwnerKinds = [...]graph.EdgeKind{graph.EdgeProvides, graph.EdgeConsumes, graph.EdgeHandlesRoute}
 
-// The cold Contracts stage materializes the selected scalar rows. It cannot
-// retain a stale scalar from an older owner frontier: there are no edit deltas
-// at this boundary. Keep native live scalars even if a route edge points to one.
+// Published contract rows carry the producer's scalar liveness decisions.
+// Keep native live scalars even if a route edge points to one. Any edit delta
+// must maintain this invariant before publication.
 func (s *Snapshot) ContractOwnerScalarLivenessGuaranteed() bool { return true }
 
 func (s *Snapshot) LoadContractFileProjectionContext(ctx context.Context, repo string, paths []string) (graph.ContractFileProjection, error) {
@@ -84,12 +84,11 @@ func (s *Snapshot) contractOwnerSource(ctx context.Context, id string) (*graph.N
 // edge's recording path for ownership even when the source is in another file.
 func (s *Snapshot) LayerContractFileProjectionContext(ctx context.Context, _ string, paths []string) (graph.ContractFileProjection, error) {
 	return s.readContractProjection(ctx, func(ctx context.Context, p *graph.ContractFileProjection, budget *int) error {
-		if len(paths) == 0 {
+		ordered := slices.Collect(uniqueNonempty(paths))
+		if len(ordered) == 0 {
 			return nil
 		}
-		ordered := slices.Clone(paths)
 		slices.Sort(ordered)
-		ordered = slices.Compact(ordered)
 		prefix := countKey("repo")
 		err := scan(ctx, s, prefix, func(key, _ []byte) (bool, error) {
 			repo, tail, err := readKeyString(key[len(prefix):])
