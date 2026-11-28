@@ -21,6 +21,8 @@ func inlineRebuildContractShapes(records *store_pebble.RebuildContractRecords, s
 		if c.BodyUnproved {
 			// An earlier proved representative can fill every shape on this
 			// provider. Native then skips every write, regardless of its body.
+			// Only providers receive top-level shapes from an earlier
+			// representative; do not extend that proof to other roles.
 			if c.Role == contracts.RoleProvider && rebuildInlineShapesComplete(c.Meta) {
 				return nil
 			}
@@ -96,6 +98,9 @@ func inlineRebuildContractShapes(records *store_pebble.RebuildContractRecords, s
 	})
 }
 
+// rebuildInlineShapesComplete requires a nonempty envelope whose every row
+// already has a shape. A missing or empty envelope on an unproved body could
+// conceal one that native would fill; it does not prove a prior writer filled it.
 func rebuildInlineShapesComplete(meta map[string]any) bool {
 	_, response := meta["response_shape"]
 	_, request := meta["request_shape"]
