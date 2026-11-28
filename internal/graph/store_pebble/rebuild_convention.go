@@ -242,17 +242,6 @@ func (p *rebuildConventionPass) source(id string) (*graph.Node, error) {
 	return p.storeReceiptNode(id)
 }
 
-func (p *rebuildConventionPass) capNode(id string) error {
-	key := pendingNodeKey(id)
-	_, err := pendingGet(p.b.pending, key, func(val []byte) (bool, error) {
-		if len(key)+len(val) > p.rowBytes {
-			return false, fmt.Errorf("%w: %s node row", ErrRebuildLinkInputSize, p.label)
-		}
-		return true, nil
-	})
-	return err
-}
-
 // h holds active sites and their raw keys; n and s request only the possible
 // name candidates and source paths used by these sites.
 func (p *rebuildConventionPass) capture(ctx context.Context, liveKinds []graph.EdgeKind) error {

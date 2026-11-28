@@ -29,6 +29,7 @@ type RebuildFnValueRules struct {
 	Prototype    func(*graph.Node) bool
 	LocalLinkage func(*graph.Node) bool
 	Registration func(*graph.Edge, string, string, float64, string, int) *graph.Edge
+	Choose       func(string, bool, bool, func(string) int, func(string) int, func() int, func() int, func() int, func() int) (float64, string, int)
 }
 
 type rebuildFnValuePass struct {
@@ -45,7 +46,7 @@ func (b *BuildStore) RebuildFnValueCallbacks(ctx context.Context, receipts iter.
 			err = fmt.Errorf("%w: %w", ErrRebuildFnValue, err)
 		}
 	}()
-	if receipts == nil || rules.Site == nil || rules.Prototype == nil || rules.LocalLinkage == nil || rules.Registration == nil {
+	if receipts == nil || rules.Site == nil || rules.Prototype == nil || rules.LocalLinkage == nil || rules.Registration == nil || rules.Choose == nil {
 		return 0, invalid("function-value callback inputs")
 	}
 	prefix := rebuildFnValuePrefix
@@ -309,17 +310,6 @@ func decodeFnValueNode(value []byte) (rebuildFnValueNode, error) {
 	return rebuildFnValueNode{file: file, receiver: recv, method: flags&1 != 0, prototype: flags&2 != 0, local: flags&4 != 0}, nil
 }
 
-func (p *rebuildFnValuePass) capNode(id string) error {
-	key := pendingNodeKey(id)
-	_, err := pendingGet(p.b.pending, key, func(val []byte) (bool, error) {
-		if len(key)+len(val) > p.rowBytes {
-			return false, fmt.Errorf("%w: %s node row", ErrRebuildLinkInputSize, p.label)
-		}
-		return true, nil
-	})
-	return err
-}
-
 // Only candidates of the current lookup participate. Live facts lacking a
 // matching receipt remain possible members, never evidence of absence.
 func (p *rebuildFnValuePass) lookup(ctx context.Context, name string, raw, prototypeMatters bool, admits func(rebuildFnValueNode) bool,
@@ -387,6 +377,7 @@ type rebuildFnValueMode byte
 const (
 	fnValueSameFile rebuildFnValueMode = iota
 	fnValueMember
+	fnValueUniqueMember
 	fnValueGlobal
 	fnValueCrossFile
 )
@@ -398,7 +389,7 @@ func (p *rebuildFnValuePass) bucket(ctx context.Context, name, scope string, mod
 		switch mode {
 		case fnValueSameFile:
 			return n.file == scope
-		case fnValueMember:
+		case fnValueMember, fnValueUniqueMember:
 			return n.method && n.receiver == scope
 		case fnValueCrossFile:
 			return !n.local
@@ -434,6 +425,8 @@ func (p *rebuildFnValuePass) bucket(ctx context.Context, name, scope string, mod
 		b.unknown = b.firstUnknown
 	case fnValueMember:
 		b.unknown = b.unknownDefs != 0
+	case fnValueUniqueMember:
+		b.unknown = b.unknownDefs != 0 && b.count-b.unknownDefs < 2
 	default:
 		// Two exact definitions block every optional definition or prototype.
 		// Likewise, an exact definition makes prototype uncertainty irrelevant.
@@ -466,74 +459,80 @@ func (p *rebuildFnValuePass) sourceReceiver(id string, raw bool) (string, error)
 	return fnValueReceiver(n), nil
 }
 
-func (p *rebuildFnValuePass) plan(ctx context.Context, e *graph.Edge, raw bool, emit func(*graph.Edge) error) (uncertain bool, err error) {
+func (p *rebuildFnValuePass) plan(ctx context.Context, e *graph.Edge, raw bool, receiver *string, emit func(*graph.Edge) error) (uncertain bool, err error) {
 	site := p.rules.Site(e)
 	if site.Name == "" {
 		return false, nil
 	}
-	choose := func(scope string, mode rebuildFnValueMode) (rebuildFnValueBucket, error) {
-		b, err := p.bucket(ctx, site.Name, scope, mode, raw, nil)
-		uncertain = uncertain || b.unknown
-		return b, err
+	var selected rebuildFnValueBucket
+	var mode rebuildFnValueMode
+	var scope string
+	choose := func(nextScope string, nextMode rebuildFnValueMode) int {
+		if err != nil {
+			return 0
+		}
+		mode, scope = nextMode, nextScope
+		selected, err = p.bucket(ctx, site.Name, scope, mode, raw, nil)
+		uncertain = uncertain || selected.unknown
+		if err != nil {
+			return 0
+		}
+		switch mode {
+		case fnValueMember:
+			return selected.count
+		case fnValueSameFile:
+			if selected.count > 0 {
+				return 1
+			}
+		case fnValueGlobal, fnValueCrossFile:
+			if selected.count == 0 && selected.protos == 1 {
+				selected.first = selected.proto
+				return 1
+			}
+			fallthrough
+		case fnValueUniqueMember:
+			if selected.count == 1 {
+				return 1
+			}
+		}
+		return 0
 	}
-	land := func(id string, confidence float64, origin string, overloads int) error {
+	self := func() int {
+		if receiver != nil {
+			if *receiver == "" {
+				return 0
+			}
+			return choose(*receiver, fnValueMember)
+		}
+		var recv string
+		recv, err = p.sourceReceiver(e.From, raw)
+		if err != nil || recv == "" {
+			return 0
+		}
+		return choose(recv, fnValueMember)
+	}
+	confidence, origin, count := p.rules.Choose(site.Receiver, site.Ungated, site.SkipGate,
+		func(recv string) int { return choose(recv, fnValueUniqueMember) },
+		func(recv string) int { return choose(recv, fnValueMember) },
+		self,
+		func() int { return choose(e.FilePath, fnValueSameFile) },
+		func() int { return choose("", fnValueGlobal) },
+		func() int { return choose("", fnValueCrossFile) },
+	)
+	if err != nil || count == 0 {
+		return uncertain, err
+	}
+	land := func(id string) error {
 		if id == "" || id == e.From {
 			return nil
 		}
-		return emit(p.rules.Registration(e, site.Name, id, confidence, origin, overloads))
+		return emit(p.rules.Registration(e, site.Name, id, confidence, origin, count))
 	}
-	recv := site.Receiver
-	if recv == "<self>" && !site.SkipGate {
-		recv, err = p.sourceReceiver(e.From, raw)
-		if err != nil {
-			return uncertain, err
-		}
+	if count == 1 {
+		return uncertain, land(selected.first)
 	}
-	if recv != "" {
-		members, err := choose(recv, fnValueMember)
-		if err != nil {
-			return uncertain, err
-		}
-		if site.SkipGate && members.count == 1 {
-			return uncertain, land(members.first, 0.5, graph.OriginASTInferred, 1)
-		}
-		if !site.SkipGate && members.count > 0 {
-			if members.count == 1 {
-				return uncertain, land(members.first, 0.85, graph.OriginASTResolved, 1)
-			}
-			_, err := p.bucket(ctx, site.Name, recv, fnValueMember, raw, func(id string) error {
-				return land(id, 0.6, graph.OriginASTInferred, members.count)
-			})
-			return uncertain, err
-		}
-	}
-	if !site.SkipGate && (site.Receiver == "" || site.Receiver == "<self>") {
-		same, err := choose(e.FilePath, fnValueSameFile)
-		if err != nil {
-			return uncertain, err
-		}
-		if same.count > 0 {
-			return uncertain, land(same.first, 0.6, graph.OriginASTInferred, 1)
-		}
-	}
-	mode, confidence := fnValueCrossFile, 0.45
-	switch {
-	case site.SkipGate:
-		mode, confidence = fnValueGlobal, 0.5
-	case !site.Ungated || site.Receiver == "<self>":
-		return uncertain, nil
-	}
-	global, err := choose("", mode)
-	if err != nil {
-		return uncertain, err
-	}
-	if global.count == 1 {
-		return uncertain, land(global.first, confidence, graph.OriginASTInferred, 1)
-	}
-	if global.count == 0 && global.protos == 1 {
-		return uncertain, land(global.proto, confidence, graph.OriginASTInferred, 1)
-	}
-	return uncertain, nil
+	_, err = p.bucket(ctx, site.Name, scope, mode, raw, land)
+	return uncertain, err
 }
 
 func (p *rebuildFnValuePass) prove(ctx context.Context) error {
@@ -570,7 +569,7 @@ func (p *rebuildFnValuePass) prove(ctx context.Context) error {
 		}
 		temp := p.column('x')
 		var rawCount, liveCount uint64
-		rawUnknown, err := p.plan(ctx, raw, true, func(e *graph.Edge) error {
+		rawUnknown, err := p.plan(ctx, raw, true, nil, func(e *graph.Edge) error {
 			key := pendingEdgeKey(e)
 			occupied, err := p.present(key)
 			if err != nil || occupied {
@@ -587,7 +586,7 @@ func (p *rebuildFnValuePass) prove(ctx context.Context) error {
 			return err
 		}
 		changed := false
-		unknown, err := p.plan(ctx, live, false, func(e *graph.Edge) error {
+		unknown, err := p.plan(ctx, live, false, nil, func(e *graph.Edge) error {
 			key := pendingEdgeKey(e)
 			occupied, err := p.present(key)
 			if err != nil || occupied {
@@ -611,7 +610,11 @@ func (p *rebuildFnValuePass) prove(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if unknown || rawUnknown || changed || liveCount != rawCount {
+		selfChanged, err := p.alternateSelfReceiver(ctx, live, raw, temp, rawCount)
+		if err != nil {
+			return err
+		}
+		if unknown || rawUnknown || changed || selfChanged || liveCount != rawCount {
 			refused.add(id, bytes.Clone(old))
 		}
 		if rawCount == 0 {
@@ -624,9 +627,63 @@ func (p *rebuildFnValuePass) prove(ctx context.Context) error {
 	return refused.err()
 }
 
+// If the source receiver differs, either value can change which member
+// bucket is consulted. Compare both cross-projections to the raw output.
+func (p *rebuildFnValuePass) alternateSelfReceiver(ctx context.Context, live, raw *graph.Edge, prefix []byte, wantCount uint64) (bool, error) {
+	self := func(e *graph.Edge) bool {
+		site := p.rules.Site(e)
+		return site.Name != "" && site.Receiver == "<self>" && !site.SkipGate
+	}
+	if live == nil || raw == nil || !self(live) && !self(raw) {
+		return false, nil
+	}
+	liveRecv, err := p.sourceReceiver(live.From, false)
+	if err != nil {
+		return false, err
+	}
+	rawRecv, err := p.sourceReceiver(raw.From, true)
+	if err != nil || liveRecv == rawRecv {
+		return false, err
+	}
+	for _, check := range []struct {
+		edge     *graph.Edge
+		receiver string
+		raw      bool
+	}{
+		{live, rawRecv, false},
+		{raw, liveRecv, true},
+	} {
+		if !self(check.edge) {
+			continue
+		}
+		var count uint64
+		var changed bool
+		unknown, err := p.plan(ctx, check.edge, check.raw, &check.receiver, func(e *graph.Edge) error {
+			key := pendingEdgeKey(e)
+			occupied, err := p.present(key)
+			if err != nil || occupied {
+				return err
+			}
+			value, err := encodeEdge(e)
+			if err != nil {
+				return err
+			}
+			want, err := p.get(append(bytes.Clone(prefix), key...))
+			changed = changed || !bytes.Equal(value, want)
+			count++
+			return err
+		})
+		if err != nil || unknown || changed || count != wantCount {
+			return true, err
+		}
+	}
+	return false, nil
+}
+
 func (p *rebuildFnValuePass) offer(key, order, val []byte) error {
 	// SQLite visits bare placeholders before prefixed ones. Within each
-	// scan, the target index breaks ties by retained edge row order.
+	// scan, the target index breaks ties by frozen receipt ordinal.
+	// A divergence from a retained SQLite rowid order needs the VM parity proof.
 	orderKey := append(p.column('W'), key...)
 	prior, err := p.get(orderKey)
 	if err != nil || prior != nil && bytes.Compare(prior, order) <= 0 {

@@ -20,6 +20,7 @@ func RunRebuildFnValueCallbacks(ctx context.Context, b *store_pebble.BuildStore,
 		Prototype:    isPrototypeDecl,
 		LocalLinkage: isFileLocalLinkage,
 		Registration: fnValueRegistration,
+		Choose:       chooseFnValueTargets,
 	})
 }
 

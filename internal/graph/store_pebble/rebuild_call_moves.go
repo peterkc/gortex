@@ -271,3 +271,14 @@ func (p *rebuildCallMoves) captureArcProof(snap *pebble.Snapshot, key, arc []byt
 	}
 	return p.claimKey(append(p.column(claims), raw...), key)
 }
+
+func (p *rebuildCallMoves) capNode(id string) error {
+	key := pendingNodeKey(id)
+	_, err := pendingGet(p.b.pending, key, func(val []byte) (bool, error) {
+		if len(key)+len(val) > p.rowBytes {
+			return false, fmt.Errorf("%w: %s node row", ErrRebuildLinkInputSize, p.label)
+		}
+		return true, nil
+	})
+	return err
+}

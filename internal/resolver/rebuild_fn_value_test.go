@@ -173,3 +173,92 @@ func requireRebuildFnValueRefusal(t *testing.T, b *store_pebble.BuildStore, befo
 	require.Zero(t, count)
 	require.Equal(t, before, rebuildEventSavedRows(t, b))
 }
+
+func TestRebuildFnValueSelfReceiverProof(t *testing.T) {
+	const file, remote = "site.ts", "other.ts"
+	caller := rebuildFnValueTestNode("caller", "register", file)
+	caller.Meta = map[string]any{"receiver": "A"}
+	rawCaller := *caller
+	rawCaller.Meta = map[string]any{"receiver": "B"}
+	call := rebuildFnValueTestSite(caller, "member", 1)
+	call.Meta["fn_ref_recv_hint"] = "<self>"
+	for _, name := range []string{"member", "unrelated"} {
+		t.Run(name, func(t *testing.T) {
+			method := rebuildFnValueTestNode("method", name, remote)
+			method.Kind = graph.KindMethod
+			method.Meta = map[string]any{"receiver": "B"}
+			liveSite := rebuildEventFacts(file, caller.Language, []*graph.Node{caller}, call)
+			declarations := rebuildEventFacts(remote, caller.Language, []*graph.Node{method})
+			b, native := openRebuildEventStores(t, liveSite, declarations)
+			require.Zero(t, ResolveFnValueCallbacks(native))
+			before := rebuildEventSavedRows(t, b)
+			rawSite := rebuildEventFacts(file, caller.Language, []*graph.Node{&rawCaller}, call)
+			_, rawNative := openRebuildEventStores(t, rawSite)
+			require.Zero(t, ResolveFnValueCallbacks(rawNative))
+			count, err := RunRebuildFnValueCallbacks(t.Context(), b, rebuildGRPCReceipts(rawSite), rebuildFnValueTestSelection(t))
+			if name == "member" {
+				_, mixed := openRebuildEventStores(t, rawSite, declarations)
+				require.Equal(t, 1, ResolveFnValueCallbacks(mixed))
+				requireRebuildFnValueRefusal(t, b, before, call, count, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Zero(t, count)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+		})
+	}
+}
+
+func TestRebuildFnValueUniqueMemberTie(t *testing.T) {
+	const file, remote = "site.ts", "other.ts"
+	caller := rebuildFnValueTestNode("caller", "register", file)
+	for _, skip := range []bool{false, true} {
+		call := rebuildFnValueTestSite(caller, "member", 1)
+		call.Meta["fn_ref_recv_hint"], call.Meta["skip_gate"] = "Owner", skip
+		var methods []*graph.Node
+		for _, id := range []string{"a", "b", "c"} {
+			method := rebuildFnValueTestNode(id, "member", remote)
+			method.Kind = graph.KindMethod
+			method.Meta = map[string]any{"receiver": "Owner"}
+			methods = append(methods, method)
+		}
+		site := rebuildEventFacts(file, caller.Language, []*graph.Node{caller}, call)
+		declarations := rebuildEventFacts(remote, caller.Language, methods)
+		b, native := openRebuildEventStores(t, site, declarations)
+		before := rebuildEventSavedRows(t, b)
+		receipt := rebuildEventFacts(remote, caller.Language, methods[:2])
+		count, err := RunRebuildFnValueCallbacks(t.Context(), b, rebuildGRPCReceipts(site, receipt), rebuildFnValueTestSelection(t))
+		if skip {
+			require.Zero(t, ResolveFnValueCallbacks(native))
+			require.NoError(t, err)
+			require.Zero(t, count)
+			require.Equal(t, before, rebuildEventSavedRows(t, b))
+			continue
+		}
+		// Ordinary member references retain the full overload set, unlike
+		// skip-gate's unique-member lookup.
+		require.Equal(t, 3, ResolveFnValueCallbacks(native))
+		requireRebuildFnValueRefusal(t, b, before, call, count, err)
+	}
+}
+
+func TestRebuildFnValueSettledPredecessor(t *testing.T) {
+	const file = "site.ts"
+	caller := rebuildFnValueTestNode("caller", "register", file)
+	target := rebuildFnValueTestNode("target", "target", file)
+	call := rebuildFnValueTestSite(caller, target.Name, 1)
+	facts := rebuildEventFacts(file, caller.Language, []*graph.Node{caller, target}, call)
+	b, native := openRebuildEventStores(t, facts)
+	settled := *call
+	settled.To = "predecessor-target"
+	move := []graph.EdgeReindex{{Edge: &settled, OldTo: call.To}}
+	require.NoError(t, b.ApplyLinkReindexes(t.Context(), move))
+	native.ReindexEdges(move)
+	require.Zero(t, ResolveFnValueCallbacks(native))
+	before := rebuildEventSavedRows(t, b)
+	count, err := RunRebuildFnValueCallbacks(t.Context(), b, rebuildGRPCReceipts(facts), rebuildFnValueTestSelection(t))
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
+	require.Equal(t, rebuildEventSQLiteRows(native), before)
+}
