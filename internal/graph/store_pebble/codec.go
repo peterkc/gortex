@@ -141,6 +141,13 @@ func decodeEdge(b []byte) (*graph.Edge, error) { return readEdge(b, true) }
 func decodeEdgeLight(b []byte) (*graph.Edge, error) { return readEdge(b, false) }
 
 func readEdge(b []byte, metadata bool) (*graph.Edge, error) {
+	if metadata {
+		return readEdgeMetadata(b, (*recordCursor).metadata)
+	}
+	return readEdgeMetadata(b, nil)
+}
+
+func readEdgeMetadata(b []byte, metadata func(*recordCursor) map[string]any) (*graph.Edge, error) {
 	if len(b) == 0 || b[0] != edgeFormat {
 		return nil, invalid("edge format")
 	}
@@ -158,8 +165,8 @@ func readEdge(b []byte, metadata bool) (*graph.Edge, error) {
 	e.Alias = d.str()
 	e.NameOnly = d.boolean()
 	e.Provisional = d.boolean()
-	if metadata {
-		e.Meta = d.metadata()
+	if metadata != nil {
+		e.Meta = metadata(&d)
 	} else if d.boolean() {
 		_ = d.bytes()
 	}
