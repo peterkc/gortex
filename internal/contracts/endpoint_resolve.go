@@ -200,10 +200,21 @@ func (q EndpointExpression) HasQuestion() bool {
 
 // Resolve uses the caller's complete, scoped constant facts, including misses.
 func (q EndpointExpression) Resolve(filePath, repoPrefix string, store EndpointConstStore, forRoute bool) (string, bool) {
+	return q.resolve(filePath, repoPrefix, endpointConstantLookup(store), forRoute)
+}
+
+func endpointConstantLookup(store EndpointConstStore) func(string, string, string) string {
+	return func(name, file, repo string) string {
+		v, _ := resolveConstIdentifier(name, file, repo, store)
+		return v
+	}
+}
+
+func (q EndpointExpression) resolve(filePath, repoPrefix string, lookup func(string, string, string) string, forRoute bool) (string, bool) {
 	for _, term := range q.Terms {
 		v := term.Literal
 		if term.Name != "" {
-			v, _ = resolveConstIdentifier(term.Name, filePath, repoPrefix, store)
+			v = lookup(term.Name, filePath, repoPrefix)
 		}
 		if v == "" {
 			continue
@@ -471,6 +482,13 @@ var ErrEndpointQuestionPosition = errors.New("invalid endpoint question position
 // ResolveEndpointQuestions performs only the native value-dependent part of
 // endpoint detection. It does not parse, transform, or read source.
 func ResolveEndpointQuestions(raw []Contract, questions []EndpointContractQuestion, store EndpointConstStore) ([]Contract, error) {
+	return ResolveEndpointQuestionsWithLookup(raw, questions, endpointConstantLookup(store))
+}
+
+// ResolveEndpointQuestionsWithLookup uses the same record reducer with a
+// caller-owned constant lookup. The lookup must be non-nil. An empty value
+// is a miss. Check any read errors before using the returned records.
+func ResolveEndpointQuestionsWithLookup(raw []Contract, questions []EndpointContractQuestion, lookup func(name, filePath, repoPrefix string) string) ([]Contract, error) {
 	pos := 0
 	for _, q := range questions {
 		if q.Position < pos || q.Position > len(raw) {
@@ -478,10 +496,10 @@ func ResolveEndpointQuestions(raw []Contract, questions []EndpointContractQuesti
 		}
 		pos = q.Position
 	}
-	return resolveEndpointQuestions(raw, questions, store), nil
+	return resolveEndpointQuestions(raw, questions, lookup), nil
 }
 
-func resolveEndpointQuestions(raw []Contract, questions []EndpointContractQuestion, store EndpointConstStore) []Contract {
+func resolveEndpointQuestions(raw []Contract, questions []EndpointContractQuestion, lookup func(name, filePath, repoPrefix string) string) []Contract {
 	var out []Contract
 	seen := make(map[string]bool)
 	pos := 0
@@ -496,7 +514,7 @@ func resolveEndpointQuestions(raw []Contract, questions []EndpointContractQuesti
 		pos = q.Position
 		c := q.Record
 		c.Meta = cloneFactMeta(c.Meta)
-		value, ok := q.Expression.Resolve(c.FilePath, c.RepoPrefix, store, q.Kind != EndpointTopic)
+		value, ok := q.Expression.resolve(c.FilePath, c.RepoPrefix, lookup, q.Kind != EndpointTopic)
 		if !ok {
 			continue
 		}
