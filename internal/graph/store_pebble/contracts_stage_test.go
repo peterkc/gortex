@@ -430,7 +430,7 @@ func TestContractStageAttemptAndIDVisit(t *testing.T) {
 	require.Zero(t, stage)
 }
 
-func TestContractsStageRejectsUnclaimedPrivateRows(t *testing.T) {
+func TestContractsStageRejectsUnclaimedPrimaryChanges(t *testing.T) {
 	for _, kind := range []string{"node", "edge"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx := t.Context()
