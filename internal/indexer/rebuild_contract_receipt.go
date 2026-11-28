@@ -43,7 +43,7 @@ func (r rebuildContractReceiptReader) requireSelected(path string) error {
 		return err
 	}
 	if held {
-		return fmt.Errorf("%w: held-out contract receipt %q", graph.ErrContractProjectionStale, path)
+		return fmt.Errorf("%w: held-out contract receipt %q", store_pebble.ErrRebuildLinkIsolation, path)
 	}
 	return nil
 }

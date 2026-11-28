@@ -158,7 +158,14 @@ func Read() { _ = os.Getenv("SHARED") }
 	require.Equal(t, shared, late[0].ID)
 	r.proofCache = &rebuildContractReceiptCache{path: py, facts: &contracts.FileFacts{}}
 	_, _, err = r.forGraphPath(ctx, py)
-	require.ErrorIs(t, err, graph.ErrContractProjectionStale)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildLinkIsolation)
+	for _, input := range job.inputs {
+		if input.Path == py {
+			_, _, err = r.load(ctx, input)
+			require.ErrorIs(t, err, store_pebble.ErrRebuildLinkIsolation)
+			break
+		}
+	}
 	require.ErrorIs(t, r.visitHeldOutContractOmissions(ctx, func(store_pebble.RebuildContractBatch) error { return nil }), errParseEntryCorrupt)
 	require.NoError(t, store.write(heldKey, heldBytes))
 	var omissions []store_pebble.RebuildContractOmission
