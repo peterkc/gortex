@@ -196,8 +196,8 @@ func CaptureFileHandlerFacts(ctx context.Context, nodes []*graph.Node, lines []s
 			f.ASTTypeLookups = make(map[string]string)
 			applyProviderFactsWithLookup(&c, bf, func(name string) string {
 				answer := resolveTypeInFile(name, nodes)
-				name, _ = typeLookupName(name)
-				if name != "" {
+				name, lookup := typeLookupName(name)
+				if lookup {
 					f.ASTTypeLookups[name] = answer
 				}
 				return answer
