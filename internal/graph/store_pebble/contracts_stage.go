@@ -412,24 +412,26 @@ func (b *BuildStore) writeContractBatch(ctx context.Context, batch RebuildContra
 			return invalid("unexpected contract stage edge kind")
 		}
 		key := pendingEdgeKey(e)
-		if err := b.claimContractRow('e', key); err != nil {
-			return err
-		}
-		val, err := encodeEdgeRecord(e, appendContractRowMetadata)
-		if err != nil {
+		if err := b.claimContractRow('c', key); err != nil {
 			return err
 		}
 		old, err := b.pendingEdge(key)
 		if err != nil {
 			return err
 		}
-		if err := b.writeEdgeRecord(e, key, val, rebuildEdgeCustody{}, old != nil); err != nil {
+		if old != nil {
+			continue // native INSERT OR IGNORE keeps the incumbent payload
+		}
+		val, err := encodeEdgeRecord(e, appendContractRowMetadata)
+		if err != nil {
 			return err
 		}
-		if old != nil && old.Origin != e.Origin {
-			if err := b.noteRevision(); err != nil {
-				return err
-			}
+		if err := b.writeEdgeRecord(e, key, val, rebuildEdgeCustody{}, false); err != nil {
+			return err
+		}
+		// Only inserted edges can authorize a primary-row change.
+		if err := b.pending.Set(contractBatchKey('e', key), nil, pebble.NoSync); err != nil {
+			return err
 		}
 	}
 	for id, shape := range batch.Shapes {
