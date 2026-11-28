@@ -24,7 +24,7 @@ func TestRebuildEarlyContractIDsNativeCuts(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, build.Close()) })
 	store := rebuildParseStore{dir: t.TempDir(), limit: 16 << 20}
 	job := rebuildFileStages{recipes: map[string]rebuildDigest{"go": {1}, "python": {2}}}
-	census := rebuildExtractorCensus{byPath: make(map[string]string)}
+	census := rebuildExtractorCensus{byPath: make(map[string]string), originByGraphPath: make(map[string]string)}
 
 	type sourceFile struct {
 		path, language, body string
@@ -60,6 +60,7 @@ app.include_router(router, prefix="/api")
 		require.NoError(t, store.write(input.parseKey(recipe), payload))
 		job.inputs = append(job.inputs, input)
 		census.byPath[f.path] = parsed.EffectiveLanguage
+		census.originByGraphPath[f.path] = f.path
 		require.NoError(t, build.AddParsedFile("", parsed))
 		nativeGraph.AddBatch(parsed.Nodes, parsed.Edges)
 		require.NoError(t, nativeGraph.BulkSetConstantValues("", parsed.Constants))
@@ -175,4 +176,88 @@ func TestRebuildEarlyContractIDsBuiltEmpty(t *testing.T) {
 	p := rebuildClonePredecessors{contracts: ids}
 	require.False(t, p.mayReplaceWithContract("http::GET::/none"))
 	require.True(t, (rebuildClonePredecessors{}).mayReplaceWithContract("http::GET::/none"))
+}
+
+func TestRebuildEarlyRouterHandlerElection(t *testing.T) {
+	for _, tc := range []struct {
+		name, firstDecl string
+		wantMounted     bool
+	}{
+		{name: "handler_move_opens_bucket", firstDecl: "export function first(req, res) {}", wantMounted: true},
+		{name: "unresolved_handler_keeps_bucket"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, root := t.Context(), t.TempDir()
+			g := graph.New()
+			idx := newTestIndexer(g)
+			idx.SetRootPath(root)
+			idx.registry.Register(languages.NewTypeScriptExtractor())
+			t.Cleanup(idx.Close)
+			b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, b.Close()) })
+			store := rebuildParseStore{dir: t.TempDir(), limit: 16 << 20}
+			job := rebuildFileStages{recipes: map[string]rebuildDigest{"typescript": {1}}}
+			census := rebuildExtractorCensus{byPath: map[string]string{}, originByGraphPath: map[string]string{}}
+			sources := []struct{ path, text string }{
+				{"handlers.ts", tc.firstDecl + "\nexport function second(req, res) {}\n"},
+				{"routes.ts", `import express from 'express';
+const app = express();
+const router = express.Router();
+export function register() {
+    app.get("/x", first);
+    router.get("/x", second);
+    app.use("/api", router);
+}
+`},
+			}
+			ext, ok := idx.registry.GetByLanguage("typescript")
+			require.True(t, ok)
+			native := contracts.NewRegistry()
+			for _, file := range sources {
+				src := []byte(file.text)
+				require.NoError(t, os.WriteFile(filepath.Join(root, file.path), src, 0o600))
+				parsed, facts, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, file.path, ext, src, src)
+				require.NoError(t, err)
+				payload, err := store_pebble.EncodeContractParseFacts(parsed, facts)
+				require.NoError(t, err)
+				input := rebuildInput{Path: file.path, Language: "typescript", Size: int64(len(src))}
+				require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), payload))
+				job.inputs = append(job.inputs, input)
+				census.byPath[file.path], census.originByGraphPath[file.path] = parsed.EffectiveLanguage, file.path
+				require.NoError(t, b.AddParsedFile("", parsed))
+				g.AddBatch(parsed.Nodes, parsed.Edges)
+				native.AddAllScoped(cloneContractRecords(facts.Records), "", "", "")
+			}
+			const raw, mounted = "http::GET::/x", "http::GET::/api/x"
+			require.Len(t, native.ByID(raw), 2)
+			require.Len(t, native.All(), 1, "the raw registry hides the mounted registration")
+			require.Equal(t, "first", native.All()[0].Meta["handler_ident"])
+			f, err := idx.readRebuildEarlyContractFacts(ctx, b.RebuildView(), job, store, &census, nil)
+			require.NoError(t, err)
+			idx.commitContracts(native)
+			want := rebuildEarlyContractIDs{raw: "routes.ts"}
+			if tc.wantMounted {
+				want[mounted] = "routes.ts"
+			}
+			nativeIDs := make(rebuildEarlyContractIDs)
+			for n := range g.NodesByKind(graph.KindContract) {
+				if n.Language == "contract" {
+					nativeIDs[n.ID] = n.FilePath
+				}
+			}
+			require.Equal(t, want, nativeIDs)
+			for _, file := range sources {
+				require.NoError(t, os.Remove(filepath.Join(root, file.path)))
+			}
+			got, err := f.finish(ctx, b.RebuildView(), "", "", "")
+			require.NoError(t, err)
+			require.Equal(t, nativeIDs, got)
+			require.NoError(t, b.BeginRebuildContractOverlay(ctx, got))
+			n, err := b.RebuildView().Node(ctx, mounted)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantMounted, n != nil)
+			require.NoError(t, b.EndRebuildContractOverlay(ctx))
+		})
+	}
 }

@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/zzet/gortex/internal/contracts"
@@ -21,6 +22,7 @@ func (ids rebuildEarlyContractIDs) contains(id string) bool {
 
 type rebuildEarlyContractFacts struct {
 	registry           *contracts.Registry
+	receipts           rebuildContractReceiptReader
 	routers            map[string]contracts.RouterFacts
 	routerOverlapFiles []string
 }
@@ -32,8 +34,8 @@ func (idx *Indexer) readRebuildEarlyContractFacts(ctx context.Context, view stor
 	job rebuildFileStages, store rebuildParseStore, census *rebuildExtractorCensus,
 	rootDeps []string,
 ) (*rebuildEarlyContractFacts, error) {
-	out := &rebuildEarlyContractFacts{registry: contracts.NewRegistry(), routers: make(map[string]contracts.RouterFacts)}
 	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: census}
+	out := &rebuildEarlyContractFacts{registry: contracts.NewRegistry(), receipts: reader, routers: make(map[string]contracts.RouterFacts)}
 	if err := reader.visitFilesAtParseCut(ctx, view, func(path string, records []contracts.Contract, facts *contracts.FileFacts) error {
 		out.registry.AddAllScoped(records, idx.repoPrefix, idx.workspaceID, idx.projectID)
 		if facts.Router != nil {
@@ -123,6 +125,9 @@ func (f *rebuildEarlyContractFacts) finish(ctx context.Context, view store_pebbl
 	}); err != nil {
 		return nil, err
 	}
+	if err := f.bindRouterHandlerIDs(ctx, view); err != nil {
+		return nil, err
+	}
 	overlapFiles, err := joinRebuildRouterPrefixes(ctx, view, f.registry, repo, workspace, f.routers)
 	if err != nil {
 		return nil, err
@@ -136,4 +141,50 @@ func (f *rebuildEarlyContractFacts) finish(ctx context.Context, view store_pebbl
 		}
 	}
 	return ids, ctx.Err()
+}
+
+// bindRouterHandlerIDs replays the symbol moves that can change the native
+// Registry.All doors for the router join. Body enrichment and bare type
+// upgrades change schema metadata, not the router fields or registry keys.
+func (f *rebuildEarlyContractFacts) bindRouterHandlerIDs(ctx context.Context, view store_pebble.RebuildView) error {
+	// Freeze the representative tasks before changing any live bucket.
+	for _, task := range f.registry.All() {
+		trail, fallback, _ := contracts.ProviderHandlerHints(task)
+		if trail == "" && fallback == "" {
+			continue
+		}
+		items := f.registry.ByID(task.ID)
+		var routerBucket bool
+		for _, c := range items {
+			if contracts.RouterContractSource(c) {
+				routerBucket = true
+				break
+			}
+		}
+		if !routerBucket {
+			continue
+		}
+		winner, err := f.receipts.providerHandler(ctx, view, task)
+		if err != nil {
+			return err
+		}
+		if winner == nil || winner.ID == task.SymbolID {
+			continue
+		}
+		// Native moves the symbol only when it can read the handler source.
+		// The early capture already checked every admitted receipt. The ID
+		// move does not use a body range or any body-derived schema value.
+		origin := f.receipts.census.originByGraphPath[winner.FilePath]
+		if f.receipts.census.byPath[origin] == "" {
+			return fmt.Errorf("%w: no admitted router handler source for %q", graph.ErrContractProjectionStale, winner.ID)
+		}
+		for i, c := range items {
+			if c.Role == contracts.RoleProvider && c.RepoPrefix == task.RepoPrefix && c.FilePath == task.FilePath &&
+				c.SymbolID == task.SymbolID && c.Line == task.Line {
+				items[i].SymbolID = winner.ID
+			}
+		}
+		f.registry.ReplaceByID(task.ID, items)
+	}
+	return ctx.Err()
 }
