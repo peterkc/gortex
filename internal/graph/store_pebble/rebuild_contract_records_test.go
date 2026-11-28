@@ -95,3 +95,51 @@ func TestRebuildContractRecordsKeepLiveAndRawBucketViews(t *testing.T) {
 		return nil
 	}))
 }
+
+func TestRebuildContractOutputEdgesKeepFirstPhysicalKey(t *testing.T) {
+	b, err := OpenBuild(t.TempDir(), FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	ctx := t.Context()
+	winner := &graph.Edge{From: "a.java::Make", To: "di::Service", Kind: graph.EdgeProvides, FilePath: "a.java", Line: 5,
+		Origin: graph.OriginASTResolved, Meta: map[string]any{"binding": "original"}}
+	later := *winner
+	later.Origin = graph.OriginASTInferred
+	later.Meta = map[string]any{"binding": "later"}
+	var readAfter *RebuildContractRecords
+	stop := errors.New("stop after edge election")
+	require.ErrorIs(t, b.WithRebuildContractRecords(ctx, func(r *RebuildContractRecords) error {
+		readAfter = r
+		first, err := r.FirstOutputEdge(winner)
+		require.NoError(t, err)
+		require.True(t, first)
+		// D83 omits winner after claiming it. The later proved payload
+		// must not get another chance at the same native insert key.
+		first, err = r.FirstOutputEdge(&later)
+		require.NoError(t, err)
+		require.False(t, first)
+		for _, distinct := range []graph.Edge{
+			{From: "b.java::Make", To: winner.To, Kind: winner.Kind, FilePath: winner.FilePath, Line: winner.Line},
+			{From: winner.From, To: "di::Other", Kind: winner.Kind, FilePath: winner.FilePath, Line: winner.Line},
+			{From: winner.From, To: winner.To, Kind: graph.EdgeConsumes, FilePath: winner.FilePath, Line: winner.Line},
+			{From: winner.From, To: winner.To, Kind: winner.Kind, FilePath: "b.java", Line: winner.Line},
+			{From: winner.From, To: winner.To, Kind: winner.Kind, FilePath: winner.FilePath, Line: 6},
+		} {
+			first, err := r.FirstOutputEdge(&distinct)
+			require.NoError(t, err)
+			require.True(t, first)
+		}
+		return stop
+	}), stop)
+	_, err = readAfter.FirstOutputEdge(winner)
+	require.Error(t, err)
+	require.NoError(t, b.WithRebuildContractRecords(ctx, func(r *RebuildContractRecords) error {
+		first, err := r.FirstOutputEdge(&later)
+		require.NoError(t, err)
+		require.True(t, first)
+		first, err = r.FirstOutputEdge(winner)
+		require.NoError(t, err)
+		require.False(t, first)
+		return nil
+	}))
+}

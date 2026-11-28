@@ -90,6 +90,28 @@ func (r *RebuildContractRecords) write(key []byte, item RebuildContractRecord) e
 	return r.build.putRebuildScratch(key, e.buf, goldBufferBytes, "contract record")
 }
 
+// FirstOutputEdge claims the native insert identity in emission order. Call it
+// before selecting coverage, even for an omitted first candidate: a later
+// duplicate must not replace the native first payload. This touches only the
+// record scratch range; PrepareContracts still checks uniqueness independently.
+func (r *RebuildContractRecords) FirstOutputEdge(e *graph.Edge) (bool, error) {
+	if err := r.ready(); err != nil {
+		return false, err
+	}
+	if e == nil || e.From == "" || e.To == "" || e.Kind == "" {
+		return false, invalid("contract output edge without identity")
+	}
+	key := append(rebuildContractRecordKey('e'), pendingEdgeKey(e)...)
+	seen, err := pendingGet(r.build.pending, key, func([]byte) (bool, error) { return true, nil })
+	if err != nil || seen {
+		return false, err
+	}
+	if err := r.build.putRebuildScratch(key, nil, goldBufferBytes, "contract output edge"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ClearID removes the rows of a live ID, retaining the raw bucket key just
 // like Registry.ReplaceByID(id, nil).
 func (r *RebuildContractRecords) ClearID(id string) error {
