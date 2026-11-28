@@ -44,23 +44,28 @@ func TestRebuildMacroExpansionReceiptCallerRepository(t *testing.T) {
 	owned.Meta = map[string]any{"via": "macro_expansion", "witness": "saved macro call"}
 	padding := strings.Repeat("x", 16<<20)
 	for _, fixture := range []struct {
-		name      string
-		incumbent *graph.Edge
-		control   bool
-		oversized bool
+		name, largeRow string
+		incumbent      *graph.Edge
+		control        bool
 	}{
-		{"missing add", nil, true, false},
-		{"no live site", nil, false, false},
-		{"real incumbent", lsp, true, false},
-		{"macro incumbent", owned, true, false},
-		{"large caller, missing add", nil, true, true},
-		{"large caller, real incumbent", lsp, true, true},
+		{name: "missing add", control: true},
+		{name: "no live site"},
+		{name: "large body, no live site", largeRow: "body"},
+		{name: "real incumbent", incumbent: lsp, control: true},
+		{name: "macro incumbent", incumbent: owned, control: true},
+		{name: "large caller, missing add", largeRow: "caller", control: true},
+		{name: "large caller, real incumbent", largeRow: "caller", incumbent: lsp, control: true},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			ctx := t.Context()
 			macroFacts := macroWithControl
 			if !fixture.control {
 				macroFacts.Edges = macroFacts.Edges[:1]
+			}
+			if fixture.largeRow == "body" {
+				body := *macroFacts.Edges[0]
+				body.Context = padding
+				macroFacts.Edges = []*graph.Edge{&body}
 			}
 			liveFacts := []store_pebble.ParseFacts{rebuildEventFacts(callerFile, "c", []*graph.Node{live}, callerUse), macroFacts}
 			rawFacts := []store_pebble.ParseFacts{rebuildEventFacts(callerFile, "c", []*graph.Node{&entrant}, callerUse), macroFacts}
@@ -88,17 +93,21 @@ func TestRebuildMacroExpansionReceiptCallerRepository(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, frozen.allows(SynthMacroExpansion))
 			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, rebuildGRPCReceipts(rawFacts...), frozen))
-			if fixture.oversized {
+			if fixture.largeRow == "caller" {
 				large := *live
 				large.Meta = map[string]any{"padding": padding}
 				b.AddNode(&large)
 				before = rebuildEventSavedRows(t, b)
 			}
 			stats, err := RunRebuildMacroExpansion(ctx, b, rebuildGRPCReceipts(rawFacts...), frozen)
-			if fixture.oversized && fixture.incumbent == nil {
+			if fixture.largeRow != "" && fixture.incumbent == nil {
 				require.ErrorIs(t, err, store_pebble.ErrRebuildMacroExpansion)
 				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
-				require.ErrorContains(t, err, "caller node")
+				if fixture.largeRow == "body" {
+					require.ErrorContains(t, err, "macro expansion edge row")
+				} else {
+					require.ErrorContains(t, err, "caller node")
+				}
 				require.Zero(t, stats)
 				require.Equal(t, before, rebuildEventSavedRows(t, b))
 				return
@@ -199,34 +208,75 @@ func TestRebuildMacroExpansionReceiptCallerAmbiguity(t *testing.T) {
 	want := macroExpansionEdge(caller.ID, callee.ID, callerFile, use.Line, first.Name)
 	selected, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
 	require.NoError(t, err)
-	for _, complete := range []bool{true, false} {
-		name := "potential sole survivor"
-		if complete {
-			name = "two exact members"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, largeRow, disagreement string
+		complete                     bool
+	}{
+		{name: "two exact members", complete: true},
+		{name: "potential sole survivor"},
+		{name: "conflicting declaration first", complete: true, disagreement: "first"},
+		{name: "conflicting declaration last", complete: true, disagreement: "last"},
+		{name: "large caller", largeRow: "caller"},
+		{name: "large body", largeRow: "body"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
-			macros := rebuildEventFacts(macroFile, lang, []*graph.Node{callee, first, &second}, firstBody, secondBody)
+			body := *firstBody
+			if tc.largeRow == "body" {
+				body.Context = strings.Repeat("x", 16<<20)
+			}
+			macros := rebuildEventFacts(macroFile, lang, []*graph.Node{callee, first, &second}, &body, secondBody)
 			rawMacros := macros
-			if !complete {
-				rawMacros.Edges = []*graph.Edge{firstBody}
+			if !tc.complete {
+				rawMacros.Edges = []*graph.Edge{&body}
+			}
+			if tc.disagreement != "" {
+				alternate := second
+				alternate.Meta = map[string]any{"macro_kind": "object"}
+				rawMacros.Nodes = slices.Clone(macros.Nodes)
+				if tc.disagreement == "first" {
+					rawMacros.Nodes = append([]*graph.Node{&alternate}, rawMacros.Nodes...)
+				} else {
+					rawMacros.Nodes = append(rawMacros.Nodes, &alternate)
+				}
+				rawMacros.File.NodeCount = len(rawMacros.Nodes)
 			}
 			// Supply macros first. A later caller receipt discovers the cohort.
 			liveCaller := rebuildEventFacts(callerFile, lang, []*graph.Node{caller}, use)
 			rawCaller := rebuildEventFacts(callerFile, lang, []*graph.Node{&entrant}, use)
 			b := openRebuildGRPCBuild(t, macros, liveCaller)
-			native := rebuildGRPCNative(t, rawMacros)
+			oracle := rawMacros
+			if tc.disagreement != "" {
+				// Model SQLite retaining the object-like copy, not both copies.
+				oracle.Nodes = slices.DeleteFunc(slices.Clone(rawMacros.Nodes), func(n *graph.Node) bool { return n == &second })
+			}
+			native := rebuildGRPCNative(t, oracle)
 			require.NoError(t, native.AddBatchChecked(rawCaller.Nodes, rawCaller.Edges))
 			require.NoError(t, RunFrameworkSynthesizersWithSelection(native, selected).Err)
-			require.Equal(t, !complete, rebuildMacroExpansionHasEdge(rebuildEventSQLiteRows(native).edges, want))
+			refuse := !tc.complete || tc.disagreement != ""
+			require.Equal(t, refuse, rebuildMacroExpansionHasEdge(rebuildEventSQLiteRows(native).edges, want))
 
 			before := rebuildEventSavedRows(t, b)
 			frozen, err := FreezeRebuildFrameworkSelection(ctx, b.RebuildView(), selected)
 			require.NoError(t, err)
 			receipts := rebuildGRPCReceipts(rawMacros, rawCaller)
 			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, receipts, frozen))
+			if tc.largeRow == "caller" {
+				large := *caller
+				large.Meta = map[string]any{"padding": strings.Repeat("x", 16<<20)}
+				b.AddNode(&large)
+				before = rebuildEventSavedRows(t, b)
+			}
 			stats, err := RunRebuildMacroExpansion(ctx, b, receipts, frozen)
-			if complete {
+			if tc.largeRow != "" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildMacroExpansion)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				if tc.largeRow == "caller" {
+					require.ErrorContains(t, err, "macro expansion caller node")
+				} else {
+					require.ErrorContains(t, err, "macro expansion edge row")
+				}
+			} else if !refuse {
 				require.NoError(t, err)
 			} else {
 				var refused *store_pebble.RebuildUnknownProvenanceError

@@ -408,6 +408,11 @@ func (p *rebuildMacroExpansion) collectBodies(ctx context.Context) error {
 		if err := p.put(p.key('A', n.RepoPrefix, n.Name, n.ID), nil); err != nil {
 			return err
 		}
+		// A later caller receipt may reach an ambiguous cohort. Start
+		// collecting both proof bits before reading any receipts.
+		if err := p.put(p.key('m', n.ID), []byte{rebuildCapabilityWanted}); err != nil {
+			return err
+		}
 		return p.addUnique(p.key('a', n.RepoPrefix, n.Name), n.ID)
 	}); err != nil {
 		return err
@@ -612,9 +617,6 @@ func (p *rebuildMacroExpansion) wantFinalProof(ctx context.Context) error {
 			if err != nil || n == nil {
 				return errors.Join(err, invalid("macro expansion proof declaration missing"))
 			}
-			if err := p.put(p.key('m', n.ID), []byte{rebuildCapabilityWanted}); err != nil {
-				return err
-			}
 			return p.put(p.key('q', n.RepoPrefix, n.Name), nil)
 		}); err != nil {
 			return err
@@ -750,22 +752,9 @@ func (p *rebuildMacroExpansion) recordNode(ctx context.Context, n *graph.Node, f
 	}
 	admitted := language != "" && n.FilePath == file
 	exact := rawRole && admitted && frozen != nil && frozen.FilePath == file && n.RepoPrefix == frozen.RepoPrefix && n.Name == frozen.Name
-	if exact && claim != rebuildScratchExact {
-		// Record an ambiguous declaration before a later caller receipt
-		// can bring a use into its cohort.
-		if claim == 0 {
-			id, seen, err := p.unique(p.key('a', n.RepoPrefix, n.Name))
-			if err != nil {
-				return err
-			}
-			if seen && id == "" {
-				claim = rebuildCapabilityWanted
-			}
-		}
-		if claim != 0 {
-			if err := p.put(macroKey, []byte{rebuildScratchExact}); err != nil {
-				return err
-			}
+	if claim != 0 {
+		if err := noteRebuildScratchState(p.put, macroKey, claim, rebuildScratchProofBit(exact)); err != nil {
+			return err
 		}
 	}
 	if rawRole && admitted && p.rawDecls {

@@ -377,7 +377,7 @@ func TestRebuildMacroExpansionRequiresDeclarationAndBody(t *testing.T) {
 		call(caller.ID, dormant.ID, 5), call(file+"::missing", "unresolved::ACTIVE", 6))
 	selection, err := NewFrameworkSynthesizerSelection([]string{SynthMacroExpansion})
 	require.NoError(t, err)
-	for _, what := range []string{"declaration", "body", "complete"} {
+	for _, what := range []string{"declaration", "body", "disagreement first", "disagreement last", "complete"} {
 		t.Run(what, func(t *testing.T) {
 			ctx := t.Context()
 			b, native := openRebuildEventStores(t, facts)
@@ -395,10 +395,22 @@ func TestRebuildMacroExpansionRequiresDeclarationAndBody(t *testing.T) {
 				receipt.Nodes = slices.DeleteFunc(slices.Clone(facts.Nodes), func(n *graph.Node) bool { return n == macro })
 			case "body":
 				receipt.Edges = slices.DeleteFunc(slices.Clone(facts.Edges), func(e *graph.Edge) bool { return e == body })
+			case "disagreement first", "disagreement last":
+				// Same ID and file, but this receipt has no function-like role.
+				alternate := *macro
+				alternate.Meta = map[string]any{"macro_kind": "object"}
+				receipt.Nodes = slices.Clone(facts.Nodes)
+				if what == "disagreement first" {
+					receipt.Nodes = append([]*graph.Node{&alternate}, receipt.Nodes...)
+				} else {
+					receipt.Nodes = append(receipt.Nodes, &alternate)
+				}
+				receipt.File.NodeCount = len(receipt.Nodes)
 			}
 			stats, err := RunRebuildMacroExpansion(ctx, b, rebuildGRPCReceipts(receipt), frozen)
 			add := macroExpansionEdge(caller.ID, callee.ID, file, use.Line, macro.Name)
 			if what != "complete" {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildMacroExpansion)
 				var refused *store_pebble.RebuildUnknownProvenanceError
 				require.ErrorAs(t, err, &refused)
 				require.Equal(t, &store_pebble.RebuildUnknownProvenanceError{Count: 1, First: graph.EdgeIdentityFor(add)}, refused)
@@ -563,8 +575,10 @@ func TestRebuildMacroExpansionReceiptOnlyDeclaration(t *testing.T) {
 	for _, tc := range []struct {
 		name                         string
 		direct, occupied, empty, tie bool
+		largeBody                    bool
 	}{
 		{name: "unresolved use"},
+		{name: "receipt-only declaration with large body", largeBody: true},
 		{name: "direct use", direct: true},
 		{name: "incumbent suppresses add", occupied: true},
 		{name: "no body", empty: true},
@@ -578,7 +592,11 @@ func TestRebuildMacroExpansionReceiptOnlyDeclaration(t *testing.T) {
 			}
 			edges := []*graph.Edge{&site}
 			if !tc.empty {
-				edges = append(edges, body)
+				input := *body
+				if tc.largeBody {
+					input.Context = strings.Repeat("x", 16<<20)
+				}
+				edges = append(edges, &input)
 			}
 			if tc.occupied {
 				incumbent := *add
@@ -616,7 +634,12 @@ func TestRebuildMacroExpansionReceiptOnlyDeclaration(t *testing.T) {
 			receipts := rebuildGRPCReceipts(receipt)
 			require.NoError(t, FreezeRebuildMacroExpansionInputs(ctx, b, receipts, frozen))
 			stats, err := RunRebuildMacroExpansion(ctx, b, receipts, frozen)
-			if tc.occupied || tc.empty || tc.tie {
+			if tc.largeBody {
+				require.ErrorIs(t, err, store_pebble.ErrRebuildMacroExpansion)
+				require.ErrorIs(t, err, store_pebble.ErrRebuildLinkInputSize)
+				require.ErrorContains(t, err, "macro expansion edge row")
+				require.Zero(t, stats)
+			} else if tc.occupied || tc.empty || tc.tie {
 				require.NoError(t, err)
 			} else {
 				var refused *store_pebble.RebuildUnknownProvenanceError
