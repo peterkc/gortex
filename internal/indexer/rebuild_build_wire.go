@@ -14,6 +14,7 @@ import (
 	"reflect"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/parser/tsalias"
 	"github.com/zzet/gortex/internal/resolver"
@@ -228,6 +229,9 @@ var rebuildFailureKinds = [...]error{
 	store_pebble.ErrRebuildExternalCallSynthesis,
 	errRebuildRouterFactsMissing,
 	store_pebble.ErrRebuildContractOverlay,
+	store_pebble.ErrContractsSeal,
+	errRebuildContractIDs,
+	graph.ErrContractProjectionStale,
 }
 
 func buildRefusal(err error) rebuildBuildReply {

@@ -30,12 +30,14 @@ type rebuildFileStages struct {
 	witness     store_pebble.Witness
 
 	classifications map[string]rebuildClassificationFact // from the verified sidecar only
+	retainFileGraph bool
 }
 
 type rebuildParsedCounts struct {
 	parsed, reused uint64
 	census         *rebuildExtractorCensus
 	claims         store_pebble.RebuildSharedClaimStats
+	fileGraphBase  store_pebble.FileGraphBase
 }
 
 var (
@@ -53,6 +55,17 @@ type rebuildExtractorCensus struct {
 
 	originByGraphPath map[string]string // exact graph key → literal path; stubs have no receipt in byPath
 	receipts          iter.Seq2[store_pebble.ParseFacts, error]
+}
+
+// supportsRelationPublication is the temporary D72 full-link-only boundary.
+// No deferred format has a checked link-free proof yet.
+func (c *rebuildExtractorCensus) supportsRelationPublication() bool {
+	for id := range c.byID {
+		if !rebuildContractLinkedExtractor(id) {
+			return false
+		}
+	}
+	return true
 }
 
 // selectPendingCallers selects a main-link page before starting workers or
@@ -247,6 +260,14 @@ func (idx *Indexer) buildRebuildFileStages(
 	fileGraph, err := private.PrepareFileGraph(ctx, graphDir, manifest.Witness, job.incarnation)
 	if err != nil {
 		return counts, err
+	}
+	if job.retainFileGraph && census.supportsRelationPublication() {
+		// The owner consumes these names during send. Retain only when
+		// there is a later relation seal to consume the private base.
+		counts.fileGraphBase, err = private.RetainFileGraph(ctx, fileGraph)
+		if err != nil {
+			return counts, err
+		}
 	}
 	if err := send(fileGraph); err != nil {
 		return counts, err

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
@@ -353,7 +354,7 @@ func buildRebuildStages(
 	req.Bounds.Dir = lease
 	job := rebuildFileStages{
 		workDir: lease, incarnation: req.Incarnation, inputs: inputs, recipes: req.Recipes, bounds: req.Bounds,
-		witness: req.Witness, classifications: classifications,
+		witness: req.Witness, classifications: classifications, retainFileGraph: exactCheckout,
 	}
 	store := rebuildParseStore{dir: req.ParseDir, limit: req.ParseLimit}
 	counts, err := idx.buildRebuildFileStages(ctx, src, store, private, job, send)
@@ -447,15 +448,84 @@ func buildRebuildStages(
 		}
 		return nil
 	}
-	if err := runMain(); err != nil {
+	// The mixed-language projection is not yet proved. Keep the private
+	// turn witnesses but never offer their unprojected rows.
+	if !exactCheckout || !counts.census.supportsRelationPublication() {
+		if err := runMain(); err != nil {
+			return err
+		}
+		if err := runTail(); err != nil {
+			return err
+		}
+		return errRebuildBuildIncomplete
+	}
+	reader := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: counts.census}
+	deferred, err := reader.deferredContractLanguages()
+	if err != nil {
 		return err
 	}
-	if err := runTail(); err != nil {
+	var contractTables store_pebble.StageTables
+	stats, err := reader.withRebuildContractSources(ctx, private, lease, rootFact, link.SpillBytes, func(read func(func(contracts.Contract) error) error) error {
+		if err := runMain(); err != nil {
+			return err
+		}
+		return reader.withRebuildContractProducer(ctx, private, read, earlyIDs, func(seal func(string, store_pebble.RelationsBase) (store_pebble.StageTables, error)) error {
+			if err := runTail(); err != nil {
+				return err
+			}
+			relationsDir := filepath.Join(lease, store_pebble.StageRelations.String())
+			if err := os.Mkdir(relationsDir, 0o700); err != nil {
+				return err
+			}
+			relations, err := private.PrepareRelations(ctx, relationsDir, counts.fileGraphBase, reader.extractorOf)
+			if err != nil {
+				return err
+			}
+			relations.Witness.Relations = &store_pebble.RelationCoverage{DeferredLanguages: deferred}
+			base, err := private.RetainRelations(ctx, counts.fileGraphBase, relations)
+			if err != nil {
+				return err
+			}
+			if err := send(relations); err != nil {
+				return err
+			}
+			contractsDir := filepath.Join(lease, store_pebble.StageContracts.String())
+			if err := os.Mkdir(contractsDir, 0o700); err != nil {
+				return err
+			}
+			contractTables, err = seal(contractsDir, base)
+			return err
+		})
+	})
+	if err != nil {
 		return err
 	}
-	// The supported tails only changed private scratch. Relation projection
-	// and its remaining tails, derived and search stages are incomplete.
-	return errRebuildBuildIncomplete
+	logger.Info("rebuild contract source capture",
+		zap.Int("records", stats.Records), zap.Int("peak_batch_bytes", stats.PeakBatchBytes),
+		zap.Int("spill_runs", stats.SpillRuns), zap.Int64("spill_bytes", stats.SpillBytes))
+	if err := send(contractTables); err != nil {
+		return err
+	}
+	derivedDir := filepath.Join(lease, store_pebble.StageDerived.String())
+	if err := os.Mkdir(derivedDir, 0o700); err != nil {
+		return err
+	}
+	derived, err := store_pebble.PrepareDeferredDerived(derivedDir, contractTables)
+	if err != nil {
+		return err
+	}
+	if err := send(derived); err != nil {
+		return err
+	}
+	searchDir := filepath.Join(lease, store_pebble.StageSearch.String())
+	if err := os.Mkdir(searchDir, 0o700); err != nil {
+		return err
+	}
+	search, err := idx.prepareRebuildSearch(ctx, private, searchDir, derived.Witness, req.Incarnation, req.ProjectName)
+	if err != nil {
+		return err
+	}
+	return send(search)
 }
 
 // runRebuildPrivateTail preserves the native post-contract-ID turn order.
