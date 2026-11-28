@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -293,34 +292,15 @@ func rebuildExternalGodotTarget(ctx context.Context, view store_pebble.RebuildVi
 	if !connection || method == "" {
 		return "", nil
 	}
-	findScript := func(from string) (string, error) {
-		var script string
-		ambiguous := false
-		err := view.VisitGuardOutgoing(ctx, from, graph.EdgeReferences, func(ref *graph.Edge) error {
-			if graph.IsUnresolvedTarget(ref.To) || ambiguous {
-				return nil
-			}
-			n, err := view.ExternalCallNode(ctx, ref.To)
-			if err == nil && n != nil && n.Kind == graph.KindFile && n.Language == "gdscript" {
-				ambiguous = script != "" && script != n.ID
-				script = n.ID
-			}
+	visitRefs := func(id string, yield func(*graph.Edge) (bool, error)) error {
+		return view.VisitGuardOutgoing(ctx, id, graph.EdgeReferences, func(e *graph.Edge) error {
+			// Keep validating adjacency rows even after the script is ambiguous.
+			_, err := yield(e)
 			return err
 		})
-		if ambiguous {
-			script = ""
-		}
-		return script, err
 	}
-	script, err := findScript(e.From)
-	if err != nil {
-		return "", err
-	}
-	if script == "" {
-		if root, _, ok := strings.Cut(e.From, "::"); ok {
-			script, err = findScript(root)
-		}
-	}
+	readNode := func(id string) (*graph.Node, error) { return view.ExternalCallNode(ctx, id) }
+	script, err := gdScriptOfSceneNode(e.From, visitRefs, readNode)
 	if err != nil || script == "" {
 		return "", err
 	}
@@ -418,47 +398,41 @@ func visitRebuildSkippedExternalCalls(ctx context.Context, view store_pebble.Reb
 	})
 }
 
-func rebuildPascalFileRole(n *graph.Node) int {
-	if n.Kind != graph.KindFile {
-		return 0
-	}
-	switch strings.ToLower(filepath.Ext(n.FilePath)) {
-	case ".pas", ".pp", ".dpr", ".lpr":
-		return 1
-	case ".dfm", ".lfm", ".fmx":
-		return 2
-	}
-	return 0
-}
-
 func visitRebuildPascalExternalCalls(ctx context.Context, view store_pebble.RebuildView,
 	yield func(*graph.Edge, store_pebble.RebuildExternalCallCandidate) error,
 ) error {
 	return view.VisitExternalCallNodes(ctx, func(n *graph.Node) bool {
 		_, _, ok := parseExternalCallTarget(n.ID)
-		return ok && rebuildPascalFileRole(n) == 2
+		return ok && n.Kind == graph.KindFile && pascalFormRole(n.FilePath) == pascalDefinitionFile
 	}, func(form *graph.Node) error {
-		var unit, lastForm graph.Node
+		var unit graph.Node
+		var lastFormID string
 		key := pascalFormKey(form.FilePath)
 		if err := view.VisitExternalCallNodes(ctx, func(n *graph.Node) bool {
-			return rebuildPascalFileRole(n) != 0 && pascalFormKey(n.FilePath) == key
+			return n.Kind == graph.KindFile && pascalFormRole(n.FilePath) != 0 && pascalFormKey(n.FilePath) == key
 		}, func(n *graph.Node) error {
-			// Native fills both maps in ascending file-ID order, last wins.
-			if rebuildPascalFileRole(n) == 1 {
+			// SQLite fills both maps in ascending file-ID order, last wins.
+			if pascalFormRole(n.FilePath) == pascalUnitFile {
 				if n.ID > unit.ID {
 					unit = *n
 				}
-			} else if n.ID > lastForm.ID {
-				lastForm = *n
+			} else if n.ID > lastFormID {
+				lastFormID = n.ID
 			}
 			return nil
 		}); err != nil {
 			return err
 		}
-		if lastForm.ID != form.ID || unit.ID == "" || unit.WorkspaceID != form.WorkspaceID {
+		if lastFormID != form.ID || unit.ID == "" {
 			return nil
 		}
-		e := &graph.Edge{From: unit.ID, To: form.ID, Kind: graph.EdgeReferences, FilePath: unit.FilePath}
+		e := pascalFormPair(
+			graph.FileNodeIdentity{ID: unit.ID, FilePath: unit.FilePath, WorkspaceID: unit.WorkspaceID},
+			graph.FileNodeIdentity{ID: form.ID, WorkspaceID: form.WorkspaceID},
+		)
+		if e == nil {
+			return nil
+		}
 		if c, ok := rebuildExternalCallCandidate(e.To, externalCallCallerLanguage(&unit, e.FilePath)); ok {
 			return yield(e, c)
 		}
@@ -553,41 +527,28 @@ func visitRebuildRustFreeExternalCall(ctx context.Context, view store_pebble.Reb
 ) error {
 	var shadowed bool
 	if err := view.VisitExternalCallNodes(ctx, func(n *graph.Node) bool {
-		return n.Language == "rust" && n.Kind == graph.KindParam && n.Name == name && enclosingFunctionForBinding(n.ID) == e.From
+		if n.Kind != graph.KindParam || n.Name != name {
+			return false
+		}
+		owner, rust := rustParameterOwner(n)
+		return rust && owner == e.From
 	}, func(*graph.Node) error {
 		shadowed = true
 		return nil
 	}); err != nil || shadowed {
 		return err
 	}
-	var all, file, dir struct {
-		count int
-		id    string
-	}
+	callerDir := rustParentDir(caller.FilePath)
+	var election rustFreeFuncElection
 	if err := view.VisitExternalCallNodes(ctx, func(n *graph.Node) bool {
 		return n.Language == "rust" && n.Kind == graph.KindFunction && n.Name == name && n.RepoPrefix == caller.RepoPrefix
 	}, func(n *graph.Node) error {
-		all.count, all.id = min(2, all.count+1), n.ID
-		if n.FilePath == caller.FilePath {
-			file.count, file.id = min(2, file.count+1), n.ID
-		}
-		if rustParentDir(n.FilePath) == rustParentDir(caller.FilePath) {
-			dir.count, dir.id = min(2, dir.count+1), n.ID
-		}
+		election.add(n, caller.FilePath, callerDir)
 		return nil
 	}); err != nil {
 		return err
 	}
-	var id string
-	switch {
-	case all.count == 1:
-		id = all.id
-	case file.count == 1:
-		id = file.id
-	case file.count == 0 && dir.count == 1:
-		id = dir.id
-	}
-	if c, ok := rebuildExternalCallCandidate(id, caller.Language); ok {
+	if c, ok := rebuildExternalCallCandidate(election.target(), caller.Language); ok {
 		return yield(e, c)
 	}
 	return nil
