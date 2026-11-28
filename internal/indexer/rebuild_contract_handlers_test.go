@@ -3,12 +3,14 @@ package indexer
 import (
 	"fmt"
 	"path"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
 )
 
@@ -132,7 +134,55 @@ func TestRebuildProviderHandlerCheckedLaravelClass(t *testing.T) {
 	require.ErrorIs(t, err, graph.ErrContractProjectionStale)
 	require.Nil(t, got)
 	route.Line--
+	foreign := route
+	foreign.FilePath = "not-admitted.php"
+	_, err = reader.providerHandler(ctx, b.RebuildView(), foreign)
+	require.ErrorContains(t, err, "no admitted handler registration")
 	reader.store.dir = t.TempDir()
 	_, err = reader.providerHandler(ctx, b.RebuildView(), route)
 	require.ErrorIs(t, err, errParseEntryCorrupt)
+}
+
+func TestRebuildHandlerElectionSQLiteBoundaries(t *testing.T) {
+	ctx := t.Context()
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	native, err := store_sqlite.Open(filepath.Join(t.TempDir(), "native.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, native.Close()) })
+	nodes := []*graph.Node{
+		{ID: "r/owner.php::Owner", Name: "Owner", Kind: graph.KindType, RepoPrefix: "r", FilePath: "r/owner.php", Meta: map[string]any{"scope_ns": "Acme"}},
+		{ID: "r/namesake.php::Owner", Name: "Owner", Kind: graph.KindFunction, RepoPrefix: "r", FilePath: "r/namesake.php", Meta: map[string]any{"scope_ns": "Acme"}},
+		{ID: "r/base.php::Action", Name: "Action", Kind: graph.KindMethod, RepoPrefix: "r", FilePath: "r/base.php", Language: "php"},
+		{ID: "x/pkg/a.go::Foreign", Name: "Foreign", Kind: graph.KindFunction, RepoPrefix: "x", FilePath: "x/pkg/a.go"},
+		{ID: "x/other/b.go::Foreign", Name: "Foreign", Kind: graph.KindFunction, RepoPrefix: "x", FilePath: "x/other/b.go", Language: "go"},
+		{ID: "r/pkg/a.go::Mixed", Name: "Mixed", Kind: graph.KindFunction, RepoPrefix: "r", FilePath: "r/pkg/a.go"},
+		{ID: "r/other/b.go::Mixed", Name: "Mixed", Kind: graph.KindFunction, RepoPrefix: "r", FilePath: "r/other/b.go", Language: "go"},
+	}
+	require.NoError(t, native.AddBatchChecked(nodes, nil))
+	b.AddBatch(nodes, nil)
+	idx := &Indexer{graph: native}
+	for _, tc := range []struct{ name, class, action, repo, dir, want string }{
+		{"unknown owner", "Acme\\Missing", "Action", "r", "r", ""},
+		{"owner without own method and non-type namesake", "Acme\\Owner", "Action", "r", "r", "r/base.php::Action"},
+		{"foreign pool directory tie", "", "Foreign", "r", "x/pkg", "x/pkg/a.go::Foreign"},
+		{"mixed language directory", "", "Mixed", "r", "r/pkg", "r/pkg/a.go::Mixed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pass := (rebuildContractReceiptReader{}).handlerPass()
+			got, err := pass.selectRebuildProviderHandler(ctx, b.RebuildView(), "", tc.action, tc.repo, tc.dir, tc.class)
+			require.NoError(t, err)
+			want := idx.resolveInnermostHandlerFromCandidates("", tc.action, tc.repo, tc.dir, tc.class, nil)
+			if tc.want == "" {
+				require.Nil(t, want)
+				require.Nil(t, got)
+				return
+			}
+			require.NotNil(t, want)
+			require.NotNil(t, got)
+			require.Equal(t, tc.want, want.ID)
+			require.Equal(t, want.ID, got.ID)
+		})
+	}
 }

@@ -222,6 +222,66 @@ def ambiguous() -> Meta:
 		require.Equal(t, []string{"empty", route.ID}, ids)
 		return nil
 	}))
+	require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+		// Two frozen tasks may successively match a live row, after a
+		// symbol move. Stationary siblings must never take the first move.
+		first := route
+		first.SymbolID = "register"
+		first.Meta = map[string]any{"handler_ident": "view"}
+		second := first
+		second.SymbolID = file + "::view"
+		second.Meta = map[string]any{"handler_trail": "no_line"}
+		consumer := first
+		consumer.Role = contracts.RoleConsumer
+		consumer.Meta = nil
+		foreign := first
+		foreign.RepoPrefix = "other"
+		foreign.Meta = nil
+		otherFile := first
+		otherFile.FilePath = "other.py"
+		otherFile.Meta = nil
+		stationary := first
+		stationary.SymbolID = "stationary"
+		stationary.Meta = nil
+		for _, c := range []contracts.Contract{first, second, consumer, foreign, otherFile, stationary} {
+			require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c}))
+		}
+		require.NoError(t, reader.bindRebuildProviderHandlers(ctx, view, records))
+		var got []store_pebble.RebuildContractRecord
+		require.NoError(t, records.VisitByID(route.ID, func(item store_pebble.RebuildContractRecord) error {
+			got = append(got, item)
+			return nil
+		}))
+		require.Len(t, got, 6)
+		for i := range 2 {
+			require.Equal(t, file+"::no_line", got[i].SymbolID)
+			require.True(t, got[i].BodyUnproved)
+			require.NotContains(t, got[i].Meta, "handler_trail")
+		}
+		for i, want := range []contracts.Contract{consumer, foreign, otherFile, stationary} {
+			require.Equal(t, store_pebble.RebuildContractRecord{Contract: want}, got[i+2])
+		}
+		return nil
+	}))
+
+	// A hidden-only hint cannot open its bucket for cleanup.
+	require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+		first := route
+		first.SymbolID = "same"
+		first.Meta = nil
+		second := first
+		second.Meta = map[string]any{"handler_trail": "unknown"}
+		require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: first}))
+		require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: second}))
+		require.NoError(t, reader.bindRebuildProviderHandlers(ctx, view, records))
+		var got []contracts.Contract
+		require.NoError(t, records.VisitByID(route.ID, func(item store_pebble.RebuildContractRecord) error {
+			got = append(got, item.Contract)
+			return nil
+		}))
+		require.Equal(t, []contracts.Contract{first, second}, got)
+		return nil
+	}))
 	for _, name := range []string{"ambiguous", "no_line"} {
 		handler, err := view.Node(ctx, file+"::"+name)
 		require.NoError(t, err)
