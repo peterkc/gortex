@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
+	"slices"
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
@@ -40,6 +42,7 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 		return err
 	}
 	view := b.RebuildView()
+	r.proofCache = &rebuildContractReceiptCache{}
 	return b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
 		if err := source(func(c contracts.Contract) error {
 			return records.Add(store_pebble.RebuildContractRecord{Contract: c})
@@ -72,18 +75,7 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 				if err := compareRebuildContractIDs(ctx, orderedEarlyContractIDs(early), s.CompleteIDs()); err != nil {
 					return fmt.Errorf("compare complete private contract IDs: %w", err)
 				}
-				// Native snapshots referenced shapes before any inline writes.
-				if err := records.VisitRepresentatives(func(item store_pebble.RebuildContractRecord) error {
-					owner, err := rebuildContractOwner(ctx, view, item.Contract)
-					if err != nil {
-						return err
-					}
-					keep, err := r.selectRebuildContractRecord(ctx, view, item, owner)
-					if err != nil || !keep {
-						return err
-					}
-					return rememberRebuildShapeRefs(s, item.Contract)
-				}); err != nil {
+				if err := r.selectRebuildShapeRefs(ctx, view, records, s, add); err != nil {
 					return err
 				}
 				for batch, err := range r.shapeBatches(ctx, view, s.ShapeRefs()) {
@@ -105,7 +97,9 @@ func (r rebuildContractReceiptReader) withRebuildContractProducer(ctx context.Co
 				if err := r.captureRebuildSpringBeanCalls(ctx, b, records, s, add); err != nil {
 					return err
 				}
-				return r.visitSpringConfig(ctx, view, records, add)
+				err := r.visitSpringConfig(ctx, view, records, add)
+				*r.proofCache = rebuildContractReceiptCache{}
+				return err
 			}, func(batches iter.Seq2[store_pebble.RebuildContractBatch, error], coverage store_pebble.ContractCoverage) error {
 				active, attempted := true, false
 				var sealErr error
@@ -196,4 +190,76 @@ func (r rebuildContractReceiptReader) captureRebuildContractRows(ctx context.Con
 		r.idx.warnMissingContractOwners(missingOwners)
 	}
 	return err
+}
+
+// Native snapshots referenced shapes before any inline writes. Elect the
+// canonical registry rows first, then keep independently raw-proved refs from
+// omitted records. A ref no selected or raw record proves gets type-file O.
+func (r rebuildContractReceiptReader) selectRebuildShapeRefs(ctx context.Context, view store_pebble.RebuildView,
+	records *store_pebble.RebuildContractRecords, selection *store_pebble.RebuildContractSelection,
+	add func(store_pebble.RebuildContractBatch) error,
+) error {
+	if err := records.WithOrderedRepresentatives(func(read func(func(store_pebble.RebuildContractRecord) error) error) error {
+		var previous string
+		var winnerKept bool
+		return read(func(item store_pebble.RebuildContractRecord) error {
+			c := item.Contract
+			owner, err := rebuildContractOwner(ctx, view, c)
+			if err != nil {
+				return err
+			}
+			keep, err := r.selectRebuildContractRecord(ctx, view, item, owner)
+			if err != nil {
+				return err
+			}
+			if c.ID != previous {
+				previous, winnerKept = c.ID, keep
+			}
+			refs := rebuildShapeRefs(c)
+			if len(refs) == 0 {
+				return nil
+			}
+			if !keep || !winnerKept {
+				raw, err := r.rawRebuildShapeRefs(ctx, c)
+				if err != nil {
+					return err
+				}
+				for id := range refs {
+					if _, ok := raw[id]; !ok {
+						delete(refs, id)
+					}
+				}
+			}
+			for _, id := range slices.Sorted(maps.Keys(refs)) {
+				if err := selection.RememberShapeRef(id); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}); err != nil {
+		return err
+	}
+	return records.VisitRepresentatives(func(item store_pebble.RebuildContractRecord) error {
+		for _, id := range slices.Sorted(maps.Keys(rebuildShapeRefs(item.Contract))) {
+			selected, err := selection.HasShapeRef(id)
+			if err != nil {
+				return err
+			}
+			if selected {
+				continue
+			}
+			n, err := view.Node(ctx, id)
+			if err != nil {
+				return err
+			}
+			if n == nil || (n.Kind != graph.KindType && n.Kind != graph.KindInterface) || n.StartLine <= 0 || contracts.ShapeExtractorForPath(n.FilePath) == nil {
+				continue // native cannot emit a shape for this reference
+			}
+			if err := add(store_pebble.RebuildContractBatch{Omitted: []store_pebble.RebuildContractOmission{rebuildShapeOmission(item.Contract, n)}}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

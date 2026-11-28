@@ -167,6 +167,13 @@ func (s *RebuildContractSelection) RememberShapeRef(id string) error {
 	return s.put('t', id)
 }
 
+func (s *RebuildContractSelection) HasShapeRef(id string) (bool, error) {
+	if err := s.checkFrozen(); err != nil {
+		return false, err
+	}
+	return s.contains('t', id)
+}
+
 func (s *RebuildContractSelection) CompleteIDs() iter.Seq2[string, error] { return s.stream('c') }
 func (s *RebuildContractSelection) SelectedIDs() iter.Seq2[string, error] { return s.stream('s') }
 func (s *RebuildContractSelection) ShapeRefs() iter.Seq2[string, error]   { return s.stream('t') }

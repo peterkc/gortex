@@ -136,6 +136,9 @@ func Register(m *http.ServeMux) {
 			wantShape, ok := g.GetNode(typeID).Meta["shape"].(*contracts.Shape)
 			require.True(t, ok)
 			require.NotNil(t, wantShape)
+			wantDeferredShape, ok := g.GetNode("deferred.py::Payload").Meta["shape"].(*contracts.Shape)
+			require.True(t, ok, "native shape exists even though its record is omitted")
+			require.NotNil(t, wantDeferredShape)
 			var nativeCalls []*graph.Edge
 			for _, e := range g.GetOutEdges("Bean.java::Client") {
 				if e.Kind == graph.EdgeCalls && e.Meta["via"] == "spring.Bean" {
@@ -217,7 +220,7 @@ func Register(m *http.ServeMux) {
 			require.Nil(t, snap.GetNode(partial))
 			shapeRows, err := snap.ContractShapesContext(ctx, []string{typeID, "deferred.py::Payload"})
 			require.NoError(t, err)
-			require.Equal(t, map[string]*contracts.Shape{typeID: wantShape}, shapeRows)
+			require.Equal(t, map[string]*contracts.Shape{typeID: wantShape, "deferred.py::Payload": wantDeferredShape}, shapeRows)
 			require.NotContains(t, snap.GetNode(typeID).Meta, "shape")
 			var actualCalls []*graph.Edge
 			for _, e := range snap.GetOutEdges("Bean.java::Client") {
@@ -271,4 +274,53 @@ func TestRebuildContractProducerRefusesUnbuiltAndUnsealed(t *testing.T) {
 	stage, err := escaped(t.TempDir(), store_pebble.RelationsBase{})
 	require.Zero(t, stage)
 	require.ErrorIs(t, err, errRebuildContractIDs)
+}
+
+func TestRebuildContractUnprovedShapeRefLabelsTypeFile(t *testing.T) {
+	ctx := t.Context()
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	idx := newTestIndexer(graph.New())
+	t.Cleanup(idx.Close)
+	const file, typeFile, typeID = "routes.go", "body.go", "body.go::Payload"
+	src := []byte("package p\nfunc Register() {}\n")
+	ext, ok := idx.registry.GetByLanguage("go")
+	require.True(t, ok)
+	parsed, facts, err := idx.extractPreparedRebuildFileWithContractFacts(ctx, file, ext, src, src)
+	require.NoError(t, err)
+	input := rebuildInput{Path: file, Language: "go", Size: int64(len(src))}
+	job := rebuildFileStages{inputs: []rebuildInput{input}, recipes: map[string]rebuildDigest{"go": {1}}}
+	store := rebuildParseStore{dir: t.TempDir(), limit: 1 << 20}
+	wire, err := store_pebble.EncodeContractParseFacts(parsed, facts)
+	require.NoError(t, err)
+	require.NoError(t, store.write(input.parseKey(idx.rebuildExtractorRecipe(job.recipes[input.Language], input)), wire))
+	r := rebuildContractReceiptReader{idx: idx, job: job, store: store, census: &rebuildExtractorCensus{
+		byPath: map[string]string{file: "go"}, originByGraphPath: map[string]string{file: file},
+	}}
+	require.NoError(t, b.AddParsedFile("", parsed))
+	n := &graph.Node{ID: typeID, Name: "Payload", Kind: graph.KindType, FilePath: typeFile, Language: "go", StartLine: 1}
+	b.AddNode(n)
+	c := contracts.Contract{ID: "http::GET::/x", Type: contracts.ContractHTTP, Role: contracts.RoleProvider,
+		SymbolID: file + "::Register", FilePath: file, Meta: map[string]any{"response_type": typeID}}
+	require.NoError(t, b.WithRebuildContractRecords(ctx, func(records *store_pebble.RebuildContractRecords) error {
+		require.NoError(t, records.Add(store_pebble.RebuildContractRecord{Contract: c, BodyUnproved: true}))
+		return records.WithContractSelection(func(s *store_pebble.RebuildContractSelection) error {
+			require.NoError(t, s.FreezeCompleteIDs())
+			var omitted []store_pebble.RebuildContractOmission
+			require.NoError(t, r.selectRebuildShapeRefs(ctx, b.RebuildView(), records, s, func(batch store_pebble.RebuildContractBatch) error {
+				omitted = append(omitted, batch.Omitted...)
+				return nil
+			}))
+			for id, err := range s.ShapeRefs() {
+				require.NoError(t, err)
+				t.Fatalf("unproved reference selected: %q", id)
+			}
+			require.Len(t, omitted, 1)
+			require.Equal(t, typeFile, omitted[0].FilePath)
+			require.Equal(t, c.ID, omitted[0].ID)
+			require.NotEqual(t, rebuildContractRecordOmission(c).RecordKey, omitted[0].RecordKey)
+			return nil
+		})
+	}))
 }

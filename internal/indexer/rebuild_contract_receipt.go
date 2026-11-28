@@ -15,10 +15,17 @@ import (
 // The caller keeps only the facts it needs from each receipt. The manifest
 // inputs are already sorted by literal path by buildRebuildFileStages.
 type rebuildContractReceiptReader struct {
-	idx    *Indexer
-	job    rebuildFileStages
-	store  rebuildParseStore
-	census *rebuildExtractorCensus
+	idx        *Indexer
+	job        rebuildFileStages
+	store      rebuildParseStore
+	census     *rebuildExtractorCensus
+	proofCache *rebuildContractReceiptCache
+}
+
+type rebuildContractReceiptCache struct {
+	path  string
+	base  store_pebble.ParseFacts
+	facts *contracts.FileFacts
 }
 
 func (r rebuildContractReceiptReader) load(ctx context.Context, input rebuildInput) (store_pebble.ParseFacts, *contracts.FileFacts, error) {
@@ -143,7 +150,17 @@ func (r rebuildContractReceiptReader) forGraphPath(ctx context.Context, file str
 	if !ok {
 		return store_pebble.ParseFacts{}, nil, fmt.Errorf("%w: no admitted contract receipt for %q", graph.ErrContractProjectionStale, file)
 	}
-	return r.load(ctx, r.job.inputs[i])
+	if err := ctx.Err(); err != nil {
+		return store_pebble.ParseFacts{}, nil, err
+	}
+	if cache := r.proofCache; cache != nil && cache.path == file && cache.facts != nil {
+		return cache.base, cache.facts, nil
+	}
+	base, facts, err := r.load(ctx, r.job.inputs[i])
+	if err == nil && r.proofCache != nil {
+		*r.proofCache = rebuildContractReceiptCache{path: file, base: base, facts: facts}
+	}
+	return base, facts, err
 }
 
 // springRawDeclaration requires an actual parse declaration, not a synthetic

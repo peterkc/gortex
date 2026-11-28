@@ -19,11 +19,6 @@ func (r rebuildContractReceiptReader) extractorOf(file string) string {
 	return r.census.byPath[r.census.originByGraphPath[file]]
 }
 
-func rebuildContractLinkedExtractor(id string) bool {
-	// The same effective-extractor admission as selectPendingCallers.
-	return id == "go" || id == "typescript" || id == "javascript"
-}
-
 func (r rebuildContractReceiptReader) deferredContractLanguages() ([]string, error) {
 	if r.census == nil || r.census.byPath == nil || r.census.originByGraphPath == nil || uint64(len(r.census.byPath)) != r.census.admitted {
 		return nil, fmt.Errorf("%w: incomplete contract extractor census", graph.ErrContractProjectionStale)
@@ -33,7 +28,7 @@ func (r rebuildContractReceiptReader) deferredContractLanguages() ([]string, err
 		if id == "" {
 			return nil, fmt.Errorf("%w: missing effective contract extractor", graph.ErrContractProjectionStale)
 		}
-		if !rebuildContractLinkedExtractor(id) {
+		if !rebuildLinkedExtractor(id) {
 			deferred[id] = struct{}{}
 		}
 	}
@@ -80,7 +75,7 @@ func (r rebuildContractReceiptReader) selectRebuildContractRecord(ctx context.Co
 			return false, fmt.Errorf("%w: elected contract owner %q changed", graph.ErrContractProjectionStale, owner)
 		}
 	}
-	if rebuildContractLinkedExtractor(lang) && (n == nil || rebuildContractLinkedExtractor(r.extractorOf(n.FilePath))) {
+	if rebuildLinkedExtractor(lang) && (n == nil || rebuildLinkedExtractor(r.extractorOf(n.FilePath))) {
 		return true, nil // checked source and fully linked owner; late consumers have run
 	}
 	if n == nil || n.FilePath != c.FilePath {
@@ -148,24 +143,45 @@ func rebuildContractRecordOmission(c contracts.Contract) store_pebble.RebuildCon
 		Type: c.Type, ID: c.ID, RecordKey: store_pebble.HeadDigest(sha256.Sum256(raw))}
 }
 
-func rememberRebuildShapeRefs(s *store_pebble.RebuildContractSelection, c contracts.Contract) error {
-	remember := func(raw any) error {
-		id, _ := raw.(string)
-		if !strings.Contains(id, "::") {
-			return nil
+func rebuildShapeRefs(c contracts.Contract) map[string]struct{} {
+	refs := make(map[string]struct{})
+	remember := func(raw any) {
+		if id, _ := raw.(string); strings.Contains(id, "::") {
+			refs[id] = struct{}{}
 		}
-		return s.RememberShapeRef(id)
 	}
 	for _, key := range []string{"request_type", "response_type"} {
-		if err := remember(c.Meta[key]); err != nil {
-			return err
-		}
+		remember(c.Meta[key])
 	}
 	env, _ := c.Meta["response_envelope"].([]map[string]any)
 	for _, row := range env {
-		if err := remember(row["type"]); err != nil {
-			return err
+		remember(row["type"])
+	}
+	return refs
+}
+
+// An omitted registry record can still prove an independent native shape
+// reference when the same checked raw registration already names that type.
+func (r rebuildContractReceiptReader) rawRebuildShapeRefs(ctx context.Context, c contracts.Contract) (map[string]struct{}, error) {
+	if r.extractorOf(c.FilePath) == "" {
+		return nil, nil
+	}
+	_, facts, err := r.forGraphPath(ctx, c.FilePath)
+	if err != nil {
+		return nil, err
+	}
+	for _, raw := range facts.Records {
+		if raw.ID == c.ID && raw.FilePath == c.FilePath && raw.SymbolID == c.SymbolID && raw.Role == c.Role && raw.Line == c.Line {
+			return rebuildShapeRefs(raw), nil // native first representative
 		}
 	}
-	return nil
+	return nil, nil
+}
+
+func rebuildShapeOmission(c contracts.Contract, n *graph.Node) store_pebble.RebuildContractOmission {
+	o := rebuildContractRecordOmission(c)
+	o.RepoPrefix, o.FilePath = n.RepoPrefix, n.FilePath
+	key := append([]byte("shape\x00"), o.RecordKey[:]...)
+	o.RecordKey = store_pebble.HeadDigest(sha256.Sum256(append(key, n.ID...)))
+	return o
 }
