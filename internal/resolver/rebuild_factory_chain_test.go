@@ -16,7 +16,7 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 	for _, mode := range []string{
 		"conformance", "raw factory entrant", "shared raw claim", "joint omitted factories",
 		"unproved method seed", "unproved free seed", "irrelevant raw arc", "inert raw arc",
-		"joint raw arc entrants", "raw arc with live-only method", "proved seed ambiguity",
+		"joint raw arc entrants", "raw arc with live-only method", "proved-only arc match", "proved seed ambiguity",
 		"unrelated large row", "related large row", "lost receiver before freeze", "lost receiver after freeze",
 	} {
 		t.Run(mode, func(t *testing.T) {
@@ -66,6 +66,8 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 				}
 			case "irrelevant raw arc", "inert raw arc", "joint raw arc entrants":
 				nodes = append(nodes, alt, altMethod)
+			case "proved-only arc match":
+				nodes = append(nodes, alt)
 			case "unrelated large row", "related large row":
 				extra.Name = seed.Name
 				extra.Meta["large"] = strings.Repeat("x", 16<<20)
@@ -89,6 +91,13 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 			case "raw arc with live-only method":
 				raw.Edges = []*graph.Edge{arc}
 				raw.Nodes = nodes[:3]
+			case "proved-only arc match":
+				// Keep the method's receipt exact. Only the implementor names change,
+				// so each walk reaches that method through a different arc.
+				rawConcrete, rawAlt := *concrete, *alt
+				rawConcrete.Name, rawAlt.Name = alt.Name, concrete.Name
+				raw.Nodes = []*graph.Node{seed, contract, &rawConcrete, method, &rawAlt}
+				raw.Edges = []*graph.Edge{arc, altArc}
 			case "unproved free seed":
 				raw.Nodes = nodes[:3]
 			case "unproved method seed":
@@ -180,6 +189,18 @@ func TestRebuildFactoryChainSQLiteOracle(t *testing.T) {
 					require.Equal(t, 2, ResolveFactoryChains(one))
 				case "lost receiver before freeze", "lost receiver after freeze":
 					require.Equal(t, 1, ResolveFactoryChains(native))
+				case "proved-only arc match":
+					_, receipt := openRebuildEventStores(t, route, raw)
+					require.Equal(t, 2, ResolveFactoryChains(native))
+					require.Equal(t, 2, ResolveFactoryChains(receipt))
+					for _, edges := range [][]*graph.Edge{native.AllEdges(), receipt.AllEdges()} {
+						for _, e := range edges {
+							if e.Kind == graph.EdgeCalls || e.Kind == graph.EdgeReferences {
+								require.Equal(t, method.ID, e.To)
+								require.Equal(t, true, e.Meta["conformance_walked"])
+							}
+						}
+					}
 				case "raw factory entrant":
 					require.Equal(t, 2, ResolveFactoryChains(native))
 					_, receipt := openRebuildEventStores(t, route, raw)
