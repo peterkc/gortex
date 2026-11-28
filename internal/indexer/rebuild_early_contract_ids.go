@@ -61,33 +61,22 @@ type rebuildEndpointConstants struct {
 	err  error
 }
 
-type rebuildEndpointValue struct {
-	value     string
-	ambiguous bool
-}
-
-func (v *rebuildEndpointValue) add(s string) {
-	if s == "" {
-		return
-	}
-	if v.value == "" {
-		v.value = s
-	} else if v.value != s {
-		v.ambiguous = true
-	}
-}
-
-// lookup reduces identical values without retaining a name group, even for a
-// name declared in many files. Preserve same-file preference and repo-wide
-// fallback in resolveConstIdentifier. Errors are sticky, not native misses.
+// lookup streams the native name group without retaining its declarations.
+// Read errors and limit excess are sticky, not absent constant answers.
 func (s *rebuildEndpointConstants) lookup(name, file, repo string) string {
 	name = strings.TrimSpace(name)
 	if name == "" || s.err != nil {
 		return ""
 	}
-	var sameFile, anywhere rebuildEndpointValue
+	var values contracts.EndpointConstantValues
+	count := 0
 	prefix := repo + "/"
 	s.err = s.view.VisitNameCandidates(s.ctx, name, nil, func(n *graph.Node) error {
+		// Native charges every exact-name candidate before kind and repo filters.
+		count++
+		if count > graph.ContractProjectionRowLimit {
+			return graph.ErrContractProjectionLimit
+		}
 		if n.Kind != graph.KindConstant || repo != "" && !strings.HasPrefix(n.ID, prefix) && !strings.HasPrefix(n.FilePath, prefix) {
 			return nil
 		}
@@ -95,22 +84,14 @@ func (s *rebuildEndpointConstants) lookup(name, file, repo string) string {
 		if err != nil || row == nil {
 			return err
 		}
-		anywhere.add(row.Value)
-		if file != "" && n.FilePath == file {
-			sameFile.add(row.Value)
-		}
+		values.Add(row.Value, file != "" && n.FilePath == file)
 		return nil
 	})
-	switch {
-	case s.err != nil:
-		return ""
-	case !sameFile.ambiguous && sameFile.value != "":
-		return sameFile.value
-	case !anywhere.ambiguous:
-		return anywhere.value
-	default:
+	if s.err != nil {
 		return ""
 	}
+	value, _ := values.Value()
+	return value
 }
 
 // finish runs after main. Collect only native DI records, without running

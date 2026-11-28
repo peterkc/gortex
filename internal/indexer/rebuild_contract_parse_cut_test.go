@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -65,4 +66,32 @@ func TestRebuildEndpointConstantReduction(t *testing.T) {
 	constants = rebuildEndpointConstants{ctx: canceled, view: b.RebuildView()}
 	require.Empty(t, constants.lookup("ROUTE", "repo/site.go", "repo"))
 	require.ErrorIs(t, constants.err, context.Canceled)
+}
+
+func TestRebuildEndpointConstantCandidateLimit(t *testing.T) {
+	ctx := t.Context()
+	b, err := store_pebble.OpenBuild(t.TempDir(), store_pebble.FullProfile)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	const name, file, id = "ROUTE", "repo/site.go", "repo/site.go::ROUTE"
+	require.NoError(t, b.AddParsedFile("repo", store_pebble.ParseFacts{
+		File:              graph.FileMetaRow{FilePath: file, NodeCount: 2},
+		EffectiveLanguage: "go",
+		Nodes: []*graph.Node{
+			{ID: file, Name: file, FilePath: file, Kind: graph.KindFile, Language: "go", RepoPrefix: "repo"},
+			{ID: id, Name: name, FilePath: file, Kind: graph.KindConstant, Language: "go", RepoPrefix: "repo"},
+		},
+		Constants: []graph.ConstantValueRow{{NodeID: id, FilePath: file, Value: "/local"}},
+	}))
+	// These rows count toward the native name limit, but cannot vote.
+	for i := range graph.ContractProjectionRowLimit - 1 {
+		b.AddNode(&graph.Node{ID: fmt.Sprintf("foreign/site.go::%d", i), Name: name, FilePath: "foreign/site.go", Kind: graph.KindFunction, Language: "go", RepoPrefix: "foreign"})
+	}
+	constants := rebuildEndpointConstants{ctx: ctx, view: b.RebuildView()}
+	require.Equal(t, "/local", constants.lookup(name, file, "repo"))
+	require.NoError(t, constants.err)
+
+	b.AddNode(&graph.Node{ID: "foreign/site.go::extra", Name: name, FilePath: "foreign/site.go", Kind: graph.KindConstant, Language: "go", RepoPrefix: "foreign"})
+	require.Empty(t, constants.lookup(name, file, "repo"))
+	require.ErrorIs(t, constants.err, graph.ErrContractProjectionLimit)
 }
