@@ -163,7 +163,8 @@ func TestRebuildSvelteKitLoadFileFallback(t *testing.T) {
 		{"parse receipt", "parsed", false},
 		{"checked skip outvotes parsed file", "checked", false},
 		{"missing skip witness", "unproved", true},
-		{"file payload differs from receipt", "changed", true},
+		{"test-file stamp differs from receipt", "changed", false},
+		{"test-file stamp differs from checked skip", "checked and stamped", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -178,11 +179,16 @@ func TestRebuildSvelteKitLoadFileFallback(t *testing.T) {
 			}
 			b, native := openRebuildEventStores(t, facts...)
 			switch tc.mode {
-			case "checked":
-				live.Meta = map[string]any{"witness": "checked skip"}
-				skips = func(yield func(*graph.Node) bool) { yield(&live) }
+			case "checked", "checked and stamped":
+				raw := *server
+				raw.Meta = map[string]any{"witness": "checked skip"}
+				live = raw
+				if tc.mode == "checked and stamped" {
+					live.Meta = map[string]any{"witness": "checked skip", "is_test_file": true}
+				}
+				skips = func(yield func(*graph.Node) bool) { yield(&raw) }
 			case "changed":
-				live.Meta = map[string]any{"witness": "different payload"}
+				live.Meta = map[string]any{"is_test_file": true}
 			}
 			if tc.mode != "parsed" {
 				b.AddNode(&live)
@@ -224,4 +230,46 @@ func TestRebuildSvelteKitLoadKeepsIncumbent(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, count)
 	require.Equal(t, want, rebuildEventSavedRows(t, b))
+}
+
+func TestRebuildSvelteKitLoadDuplicateNodeReceipts(t *testing.T) {
+	route := newRebuildSvelteKitRoute("src/routes/duplicate/", "web", "web")
+	other := *route.page
+	other.StartLine++
+	for _, first := range []*graph.Node{route.page, &other} {
+		last := &other
+		if first == &other {
+			last = route.page
+		}
+		facts := route.receipts()
+		facts[0].Nodes = []*graph.Node{first, last}
+		facts[0].File.NodeCount = len(facts[0].Nodes)
+		build, native := openRebuildEventStores(t, facts...)
+		require.Equal(t, 1, ResolveSvelteKitLoad(native))
+		want := rebuildEventSQLiteRows(native)
+		require.Equal(t, []*graph.Edge{rebuildSvelteKitReference(last, route.load)}, rebuildSvelteKitEdges(want))
+		adds, err := RunRebuildSvelteKitLoad(t.Context(), build, rebuildGRPCReceipts(facts...), rebuildSvelteKitSelection(t, build), nil)
+		require.NoError(t, err)
+		require.EqualValues(t, 1, adds)
+		require.Equal(t, want, rebuildEventSavedRows(t, build))
+	}
+}
+
+func TestRebuildSvelteKitLoadWinnerWorkspaceProof(t *testing.T) {
+	route := newRebuildSvelteKitRoute("src/routes/workspace/", "web", "web")
+	page := rebuildEventFacts(route.page.FilePath, route.page.Language, []*graph.Node{route.page})
+	server := rebuildEventFacts(route.loadFile.FilePath, route.loadFile.Language, []*graph.Node{route.loadFile})
+	b := openRebuildGRPCBuild(t, page, server)
+	before := rebuildEventSavedRows(t, b)
+	// Both facts still elect the same edge identity, but neither proves
+	// the workspace that native reads from the saved winners.
+	rawPage, rawFile := *route.page, *route.loadFile
+	rawPage.WorkspaceID, rawFile.WorkspaceID = "other", "other"
+	page.Nodes = []*graph.Node{&rawPage}
+	server.Nodes = []*graph.Node{&rawFile}
+	adds, err := RunRebuildSvelteKitLoad(t.Context(), b, rebuildGRPCReceipts(page, server), rebuildSvelteKitSelection(t, b), nil)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildSvelteKitLoad)
+	require.ErrorIs(t, err, store_pebble.ErrRebuildUnknownProvenance)
+	require.Zero(t, adds)
+	require.Equal(t, before, rebuildEventSavedRows(t, b))
 }

@@ -76,7 +76,7 @@ func (p *rebuildSvelteKitLoad) winner(col byte, dir string, kind graph.NodeKind)
 
 func (p *rebuildSvelteKitLoad) offer(col byte, dir string, n *graph.Node) error {
 	prior, err := p.winner(col, dir, n.Kind)
-	if err != nil || prior != nil && prior.ID >= n.ID {
+	if err != nil || prior != nil && prior.ID > n.ID {
 		return err
 	}
 	candidate := graph.Node{ID: n.ID, Kind: n.Kind, FilePath: n.FilePath, WorkspaceID: n.WorkspaceID}
@@ -165,28 +165,6 @@ func (p *rebuildSvelteKitLoad) recordNode(n *graph.Node) error {
 	if !ok {
 		return nil
 	}
-	if n.Kind == graph.KindFile {
-		// Reuse the test-file stage's exact FileGraph row check. The
-		// checked skip stream is a separate producer, not a parse receipt.
-		value, err := encodeNode(n)
-		if err != nil {
-			return err
-		}
-		matched, err := pendingGet(p.b.pending, pendingNodeKey(n.ID), func(raw []byte) (bool, error) {
-			return bytes.Equal(raw, value), nil
-		})
-		if err != nil {
-			return err
-		}
-		key := p.key('f', n.ID)
-		state, err := rebuildScratchState(p.b.pending, key, "SvelteKit server file proof")
-		if err != nil {
-			return err
-		}
-		if err := noteRebuildScratchState(p.put, key, state|rebuildCapabilityWanted, rebuildScratchProofBit(matched)); err != nil {
-			return err
-		}
-	}
 	return p.offer('r', dir, n)
 }
 
@@ -198,16 +176,9 @@ func (p *rebuildSvelteKitLoad) electedProved(dir string) (bool, error) {
 	kind := graph.KindFile
 	if load != nil && load.ID != "" {
 		kind = graph.KindFunction
-	} else {
-		file, err := p.winner('l', dir, graph.KindFile)
-		if err != nil || file == nil {
-			return false, err
-		}
-		state, err := rebuildScratchState(p.b.pending, p.key('f', file.ID), "SvelteKit server file proof")
-		if err != nil || state != rebuildScratchExact {
-			return false, err
-		}
 	}
+	// Compare only the elected route fields. FileGraph metadata can have changed
+	// since capture, for example when the test-file pass stamps the server file.
 	for _, role := range [...]graph.NodeKind{graph.KindType, kind} {
 		live, err := p.get(p.key('l', dir, string(role)))
 		if err != nil {

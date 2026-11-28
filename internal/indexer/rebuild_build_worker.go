@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pebble"
 	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
@@ -836,13 +835,7 @@ func buildRebuildStages(
 		if goFrameMoves != 0 {
 			logger.Info("rebuild GoFrame applied to private build", zap.Uint64("moves", goFrameMoves))
 		}
-		svelteKitAdds, err := resolver.RunRebuildSvelteKitLoad(ctx, private, receipts, selection, func(yield func(*graph.Node) bool) {
-			for key, fact := range classifications {
-				if n := rebuildCheckedSkipNode(key, fact); n != nil && !yield(n) {
-					return
-				}
-			}
-		})
+		svelteKitAdds, err := resolver.RunRebuildSvelteKitLoad(ctx, private, receipts, selection, rebuildCheckedSkips(classifications))
 		if err != nil {
 			return err
 		}

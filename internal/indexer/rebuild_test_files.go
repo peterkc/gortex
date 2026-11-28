@@ -12,18 +12,21 @@ import (
 func runRebuildTestFiles(ctx context.Context, build *store_pebble.BuildStore,
 	receipts iter.Seq2[store_pebble.ParseFacts, error], classifications map[string]rebuildClassificationFact,
 ) error {
-	skips := func(yield func(*graph.Node) bool) {
+	return build.RebuildTestFiles(ctx, receipts, rebuildCheckedSkips(classifications), IsTestFile, func(n *graph.Node) string {
+		return detectTestRunnerForFileEdges(n, nil)
+	}, func(n *graph.Node, e *graph.Edge) string {
+		return detectRunnerFromImportEdgeSlice(n, []*graph.Edge{e})
+	})
+}
+
+func rebuildCheckedSkips(classifications map[string]rebuildClassificationFact) iter.Seq[*graph.Node] {
+	return func(yield func(*graph.Node) bool) {
 		for key, fact := range classifications {
 			if n := rebuildCheckedSkipNode(key, fact); n != nil && !yield(n) {
 				return
 			}
 		}
 	}
-	return build.RebuildTestFiles(ctx, receipts, skips, IsTestFile, func(n *graph.Node) string {
-		return detectTestRunnerForFileEdges(n, nil)
-	}, func(n *graph.Node, e *graph.Edge) string {
-		return detectRunnerFromImportEdgeSlice(n, []*graph.Edge{e})
-	})
 }
 
 // The owner-checked classification is already validated by buildRebuildFileStages.

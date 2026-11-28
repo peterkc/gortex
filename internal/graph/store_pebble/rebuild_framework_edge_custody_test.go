@@ -2,6 +2,7 @@ package store_pebble
 
 import (
 	"encoding/binary"
+	"iter"
 	"strings"
 	"testing"
 
@@ -454,5 +455,97 @@ func TestRebuildGoFrameStaleTaggedCallWorkspace(t *testing.T) {
 		}
 		require.Zero(t, moves)
 		require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+	}
+}
+
+func TestRebuildSvelteKitLoadStoreGuards(t *testing.T) {
+	const dir, file = "routes", "routes/+page.server.ts"
+	rules := RebuildSvelteKitLoadRules{
+		RouteNode: func(graph.NodeKind, *graph.Node) (string, bool) { return "", false },
+		ServerDir: func(path string) (string, bool) { return dir, path == file },
+		PageFile:  func(string) bool { return false },
+		Target:    func(*graph.Node, string, *graph.Node, graph.FileNodeIdentity) string { return "" },
+		Reference: func(*graph.Node, string) *graph.Edge { return nil },
+	}
+	for _, mode := range []string{"nil rules", "nil receipts", "occupied scratch", "invalid checked skip", "server row cap"} {
+		t.Run(mode, func(t *testing.T) {
+			server := &graph.Node{ID: file, Kind: graph.KindFile, FilePath: file, Language: "typescript"}
+			if mode == "server row cap" {
+				server.Meta = map[string]any{"large": strings.Repeat("x", 16<<20)}
+			}
+			b, receipts := seedSyntheticCustody(t, producerProofFacts(server))
+			ctx := t.Context()
+			var skips iter.Seq[*graph.Node]
+			fixtureRules := rules
+			switch mode {
+			case "nil rules":
+				fixtureRules.Reference = nil
+			case "nil receipts":
+				receipts = nil
+			case "occupied scratch":
+				require.NoError(t, b.pending.Set(rebuildSvelteKitLoadPrefix, []byte("occupied"), pebble.NoSync))
+			case "invalid checked skip":
+				bad := *server
+				bad.ID = "wrong"
+				skips = func(yield func(*graph.Node) bool) { yield(&bad) }
+			}
+			before := rebuildFrameworkCustodyRows(t, b)
+			adds, err := b.RebuildSvelteKitLoad(ctx, receipts, skips, fixtureRules)
+			require.ErrorIs(t, err, ErrRebuildSvelteKitLoad)
+			switch mode {
+			case "nil rules", "nil receipts":
+				require.ErrorContains(t, err, "SvelteKit load inputs")
+			case "occupied scratch":
+				require.ErrorContains(t, err, "SvelteKit load scratch range occupied")
+			case "invalid checked skip":
+				require.ErrorContains(t, err, "SvelteKit checked skip row")
+			case "server row cap":
+				require.ErrorIs(t, err, ErrRebuildLinkInputSize)
+			}
+			require.Zero(t, adds)
+			require.Equal(t, before, rebuildFrameworkCustodyRows(t, b))
+			busy, err := rebuildGuardHasPrefix(ctx, b.pending, rebuildSvelteKitLoadPrefix)
+			require.NoError(t, err)
+			require.Equal(t, mode == "occupied scratch", busy)
+			if busy {
+				owner, err := pendingGet(b.pending, rebuildSvelteKitLoadPrefix, copyValue)
+				require.NoError(t, err)
+				require.Equal(t, "occupied", string(owner))
+			}
+		})
+	}
+}
+
+func TestRebuildSvelteKitLoadReceiptAdmission(t *testing.T) {
+	const dir, file = "routes", "routes/+page.server.ts"
+	for _, mode := range []string{"exact", "legacy receipt", "wrong recording file", "wrong File ID"} {
+		t.Run(mode, func(t *testing.T) {
+			b := newBuild(t, FullProfile)
+			server := &graph.Node{ID: file, Kind: graph.KindFile, FilePath: file, Language: "typescript"}
+			facts := producerProofFacts(server)
+			switch mode {
+			case "legacy receipt":
+				facts.EffectiveLanguage = ""
+			case "wrong recording file":
+				facts.File.FilePath = "elsewhere/+page.server.ts"
+			case "wrong File ID":
+				server.ID = "other"
+			}
+			p := rebuildSvelteKitLoad{
+				rebuildCallMoves: rebuildCallMoves{b: b, prefix: rebuildSvelteKitLoadPrefix},
+				rules: RebuildSvelteKitLoadRules{
+					ServerDir: func(path string) (string, bool) { return dir, path == file },
+				},
+			}
+			require.NoError(t, p.record(t.Context(), sqlCallsiteTestReceipts(facts), nil))
+			winner, err := p.winner('r', dir, graph.KindFile)
+			require.NoError(t, err)
+			if mode == "exact" {
+				require.NotNil(t, winner)
+				require.Equal(t, server.ID, winner.ID)
+			} else {
+				require.Nil(t, winner)
+			}
+		})
 	}
 }

@@ -70,7 +70,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 		{"UIKit", "moves", 1},
 		{"Vapor", "moves", 1},
 		{"GoFrame", "moves", 1},
-		{"SvelteKit load", "adds", 1},
+		{"SvelteKit load", "adds", 2},
 		{"factory chain", "moves", 1},
 		{"function-value callbacks", "adds", 1},
 		{"value refs", "moves", 1},
@@ -94,6 +94,7 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 			root, src := rebuildInputFixture(t)
 			lease := t.TempDir()
 			cfg := config.Default().Index
+			cfg.MaxFileSize = 1024
 			off := false
 			cfg.Coverage.Modules.Enabled, cfg.Coverage.Clones.Enabled = &off, &off
 			req := rebuildBuildRequest{
@@ -135,6 +136,12 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 				key := input.parseKey(idx.rebuildExtractorRecipe(req.Recipes[lang], input))
 				require.NoError(t, store.write(key, payload))
 			}
+			const skipServer = "tests/b2-svelte-fallback/+page.server.ts"
+			const skipSize = 1025
+			if tc.exact {
+				// The fallback route has a checked size-skip File row and no parse receipt.
+				require.NoError(t, os.WriteFile(filepath.Join(root, skipServer), bytes.Repeat([]byte{' '}, skipSize), 0o600))
+			}
 			inputRoot, err := rebuildInputRoot(inputs)
 			require.NoError(t, err)
 			rootBytes, err := hex.DecodeString(inputRoot)
@@ -149,6 +156,9 @@ func TestRebuildBuildFrameworkOrder(t *testing.T) {
 							return mode.IsRegular(), nil
 						}, emit)
 					if err != nil {
+						return err
+					}
+					if err := emit(rebuildClassificationSidecarRow(skipServer, "typescript", skipSize, cfg.MaxFileSize, nil, false)); err != nil {
 						return err
 					}
 					return emit(rebuildGoManifestSidecarRow(rebuildGoManifest{Path: "go.mod"}))
@@ -828,6 +838,9 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 	page.Meta = map[string]any{"component": true}
 	serverLoad := node(serverPath, "typescript", "load", graph.KindFunction, 3)
 	pageFacts, serverFacts := receipt([]*graph.Node{page}), receipt([]*graph.Node{serverLoad})
+	fallbackPage := node("tests/b2-svelte-fallback/+page.svelte", "svelte", "+page", graph.KindType, 2)
+	fallbackPage.Meta = map[string]any{"component": true}
+	fallbackPageFacts := receipt([]*graph.Node{fallbackPage})
 
 	const factoryPath = "factory_harness.go"
 	factoryCaller := node(factoryPath, "go", "useFactoryHarness", graph.KindFunction, 1)
@@ -873,6 +886,6 @@ func rebuildFrameworkOrderReceipts() []store_pebble.ParseFacts {
 		receipt([]*graph.Node{sql}),
 		receipt([]*graph.Node{action}),
 		celeryFacts, springFacts, mediatrFacts, ifaceFacts, sidekiqFacts, laravelFacts, fnFacts, macroFacts, ginFacts, expressFacts, reactFallbackFacts, fastapiFacts, railsFacts,
-		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, uikitFacts, vaporFacts, goFrameFacts, pageFacts, serverFacts, factoryFacts, callbackFacts, valueFacts,
+		godotManifestFacts, godotScriptFacts, godotPreloadFacts, swiftuiFacts, uikitFacts, vaporFacts, goFrameFacts, pageFacts, serverFacts, fallbackPageFacts, factoryFacts, callbackFacts, valueFacts,
 	}
 }
