@@ -35,7 +35,7 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 	if r.unsafe {
 		return r
 	}
-	var writes []*sitter.Node
+	var writes, mutations []*sitter.Node
 	r.bindings = make(map[string][]jsReceiverBinding)
 	r.types = make(map[string]bool)
 	bind := func(n *sitter.Node) {
@@ -84,7 +84,9 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 				bind(name)
 			}
 		case "interface_declaration":
-			r.types[n.ChildByFieldName("name").Content(src)] = true
+			if name := n.ChildByFieldName("name"); name != nil && !jsReceiverGlobalAugmentation(n) {
+				r.types[name.Content(src)] = true
+			}
 		case "arrow_function", "catch_clause":
 			jsReceiverTargets(n.ChildByFieldName("parameter"), bind)
 		case "formal_parameters", "import_clause", "namespace_import", "import_require_clause":
@@ -102,6 +104,10 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 				local = n.ChildByFieldName("name")
 			}
 			jsReceiverTargets(local, bind)
+		case "call_expression":
+			if object := jsObjectMutationTarget(n, src); object != nil {
+				mutations = append(mutations, object)
+			}
 		case "assignment_expression", "augmented_assignment_expression":
 			writes = append(writes, n.ChildByFieldName("left"))
 		case "for_in_statement":
@@ -127,7 +133,54 @@ func collectJSBuiltinReceivers(root *sitter.Node, src []byte, language string) *
 			jsReceiverTargets(write, r.recordWrite)
 		}
 	}
+	for _, target := range mutations {
+		name, fields := jsReceiverWritePath(target, src)
+		if _, bound := r.bindingAt(name, target.StartByte()); bound {
+			continue
+		}
+		if name == "globalThis" || jsGlobalAlias(name) || jsStaticReceiverFamily(name) != "" && (len(fields) == 0 || fields[0] == "prototype" || fields[0] == "*") {
+			r.unsafe = true
+		}
+	}
 	return r
+}
+
+func jsObjectMutationTarget(call *sitter.Node, src []byte) *sitter.Node {
+	name, fields := jsReceiverWritePath(call.ChildByFieldName("function"), src)
+	if name != "Object" || len(fields) != 1 {
+		return nil
+	}
+	switch fields[0] {
+	case "assign", "defineProperty", "defineProperties", "setPrototypeOf":
+		if args := call.ChildByFieldName("arguments"); args != nil {
+			for arg := range args.NamedChildren() {
+				if arg.Type() != "comment" {
+					return arg
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func jsGlobalAlias(name string) bool {
+	return name == "window" || name == "self" || name == "global"
+}
+
+// An interface in declare global augments the platform type namespace; it
+// does not prove a local user type.
+func jsReceiverGlobalAugmentation(n *sitter.Node) bool {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		if p.Type() != "ambient_declaration" {
+			continue
+		}
+		for i := range p.ChildCount() {
+			if p.Child(int(i)).Type() == "global" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Follow only target fields. In { [key]: x = fallback } only x is a target.
@@ -199,6 +252,12 @@ func (r *jsBuiltinReceivers) recordWrite(n *sitter.Node) {
 		return
 	}
 	binding, bound := r.bindingAt(name, n.StartByte())
+	if jsGlobalAlias(name) {
+		if !bound && (len(fields) == 0 || fields[0] == "*" || jsStaticReceiverFamily(fields[0]) != "") {
+			r.unsafe = true
+		}
+		return
+	}
 	platformName := name == "globalThis" || jsStaticReceiverFamily(name) != ""
 	if !bound && platformName && len(r.bindings[name]) != 0 {
 		r.unsafe = true // A platform write outside the local binding's scope.
@@ -450,7 +509,7 @@ func (r *jsBuiltinReceivers) receiver(node *sitter.Node, site uint32) graph.Buil
 		// property name alone never creates a static owner or instance.
 		hint := r.receiver(n.ChildByFieldName("object"), site)
 		switch hint.Form {
-		case "import", "shadowed", "user":
+		case "import", "shadowed":
 			return hint
 		}
 	default:
@@ -511,12 +570,12 @@ func (r *jsBuiltinReceivers) receiverValue(node *sitter.Node) graph.BuiltinRecei
 		family = "string"
 	case "number":
 		if strings.HasSuffix(n.Content(r.src), "n") {
-			return graph.BuiltinReceiverHint{Form: "user"} // bigint is not number.
+			return graph.BuiltinReceiverHint{Form: "unknown"} // bigint is not number.
 		}
 		family = "number"
 	case "object":
 		if n.NamedChildCount() != 0 {
-			return graph.BuiltinReceiverHint{Form: "user"} // Own members and spreads are not checked.
+			return graph.BuiltinReceiverHint{Form: "unknown"} // Own members and spreads are not checked.
 		}
 		family = "object"
 	case "new_expression":

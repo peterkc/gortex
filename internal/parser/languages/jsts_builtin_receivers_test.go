@@ -49,11 +49,23 @@ func TestJSTS_BuiltinReceiverEvidence(t *testing.T) {
 		{"syntax_error", "javascript", `[].slice(); const broken = ;`, "unknown", ""},
 		{"not_yet_visible", "javascript", `xs.slice(); const xs = [];`, "shadowed", ""},
 		{"outside_block", "javascript", `{ const xs = []; } xs.slice();`, "unknown", ""},
-		{"bigint", "javascript", `(1n).toFixed(0);`, "user", ""},
+		{"bigint", "javascript", `(1n).toFixed(0);`, "unknown", ""},
+		{"object_literal", "javascript", `const api = { slice() {} }; api.slice();`, "unknown", ""},
+		{"object_literal_property", "javascript", `const state = { list: [] }; state.list.slice();`, "unknown", ""},
+		{"user_type_property", "typescript", `interface State { list: string[] } let state: State; state.list.slice();`, "unknown", ""},
+		{"global_augmentation", "typescript", `export {}; declare global { interface Array<T> { extra(): void } } let xs: Array<string>; xs.slice();`, "unknown", ""},
 		{"template", "javascript", "`hello ${x}`.slice();", "instance", "string"},
 		{"export_const", "javascript", `export const xs = []; xs.slice();`, "instance", "array"},
 		{"unknown_var_initializer", "javascript", `var xs = f(); xs.slice();`, "unknown", ""},
 		{"named_local_constructor", "javascript", `class Box {} new Box().slice();`, "shadowed", ""},
+		{"write_outside_builtin_binding", "javascript", `function f(Array) {} Array = X; "ab".slice();`, "unknown", ""},
+		{"write_before_lexical_binding", "javascript", `Array = X; let Array; "ab".slice();`, "unknown", ""},
+		{"replace_global_this", "javascript", `globalThis = X; [].slice();`, "unknown", ""},
+		{"computed_global_this_write", "javascript", `globalThis[k] = X; [].slice();`, "unknown", ""},
+		{"window_prototype_write", "javascript", `window.Array.prototype.slice = f; [].slice();`, "unknown", ""},
+		{"self_prototype_write", "javascript", `self.String.prototype.slice = f; "a".slice();`, "unknown", ""},
+		{"global_object_write", "javascript", `global.console.log = f; console.log(x);`, "unknown", ""},
+		{"local_window_write", "javascript", `function f(window) { window.Array.prototype.slice = f; } [].slice();`, "instance", "array"},
 		{"global_bracket_write", "javascript", `globalThis["Array"] = X; [].slice();`, "shadowed", ""},
 		{"dynamic_prototype_member", "javascript", `Array.prototype[key] = f; [].slice();`, "unknown", ""},
 		{"unrelated_local_member", "javascript", `const xs = []; xs.other = f; xs.slice();`, "instance", "array"},
@@ -133,6 +145,7 @@ api.slice();
 				9:  {Form: "import", Name: "*", Module: "ns-lib"},
 				10: {Form: "shadowed"},
 				11: {Form: "unknown"},
+				15: {Form: "unknown"},
 				16: {Form: "unknown"},
 			},
 		},
@@ -225,6 +238,35 @@ clean.slice(0);`,
 				require.Equal(t, 1, seen[line], "Call at line %d", line)
 			}
 			require.ElementsMatch(t, want, captured.Edges)
+		})
+	}
+}
+
+func TestJSTS_BuiltinReceiverObjectMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name, mutation, form, family string
+	}{
+		{"defineProperty", `Object.defineProperty(Array.prototype, "slice", {value: f});`, "unknown", ""},
+		{"assign", `Object.assign(Array.prototype, {slice: f});`, "unknown", ""},
+		{"unrelated object", `Object.assign({}, {slice: f});`, "instance", "array"},
+		{"local constructor", `function f(Array) { Object.assign(Array.prototype, {slice: f}); }`, "instance", "array"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := []byte(tc.mutation + "\n[].slice();")
+			tree, err := parser.ParseFile(src, astquery.DefaultLanguageResolver("javascript"))
+			require.NoError(t, err)
+			defer tree.Close()
+			root := tree.RootNode()
+			require.False(t, root.HasError())
+			r := collectJSBuiltinReceivers(root, src, "javascript")
+			var hints []graph.BuiltinReceiverHint
+			walkNodes(root, func(n *sitter.Node) {
+				if n.Type() != "call_expression" || n.StartPoint().Row != 1 {
+					return
+				}
+				hints = append(hints, r.memberHint(n.ChildByFieldName("function"), n.StartByte()))
+			})
+			require.Equal(t, []graph.BuiltinReceiverHint{{Form: tc.form, Family: tc.family}}, hints)
 		})
 	}
 }
