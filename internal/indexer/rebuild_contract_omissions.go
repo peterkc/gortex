@@ -65,12 +65,29 @@ func (r rebuildContractReceiptReader) visitHeldOutContractOmissions(ctx context.
 			seen[o] = struct{}{}
 			return yield(store_pebble.RebuildContractBatch{Omitted: []store_pebble.RebuildContractOmission{o}})
 		}
+		addRecord := func(c contracts.Contract, o store_pebble.RebuildContractOmission) error {
+			if err := add(o); err != nil {
+				return err
+			}
+			for _, id := range slices.Sorted(maps.Keys(rebuildShapeRefs(c))) {
+				file, _, err := heldShapeFile(r.linkView, id)
+				if err != nil {
+					return err
+				}
+				if file != "" {
+					if err := add(rebuildShapeOmission(o, scope.RepoPrefix, file, id)); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
 		for _, raw := range facts.Records {
 			o := rebuildContractRecordOmission(r.scopedRawContract(raw))
 			if local, _ := contracts.RouterPrefixFactUse(raw, facts.Router); local {
 				o.ID = "" // the final route ID needs an excluded reducer
 			}
-			if err := add(o); err != nil {
+			if err := addRecord(raw, o); err != nil {
 				return err
 			}
 		}
@@ -79,7 +96,7 @@ func (r rebuildContractReceiptReader) visitHeldOutContractOmissions(ctx context.
 			o.ID = "" // the final ID (if any) needs endpoint lookup
 			key := append([]byte("held endpoint question\x00"), o.RecordKey[:]...)
 			o.RecordKey = store_pebble.HeadDigest(sha256.Sum256(binary.AppendUvarint(key, uint64(i))))
-			if err := add(o); err != nil {
+			if err := addRecord(q.Record, o); err != nil {
 				return err
 			}
 		}

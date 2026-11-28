@@ -63,6 +63,13 @@ func (p *rebuildHandlerPass) providerHandler(ctx context.Context, view store_peb
 			return nil, fmt.Errorf("%w: no handler class answer for %q at %s:%d", graph.ErrContractProjectionStale, c.ID, c.FilePath, c.Line)
 		}
 	}
+	if r.markIsolationAffected != nil {
+		for _, ident := range rebuildHandlerTrailNames(trail, fallback) {
+			if err := r.markHeldName(ctx, view, c.FilePath, c.Type, handlerLookupName(ident), graph.KindFunction, graph.KindMethod); err != nil {
+				return nil, err
+			}
+		}
+	}
 	handler, err := p.selectRebuildProviderHandler(ctx, view, trail, fallback, c.RepoPrefix, path.Dir(c.FilePath), class)
 	if err != nil || handler == nil || handler.FilePath == "" || handler.RepoPrefix != c.RepoPrefix {
 		return nil, err
@@ -87,12 +94,8 @@ func (p *rebuildHandlerPass) selectRebuildProviderHandler(ctx context.Context, v
 			return nil, nil
 		}
 	}
-	trailNames := contracts.HandlerCandidatesInTrail(trail)
-	if len(trailNames) == 0 && fallback != "" {
-		trailNames = []string{fallback}
-	}
 	var best *graph.Node
-	for _, ident := range trailNames {
+	for _, ident := range rebuildHandlerTrailNames(trail, fallback) {
 		name := handlerLookupName(ident)
 		if name == "" {
 			continue
@@ -112,6 +115,14 @@ func (p *rebuildHandlerPass) selectRebuildProviderHandler(ctx context.Context, v
 		}
 	}
 	return best, ctx.Err()
+}
+
+func rebuildHandlerTrailNames(trail, fallback string) []string {
+	names := contracts.HandlerCandidatesInTrail(trail)
+	if len(names) == 0 && fallback != "" {
+		return []string{fallback}
+	}
+	return names
 }
 
 func rebuildHandlerClassOwner(ctx context.Context, view store_pebble.RebuildView, class string) (string, error) {

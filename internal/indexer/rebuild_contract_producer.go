@@ -242,6 +242,24 @@ func (r rebuildContractReceiptReader) selectRebuildShapeRefs(ctx context.Context
 	}
 	return records.VisitRepresentatives(func(item store_pebble.RebuildContractRecord) error {
 		for _, id := range slices.Sorted(maps.Keys(rebuildShapeRefs(item.Contract))) {
+			o := rebuildContractRecordOmission(item.Contract)
+			if r.isolate {
+				file, language, err := heldShapeFile(view, id)
+				if err != nil {
+					return err
+				}
+				if file != "" {
+					if r.markIsolationAffected != nil {
+						if err := r.markIsolationAffected(item.FilePath, item.Type, language); err != nil {
+							return err
+						}
+					}
+					if err := add(store_pebble.RebuildContractBatch{Omitted: []store_pebble.RebuildContractOmission{rebuildShapeOmission(o, item.RepoPrefix, file, id)}}); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			selected, err := selection.HasShapeRef(id)
 			if err != nil {
 				return err
@@ -253,10 +271,10 @@ func (r rebuildContractReceiptReader) selectRebuildShapeRefs(ctx context.Context
 			if err != nil {
 				return err
 			}
-			if n == nil || (n.Kind != graph.KindType && n.Kind != graph.KindInterface) || n.StartLine <= 0 || contracts.ShapeExtractorForPath(n.FilePath) == nil {
-				continue // native cannot emit a shape for this reference
+			if n == nil || !rebuildShapeCandidate(n.FilePath, n.Kind, n.StartLine) {
+				continue // absent from both this cut and the held shape candidates
 			}
-			if err := add(store_pebble.RebuildContractBatch{Omitted: []store_pebble.RebuildContractOmission{rebuildShapeOmission(item.Contract, n)}}); err != nil {
+			if err := add(store_pebble.RebuildContractBatch{Omitted: []store_pebble.RebuildContractOmission{rebuildShapeOmission(o, n.RepoPrefix, n.FilePath, id)}}); err != nil {
 				return err
 			}
 		}

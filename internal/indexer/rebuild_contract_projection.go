@@ -185,10 +185,22 @@ func (r rebuildContractReceiptReader) rawRebuildShapeRefs(ctx context.Context, c
 	return nil, nil
 }
 
-func rebuildShapeOmission(c contracts.Contract, n *graph.Node) store_pebble.RebuildContractOmission {
-	o := rebuildContractRecordOmission(c)
-	o.RepoPrefix, o.FilePath = n.RepoPrefix, n.FilePath
+func rebuildShapeOmission(o store_pebble.RebuildContractOmission, repo, file, id string) store_pebble.RebuildContractOmission {
+	o.RepoPrefix, o.FilePath = repo, file
 	key := append([]byte("shape\x00"), o.RecordKey[:]...)
-	o.RecordKey = store_pebble.HeadDigest(sha256.Sum256(append(key, n.ID...)))
+	o.RecordKey = store_pebble.HeadDigest(sha256.Sum256(append(key, id...)))
 	return o
+}
+
+func rebuildShapeCandidate(file string, kind graph.NodeKind, startLine int) bool {
+	return (kind == graph.KindType || kind == graph.KindInterface) && startLine > 0 && contracts.ShapeExtractorForPath(file) != nil
+}
+
+// heldShapeFile uses held declaration attribution only to scope an omission.
+func heldShapeFile(view store_pebble.RebuildView, id string) (file, language string, err error) {
+	file, language, kind, startLine, err := view.RebuildHeldDeclaration(id)
+	if err != nil || !rebuildShapeCandidate(file, kind, startLine) {
+		return "", "", err
+	}
+	return file, language, nil
 }

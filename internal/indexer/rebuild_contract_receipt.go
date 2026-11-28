@@ -15,13 +15,14 @@ import (
 // The caller keeps only the facts it needs from each receipt. The manifest
 // inputs are already sorted by literal path by buildRebuildFileStages.
 type rebuildContractReceiptReader struct {
-	idx        *Indexer
-	job        rebuildFileStages
-	store      rebuildParseStore
-	census     *rebuildExtractorCensus
-	proofCache *rebuildContractReceiptCache
-	isolate    bool
-	linkView   store_pebble.RebuildView
+	idx                   *Indexer
+	job                   rebuildFileStages
+	store                 rebuildParseStore
+	census                *rebuildExtractorCensus
+	proofCache            *rebuildContractReceiptCache
+	isolate               bool
+	linkView              store_pebble.RebuildView
+	markIsolationAffected func(file string, kind contracts.ContractType, language string) error
 }
 
 type rebuildContractReceiptCache struct {
@@ -100,7 +101,35 @@ func (r rebuildContractReceiptReader) visitFilesAtParseCut(ctx context.Context, 
 		if err != nil {
 			return err
 		}
-		records, err := contracts.ResolveEndpointQuestionsWithLookup(facts.Records, facts.Questions, constants.lookup)
+		lookup := constants.lookup
+		if r.markIsolationAffected != nil {
+			// Scope an actual lookup to the contract families that ask this
+			// name in the current receipt. A held value never enters the vote.
+			kinds := make(map[string][]contracts.ContractType)
+			for _, q := range facts.Questions {
+				for _, term := range q.Expression.Terms {
+					name := strings.TrimSpace(term.Name)
+					if name != "" && !slices.Contains(kinds[name], q.Record.Type) {
+						kinds[name] = append(kinds[name], q.Record.Type)
+					}
+				}
+			}
+			lookup = func(name, file, repo string) string {
+				value := constants.lookup(name, file, repo)
+				if constants.err != nil {
+					return ""
+				}
+				name = strings.TrimSpace(name)
+				for _, kind := range kinds[name] {
+					if err := r.markHeldName(ctx, view, file, kind, name, graph.KindConstant); err != nil {
+						constants.err = err
+						return ""
+					}
+				}
+				return value
+			}
+		}
+		records, err := contracts.ResolveEndpointQuestionsWithLookup(facts.Records, facts.Questions, lookup)
 		if err != nil {
 			return fmt.Errorf("%w: endpoint questions for %q: %w", errParseEntryCorrupt, input.Path, err)
 		}
@@ -112,6 +141,25 @@ func (r rebuildContractReceiptReader) visitFilesAtParseCut(ctx context.Context, 
 		}
 	}
 	return ctx.Err()
+}
+
+// markHeldName records only affected scope, not excluded candidate data.
+func (r rebuildContractReceiptReader) markHeldName(ctx context.Context, view store_pebble.RebuildView,
+	file string, kind contracts.ContractType, name string, kinds ...graph.NodeKind,
+) error {
+	if r.markIsolationAffected == nil || name == "" {
+		return nil
+	}
+	languages, err := view.RebuildHeldNameLanguages(ctx, name, kinds...)
+	if err != nil {
+		return err
+	}
+	for _, language := range languages {
+		if err := r.markIsolationAffected(file, kind, language); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // visitLateContractSourcesAtParseCut emits the original records needed by the
